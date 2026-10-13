@@ -507,16 +507,17 @@ describe("NodeExecutionEnv text line reader", () => {
 		await newline.close(BACKGROUND_CONTEXT);
 	});
 
-	it("decodes multi-byte characters split across read chunks and lines longer than one chunk", async () => {
+	it("decodes split multi-byte characters and BOMs across long lines", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
 		// The reader uses 64 KiB chunks; place a four-byte character across the first boundary.
-		const first = `${"a".repeat(64 * 1024 - 2)}😀tail`;
-		const second = "é".repeat(100_000);
-		getOrThrow(await env.writeFile("large.txt", `${first}\n${second}`, BACKGROUND_CONTEXT));
+		const first = `${"a".repeat(64 * 1024 - 5)}😀${"tail".repeat(20_000)}\ufeff\r`;
+		const second = `${"é".repeat(100_000)}\ufeff`;
+		getOrThrow(await env.writeFile("large.txt", `\ufeff${first}\n\n${second}`, BACKGROUND_CONTEXT));
 		const reader = getOrThrow(await env.openTextLineReader("large.txt", BACKGROUND_CONTEXT));
 		try {
 			expect(getOrThrow(await reader.readLine(BACKGROUND_CONTEXT))).toEqual({ text: first, terminated: true });
+			expect(getOrThrow(await reader.readLine(BACKGROUND_CONTEXT))).toEqual({ text: "", terminated: true });
 			expect(getOrThrow(await reader.readLine(BACKGROUND_CONTEXT))).toEqual({ text: second, terminated: false });
 			expect(getOrThrow(await reader.readLine(BACKGROUND_CONTEXT))).toBeUndefined();
 		} finally {
@@ -524,10 +525,35 @@ describe("NodeExecutionEnv text line reader", () => {
 		}
 	});
 
-	it("rejects a read cancelled while pending without consuming its bytes", async () => {
+	it.each([
+		{
+			phase: "the first chunk",
+			content: "one\ntwo\n",
+			readNumber: 1,
+			lines: [
+				{ text: "one", terminated: true },
+				{ text: "two", terminated: true },
+			],
+		},
+		{
+			phase: "a split UTF-8 character after a decoded prefix",
+			content: `${"a".repeat(64 * 1024 - 2)}😀tail\nnext\n`,
+			readNumber: 2,
+			lines: [
+				{ text: `${"a".repeat(64 * 1024 - 2)}😀tail`, terminated: true },
+				{ text: "next", terminated: true },
+			],
+		},
+		{
+			phase: "EOF with an incomplete UTF-8 character",
+			content: new Uint8Array([0x61, 0xc3]),
+			readNumber: 2,
+			lines: [{ text: "a\ufffd", terminated: false }],
+		},
+	])("retries without consuming bytes when cancelled during $phase", async ({ content, readNumber, lines }) => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
-		getOrThrow(await env.writeFile("lines.txt", "one\ntwo\n", BACKGROUND_CONTEXT));
+		getOrThrow(await env.writeFile("lines.txt", content, BACKGROUND_CONTEXT));
 		const prototype = await fileHandlePrototype(join(root, "lines.txt"));
 		const read = prototype.read;
 		let markStarted: () => void = () => {};
@@ -538,9 +564,12 @@ describe("NodeExecutionEnv text line reader", () => {
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		vi.spyOn(prototype, "read").mockImplementationOnce(async function (this: FileHandle, ...args: unknown[]) {
-			markStarted();
-			await gate;
+		let reads = 0;
+		vi.spyOn(prototype, "read").mockImplementation(async function (this: FileHandle, ...args: unknown[]) {
+			if (++reads === readNumber) {
+				markStarted();
+				await gate;
+			}
 			return Reflect.apply(read, this, args);
 		} as unknown as FileHandle["read"]);
 
@@ -552,8 +581,7 @@ describe("NodeExecutionEnv text line reader", () => {
 			controller.abort();
 			release();
 			expect(await pending).toMatchObject({ ok: false, error: { code: "aborted" } });
-			expect(getOrThrow(await reader.readLine(BACKGROUND_CONTEXT))).toEqual({ text: "one", terminated: true });
-			expect(getOrThrow(await reader.readLine(BACKGROUND_CONTEXT))).toEqual({ text: "two", terminated: true });
+			for (const line of lines) expect(getOrThrow(await reader.readLine(BACKGROUND_CONTEXT))).toEqual(line);
 			expect(getOrThrow(await reader.readLine(BACKGROUND_CONTEXT))).toBeUndefined();
 		} finally {
 			await reader.close(BACKGROUND_CONTEXT);

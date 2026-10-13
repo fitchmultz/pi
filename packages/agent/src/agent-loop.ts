@@ -12,7 +12,6 @@ import {
 	type SystemMessage,
 	type ToolResultMessage,
 	type ToolStateChanges,
-	toToolDeclaration,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
 import { getDefaultStreamFn } from "./stream-fn.ts";
@@ -344,10 +343,7 @@ function declareToolChanges(context: AgentContext, pendingMessages: AgentMessage
 				index === systemIndex ? withToolChanges(pending, NO_CHANGES) : message,
 			)
 		: pendingMessages;
-	const changes = getToolStateChanges(
-		getCurrentTools([...context.messages, ...baseline]),
-		(context.tools ?? []).map(toToolDeclaration),
-	);
+	const changes = getToolStateChanges(getCurrentTools([...context.messages, ...baseline]), context.tools ?? []);
 	const unchanged = changes.toolsAdded.length === 0 && changes.toolsRemoved.length === 0;
 
 	if (pending) {

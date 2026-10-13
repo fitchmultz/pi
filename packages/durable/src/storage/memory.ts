@@ -54,8 +54,9 @@ function* documentDeltaBatches(
 	version: number,
 	revisions: readonly DocumentRevision[],
 	start: number,
+	end: number,
 ): Generator<readonly Op[]> {
-	for (let index = start; index < revisions.length; index++) {
+	for (let index = start; index < end; index++) {
 		const revision = revisions[index]!;
 		if (revision.kind !== "delta" || revision.version !== version) {
 			throw new Error(`Document ${id} crosses a stored version boundary without a base`);
@@ -663,16 +664,25 @@ export class MemoryStorage implements Storage {
 			throw new StorageRequestError(`Document ${id} does not retain historical content`);
 		}
 		if (!isAliveAt(stored.record, at)) return undefined;
-		const revisions = at === "current" ? stored.revisions : stored.revisions.filter((revision) => revision.seq <= at);
-		let baseIndex = revisions.length - 1;
+		const revisions = stored.revisions;
+		let end = revisions.length;
+		if (at !== "current") {
+			let low = 0;
+			while (low < end) {
+				const middle = Math.floor((low + end) / 2);
+				if (revisions[middle]!.seq <= at) low = middle + 1;
+				else end = middle;
+			}
+		}
+		let baseIndex = end - 1;
 		while (baseIndex >= 0 && revisions[baseIndex]!.kind !== "base") baseIndex--;
 		const base = revisions[baseIndex];
 		if (base?.kind !== "base") throw new Error(`Document ${id} is missing a required base`);
 		const value = applyImmutableBatches(
 			base.value,
-			documentDeltaBatches(id, base.version, revisions, baseIndex + 1),
+			documentDeltaBatches(id, base.version, revisions, baseIndex + 1, end),
 		) as JsonObject;
-		return { record: stored.record, version: base.version, value, deltasSinceBase: revisions.length - baseIndex - 1 };
+		return { record: stored.record, version: base.version, value, deltasSinceBase: end - baseIndex - 1 };
 	}
 
 	private *visibleEntries(

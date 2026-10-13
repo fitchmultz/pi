@@ -1,4 +1,5 @@
 import { Type } from "typebox";
+import { IsProperties, IsSchemaObject } from "typebox/schema";
 import { describe, expect, test } from "vitest";
 import type { Message, Tool, TranscriptContext } from "../src/types.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../src/utils/text.ts";
@@ -121,6 +122,29 @@ describe("system message replay", () => {
 			toolsRemoved: [{ name: "a" }, { name: "b" }],
 		});
 		expect(getToolStateChanges([tool("a")], [tool("a")])).toEqual({ toolsAdded: [], toolsRemoved: [] });
+	});
+
+	test("tool changes compare against the last duplicate definition but preserve array order", () => {
+		const changes = getToolStateChanges(
+			[tool("a", "old"), tool("b"), tool("a", "last")],
+			[tool("a", "last"), tool("c"), tool("a", "old")],
+		);
+		expect(changes).toEqual({
+			toolsAdded: [tool("c"), tool("a", "old")],
+			toolsRemoved: [{ name: "b" }, { name: "a" }],
+		});
+	});
+
+	test("added declarations have independent schema snapshots even for repeated tool objects", () => {
+		const value = Object.assign(Type.String(), { description: "original" });
+		const parameters = Type.Object({ value });
+		const executable = { ...tool("a"), parameters };
+		const changes = getToolStateChanges([], [executable, executable]);
+		const first = changes.toolsAdded[0].parameters;
+		if (!IsProperties(first) || !IsSchemaObject(first.properties.value)) throw new Error("expected value schema");
+		Object.assign(first.properties.value, { description: "changed" });
+		expect(changes.toolsAdded[1].parameters).toHaveProperty("properties.value.description", "original");
+		expect(value.description).toBe("original");
 	});
 
 	test("detects non-additive tool history and redefinitions", () => {

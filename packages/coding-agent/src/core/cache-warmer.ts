@@ -1,7 +1,9 @@
 import {
 	type Api,
+	type CacheRetention,
 	type Context,
 	calculateCost,
+	hasApi,
 	type Model,
 	type ModelsSimpleStreamOptions,
 	type SimpleStreamOptions,
@@ -16,7 +18,7 @@ import type { CacheWarmingMode } from "./settings-manager.ts";
 const MAX_WARMING_AGE_MS = 60 * 60_000;
 /** Idle warming uses a shorter horizon because continuation estimates become less reliable with age. */
 const MAX_IDLE_WARMING_AGE_MS = 30 * 60_000;
-/** A refresh is sent only when it is expected to save at least this many dollars. */
+/** A refresh is sent only when catalog-estimated savings reach this many dollars. */
 const CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS = 0.05;
 /**
  * Chance that a real request arrives before the cache entry expires while the
@@ -31,18 +33,34 @@ export function getCacheWarmingDelayMs(ttlMs: number): number | undefined {
 	return Math.max(1, Math.floor(Math.min(ttlMs * 0.9, ttlMs - 10_000)));
 }
 
-/**
- * Lifetime of the prompt cache entry a request writes, from the model's
- * `promptCache` tier for the retention the request used. Undefined when the
- * model has no lifetime for that tier or caching is off.
- */
-export function getPromptCacheTtlMs(model: Model<Api>, options: SimpleStreamOptions | undefined): number | undefined {
+function getEffectiveCacheRetention(model: Model<Api>, options: SimpleStreamOptions | undefined): CacheRetention {
 	const retention =
 		options?.cacheRetention ??
 		(getProviderEnvValue("PI_CACHE_RETENTION", options?.env) === "long" ? "long" : "short");
+	return retention === "long" &&
+		hasApi(model, "anthropic-messages") &&
+		model.compat?.supportsLongCacheRetention === false
+		? "short"
+		: retention;
+}
+
+/**
+ * Lifetime of the prompt cache entry a request writes, from the model's
+ * `promptCache` tier for effective native retention. Undefined when the
+ * model has no lifetime for that tier or caching is off.
+ */
+export function getPromptCacheTtlMs(model: Model<Api>, options: SimpleStreamOptions | undefined): number | undefined {
+	const retention = getEffectiveCacheRetention(model, options);
 	if (retention === "none") return undefined;
 	const seconds = model.promptCache?.[retention];
 	return seconds === undefined ? undefined : seconds * 1000;
+}
+
+function getCacheWarmingTiming(model: Model<Api>, options: SimpleStreamOptions | undefined) {
+	const ttlMs = getPromptCacheTtlMs(model, options);
+	const delayMs = ttlMs === undefined ? undefined : getCacheWarmingDelayMs(ttlMs);
+	if (ttlMs === undefined || delayMs === undefined) return undefined;
+	return { ttlMs, delayMs, retention: getEffectiveCacheRetention(model, options) };
 }
 
 /**
@@ -71,7 +89,7 @@ function lastPromptTokens(entries: SessionEntry[]): number {
 
 function price(
 	model: Model<Api>,
-	tokens: Partial<Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite">>,
+	tokens: Partial<Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "cacheWrite1h">>,
 ): number {
 	const usage: Usage = {
 		input: 0,
@@ -87,7 +105,11 @@ function price(
 
 export type CacheWarmingAction = "warm" | "stop";
 
-/** Inputs and outcome of one warm-or-stop decision, as shown by `/session`. */
+/**
+ * Inputs and outcome of one warm-or-stop decision, as shown by `/session`.
+ * Prices use the selected model's catalog; provider wrappers or service tiers
+ * can change actual request rates. This is not a cost or savings guarantee.
+ */
 export interface CacheWarmingDecision {
 	/** "streaming" while the agent run that sent the request is still active. */
 	phase: "streaming" | "idle";
@@ -141,6 +163,8 @@ export interface CacheWarmRequest {
 interface ActiveRun extends CacheWarmRequest {
 	/** False once the session's model or messages no longer match the request. */
 	isCurrent: () => boolean;
+	/** Effective retention observed at native request preparation, separate from replay options. */
+	retention: CacheRetention;
 	ttlMs: number;
 	delayMs: number;
 	/** Latest safe time to send this refresh, leaving half the original expiry margin. */
@@ -201,37 +225,39 @@ export class CacheWarmer {
 		};
 	}
 
-	/** Keep the prompt cache entry written by `request` warm while `isCurrent` holds. */
-	start(request: CacheWarmRequest, isCurrent: () => boolean): void {
+	/** Keep raw replay options, but schedule and price the prepared request's native retention. */
+	start(
+		request: CacheWarmRequest,
+		isCurrent: () => boolean,
+		prepared: Pick<CacheWarmRequest, "model" | "options">,
+	): void {
 		this.clearRun();
 		const mode = this.getMode();
 		if (mode === "off") {
 			this.stop("cache warming disabled");
 			return;
 		}
-		if (!isReplayable(request.model, request.options)) {
+		if (!isCurrent()) {
+			this.stop("conversation context changed");
+			return;
+		}
+		if (!isReplayable(prepared.model, prepared.options)) {
 			this.stop("request cannot be replayed safely");
 			return;
 		}
-		const ttlMs = getPromptCacheTtlMs(request.model, request.options);
-		if (ttlMs === undefined) {
+		const timing = getCacheWarmingTiming(prepared.model, prepared.options);
+		if (!timing) {
 			this.stop(
-				request.options.cacheRetention === "none"
+				prepared.options.cacheRetention === "none"
 					? "request disabled prompt caching"
 					: "cache lifetime unavailable",
 			);
 			return;
 		}
-		const delayMs = getCacheWarmingDelayMs(ttlMs);
-		if (delayMs === undefined) {
-			this.stop("cache lifetime unavailable");
-			return;
-		}
 		this.run = {
 			...request,
 			isCurrent,
-			ttlMs,
-			delayMs,
+			...timing,
 			refreshDeadlineAt: 0,
 			startedAt: Date.now(),
 			controller: new AbortController(),
@@ -330,15 +356,25 @@ export class CacheWarmer {
 		run.extensionOverride = extensionOverride;
 		try {
 			const message = await this.models
-				.streamSimple(run.model, run.context, {
-					...run.options,
-					...(run.options.cacheTraceContext
-						? { cacheTraceContext: { ...run.options.cacheTraceContext, purpose: "warming" as const } }
-						: {}),
-					maxTokens: 1,
-					maxRetries: 0,
-					signal: run.controller.signal,
-				})
+				.streamSimple(
+					run.model,
+					run.context,
+					{
+						...run.options,
+						...(run.options.cacheTraceContext
+							? { cacheTraceContext: { ...run.options.cacheTraceContext, purpose: "warming" as const } }
+							: {}),
+						maxTokens: 1,
+						maxRetries: 0,
+						signal: run.controller.signal,
+					},
+					(model, options) => {
+						if (!this.validateRun(run) || this.refreshDeadlineMissed(run)) return;
+						const timing = getCacheWarmingTiming(model, options);
+						if (!timing) this.stop("cache lifetime unavailable");
+						else Object.assign(run, timing);
+					},
+				)
 				.result();
 			if (!this.validateRun(run)) return;
 			if (message.stopReason !== "error" && message.stopReason !== "aborted") {
@@ -382,9 +418,14 @@ export class CacheWarmer {
 		const model = run.model;
 		const promptTokens = lastPromptTokens(this.sessionManager.getBranch());
 		const cacheHitCost = price(model, { cacheRead: promptTokens });
+		const longWrite =
+			(model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") && run.retention === "long";
+		const hasWritePrice = model.cost.cacheWrite > 0 || model.cost.tiers?.some((tier) => tier.cacheWrite > 0);
 		const cacheMissCost = price(
 			model,
-			model.cost.cacheWrite > 0 ? { cacheWrite: promptTokens } : { input: promptTokens },
+			longWrite || hasWritePrice
+				? { cacheWrite: promptTokens, cacheWrite1h: longWrite ? promptTokens : 0 }
+				: { input: promptTokens },
 		);
 		const warmCost = price(model, { cacheRead: promptTokens, output: 1 });
 		const missCost = Math.max(0, cacheMissCost - cacheHitCost);
@@ -415,7 +456,7 @@ function formatCacheWarmingEconomics(decision: CacheWarmingDecision): string {
 			? `${probability}% continuation probability while agent is running`
 			: `${probability}% continuation probability`;
 	const comparison = decision.action === "warm" ? ">=" : "<";
-	return `${probabilityText}, expected savings ${formatDollars(decision.expectedSavings)} ${comparison} $${CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS.toFixed(3)}`;
+	return `catalog estimate, ${probabilityText}, expected savings ${formatDollars(decision.expectedSavings)} ${comparison} $${CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS.toFixed(3)}`;
 }
 
 function formatCacheWarmingDecisionTime(nextWarmAt: number | undefined, now: number): string {

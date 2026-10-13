@@ -1,6 +1,6 @@
 import type { WriteStream } from "node:fs";
 import { open } from "node:fs/promises";
-import { createOutputFileStream } from "../../utils/output-files.ts";
+import { createOutputFileStream, writeOutputFileChunk } from "../../utils/output-files.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "./truncate.ts";
 
 export interface OutputAccumulatorOptions {
@@ -53,6 +53,7 @@ export class OutputAccumulator {
 
 	private tempFilePath: string | undefined;
 	private tempFileStream: WriteStream | undefined;
+	private tempFileDone: Promise<void> | undefined;
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
@@ -61,7 +62,7 @@ export class OutputAccumulator {
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
 	}
 
-	append(data: Buffer): void {
+	append(data: Buffer): Promise<void> | undefined {
 		if (this.finished) {
 			throw new Error("Cannot append to a finished output accumulator");
 		}
@@ -71,7 +72,7 @@ export class OutputAccumulator {
 
 		if (this.tempFileStream || this.shouldUseTempFile()) {
 			this.ensureTempFile();
-			this.tempFileStream?.write(data);
+			return writeOutputFileChunk(this.tempFileStream!, data);
 		} else if (data.length > 0) {
 			this.rawChunks.push(data);
 		}
@@ -126,19 +127,8 @@ export class OutputAccumulator {
 		const stream = this.tempFileStream;
 		this.tempFileStream = undefined;
 
-		await new Promise<void>((resolve, reject) => {
-			const onError = (error: Error) => {
-				stream.off("finish", onFinish);
-				reject(error);
-			};
-			const onFinish = () => {
-				stream.off("error", onError);
-				resolve();
-			};
-			stream.once("error", onError);
-			stream.once("finish", onFinish);
-			stream.end();
-		});
+		stream.end();
+		await this.tempFileDone;
 	}
 
 	/**
@@ -246,9 +236,10 @@ export class OutputAccumulator {
 		if (this.tempFilePath) {
 			return;
 		}
-		const { path, stream } = createOutputFileStream(this.tempFilePrefix, ".log");
+		const { path, stream, done } = createOutputFileStream(this.tempFilePrefix, ".log");
 		this.tempFilePath = path;
 		this.tempFileStream = stream;
+		this.tempFileDone = done;
 		for (const chunk of this.rawChunks) {
 			this.tempFileStream.write(chunk);
 		}

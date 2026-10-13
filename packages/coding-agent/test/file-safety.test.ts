@@ -146,6 +146,35 @@ describe("file save safety", () => {
 		expect(fs.readFileSync(path, "utf8")).toBe(original);
 		expect(fs.readdirSync(dir)).toEqual(["session.jsonl"]);
 	});
+
+	it.each(["file", "symlink"] as const)("refuses an existing %s at a fork destination", (kind) => {
+		const source = SessionManager.create(dir, dir);
+		source.appendMessage({ role: "user", content: "original", timestamp: 1 });
+		const sourcePath = source.getSessionFile()!;
+		const original = fs.readFileSync(sourcePath, "utf8");
+		const destination = join(dir, "2025-01-01T00-00-00-000Z_forked.jsonl");
+		if (kind === "file") fs.writeFileSync(destination, "existing destination");
+		else fs.symlinkSync(sourcePath, destination);
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2025-01-01T00:00:00Z"));
+		try {
+			expect(() => SessionManager.forkFrom(sourcePath, dir, dir, { id: "forked" })).toThrow(/EEXIST/);
+			expect(fs.readFileSync(destination, "utf8")).toBe(kind === "file" ? "existing destination" : original);
+			expect(fs.readFileSync(sourcePath, "utf8")).toBe(original);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("propagates a failed fork write without altering the source journal", () => {
+		const source = SessionManager.create(dir, dir);
+		source.appendMessage({ role: "user", content: "original", timestamp: 1 });
+		const path = source.getSessionFile()!;
+		const original = fs.readFileSync(path, "utf8");
+		failNextWrite();
+		expect(() => SessionManager.forkFrom(path, dir, dir)).toThrow("simulated disk full");
+		expect(fs.readFileSync(path, "utf8")).toBe(original);
+	});
 });
 
 describe("HTML export journal guard", () => {

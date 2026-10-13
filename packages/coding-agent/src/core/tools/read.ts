@@ -159,37 +159,58 @@ export function createReadToolDefinition(
 								// Read text content.
 								const buffer = await ops.readFile(absolutePath);
 								const textContent = buffer.toString("utf-8");
-								const allLines = (json === undefined ? textContent : extractReadJson(textContent, json)).split(
-									"\n",
-								);
+								const selectedText = json === undefined ? textContent : extractReadJson(textContent, json);
 								const source = json === undefined ? "file" : "JSON selection";
 								const continuation = json === undefined ? "" : ` with the same json=${JSON.stringify(json)}`;
-								const totalFileLines = allLines.length;
+								let totalFileLines = 1;
+								for (
+									let end = selectedText.indexOf("\n");
+									end !== -1;
+									end = selectedText.indexOf("\n", end + 1)
+								) {
+									totalFileLines++;
+								}
 								// Apply offset if specified. Convert from 1-indexed input to 0-indexed array access.
 								const startLine = offset ? Math.max(0, offset - 1) : 0;
 								const startLineDisplay = startLine + 1;
 								// Check if offset is out of bounds.
-								if (startLine >= allLines.length) {
+								if (startLine >= totalFileLines) {
 									throw new Error(
-										`Offset ${offset} is beyond end of ${source} (${allLines.length} lines total)`,
+										`Offset ${offset} is beyond end of ${source} (${totalFileLines} lines total)`,
 									);
 								}
-								let selectedContent: string;
 								let userLimitedLines: number | undefined;
+								let endLine = totalFileLines;
 								// If limit is specified by the user, honor it first. Otherwise truncateHead decides.
 								if (limit !== undefined) {
-									const endLine = Math.min(startLine + limit, allLines.length);
-									selectedContent = allLines.slice(startLine, endLine).join("\n");
+									endLine = Math.min(startLine + limit, totalFileLines);
 									userLimitedLines = endLine - startLine;
-								} else {
-									selectedContent = allLines.slice(startLine).join("\n");
 								}
+								// Retain Array.slice's numeric coercion, including fractional and negative limits.
+								const startIndex = Math.trunc(startLine);
+								const integerEnd = Math.trunc(endLine) || 0;
+								const endIndex = integerEnd < 0 ? Math.max(0, totalFileLines + integerEnd) : integerEnd;
+								let startOffset = 0;
+								for (let line = 0; line < startIndex; line++) {
+									startOffset = selectedText.indexOf("\n", startOffset) + 1;
+								}
+								let endOffset = startOffset;
+								if (endIndex >= totalFileLines) {
+									endOffset = selectedText.length;
+								} else {
+									for (let line = startIndex; line < endIndex; line++) {
+										endOffset = selectedText.indexOf("\n", endOffset) + 1;
+									}
+									if (endIndex > startIndex) endOffset--;
+								}
+								const selectedContent = selectedText.slice(startOffset, endOffset);
 								// Apply truncation, respecting both line and byte limits.
 								const truncation = truncateHead(selectedContent);
 								let outputText: string;
 								if (truncation.firstLineExceedsLimit) {
 									// First line alone exceeds the byte limit. Point the model at a bash fallback.
-									const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine], "utf-8"));
+									const firstLine = selectedContent.split("\n", 1)[startLine - startIndex];
+									const firstLineSize = formatSize(Buffer.byteLength(firstLine, "utf-8"));
 									outputText =
 										json === undefined
 											? `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`
@@ -206,9 +227,9 @@ export function createReadToolDefinition(
 										outputText += `\n\n[Showing ${json === undefined ? "" : "JSON selection "}lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset}${continuation} to continue.]`;
 									}
 									details = { truncation };
-								} else if (userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length) {
+								} else if (userLimitedLines !== undefined && startLine + userLimitedLines < totalFileLines) {
 									// User-specified limit stopped early, but the file still has more content.
-									const remaining = allLines.length - (startLine + userLimitedLines);
+									const remaining = totalFileLines - (startLine + userLimitedLines);
 									const nextOffset = startLine + userLimitedLines + 1;
 									outputText = `${truncation.content}\n\n[${remaining} more lines in ${source}. Use offset=${nextOffset}${continuation} to continue.]`;
 								} else {
@@ -221,7 +242,7 @@ export function createReadToolDefinition(
 							if (aborted) return;
 							signal?.removeEventListener("abort", onAbort);
 							resolve({ content, details });
-						} catch (error: any) {
+						} catch (error) {
 							signal?.removeEventListener("abort", onAbort);
 							if (!aborted) reject(error);
 						}

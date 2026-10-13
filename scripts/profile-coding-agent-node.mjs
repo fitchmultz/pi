@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -46,7 +46,8 @@ Notes:
   - By default the benchmark uses your normal configured agent dir, so global models/auth/settings work.
   - TUI mode measures startup until the interactive UI reaches first usable state.
   - RPC mode measures startup until a real get_state request receives a response, then closes stdin to exit cleanly.
-  - CPU profiles are kept in the selected profile directory for later analysis.
+  - Node CPU profiles use unique per-run directories and PID filenames, preserving launcher and worker profiles.
+  - Bun CPU profiles are kept in the selected profile directory with the requested label.
 `);
 }
 
@@ -367,7 +368,9 @@ function getRuntimeCommand(runtime, mode, profileDir, profileName, cpuProfile, n
 
 	const args = [];
 	if (cpuProfile) {
-		args.push("--cpu-prof", `--cpu-prof-dir=${profileDir}`, `--cpu-prof-name=${profileName}`);
+		// The managed launcher forwards execArgv to its worker. Node's default
+		// PID/thread filenames keep the launcher from overwriting the worker.
+		args.push("--cpu-prof", `--cpu-prof-dir=${profileDir}`);
 	}
 	args.push(nodeEntryPath, ...benchmarkArgs);
 	return {
@@ -393,10 +396,8 @@ function createBenchmarkEnv(options, isolatedAgentDir) {
 	return env;
 }
 
-async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir }) {
+async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir, profileName }) {
 	const runNumber = runIndex + 1;
-	const suffix = String(runNumber).padStart(3, "0");
-	const profileName = `${options.label}-${suffix}.cpuprofile`;
 	const tempRoot = options.isolatedAgentDir ? mkdtempSync(join(tmpdir(), "pi-startup-benchmark-")) : undefined;
 	const isolatedAgentDir = tempRoot ? join(tempRoot, "agent") : undefined;
 	if (isolatedAgentDir) {
@@ -427,12 +428,7 @@ async function runTuiBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 			throw new Error(stderr.trim() || `Benchmark child exited with code ${exitCode}`);
 		}
 
-		const profilePath = options.cpuProfile ? join(profileDir, profileName) : undefined;
-		if (profilePath && !existsSync(profilePath)) {
-			throw new Error(`CPU profile was not written: ${profilePath}`);
-		}
-
-		return { elapsedMs, profilePath, timings: parseStartupTimings(stderr) };
+		return { elapsedMs, pid: child.pid, timings: parseStartupTimings(stderr) };
 	} finally {
 		if (tempRoot) {
 			rmSync(tempRoot, { recursive: true, force: true });
@@ -453,10 +449,8 @@ function splitJsonLines(buffer, onLine) {
 	}
 }
 
-async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir }) {
+async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, profileDir, profileName }) {
 	const runNumber = runIndex + 1;
-	const suffix = String(runNumber).padStart(3, "0");
-	const profileName = `${options.label}-${suffix}.cpuprofile`;
 	const tempRoot = options.isolatedAgentDir ? mkdtempSync(join(tmpdir(), "pi-startup-benchmark-")) : undefined;
 	const isolatedAgentDir = tempRoot ? join(tempRoot, "agent") : undefined;
 	if (isolatedAgentDir) {
@@ -530,12 +524,7 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 			throw new Error(stderr.trim() || `Benchmark child exited with code ${exitCode}`);
 		}
 
-		const profilePath = options.cpuProfile ? join(profileDir, profileName) : undefined;
-		if (profilePath && !existsSync(profilePath)) {
-			throw new Error(`CPU profile was not written: ${profilePath}`);
-		}
-
-		return { elapsedMs: readyElapsedMs, profilePath, timings: parseStartupTimings(stderr) };
+		return { elapsedMs: readyElapsedMs, pid: child.pid, timings: parseStartupTimings(stderr) };
 	} finally {
 		if (tempRoot) {
 			rmSync(tempRoot, { recursive: true, force: true });
@@ -544,10 +533,32 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 }
 
 async function runBenchmarkRun(params) {
-	if (params.options.mode === "rpc") {
-		return await runRpcBenchmarkRun(params);
+	const { options, runtime } = params;
+	const suffix = String(params.runIndex + 1).padStart(3, "0");
+	const profileName = `${options.label}-${suffix}.cpuprofile`;
+	const profileDir = options.cpuProfile && runtime === "node"
+		? mkdtempSync(join(params.profileDir, `${options.label}-${suffix}-`))
+		: params.profileDir;
+	const runParams = { ...params, profileDir, profileName };
+	const result = options.mode === "rpc" ? await runRpcBenchmarkRun(runParams) : await runTuiBenchmarkRun(runParams);
+	const profiles = [];
+	if (options.cpuProfile) {
+		const names = runtime === "node"
+			? readdirSync(profileDir).filter((name) => name.endsWith(".cpuprofile"))
+			: [profileName].filter((name) => existsSync(join(profileDir, name)));
+		if (names.length === 0) throw new Error(`CPU profiles were not written: ${profileDir}`);
+		for (const name of names) {
+			let role = "CLI";
+			if (runtime === "node" && options.bundle) {
+				role = Number(name.split(".")[3]) === result.pid ? "launcher" : "worker";
+			}
+			profiles.push({ path: join(profileDir, name), role });
+		}
+		if (runtime === "node" && options.bundle && !profiles.some((profile) => profile.role === "worker")) {
+			throw new Error(`Managed worker CPU profile was not written: ${profileDir}`);
+		}
 	}
-	return await runTuiBenchmarkRun(params);
+	return { ...result, profiles };
 }
 
 async function main() {
@@ -612,6 +623,9 @@ async function main() {
 		process.stdout.write(
 			`[${measuredIndex === undefined ? `warmup ${runIndex + 1}` : `run ${measuredIndex}`}] elapsed=${formatMs(result.elapsedMs)}\n`,
 		);
+		for (const profile of result.profiles) {
+			process.stdout.write(`  ${profile.role} profile: ${toDisplayPath(profile.path)}\n`);
+		}
 
 		if (measuredIndex !== undefined) {
 			measuredRuns.push(result);
@@ -634,8 +648,10 @@ async function main() {
 		for (const [label, summary] of timingSummaries.entries()) {
 			process.stdout.write(`  ${label}: ${formatMs(summary.median)}\n`);
 		}
-		if (options.cpuProfile && maxElapsedRun.profilePath) {
-			process.stdout.write(`  selected profile: ${toDisplayPath(maxElapsedRun.profilePath)}\n`);
+		if (options.cpuProfile) {
+			for (const profile of maxElapsedRun.profiles) {
+				process.stdout.write(`  selected ${profile.role} profile: ${toDisplayPath(profile.path)}\n`);
+			}
 			process.stdout.write(`  profiles dir:     ${toDisplayPath(profileDir)}\n`);
 		}
 		process.stdout.write(`METRIC startup_time_ms=${measuredRuns[0].elapsedMs.toFixed(1)}\n`);
@@ -655,8 +671,10 @@ async function main() {
 	for (const [label, summary] of timingSummaries.entries()) {
 		process.stdout.write(`  ${label} median: ${formatMs(summary.median)}\n`);
 	}
-	if (options.cpuProfile && maxElapsedRun.profilePath) {
-		process.stdout.write(`  selected profile: ${toDisplayPath(maxElapsedRun.profilePath)}\n`);
+	if (options.cpuProfile) {
+		for (const profile of maxElapsedRun.profiles) {
+			process.stdout.write(`  selected ${profile.role} profile: ${toDisplayPath(profile.path)}\n`);
+		}
 		process.stdout.write(`  profiles dir:     ${toDisplayPath(profileDir)}\n`);
 	}
 	process.stdout.write(`METRIC startup_time_ms=${elapsedSummary.median.toFixed(1)}\n`);

@@ -203,8 +203,9 @@ export function killProcessTree(pid: number): void {
 			// Ignore errors if taskkill fails.
 		}
 	} else {
-		// Use SIGKILL on Unix/Linux/Mac
+		// Stop the group first so waiting shells cannot continue as their children are killed.
 		try {
+			process.kill(-pid, "SIGSTOP");
 			process.kill(-pid, "SIGKILL");
 		} catch {
 			// Fallback to killing just the child if process group kill fails

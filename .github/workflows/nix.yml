@@ -23,11 +23,19 @@ on:
       - 'flake.lock'
       - 'flake.nix'
       - 'nix/**'
+      - 'package.json'
       - 'package-lock.json'
       - 'packages/*/package.json'
       - 'packages/coding-agent/install-lock/**'
-      - 'packages/ai/scripts/hydrate-model-catalog.ts'
+      - 'packages/ai/scripts/**'
+      - 'packages/ai/src/**'
       - 'scripts/update-model-catalog-pin.mjs'
+      - 'scripts/build.mjs'
+      - 'scripts/pack-nix-packages.mjs'
+      - 'scripts/package-artifacts.mjs'
+      - 'scripts/npm-command.mjs'
+      - 'scripts/release-packages.mjs'
+      - 'scripts/package-workspaces.mjs'
   workflow_run:
     workflows:
       - Publish Model Catalog

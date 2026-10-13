@@ -47,4 +47,25 @@ describe("edit byte safety", () => {
 		);
 		expect(readFileSync(path, "utf8")).toBe(text);
 	});
+
+	it.each(["\n", "\r\n"])(
+		"maps out-of-order fuzzy edits after Unicode-expanded lines without changing untouched bytes (%j)",
+		async (ending) => {
+			const path = join(dir, "multi-unicode.txt");
+			writeFileSync(
+				path,
+				`\uFEFFﬃ prefix  ${ending}😀cafe\u0301 “first” tail   ${ending}middle\rCR  ${ending}ＡＢＣ “second” tail   ${ending}keep  ${ending}`,
+			);
+			await createEditTool(dir).execute("edit", {
+				path,
+				edits: [
+					{ oldText: '"second"', newText: '"SECOND"' },
+					{ oldText: 'café "first"', newText: '"FIRST"' },
+				],
+			});
+			expect(readFileSync(path, "utf8")).toBe(
+				`\uFEFFﬃ prefix  ${ending}😀"FIRST" tail   ${ending}middle\rCR  ${ending}ＡＢＣ "SECOND" tail   ${ending}keep  ${ending}`,
+			);
+		},
+	);
 });

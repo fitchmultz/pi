@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced retained-array copying in the opt-in in-memory telemetry adapter.
+
+## [1.2.0] - 2026-10-12
+
 ## [1.1.0] - 2026-10-07
 
 ## [1.0.4] - 2026-10-05

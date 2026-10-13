@@ -101,6 +101,21 @@ describe("wrapTextWithAnsi", () => {
 	});
 
 	describe("basic wrapping", () => {
+		it("preserves exact style transitions and graphemes within long tokens", () => {
+			for (const [text, width, expected] of [
+				[
+					"\x1b[4;44mabcdefghijkl\x1b[24m\x1b[0m",
+					4,
+					["\x1b[4;44mabcd\x1b[24m", "\x1b[4;44mefgh\x1b[24m", "\x1b[4;44mijkl\x1b[24m\x1b[0m"],
+				],
+				["\x1b[4mabcd\x1b[24m\x1b[31mefgh\x1b[0m", 4, ["\x1b[4mabcd\x1b[24m\x1b[31m", "\x1b[31mefgh\x1b[0m"]],
+				["\u200b👩‍💻e\u0301\u200b👩‍💻e\u0301", 3, ["\u200b👩‍💻e\u0301\u200b", "👩‍💻e\u0301"]],
+				["a\tbcde", 4, ["a", "bcde"]],
+			] as const) {
+				assert.deepStrictEqual(wrapTextWithAnsi(text, width), expected);
+			}
+		});
+
 		it("should handle LF, CRLF, and CR line endings", () => {
 			assert.deepStrictEqual(wrapTextWithAnsi("first\nsecond\r\nthird\rfourth", 80), [
 				"first",
@@ -196,6 +211,20 @@ describe("wrapTextWithAnsi", () => {
 });
 
 describe("wrapTextWithAnsi with OSC 8 hyperlinks", () => {
+	it("preserves control and Unicode hyperlink payload bytes across styled long-token rows", () => {
+		for (const terminator of ["\x07", "\x1b\\"]) {
+			const open = `\x1b]8;id=wrapped;https://example.com/\tกำ?x=1${terminator}`;
+			const close = `\x1b]8;;${terminator}`;
+			const underline = "\x1b[4m";
+			const underlineOff = "\x1b[24m";
+			assert.deepStrictEqual(wrapTextWithAnsi(`${underline}${open}abcdefghij${close}${underlineOff}`, 4), [
+				`${underline}${open}abcd${underlineOff}${close}`,
+				`${underline}${open}efgh${underlineOff}${close}`,
+				`${underline}${open}ij${close}${underlineOff}`,
+			]);
+		}
+	});
+
 	it("re-emits OSC 8 open at the start of continuation lines", () => {
 		// A hyperlink whose text is long enough to wrap
 		const url = "https://example.com";

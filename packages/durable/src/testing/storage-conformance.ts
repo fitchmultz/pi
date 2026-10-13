@@ -832,6 +832,10 @@ export function createStorageConformance(options: StorageConformanceOptions): re
 			const changed = (await storage.document(firstId, changedAt, context))!;
 			expect(changed.value).toEqual({ items: ["a", "b"], nested: { count: 2 } });
 			expect(changed.deltasSinceBase).toBe(1);
+			const unchangedAt = await storage.commit(
+				[{ type: "entry", value: entry(await storage.mintId<EntryId>(), rootId) }],
+				context,
+			);
 			(changed.value.items as string[]).push("read mutation");
 			expect((await storage.document(firstId, "current", context))?.value).toEqual({
 				items: ["a", "b"],
@@ -865,6 +869,11 @@ export function createStorageConformance(options: StorageConformanceOptions): re
 			expect(await storage.document(firstId, changedAt, context)).toMatchObject({
 				version: 1,
 				value: { items: ["a", "b"], nested: { count: 2 } },
+			});
+			expect(await storage.document(firstId, unchangedAt, context)).toMatchObject({
+				version: 1,
+				value: { items: ["a", "b"], nested: { count: 2 } },
+				deltasSinceBase: 1,
 			});
 			expect(await storage.document(firstId, checkpointAt, context)).toMatchObject({
 				version: 2,
@@ -1643,6 +1652,38 @@ export function createStorageConformance(options: StorageConformanceOptions): re
 					context,
 				),
 			).rejects.toThrow(`ID ${explicitEntryId} already belongs to entry`);
+
+			const taskId = await storage.mintId<TaskId<JsonValue>>();
+			const conflictingSubmissionId = idFromNumber<SubmissionId>(taskId);
+			const task = pendingTask(taskId, rootId);
+			await expect(
+				storage.commit(
+					[
+						{ type: "task", value: task },
+						{
+							type: "submission",
+							value: {
+								id: conflictingSubmissionId,
+								conversationId: rootId,
+								type: "input",
+								status: "queued",
+							},
+						},
+					],
+					context,
+				),
+			).rejects.toThrow(`ID ${taskId} is written as two record types`);
+			expect(await storage.task(taskId, context)).toBeUndefined();
+			expect(await storage.submission(conflictingSubmissionId, context)).toBeUndefined();
+			const replacement = pendingTask(taskId, rootId, "replacement");
+			await storage.commit(
+				[
+					{ type: "task", value: task },
+					{ type: "task", value: replacement },
+				],
+				context,
+			);
+			expect(await storage.task(taskId, context)).toEqual(replacement);
 
 			await storage.commit(
 				[{ type: "entry", value: entry(idFromNumber<EntryId>(Number.MAX_SAFE_INTEGER), rootId, "last-id") }],

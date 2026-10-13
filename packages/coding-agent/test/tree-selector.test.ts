@@ -673,6 +673,86 @@ describe("TreeSelectorComponent", () => {
 			expect(list.getSelectedNode()?.entry.id).toBe("user-1");
 		});
 
+		test("reattaches hidden ancestry with active-first connectors, orphan roots, empty IDs and folding", () => {
+			const entries: SessionEntry[] = [
+				userMessage("root", null, "root"),
+				modelChange("hidden-1", "root"),
+				modelChange("hidden-2", "hidden-1"),
+				userMessage("branch-a", "hidden-2", "branch A"),
+				assistantMessage("leaf-a", "branch-a", "A leaf"),
+				userMessage("branch-b", "hidden-2", "branch B"),
+				assistantMessage("leaf-b", "branch-b", "B leaf"),
+				modelChange("current", "leaf-b"),
+				userMessage("branch-c", "hidden-2", "branch C"),
+			];
+			const orphan: SessionTreeNode = {
+				entry: userMessage("orphan", "missing", "orphan"),
+				children: [{ entry: assistantMessage("orphan-leaf", "orphan", "orphan leaf"), children: [] }],
+			};
+			const selector = new TreeSelectorComponent(
+				[orphan, ...buildTree(entries)],
+				"current",
+				40,
+				() => {},
+				() => {},
+			);
+			const list = selector.getTreeList();
+			expect(list.getSelectedNode()?.entry.id).toBe("leaf-b");
+			expect(
+				list
+					.render(100)
+					.map(stripVTControlCharacters)
+					.map((line) => line.trimEnd()),
+			).toEqual([
+				"  • user: root",
+				"  ├⊟ • user: branch B",
+				"› │     • assistant: B leaf",
+				"  ├⊟ user: branch A",
+				"  │     assistant: A leaf",
+				"  └─ user: branch C",
+				"  user: orphan",
+				"     assistant: orphan leaf",
+				"  (3/8)",
+			]);
+
+			selector.handleInput(CTRL_LEFT);
+			expect(list.getSelectedNode()?.entry.id).toBe("branch-b");
+			selector.handleInput(CTRL_LEFT);
+			selector.handleInput(DOWN);
+			expect(list.getSelectedNode()?.entry.id).toBe("branch-a");
+			selector.handleInput(UP);
+			selector.handleInput(CTRL_RIGHT);
+			selector.handleInput(DOWN);
+			expect(list.getSelectedNode()?.entry.id).toBe("leaf-b");
+			selector.handleInput("\x15");
+			expect(list.getSelectedNode()?.entry.id).toBe("branch-b");
+
+			for (const { parentId, rootRow } of [
+				{ parentId: "r", rootRow: "  • user: r" },
+				{ parentId: "", rootRow: "  user: r" },
+			]) {
+				const emptyIdSelector = new TreeSelectorComponent(
+					buildTree([
+						userMessage("r", null, "r"),
+						modelChange("", "r"),
+						userMessage("x", null, "x"),
+						assistantMessage("active", parentId, "active"),
+					]),
+					"active",
+					40,
+					() => {},
+					() => {},
+				);
+				expect(
+					emptyIdSelector
+						.getTreeList()
+						.render(100)
+						.map(stripVTControlCharacters)
+						.map((line) => line.trimEnd()),
+				).toEqual([rootRow, "›    • assistant: active", "  user: x", "  (2/3)"]);
+			}
+		});
+
 		test("search resets fold state", () => {
 			const tree = buildBranchingTree();
 			const selector = new TreeSelectorComponent(

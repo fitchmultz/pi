@@ -557,7 +557,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// shallow-copy the messages array or refresh the model object without changing
 			// the provider request, so top-level object identity is not a valid cache key.
 			if (options?.sessionId === sessionManager.getSessionId()) {
-				cacheWarmer.start({ model, context, options: requestOptions }, cacheContextIsCurrent(model));
+				const isCurrent = cacheContextIsCurrent(model);
+				cacheWarmer.cancel();
+				return modelRuntime.streamSimple(model, context, requestOptions, (preparedModel, preparedOptions) => {
+					if (requestOptions.signal?.aborted) return;
+					cacheWarmer.start({ model, context, options: requestOptions }, isCurrent, {
+						model: preparedModel,
+						options: preparedOptions,
+					});
+				});
 			}
 			return modelRuntime.streamSimple(model, context, requestOptions);
 		},

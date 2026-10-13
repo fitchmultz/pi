@@ -68,6 +68,12 @@ export function createMermaidMarkdownTransformer(options: MermaidTransformerOpti
 			return markdown;
 		}
 
+		// Raw token reconstruction can rewrite nested blockquotes or discard duplicate definitions.
+		// Keep those candidates on the lexer path; other source only needs newline normalization.
+		if (!/mermaid/i.test(markdown) && !/(?:^|[\r\n]) {0,3}[[>]/.test(markdown)) {
+			return markdown.replace(/\r\n|\r/g, "\n");
+		}
+
 		return markdownParser
 			.lexer(markdown)
 			.map((token) => {

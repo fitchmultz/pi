@@ -5,6 +5,8 @@
 import { describe, expect, it } from "vitest";
 import { convertToPng, loadPngTranscoder } from "../src/utils/image-convert.ts";
 import { formatDimensionNote, resizeImage } from "../src/utils/image-resize.ts";
+import { resizeImageInProcess } from "../src/utils/image-resize-core.ts";
+import { loadPhoton } from "../src/utils/photon.ts";
 
 // Small 2x2 red PNG image (base64) - generated with ImageMagick
 const TINY_PNG =
@@ -91,6 +93,60 @@ it("loadPngTranscoder converts synchronously to oriented PNG data", async () => 
 });
 
 describe("resizeImage", () => {
+	it("returns the first fitting encoding and rejects an exact encoded byte limit", async () => {
+		const photon = (await loadPhoton())!;
+		const pixels = new Uint8Array(64 * 64 * 4);
+		let seed = 1;
+		for (let i = 0; i < pixels.length; i += 4) {
+			seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+			pixels[i] = seed & 255;
+			pixels[i + 1] = (seed >>> 8) & 255;
+			pixels[i + 2] = (seed >>> 16) & 255;
+			pixels[i + 3] = 255;
+		}
+		const original = new photon.PhotonImage(pixels, 64, 64);
+		const resized = photon.resize(original, 32, 32, photon.SamplingFilter.Lanczos3);
+		try {
+			const input = original.get_bytes();
+			// Independent encoder outputs distinguish first fit from smallest output.
+			const png = Buffer.from(resized.get_bytes()).toString("base64");
+			const jpeg80 = Buffer.from(resized.get_bytes_jpeg(80)).toString("base64");
+			const jpeg85 = Buffer.from(resized.get_bytes_jpeg(85)).toString("base64");
+			const jpeg70 = Buffer.from(resized.get_bytes_jpeg(70)).toString("base64");
+			const jpeg40 = Buffer.from(resized.get_bytes_jpeg(40)).toString("base64");
+			expect(png.length).toBeGreaterThan(jpeg80.length);
+			expect(jpeg85.length).toBeGreaterThanOrEqual(jpeg80.length);
+			expect(jpeg80.length).toBeGreaterThan(jpeg70.length);
+			expect(jpeg70.length).toBeGreaterThan(jpeg40.length);
+
+			for (const [maxBytes, jpegQuality, data, mimeType] of [
+				[png.length + 1, 80, png, "image/png"],
+				[png.length, 80, jpeg80, "image/jpeg"],
+				[jpeg80.length, 80, jpeg70, "image/jpeg"],
+				[jpeg80.length, 40, jpeg40, "image/jpeg"],
+			] as const) {
+				const result = await resizeImageInProcess(input, "image/png", {
+					maxWidth: 32,
+					maxHeight: 32,
+					maxBytes,
+					jpegQuality,
+				});
+				expect(result).toEqual({
+					data,
+					mimeType,
+					originalWidth: 64,
+					originalHeight: 64,
+					width: 32,
+					height: 32,
+					wasResized: true,
+				});
+			}
+		} finally {
+			resized.free();
+			original.free();
+		}
+	});
+
 	it("should keep caller input bytes intact", async () => {
 		const input = new Uint8Array(imageBytes(TINY_PNG));
 		const originalByteLength = input.byteLength;

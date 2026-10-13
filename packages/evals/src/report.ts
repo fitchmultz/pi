@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { styleText } from "node:util";
-import type { ReportCase } from "@vitest-evals/core";
-import { readReportWorkspace, readVitestJsonReportFile } from "@vitest-evals/core/node";
+import { collectReportWorkspace, type ReportCase } from "@vitest-evals/core";
+import { readVitestJsonReportFile } from "@vitest-evals/core/node";
 import type { DocumentationVariant, EvalTask } from "./plan.ts";
 
 export const PI_SESSION_SNAPSHOT_ARTIFACT = "piSessionJsonl";
@@ -139,11 +139,11 @@ export async function readTaskObservation(
 	artifactDirectory: string,
 ): Promise<EvalObservation> {
 	const identity = taskIdentity(task);
-	const loaded = await Promise.all([readReportWorkspace([reportPath]), readVitestJsonReportFile(reportPath)]).catch(
-		() => undefined,
-	);
+	const loaded = await readVitestJsonReportFile(reportPath)
+		.then((rawReport) => ({ rawReport, workspace: collectReportWorkspace(rawReport) }))
+		.catch(() => undefined);
 	if (!loaded) return { ...identity, outcome: "errored" };
-	const [{ workspace }, rawReport] = loaded;
+	const { workspace, rawReport } = loaded;
 	const reportedFullName = `${task.evalSet} ${task.caseId}`;
 	const assertions = rawReport.testResults.flatMap(({ assertionResults }) => assertionResults);
 	if (assertions.length !== 1) return { ...identity, outcome: "errored" };
@@ -369,7 +369,11 @@ export function summarizeEvalObservations(
 		totalsByEvalSet.set(group.evalSet, (totalsByEvalSet.get(group.evalSet) ?? 0) + 1);
 		const { pair, blocked } = resolvePair(group);
 		if (blocked) blockedPairs.push(blocked);
-		if (pair) pairsByEvalSet.set(group.evalSet, [...(pairsByEvalSet.get(group.evalSet) ?? []), pair]);
+		if (pair) {
+			const pairs = pairsByEvalSet.get(group.evalSet) ?? [];
+			pairs.push(pair);
+			pairsByEvalSet.set(group.evalSet, pairs);
+		}
 	}
 	const comparisons = [...totalsByEvalSet]
 		.sort(([left], [right]) => left.localeCompare(right))

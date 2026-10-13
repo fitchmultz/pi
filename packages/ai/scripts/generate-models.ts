@@ -12,6 +12,7 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_REST_BASE_URL,
+	normalizeCloudflareModel,
 	normalizeCloudflareModelId,
 } from "../src/api/cloudflare.ts";
 import type {
@@ -3368,9 +3369,10 @@ async function generateModels() {
 	};
 	const providers: Record<string, ProviderCatalog> = {};
 	for (const model of allModels) {
-		providers[model.provider] ??= { chat: {}, image: {}, classifier: {} };
+		const normalized = normalizeCloudflareModel(model);
+		providers[normalized.provider] ??= { chat: {}, image: {}, classifier: {} };
 		// Only add if not already present (models.dev takes priority over OpenRouter).
-		providers[model.provider].chat[model.id] ??= { ...model, type: "chat" };
+		providers[normalized.provider].chat[normalized.id] ??= { ...normalized, type: "chat" };
 	}
 	for (const model of openRouterCatalog.images) {
 		applyImageInputMetadata(model);

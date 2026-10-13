@@ -144,19 +144,44 @@ export function createGrepToolDefinition(
 							return path.basename(filePath);
 						};
 
-						const fileCache = new Map<string, string[]>();
-						const getFileLines = async (filePath: string): Promise<string[]> => {
-							let lines = fileCache.get(filePath);
-							if (!lines) {
+						const fileCache = new Map<string, { lines: Map<number, string>; lineCount: number }>();
+						const getFileLines = async (filePath: string) => {
+							let cached = fileCache.get(filePath);
+							if (!cached) {
+								const lines = new Map<number, string>();
+								let lineCount = 0;
 								try {
 									const content = await ops.readFile(filePath);
-									lines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+									const windows = matches
+										.filter((match) => match.filePath === filePath)
+										.map((match) => ({
+											start: Math.max(1, match.lineNumber - contextValue),
+											end: match.lineNumber + contextValue,
+										}))
+										.sort((a, b) => a.start - b.start);
+									const lastLine = windows.reduce((last, window) => Math.max(last, window.end), 0);
+									const endings = /\r\n|\r|\n/g;
+									let start = 0;
+									let windowIndex = 0;
+									while (lineCount < lastLine) {
+										lineCount++;
+										const ending = endings.exec(content);
+										while (windowIndex < windows.length && windows[windowIndex].end < lineCount) {
+											windowIndex++;
+										}
+										if (windowIndex < windows.length && lineCount >= windows[windowIndex].start) {
+											lines.set(lineCount, content.slice(start, ending?.index ?? content.length));
+										}
+										if (!ending) break;
+										start = ending.index + ending[0].length;
+									}
 								} catch {
-									lines = [];
+									lineCount = 0;
 								}
-								fileCache.set(filePath, lines);
+								cached = { lines, lineCount };
+								fileCache.set(filePath, cached);
 							}
-							return lines;
+							return cached;
 						};
 
 						const args: string[] = ["--json", "--line-number", "--color=never", "--hidden"];
@@ -196,13 +221,13 @@ export function createGrepToolDefinition(
 
 						const formatBlock = async (filePath: string, lineNumber: number): Promise<string[]> => {
 							const relativePath = formatPath(filePath);
-							const lines = await getFileLines(filePath);
-							if (!lines.length) return [`${relativePath}:${lineNumber}: (unable to read file)`];
+							const { lines, lineCount } = await getFileLines(filePath);
+							if (!lineCount) return [`${relativePath}:${lineNumber}: (unable to read file)`];
 							const block: string[] = [];
 							const start = contextValue > 0 ? Math.max(1, lineNumber - contextValue) : lineNumber;
-							const end = contextValue > 0 ? Math.min(lines.length, lineNumber + contextValue) : lineNumber;
+							const end = contextValue > 0 ? Math.min(lineCount, lineNumber + contextValue) : lineNumber;
 							for (let current = start; current <= end; current++) {
-								const lineText = lines[current - 1] ?? "";
+								const lineText = lines.get(current) ?? "";
 								const sanitized = lineText.replace(/\r/g, "");
 								const isMatchLine = current === lineNumber;
 								// Truncate long lines so grep output stays compact.

@@ -123,8 +123,32 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			if (child.pid) trackDetachedChildPid(child.pid);
 			let timedOut = false;
 			let timeoutHandle: NodeJS.Timeout | undefined;
+			let outputError: Error | undefined;
+			let pendingOutput: Promise<void> | undefined;
 			const onAbort = () => {
 				if (child.pid) killProcessTree(child.pid);
+			};
+			const failOutput = (error: unknown) => {
+				outputError = error instanceof Error ? error : new Error(String(error));
+				onAbort();
+			};
+			const handleData = (data: Buffer) => {
+				if (outputError) return;
+				try {
+					// The void callback contract still accepts synchronous consumers. Our spill
+					// consumers return a drain promise, which only this native producer awaits.
+					const pending: unknown = onData(data);
+					if (pending instanceof Promise) {
+						child.stdout?.pause();
+						child.stderr?.pause();
+						pendingOutput = pending.catch(failOutput).then(() => {
+							child.stdout?.resume();
+							child.stderr?.resume();
+						});
+					}
+				} catch (error) {
+					failOutput(error);
+				}
 			};
 
 			try {
@@ -136,8 +160,8 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 					}, timeoutMs);
 				}
 				// Stream stdout and stderr.
-				child.stdout?.on("data", onData);
-				child.stderr?.on("data", onData);
+				child.stdout?.on("data", handleData);
+				child.stderr?.on("data", handleData);
 				// Handle abort signal by killing the entire process tree.
 				if (signal) {
 					if (signal.aborted) onAbort();
@@ -146,6 +170,8 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
 				const exitCode = await waitForChildProcess(child);
+				await pendingOutput;
+				if (outputError) throw outputError;
 				if (signal?.aborted) {
 					throw new Error("aborted");
 				}
@@ -157,6 +183,8 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				const signalCode = child.signalCode;
 				return { exitCode: exitCode ?? (signalCode ? 128 + (osConstants.signals[signalCode] ?? 0) : 1) };
 			} finally {
+				child.stdout?.off("data", handleData);
+				child.stderr?.off("data", handleData);
 				if (child.pid) untrackDetachedChildPid(child.pid);
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (signal) signal.removeEventListener("abort", onAbort);
@@ -321,8 +349,9 @@ export function createShellToolDefinition(
 
 			const handleData = (data: Buffer) => {
 				if (!acceptingOutput) return;
-				output.append(data);
+				const drained = output.append(data);
 				scheduleOutputUpdate();
+				return drained;
 			};
 
 			const finishOutput = async () => {

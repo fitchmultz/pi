@@ -1101,12 +1101,21 @@ export function createProvider<TApi extends Api = Api>(input: CreateProviderOpti
 	const fetchModels = input.fetchModels;
 	const currentModels = (): readonly ProviderModel<TApi>[] => {
 		const merged = [...baselineModels];
+		if (dynamicModels.length === 0) return merged;
+		const indices = new Map<string, number>();
+		for (let index = 0; index < merged.length; index++) {
+			const model = merged[index];
+			const key = `${getModelType(model)}:${model.id}`;
+			if (!indices.has(key)) indices.set(key, index);
+		}
 		for (const model of dynamicModels) {
-			const index = merged.findIndex(
-				(entry) => getModelType(entry) === getModelType(model) && entry.id === model.id,
-			);
-			if (index >= 0) merged[index] = model;
-			else merged.push(model);
+			const key = `${getModelType(model)}:${model.id}`;
+			const index = indices.get(key);
+			if (index !== undefined) merged[index] = model;
+			else {
+				indices.set(key, merged.length);
+				merged.push(model);
+			}
 		}
 		return merged;
 	};

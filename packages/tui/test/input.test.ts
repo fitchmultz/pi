@@ -65,6 +65,40 @@ describe("Input component", () => {
 		assert.strictEqual(input.getValue(), "EÄ");
 	});
 
+	it("moves and deletes complete graphemes in a mixed value", () => {
+		const input = new Input();
+		input.setValue("Ae\u0301👩‍💻🇨🇳Z");
+		input.handleInput("\x05");
+		input.handleInput("\x1b[D");
+		input.handleInput("\x7f");
+		assert.strictEqual(input.getValue(), "Ae\u0301👩‍💻Z");
+		input.handleInput("\x1b[D");
+		input.handleInput("\x1b[3~");
+		assert.strictEqual(input.getValue(), "Ae\u0301Z");
+		input.handleInput("\x1b[D");
+		input.handleInput("x");
+		assert.strictEqual(input.getValue(), "Axe\u0301Z");
+		input.handleInput("\x1b[C");
+		input.handleInput("y");
+		assert.strictEqual(input.getValue(), "Axe\u0301yZ");
+	});
+
+	it("keeps prefix and suffix grapheme context after inserting regional indicators", () => {
+		for (const [keys, expected] of [
+			[["\x1b[C", "x"], "🇩🇦🇧x🇨"],
+			[["\x1b[3~"], "🇩🇨"],
+			[["\x7f"], "🇦🇧🇨"],
+			[["\x1b[D", "x"], "x🇩🇦🇧🇨"],
+		] as const) {
+			const input = new Input();
+			input.setValue("🇦🇧🇨");
+			input.handleInput("\x01");
+			input.handleInput("🇩");
+			for (const key of keys) input.handleInput(key);
+			assert.strictEqual(input.getValue(), expected);
+		}
+	});
+
 	describe("render", () => {
 		it("supports a custom prompt and styled placeholder", () => {
 			const input = new Input({

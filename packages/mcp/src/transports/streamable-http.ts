@@ -17,7 +17,7 @@ import {
 	TransportEvents,
 } from "./transport.ts";
 
-const MAX_ERROR_BODY_BYTES = 8 * 1024;
+const MAX_ERROR_BODY_CHARS = 8 * 1024;
 const ERROR_MESSAGE_BODY_CHARS = 500;
 const DEFAULT_RECONNECT_INITIAL_DELAY_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
@@ -41,7 +41,8 @@ export interface ConsumeSseOptions {
 export async function consumeSseStream(stream: ReadableStream<Uint8Array>, options: ConsumeSseOptions): Promise<void> {
 	const reader = stream.getReader();
 	const decoder = new TextDecoder();
-	let buffered = "";
+	let lineFragments: string[] = [];
+	let lineBytes = 0;
 	let eventName: string | undefined;
 	let eventId: string | undefined;
 	let dataLines: string[] = [];
@@ -86,22 +87,31 @@ export async function consumeSseStream(stream: ReadableStream<Uint8Array>, optio
 		} else if (field === "retry" && /^\d+$/.test(value)) options.onRetry?.(Number(value));
 	};
 
+	const append = (text: string) => {
+		let offset = 0;
+		while (true) {
+			const newline = text.indexOf("\n", offset);
+			const fragment = text.slice(offset, newline < 0 ? text.length : newline);
+			if (fragment) lineFragments.push(fragment);
+			lineBytes += Buffer.byteLength(fragment);
+			if (newline < 0) return;
+			const line = lineFragments.join("");
+			lineFragments = [];
+			lineBytes = 0;
+			processLine(line);
+			offset = newline + 1;
+		}
+	};
+
 	try {
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
-			buffered += decoder.decode(value, { stream: true });
-			let newline = buffered.indexOf("\n");
-			while (newline >= 0) {
-				processLine(buffered.slice(0, newline));
-				buffered = buffered.slice(newline + 1);
-				newline = buffered.indexOf("\n");
-			}
-			if (Buffer.byteLength(buffered) > maxEventBytes)
-				throw new Error(`MCP SSE event exceeds ${maxEventBytes} bytes`);
+			append(decoder.decode(value, { stream: true }));
+			if (lineBytes > maxEventBytes) throw new Error(`MCP SSE event exceeds ${maxEventBytes} bytes`);
 		}
-		buffered += decoder.decode();
-		if (buffered) processLine(buffered);
+		append(decoder.decode());
+		if (lineFragments.length > 0) processLine(lineFragments.join(""));
 		dispatch();
 	} finally {
 		reader.releaseLock();
@@ -338,7 +348,27 @@ export class StreamableHttpTransport extends TransportEvents implements McpTrans
 
 	private async checkResponse(response: Response): Promise<void> {
 		if (response.ok) return;
-		const body = (await response.text().catch(() => "")).slice(0, MAX_ERROR_BODY_BYTES);
+		let body = "";
+		if (response.body) {
+			let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+			try {
+				reader = response.body.getReader();
+				const decoder = new TextDecoder();
+				while (body.length < MAX_ERROR_BODY_CHARS) {
+					const { done, value } = await reader.read();
+					const text = done ? decoder.decode() : decoder.decode(value, { stream: true });
+					body += text.slice(0, MAX_ERROR_BODY_CHARS - body.length);
+					if (done) break;
+				}
+			} catch {
+				body = "";
+			} finally {
+				if (reader) {
+					await reader.cancel().catch(() => {});
+					reader.releaseLock();
+				}
+			}
+		}
 		if (response.status === 401) throw new McpAuthRequiredError(response, body);
 		if (response.status === 404 && this.sessionIdValue) throw new McpSessionExpiredError(body);
 		throw new McpHttpError(response.status, describeHttpFailure(response.status, body), body);

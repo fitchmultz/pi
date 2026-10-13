@@ -61,7 +61,8 @@ function copyAttributes(attributes?: SpanAttributes): SpanAttributes {
 }
 
 function mergeAttributes(current: SpanAttributes, attributes: SpanAttributes): SpanAttributes {
-	const merged = copyAttributes(current);
+	// Current arrays are already owned; only incoming values need copying.
+	const merged = { ...current };
 	for (const [name, value] of Object.entries(attributes)) {
 		if (value !== undefined) merged[name] = copyAttributeValue(value);
 	}

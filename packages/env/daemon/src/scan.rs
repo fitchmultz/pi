@@ -1,7 +1,7 @@
 //! Port of Durable's `LineScanner` (`env/line-scan.ts`): locates lines `[start_line, end_line)` of a file fed in order
 //! and measures their decoded UTF-8 size as `new TextDecoder().decode(file)` would produce it.
 
-use crate::decode::{decode_into, range_decoder, starts_with_bom};
+use crate::decode::{decode_len, range_decoder, starts_with_bom};
 use encoding_rs::Decoder;
 use serde_json::{Value, json};
 
@@ -21,6 +21,7 @@ pub struct LineScanner {
     first_line_bytes: u64,
     selection: Option<Decoder>,
     first_line: Option<Decoder>,
+    scratch: [u8; 4096],
     head: Option<Vec<u8>>,
     bom: bool,
 }
@@ -42,6 +43,7 @@ impl LineScanner {
             first_line_bytes: 0,
             selection: None,
             first_line: None,
+            scratch: [0; 4096],
             head: Some(Vec::with_capacity(3)),
             bom: false,
         };
@@ -147,14 +149,14 @@ impl LineScanner {
     fn end_first_line(&mut self, position: u64) {
         self.first_line_end = Some(position);
         if let Some(mut decoder) = self.first_line.take() {
-            self.first_line_bytes += decode_into(&mut decoder, &[], true).len() as u64;
+            self.first_line_bytes += decode_len(&mut decoder, &[], true, &mut self.scratch);
         }
     }
 
     fn end_selection(&mut self, position: u64) {
         self.end = Some(position);
         if let Some(mut decoder) = self.selection.take() {
-            self.selected_bytes += decode_into(&mut decoder, &[], true).len() as u64;
+            self.selected_bytes += decode_len(&mut decoder, &[], true, &mut self.scratch);
         }
     }
 
@@ -168,10 +170,10 @@ impl LineScanner {
         }
         let bytes = &chunk[from..to];
         if let Some(decoder) = &mut self.selection {
-            self.selected_bytes += decode_into(decoder, bytes, false).len() as u64;
+            self.selected_bytes += decode_len(decoder, bytes, false, &mut self.scratch);
         }
         if let Some(decoder) = &mut self.first_line {
-            self.first_line_bytes += decode_into(decoder, bytes, false).len() as u64;
+            self.first_line_bytes += decode_len(decoder, bytes, false, &mut self.scratch);
         }
     }
 }
@@ -210,6 +212,30 @@ mod tests {
             assert_eq!(middle["lastLineStart"], 8);
             let past = scan(&file, 9, None, chunk);
             assert_eq!(past["start"], 16);
+        }
+    }
+
+    #[test]
+    fn measures_long_valid_and_invalid_lines_across_output_buffers() {
+        let mut file = vec![0xef, 0xbb, 0xbf];
+        file.extend_from_slice(&vec![b'a'; 4095]);
+        file.extend_from_slice("é".repeat(2049).as_bytes());
+        file.extend_from_slice(&[0xe2, 0x82, b'\n']);
+        file.extend_from_slice(&vec![0xff; 4097]);
+        file.extend_from_slice("😀".repeat(2049).as_bytes());
+        file.extend_from_slice(&[0xe2, 0x82]);
+        // Each incomplete sequence is one U+FFFD; each invalid FF is its own U+FFFD.
+        let first = 4095 + 2049 * 2 + 3;
+        let second = 4097 * 3 + 2049 * 4 + 3;
+        for chunk in [1, 3, 4096, 65536] {
+            let all = scan(&file, 0, None, chunk);
+            assert_eq!(all["newlines"], 1);
+            assert_eq!(all["selectedBytes"], first + 1 + second);
+            assert_eq!(all["firstLineBytes"], first);
+            let last = scan(&file, 1, Some(2), chunk);
+            assert_eq!(last["selectedBytes"], second);
+            assert_eq!(last["firstLineBytes"], second);
+            assert_eq!(last["end"], file.len());
         }
     }
 }

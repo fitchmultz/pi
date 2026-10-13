@@ -19,41 +19,68 @@ function getGitSource(repoRoot) {
 	return { commit, dirty: status.length > 0 };
 }
 
-function packPackages(packages, tarballDirectory, npmOptions) {
+export function packWorkspacePackages(packages, tarballDirectory, npmOptions = {}) {
 	mkdirSync(tarballDirectory, { recursive: true });
-	const packedPackages = [];
+	const expected = new Set();
 	for (const pkg of packages) {
 		const packageJson = JSON.parse(readFileSync(join(pkg.directory, "package.json"), "utf8"));
 		if (packageJson.name !== pkg.name) throw new Error(`Unexpected package name in ${pkg.directory}`);
-		const output = execNpmSync(["pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory], {
-			...npmOptions,
-			cwd: pkg.directory,
-			encoding: "utf8",
-			stdio: ["inherit", "pipe", "inherit"],
-		});
-		const parsed = JSON.parse(output);
-		const packed = Array.isArray(parsed) ? (parsed.length === 1 ? parsed[0] : undefined) : parsed?.[pkg.name];
-		if (packed?.name !== pkg.name || typeof packed.filename !== "string") {
-			throw new Error(`npm pack returned an unexpected result for ${pkg.name}`);
+		if (expected.has(pkg.name)) throw new Error(`Duplicate package selected for packing: ${pkg.name}`);
+		expected.add(pkg.name);
+	}
+	if (packages.length === 0) return [];
+	const output = execNpmSync([
+		"pack", ...packages.map((pkg) => pkg.directory),
+		"--workspaces=false", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory,
+	], {
+		...npmOptions,
+		cwd: npmOptions.cwd ?? packages[0].directory,
+		encoding: "utf8",
+		maxBuffer: 16 * 1024 * 1024,
+		stdio: ["inherit", "pipe", "inherit"],
+	});
+	const parsed = JSON.parse(output);
+	const entries = Array.isArray(parsed)
+		? parsed.map((packed) => [packed?.name, packed])
+		: parsed && typeof parsed === "object" ? Object.entries(parsed) : [];
+	if (entries.length !== packages.length) throw new Error("npm pack returned an unexpected package count");
+	const packedByName = new Map();
+	const filenames = new Set();
+	for (const [name, packed] of entries) {
+		if (
+			!expected.has(name) || packed?.name !== name || packedByName.has(name) ||
+			typeof packed.filename !== "string" || !/^[^/\\]+\.tgz$/.test(packed.filename) ||
+			filenames.has(packed.filename) || !Array.isArray(packed.files)
+		) {
+			throw new Error(`npm pack returned an unexpected result for ${name}`);
 		}
+		packedByName.set(name, packed);
+		filenames.add(packed.filename);
+	}
 
-		const originalPath = join(tarballDirectory, packed.filename);
+	return packages.map((pkg) => packedByName.get(pkg.name));
+}
+
+function packPackages(repoRoot, packages, tarballDirectory, npmOptions) {
+	const packed = packWorkspacePackages(packages, tarballDirectory, { ...npmOptions, cwd: repoRoot });
+	return packages.map((pkg, index) => {
+		const metadata = packed[index];
+		const originalPath = join(tarballDirectory, metadata.filename);
 		const contents = readFileSync(originalPath);
 		const digest = createHash("sha512").update(contents).digest();
 		const hash = digest.toString("hex").slice(0, 12);
 		const tarballPath = originalPath.replace(/\.tgz$/, `-${hash}.tgz`);
 		renameSync(originalPath, tarballPath);
 		console.log(
-			`  ${pkg.name}@${pkg.version}: ${packed.files.length} files, ${packed.size} bytes packed, ${packed.unpackedSize} bytes unpacked`,
+			`  ${pkg.name}@${pkg.version}: ${metadata.files.length} files, ${metadata.size} bytes packed, ${metadata.unpackedSize} bytes unpacked`,
 		);
-		packedPackages.push({
+		return {
 			name: pkg.name,
 			version: pkg.version,
 			tarballPath,
 			integrity: `sha512-${digest.toString("base64")}`,
-		});
-	}
-	return packedPackages;
+		};
+	});
 }
 
 function prepareOutputDirectory(outDir, options) {
@@ -83,7 +110,7 @@ export function produceArtifactSet({ repoRoot, outDir, build = true, offlineMode
 	}
 	const artifactSource = source === undefined ? getGitSource(root) : source;
 	const packages = getPublicWorkspacePackages(join(root, "packages"));
-	const packedPackages = packPackages(packages, join(artifactDirectory, "tarballs"), npmOptions);
+	const packedPackages = packPackages(root, packages, join(artifactDirectory, "tarballs"), npmOptions);
 	const manifest = {
 		schemaVersion: manifestSchemaVersion,
 		source: artifactSource,

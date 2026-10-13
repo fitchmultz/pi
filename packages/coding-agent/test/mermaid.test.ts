@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MarkdownTransformContext } from "../src/core/extensions/types.ts";
 import type { MermaidRenderingMode } from "../src/core/settings-manager.ts";
+import { createMarkdownTransform } from "../src/modes/interactive/components/markdown-transform.ts";
 import { createMermaidMarkdownTransformer } from "../src/modes/interactive/components/mermaid.ts";
 import type { Theme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -25,6 +26,58 @@ function transformMermaid(markdown: string, options: TransformOptions = {}): str
 }
 
 describe("Mermaid rendering", () => {
+	it.each([
+		{ name: "CRLF", source: "line\r\nnext\r\n", expected: "line\nnext\n" },
+		{ name: "bare CR", source: "line\rnext\r", expected: "line\nnext\n" },
+		{ name: "tabs and blank lines", source: "\tcode\n \t \n\nnext\n", expected: "\tcode\n \t \n\nnext\n" },
+		{
+			name: "fences and Unicode",
+			source: "```ts\r\n\t漢字 👨‍👩‍👧‍👦 é\r\n```\r\n",
+			expected: "```ts\n\t漢字 👨‍👩‍👧‍👦 é\n```\n",
+		},
+		{
+			name: "nested lists and quotes",
+			source: "> quote\n>\n> - one\n> - two\n\n- item\n\tcontinuation\n",
+			expected: "> quote\n>\n> - one\n> - two\n\n- item\n\tcontinuation\n",
+		},
+		{
+			name: "quoted list with lazy continuation",
+			source: "> quote\n> - list\nlazy\n> quote\n> - list\nlazy\n",
+			expected: "> quote\n> - list\nlazy\n\n> quote\n> - list\nlazy\n",
+		},
+		{
+			name: "link definitions",
+			source: '[ref]: https://example.com "Title"\n\n[ref]\n',
+			expected: '[ref]: https://example.com "Title"\n\n[ref]\n',
+		},
+		{
+			name: "duplicate link definitions",
+			source: "[ref]: /one\r\n\r\n[ref]: /two\r\n\r\n[ref]\r\n",
+			expected: "[ref]: /one\n\n\n\n[ref]\n",
+		},
+		{
+			name: "indented duplicate definitions",
+			source: "   [ref]: /one\n\n   [ref]: /two\n",
+			expected: "   [ref]: /one\n\n\n",
+		},
+		{
+			name: "ANSI hyperlink payload",
+			source: "\x1b]8;;https://example.com/a?x=1\x07link\x1b]8;;\x07\n",
+			expected: "\x1b]8;;https://example.com/a?x=1\x07link\x1b]8;;\x07\n",
+		},
+	])("matches baseline lexer reconstruction without a Mermaid marker: $name", ({ source, expected }) => {
+		let downstreamSource: string | undefined;
+		const transform = createMarkdownTransform("assistant", true, [
+			createMermaidMarkdownTransformer({ getMode: () => "streaming" }),
+			(markdown) => {
+				downstreamSource = markdown;
+				return markdown;
+			},
+		]);
+		transform(source, 100);
+		expect(downstreamSource).toBe(expected);
+	});
+
 	it("replaces Mermaid code blocks with Unicode diagrams", () => {
 		const markdown = "Before\n\n```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```\nAfter";
 		const rendered = transformMermaid(markdown);
@@ -60,6 +113,12 @@ describe("Mermaid rendering", () => {
 		const partialMarkdown = "```mermaid\nflowchart LR\n  A --> B";
 
 		expect(transformMermaid(partialMarkdown, { isStreaming: true })).toContain("───▶");
+	});
+
+	it("recognizes mixed-case markers with tilde fences and tab-separated options", () => {
+		const markdown = "~~~MeRmAiD\toptions\nflowchart LR\n  A --> B\n~~~";
+		expect(transformMermaid(markdown)).toContain("───▶");
+		expect(transformMermaid(markdown)).not.toContain("~~~MeRmAiD");
 	});
 
 	it("renders diagrams with class assignments", () => {

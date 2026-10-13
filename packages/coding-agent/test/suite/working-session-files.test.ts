@@ -180,6 +180,48 @@ for (const [index, entry] of state.entries.entries()) {
 		}
 	});
 
+	it("normalizes each forked native record before returning a manager or capturing working state", async () => {
+		const source = await createHarness();
+		try {
+			const sourcePath = join(source.tempDir, "native.jsonl");
+			const prefix =
+				'{"type":"custom","id":"native","parentId":null,"timestamp":"2025-01-01T00:00:00Z","customType":"opaque","data":';
+			const nativeRecord = `${prefix}{"zero":-0,"overflow":1e999,"negativeOverflow":-1e999,"nested":[1e999,-0]}}`;
+			const normalizedRecord = `${prefix}{"zero":0,"overflow":null,"negativeOverflow":null,"nested":[null,0]}}`;
+			const original = `${JSON.stringify(source.sessionManager.getHeader())}\n${nativeRecord}\n`;
+			writeFileSync(sourcePath, original);
+			const fork = SessionManager.forkFrom(sourcePath, source.tempDir, source.tempDir);
+			const forkPath = fork.getSessionFile()!;
+			const expected = { zero: 0, overflow: null, negativeOverflow: null, nested: [null, 0] };
+			expect(fork.getEntry("native")).toMatchObject({ type: "custom", data: expected });
+			expect(readFileSync(forkPath, "utf8").split("\n")[1]).toBe(normalizedRecord);
+			expect(readFileSync(sourcePath, "utf8")).toBe(original);
+			const reopened = SessionManager.open(forkPath);
+			expect(reopened.getEntry("native")).toMatchObject({ type: "custom", data: expected });
+
+			const restored = await createHarness({ sessionManager: fork });
+			try {
+				const hold = await restored.session.acquireWorkingSession();
+				try {
+					expect(hold.state.entries[0]).toMatchObject({ type: "custom", data: expected });
+					expect(resolveWorkingSession(hold.state)?.entries[0]).toMatchObject({ type: "custom", data: expected });
+				} finally {
+					await hold.release();
+				}
+			} finally {
+				restored.cleanup();
+			}
+
+			const entry = fork.getEntry("native");
+			if (entry?.type !== "custom") throw new Error("missing native entry");
+			(entry.data as { nested: unknown[] }).nested.push("local change");
+			expect(reopened.getEntry("native")).toMatchObject({ type: "custom", data: expected });
+			expect(readFileSync(forkPath, "utf8").split("\n")[1]).toBe(normalizedRecord);
+		} finally {
+			source.cleanup();
+		}
+	});
+
 	it("captures, writes, validates, opens, restores and attests complete histories above Node's string limit", async () => {
 		const h = await createHarness({ allowedToolNames: ["read", "bash"], excludedToolNames: ["bash"] });
 		try {

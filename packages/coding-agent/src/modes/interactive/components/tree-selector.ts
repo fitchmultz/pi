@@ -438,23 +438,18 @@ class TreeList implements Component {
 
 		const visibleIds = new Set(this.filteredNodes.map((n) => n.node.entry.id));
 
-		// Build entry map for efficient parent lookup (using full tree)
-		const entryMap = new Map<string, FlatNode>();
+		// flatNodes is parent-before-child preorder, so each hidden chain is resolved once.
+		const nearestVisibleAncestor = new Map<string, string | null>();
 		for (const flatNode of this.flatNodes) {
-			entryMap.set(flatNode.node.entry.id, flatNode);
+			const { id, parentId } = flatNode.node.entry;
+			const ancestorId =
+				parentId == null
+					? null
+					: visibleIds.has(parentId)
+						? parentId
+						: (nearestVisibleAncestor.get(parentId) ?? null);
+			nearestVisibleAncestor.set(id, ancestorId);
 		}
-
-		// Find nearest visible ancestor for a node
-		const findVisibleAncestor = (nodeId: string): string | null => {
-			let currentId = entryMap.get(nodeId)?.node.entry.parentId ?? null;
-			while (currentId !== null) {
-				if (visibleIds.has(currentId)) {
-					return currentId;
-				}
-				currentId = entryMap.get(currentId)?.node.entry.parentId ?? null;
-			}
-			return null;
-		};
 
 		// Build visible tree structure:
 		// - visibleParent: nodeId → nearest visible ancestor (or null for roots)
@@ -465,7 +460,7 @@ class TreeList implements Component {
 
 		for (const flatNode of this.filteredNodes) {
 			const nodeId = flatNode.node.entry.id;
-			const ancestorId = findVisibleAncestor(nodeId);
+			const ancestorId = nearestVisibleAncestor.get(nodeId) ?? null;
 			visibleParent.set(nodeId, ancestorId);
 
 			if (!visibleChildren.has(ancestorId)) {

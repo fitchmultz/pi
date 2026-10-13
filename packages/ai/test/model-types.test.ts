@@ -12,7 +12,7 @@ import {
 import { InMemoryModelsStore, type ModelsStoreEntry } from "../src/models-store.ts";
 import { getBuiltinModel } from "../src/providers/all.ts";
 import { fauxAssistantMessage, fauxProvider } from "../src/providers/faux.ts";
-import type { Api, ImageApi, ImageModel, Model } from "../src/types.ts";
+import type { Api, ClassifierModel, ImageApi, ImageModel, Model } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
 
 function chatModel(provider: string, id: string): Model<Api> {
@@ -135,5 +135,70 @@ describe("stored and fetched models of unknown types", () => {
 		expect(refreshed.errors.size).toBe(0);
 		expect(models.getAllModels("dyn").map((model) => model.id)).toEqual(["fetched-chat"]);
 		expect(await modelsStore.read("dyn")).toMatchObject({ models: [{ id: "fetched-chat" }] });
+	});
+});
+
+describe("dynamic model overlays", () => {
+	it("replaces the first baseline match by type, keeps order and applies the last overlay definition", async () => {
+		const classifier: ClassifierModel<"test-classify"> = {
+			...chatModel("dyn", "shared"),
+			type: "classifier",
+			api: "test-classify",
+		};
+		const baseline = [
+			{ ...chatModel("dyn", "shared"), name: "first chat" },
+			chatModel("dyn", "untouched"),
+			imageModel("dyn", "shared"),
+			classifier,
+			{ ...chatModel("dyn", "shared"), type: "chat" as const, name: "duplicate chat" },
+		];
+		const modelsStore = new InMemoryModelsStore();
+		await modelsStore.write("dyn", {
+			models: [
+				{ ...chatModel("dyn", "shared"), name: "early chat overlay" },
+				{ ...chatModel("dyn", "new"), name: "early new overlay" },
+				{ ...imageModel("dyn", "shared"), name: "image overlay" },
+				{ ...classifier, name: "classifier overlay" },
+				{ ...chatModel("dyn", "shared"), type: "chat", name: "last chat overlay" },
+				{ ...chatModel("dyn", "new"), name: "last new overlay" },
+			],
+		});
+		const models = createModels({ modelsStore });
+		models.setProvider(
+			createProvider({
+				id: "dyn",
+				auth: noAuth,
+				models: baseline,
+				fetchModels: async () => {
+					throw new Error("offline restoration must not fetch");
+				},
+				api: chatStreams,
+			}),
+		);
+
+		expect((await models.refresh({ allowNetwork: false })).errors.size).toBe(0);
+		expect(models.getAllModels("dyn").map((model) => model.name)).toEqual([
+			"last chat overlay",
+			"untouched",
+			"image overlay",
+			"classifier overlay",
+			"duplicate chat",
+			"last new overlay",
+		]);
+		expect(models.getModels("dyn").map((model) => model.name)).toEqual([
+			"last chat overlay",
+			"untouched",
+			"duplicate chat",
+			"last new overlay",
+		]);
+		baseline[0].id = "renamed";
+		expect(models.getAllModels("dyn").map((model) => model.name)).toEqual([
+			"first chat",
+			"untouched",
+			"image overlay",
+			"classifier overlay",
+			"last chat overlay",
+			"last new overlay",
+		]);
 	});
 });

@@ -4,8 +4,56 @@ import { McpClient, StdioTransport } from "../src/index.ts";
 
 const fixture = fileURLToPath(new URL("./fixtures/stdio-server.mjs", import.meta.url));
 const stubborn = fileURLToPath(new URL("./fixtures/stubborn-server.mjs", import.meta.url));
+const framing = fileURLToPath(new URL("./fixtures/stdio-framing-server.mjs", import.meta.url));
 
 describe("StdioTransport", () => {
+	it("preserves fragmented UTF-8, byte limits, CRLF, and recovery after invalid frames", async () => {
+		const transport = new StdioTransport({
+			command: process.execPath,
+			args: [framing, "frames", "128"],
+			maxMessageBytes: 128,
+		});
+		const messages: unknown[] = [];
+		const errors: Error[] = [];
+		transport.onMessage((message) => messages.push(message));
+		transport.onError((error) => errors.push(error));
+		const closed = new Promise<void>((resolve) => transport.onClose(resolve));
+		try {
+			await transport.start();
+			await closed;
+			expect(messages).toEqual([
+				{ jsonrpc: "2.0", id: 1, result: "é😀" },
+				{ jsonrpc: "2.0", id: 2, result: true },
+				{ jsonrpc: "2.0", id: 3, result: null },
+			]);
+			expect(errors).toHaveLength(4);
+			expect(errors[0]).toBeInstanceOf(SyntaxError);
+			expect(errors[1].message).toBe("Invalid JSON-RPC message");
+			expect(errors.slice(2).map((error) => error.message)).toEqual([
+				"MCP stdio message exceeds 128 bytes",
+				"MCP stdio message exceeds 128 bytes",
+			]);
+		} finally {
+			await transport.close();
+		}
+	});
+
+	it.each(["incomplete", "whitespace"])("reports only nonblank incomplete frames on close: %s", async (mode) => {
+		const transport = new StdioTransport({ command: process.execPath, args: [framing, mode] });
+		const errors: string[] = [];
+		transport.onError((error) => errors.push(error.message));
+		const closed = new Promise<void>((resolve) => transport.onClose(resolve));
+		try {
+			await transport.start();
+			await closed;
+			expect(errors).toEqual(
+				mode === "incomplete" ? ["MCP stdio server closed with an incomplete JSON-RPC message"] : [],
+			);
+		} finally {
+			await transport.close();
+		}
+	});
+
 	it("connects to a newline-delimited MCP server and captures stderr", async () => {
 		const stderr: string[] = [];
 		const transport = new StdioTransport({

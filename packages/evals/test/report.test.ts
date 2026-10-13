@@ -113,6 +113,21 @@ describe("classifyCaseStatus", () => {
 });
 
 describe("readTaskObservation", () => {
+	it.each(["{", '{"testResults":[]}'])("records an errored outcome for malformed report %s", async (report) => {
+		const { directory, reportPath } = await writeTaskReport();
+		await writeFile(reportPath, report);
+		await expect(readTaskObservation(task, reportPath, directory)).resolves.toMatchObject({
+			outcome: "errored",
+		});
+	});
+
+	it("records an errored outcome for malformed eval metadata in an otherwise valid harness run", async () => {
+		const { observation } = await readObservation({
+			meta: { ...scoredMeta(), eval: { avgScore: 0.5, scores: "not an array" } },
+		});
+		expect(observation).toMatchObject({ outcome: "errored" });
+	});
+
 	it("preserves a skipped outcome when no harness run exists", async () => {
 		const { observation } = await readObservation({ status: "skipped" });
 		expect(observation).toMatchObject({ outcome: "skipped" });

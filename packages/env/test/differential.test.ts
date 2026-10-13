@@ -225,6 +225,25 @@ function randomOperation(next: () => number): { label: string; run: Operation } 
 }
 
 describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
+	it("lists valid multibyte names in the same order as Node", async () => {
+		const { local, remote } = pair();
+		const names = ["z", "\u{10000}", "é", "\ue000", "a"];
+		for (const env of [local, remote]) {
+			for (const name of names) {
+				const written = await env.writeFile(name, "", context);
+				expect(written.ok).toBe(true);
+			}
+		}
+		const listed = async (env: ExecutionEnv) => {
+			const result = await env.listDir(".", context);
+			if (!result.ok) throw result.error;
+			return result.value.map((entry) => entry.name);
+		};
+		const expected = await listed(local);
+		expect(await listed(remote)).toEqual(expected);
+		if (process.platform !== "win32") expect(expected).toEqual(["a", "z", "é", "\ue000", "\u{10000}"]);
+	});
+
 	it("gives the same results for random file operation sequences", async () => {
 		for (let seed = 1; seed <= 60; seed++) {
 			const next = random(seed);

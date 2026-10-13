@@ -475,9 +475,87 @@ export function createEnvConformance(options: EnvConformanceOptions): readonly E
 			const timedOut = await env.exec([...shell, "sleep 2"], { timeout: 0.1 }, context);
 			assert.strictEqual(errorCode(timedOut), "timeout");
 			const controller = new AbortController();
-			const running = env.exec([...shell, "sleep 2"], undefined, withAbortSignal(controller.signal, context));
-			setTimeout(() => controller.abort(), 100);
-			assert.strictEqual(errorCode(await running), "aborted");
+			// Use the backend's path rules, not the host OS, to retain the simple Windows fixture.
+			if (getOrThrow(await env.joinPath(["a", "b"], context)) === "a\\b") {
+				const running = env.exec([...shell, "sleep 2"], undefined, withAbortSignal(controller.signal, context));
+				setTimeout(() => controller.abort(), 100);
+				assert.strictEqual(errorCode(await running), "aborted");
+				return;
+			}
+
+			// Wait on the newest leaf to expose child-first process-group signal delivery.
+			const nested = [
+				'printf "%s\\n" "$$" >> children.pid',
+				'i=0; while [ "$i" -lt 64 ]; do sleep 600 & child=$!; printf "%s\\n" "$child" >> children.pid; i=$((i+1)); done',
+				'printf "before stop\\nREADY\\n"',
+				'wait "$child"',
+				'printf "inner\\n" >> continued; printf "should not run\\n"',
+			].join("; ");
+			const ready = Promise.withResolvers<void>();
+			const deadline = Promise.withResolvers<never>();
+			const timer = setTimeout(() => deadline.reject(new Error("Command cancellation did not finish")), 3000);
+			let output = "";
+			const running = env.exec(
+				[
+					...shell,
+					'printf "%s\\n" "$$" > children.pid; "$@" & nested=$!; wait "$nested"; printf "outer\\n" >> continued; printf "should not run\\n"',
+					"argv0",
+					...shell,
+					nested,
+				],
+				{
+					onOutput: (text) => {
+						output += text;
+						if (output.includes("READY\n")) ready.resolve();
+					},
+				},
+				withAbortSignal(controller.signal, context),
+			);
+			try {
+				await Promise.race([ready.promise, running, deadline.promise]);
+				assert.ok(output.includes("READY\n"), "all descendants became ready");
+				const pids = getOrThrow(await env.readTextFile("children.pid", context))
+					.trim()
+					.split("\n")
+					.map(Number);
+				assert.strictEqual(pids.length, 66);
+				assert.ok(
+					pids.every((pid) => Number.isSafeInteger(pid) && pid > 1),
+					"recorded valid owned PIDs",
+				);
+				controller.abort();
+				assert.strictEqual(errorCode(await Promise.race([running, deadline.promise])), "aborted");
+				const reapedBy = Date.now() + 1000;
+				while (
+					getOrThrow(
+						await env.exec(
+							[...shell, `for pid in ${pids.join(" ")}; do kill -0 "$pid" 2>/dev/null && exit 1; done; exit 0`],
+							undefined,
+							context,
+						),
+					).exitCode !== 0
+				) {
+					assert.ok(Date.now() < reapedBy, "all command descendants exited");
+					await new Promise((resolve) => setTimeout(resolve, 20));
+				}
+				assert.strictEqual(getOrThrow(await env.exists("continued", context)), false);
+				assert.ok(output.includes("before stop\n"), "partial output preserved");
+				assert.ok(!output.includes("should not run"), "no post-cancellation output");
+			} finally {
+				clearTimeout(timer);
+				controller.abort();
+				getOrThrow(
+					await env.exec(
+						[
+							...shell,
+							'if [ -f children.pid ]; then while read -r pid; do [ "$pid" -gt 1 ] && kill -KILL "$pid" 2>/dev/null; done < children.pid; fi; :',
+						],
+						undefined,
+						context,
+					),
+				);
+				await running;
+			}
 		}),
 	];
 

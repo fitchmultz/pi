@@ -7,7 +7,7 @@
 // notifications. Notifications run in enqueue order, so every observer sees revisions in adoption order.
 // `holdPublications` defers delivery until a multi-step change (a reload commit) is complete.
 
-const queue: (() => void)[] = [];
+const queue: ((() => void) | undefined)[] = [];
 let held = 0;
 let draining = false;
 
@@ -31,9 +31,21 @@ export function holdPublications<T>(fn: () => T): T {
 function drain(): void {
 	if (draining || held > 0) return;
 	draining = true;
+	let consumed = 0;
 	try {
-		for (let task = queue.shift(); task !== undefined; task = queue.shift()) task();
+		while (consumed < queue.length) {
+			const task = queue[consumed]!;
+			queue[consumed++] = undefined;
+			task();
+			// Compact only after enough consumption to keep reentrant chains bounded and copying amortized.
+			if (consumed >= 1024 && consumed * 2 >= queue.length) {
+				queue.splice(0, consumed);
+				consumed = 0;
+			}
+		}
 	} finally {
+		if (consumed === queue.length) queue.length = 0;
+		else queue.splice(0, consumed);
 		draining = false;
 	}
 }

@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -23,6 +25,7 @@ describe("AgentSession actionable boundaries", () => {
 	it("settles no-op boundary handlers without copying history into preview managers", async () => {
 		const boundaries: string[] = [];
 		const harness = await createHarness({
+			settings: { compaction: { enabled: false } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("turn_end", (event) => {
@@ -42,12 +45,109 @@ describe("AgentSession actionable boundaries", () => {
 			await harness.session.prompt("start");
 			expect(boundaries).toEqual(["turn_end", "agent_before_settle"]);
 			expect(previewManagers).not.toHaveBeenCalled();
+			expect(harness.session.messages.filter((message) => message.role !== "system").map(getMessageText)).toEqual([
+				"start",
+				"done",
+			]);
 			expect(harness.faux.state.callCount).toBe(1);
 			expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 		} finally {
 			previewManagers.mockRestore();
 		}
 	});
+
+	it.each(["turn_end", "agent_before_settle"] as const)(
+		"refreshes direct native changes despite empty drafts at %s",
+		async (boundary) => {
+			for (const mutation of ["edit", "branch", "reset", "reload", "messages", "pop", "splice", "nested"] as const) {
+				const manager = SessionManager.inMemory();
+				manager.appendCustomMessageEntry("canonical", "canonical context", false);
+				const harness = await createHarness({
+					sessionManager: manager,
+					settings: { compaction: { enabled: false } },
+					extensionFactories: [
+						(pi) => {
+							const mutate = () => {
+								const user = manager
+									.getBranch()
+									.find((entry) => entry.type === "message" && entry.message.role === "user");
+								if (!user) throw new Error("missing user entry");
+								switch (mutation) {
+									case "edit":
+										manager.appendContextEdit(user.id, { content: "native edit" });
+										break;
+									case "branch":
+										manager.branch(user.id);
+										break;
+									case "reset":
+										manager.resetLeaf();
+										break;
+									case "reload": {
+										const path = join(harness.tempDir, "same-ids.jsonl");
+										const entries = manager
+											.getEntries()
+											.map((entry) =>
+												entry.id === user.id && entry.type === "message"
+													? { ...entry, message: { ...entry.message, content: "reloaded input" } }
+													: entry,
+											);
+										writeFileSync(
+											path,
+											[manager.getHeader(), ...entries].map((entry) => JSON.stringify(entry)).join("\n"),
+										);
+										manager.setSessionFile(path);
+										break;
+									}
+									case "messages":
+										harness.session.agent.state.messages = [];
+										break;
+									case "pop":
+										harness.session.agent.state.messages.pop();
+										break;
+									case "splice":
+										harness.session.agent.state.messages.splice(0);
+										break;
+									case "nested": {
+										const message = harness.session.messages.find((message) => message.role === "custom");
+										if (!message) throw new Error("missing projected custom message");
+										message.content = "noncanonical context";
+										break;
+									}
+								}
+							};
+							if (boundary === "turn_end") pi.on(boundary, mutate);
+							else pi.on(boundary, mutate);
+						},
+					],
+				});
+				harnesses.push(harness);
+				harness.session.refreshContext();
+				harness.setResponses([fauxAssistantMessage("done")]);
+
+				await harness.session.prompt("start");
+
+				const userTexts = harness.session.messages.filter((message) => message.role === "user").map(getMessageText);
+				expect(userTexts, mutation).toEqual(
+					mutation === "edit"
+						? ["native edit"]
+						: mutation === "reload"
+							? ["reloaded input"]
+							: mutation === "reset"
+								? []
+								: ["start"],
+				);
+				expect(
+					harness.session.messages.filter((message) => message.role === "assistant").map(getMessageText),
+					mutation,
+				).toEqual(mutation === "branch" || mutation === "reset" ? [] : ["done"]);
+				expect(
+					harness.session.messages.filter((message) => message.role === "custom").map(getMessageText),
+					mutation,
+				).toEqual(mutation === "reset" ? [] : ["canonical context"]);
+				expect(harness.eventsOfType("agent_settled"), mutation).toHaveLength(1);
+			}
+		},
+	);
 
 	it("commits a retain-none turn_end compaction and explicitly continues once", async () => {
 		let handled = false;

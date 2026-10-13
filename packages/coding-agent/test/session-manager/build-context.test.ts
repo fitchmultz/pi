@@ -286,10 +286,20 @@ describe("buildSessionContext", () => {
 	});
 
 	describe("edge cases", () => {
-		it("uses last entry when leafId not found", () => {
+		it.each([undefined, "", "nonexistent"])("uses last entry when leafId is %s", (leafId) => {
 			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
-			const ctx = buildSessionContext(entries, "nonexistent");
+			const ctx = buildSessionContext(entries, leafId);
 			expect(ctx.messages).toHaveLength(2);
+		});
+
+		it("keeps an explicitly null leaf empty, including settings", () => {
+			const entries: SessionEntry[] = [
+				modelChange("1", null, "openai", "gpt-4"),
+				thinkingLevel("2", "1", "high"),
+				msg("3", "2", "user", "not selected"),
+			];
+			expect(buildContextEntries(entries, null)).toEqual([]);
+			expect(buildSessionContext(entries, null)).toEqual({ messages: [], thinkingLevel: "off", model: null });
 		});
 
 		it("handles orphaned entries gracefully", () => {

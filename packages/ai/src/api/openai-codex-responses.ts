@@ -1390,7 +1390,8 @@ async function* parseWebSocket(
 	signal?: AbortSignal,
 	idleTimeoutMs?: number,
 ): AsyncGenerator<Record<string, unknown>> {
-	const queue: Record<string, unknown>[] = [];
+	let queue: (Record<string, unknown> | undefined)[] = [];
+	let head = 0;
 	let pending: (() => void) | null = null;
 	let done = false;
 	let failed: Error | null = null;
@@ -1464,8 +1465,17 @@ async function* parseWebSocket(
 			if (signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
-			if (queue.length > 0) {
-				yield queue.shift()!;
+			if (head < queue.length) {
+				const event = queue[head]!;
+				queue[head++] = undefined;
+				if (head === queue.length) {
+					queue.length = 0;
+					head = 0;
+				} else if (head >= 1024 && head * 2 >= queue.length) {
+					queue = queue.slice(head);
+					head = 0;
+				}
+				yield event;
 				continue;
 			}
 			if (done) break;

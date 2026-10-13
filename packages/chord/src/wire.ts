@@ -1,5 +1,5 @@
 import { Type } from "typebox";
-import { Value } from "typebox/value";
+import { Compile } from "typebox/compile";
 import type { Description } from "./contract.ts";
 import type { WireOp } from "./delta/index.ts";
 import { ChordError, type ChordErrorCode } from "./errors.ts";
@@ -217,6 +217,7 @@ const FrameSchema = Type.Union([
 	Type.Object({ t: Type.Literal("retire"), epoch: Type.Integer({ minimum: 1 }) }),
 	Type.Object({ t: Type.Literal("abort"), reload: Reload }),
 ]);
+const FrameValidator = Compile(FrameSchema);
 
 /** A frame that passes structural validation; anything else is a protocol violation. */
-export const isFrame = (value: unknown): value is Frame => Value.Check(FrameSchema, value);
+export const isFrame = (value: unknown): value is Frame => FrameValidator.Check(value);

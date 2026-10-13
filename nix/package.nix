@@ -52,24 +52,8 @@ let
     installPhase = ''
       runHook preInstall
 
-      pack_package() {
-        local package_dir="$1"
-        local output_name="$2"
-        local tarball
-
-        tarball="$(cd "$package_dir" && npm pack --ignore-scripts --silent --pack-destination "$TMPDIR")"
-        mv "$TMPDIR/$tarball" "$out/$output_name.tgz"
-      }
-
-      mkdir -p "$out"
-      pack_package packages/chord chord
-      pack_package packages/telemetry telemetry
-      pack_package packages/ai ai
-      pack_package packages/tui tui
-      pack_package packages/agent agent
-      pack_package packages/codemode codemode
-      pack_package packages/mcp mcp
-      pack_package packages/coding-agent coding-agent
+      node scripts/pack-nix-packages.mjs "$out" \
+        chord telemetry ai tui agent codemode mcp coding-agent
 
       runHook postInstall
     '';

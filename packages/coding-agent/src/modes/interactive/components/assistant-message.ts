@@ -1,5 +1,13 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	MouseRegion,
+	Spacer,
+	Text,
+} from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
@@ -7,6 +15,15 @@ import { createMarkdownTransform } from "./markdown-transform.ts";
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_ZONE_FINAL = "\x1b]133;C\x07";
+
+interface ContentRun {
+	type: "text" | "thinking";
+	text: string;
+	hidden: boolean;
+	runIndex: number;
+	content: Markdown | Text;
+	child: Component;
+}
 
 /**
  * Component that renders a complete assistant message
@@ -23,6 +40,7 @@ export class AssistantMessageComponent extends Container {
 	private hasToolCalls = false;
 	private isStreaming = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
+	private contentRuns: ContentRun[] = [];
 
 	constructor(
 		message?: AssistantMessage,
@@ -53,6 +71,7 @@ export class AssistantMessageComponent extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.contentRuns = [];
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
@@ -61,6 +80,7 @@ export class AssistantMessageComponent extends Container {
 	setHideThinkingBlock(hide: boolean): void {
 		this.hideThinkingBlock = hide;
 		this.thinkingVisibilityOverrides.clear();
+		this.contentRuns = [];
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
@@ -68,6 +88,7 @@ export class AssistantMessageComponent extends Container {
 
 	setHiddenThinkingLabel(label: string): void {
 		this.hiddenThinkingLabel = label;
+		this.contentRuns = [];
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
@@ -75,6 +96,7 @@ export class AssistantMessageComponent extends Container {
 
 	setOutputPad(padding: number): void {
 		this.outputPad = padding;
+		this.contentRuns = [];
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
@@ -83,6 +105,7 @@ export class AssistantMessageComponent extends Container {
 	setCompactView(compactView: boolean): void {
 		if (this.compactView === compactView) return;
 		this.compactView = compactView;
+		this.contentRuns = [];
 		if (this.lastMessage) this.updateContent(this.lastMessage);
 	}
 
@@ -99,10 +122,52 @@ export class AssistantMessageComponent extends Container {
 
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
 		this.lastMessage = message;
+		if (this.isStreaming !== isStreaming) this.contentRuns = [];
 		this.isStreaming = isStreaming;
 
-		// Clear content container
+		const previousRuns = this.contentRuns;
+		const runs: ContentRun[] = [];
 		this.contentContainer.clear();
+
+		const addRun = (type: ContentRun["type"], text: string, hidden = false, runIndex = 0): void => {
+			let run = previousRuns[runs.length];
+			if (!run || run.type !== type || run.hidden !== hidden || run.runIndex !== runIndex) {
+				const content = hidden
+					? new Text(text, this.outputPad, 0)
+					: new Markdown(
+							text,
+							this.outputPad,
+							0,
+							this.markdownTheme,
+							type === "thinking"
+								? { color: (text: string) => theme.fg("thinkingText", text), italic: true }
+								: undefined,
+							{
+								transform: createMarkdownTransform(
+									type === "thinking" ? "assistant-thinking" : "assistant",
+									this.isStreaming,
+									this.markdownTransformers,
+								),
+							},
+						);
+				const child =
+					type === "thinking"
+						? new MouseRegion(content, (event) => {
+								if (event.type !== "click" || event.button !== "left") return undefined;
+								this.thinkingVisibilityOverrides.set(runIndex, !hidden);
+								if (this.lastMessage) this.updateContent(this.lastMessage);
+								return { handled: true };
+							})
+						: content;
+				run = { type, text, hidden, runIndex, content, child };
+			} else if (run.text !== text) {
+				// Compare source snapshots: providers can mutate the same message and blocks in place.
+				run.content.setText(text);
+				run.text = text;
+			}
+			runs.push(run);
+			this.contentContainer.addChild(run.child);
+		};
 
 		let needsSpacer = true;
 
@@ -115,11 +180,7 @@ export class AssistantMessageComponent extends Container {
 				needsSpacer = false;
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
-				this.contentContainer.addChild(
-					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
-						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
-					}),
-				);
+				addRun("text", content.text.trim());
 			} else if (content.type === "thinking") {
 				const thinkingBlocks: string[] = [];
 				for (; i < message.content.length; i++) {
@@ -143,35 +204,15 @@ export class AssistantMessageComponent extends Container {
 				if (hidden && this.compactView) continue;
 				if (needsSpacer) this.contentContainer.addChild(new Spacer(1));
 				needsSpacer = true;
-				const thinkingComponent = hidden
-					? new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0)
-					: new Markdown(
-							thinkingBlocks.join("\n\n"),
-							this.outputPad,
-							0,
-							this.markdownTheme,
-							{
-								color: (text: string) => theme.fg("thinkingText", text),
-								italic: true,
-							},
-							{
-								transform: createMarkdownTransform(
-									"assistant-thinking",
-									this.isStreaming,
-									this.markdownTransformers,
-								),
-							},
-						);
-				this.contentContainer.addChild(
-					new MouseRegion(thinkingComponent, (event) => {
-						if (event.type !== "click" || event.button !== "left") return undefined;
-						this.thinkingVisibilityOverrides.set(runIndex, !hidden);
-						if (this.lastMessage) this.updateContent(this.lastMessage);
-						return { handled: true };
-					}),
+				addRun(
+					"thinking",
+					hidden ? theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)) : thinkingBlocks.join("\n\n"),
+					hidden,
+					runIndex,
 				);
 			}
 		}
+		this.contentRuns = runs;
 
 		// Check if incomplete/failed - show after partial content.
 		// For aborted/error tool calls, tool execution components show the error.

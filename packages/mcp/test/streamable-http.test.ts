@@ -89,6 +89,70 @@ async function protocolHandler(
 afterEach(closeServers);
 
 describe("consumeSseStream", () => {
+	it.each([16, 15])("accounts for fragmented UTF-8 and data joins at a %i-byte cap through EOF", async (limit) => {
+		const bytes = new TextEncoder().encode(
+			"\uFEFF:keepalive\r\nid: prime\r\nretry: 12\r\nretry: nope\r\n\r\nid: first\r\nid: bad\0id\r\nevent: message\r\ndata: é😀\r\ndata: é😀\r\ndata: é",
+		);
+		let offset = 0;
+		const stream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (offset === bytes.length) controller.close();
+				else controller.enqueue(bytes.subarray(offset, ++offset));
+			},
+		});
+		const events: SseEvent[] = [];
+		const ids: string[] = [];
+		const retries: number[] = [];
+		const consumed = consumeSseStream(stream, {
+			maxEventBytes: limit,
+			onId: (id) => ids.push(id),
+			onRetry: (delay) => retries.push(delay),
+			onEvent: (event) => events.push(event),
+		});
+		if (limit === 16) {
+			await consumed;
+			expect(events).toEqual([{ event: "message", id: "first", data: "é😀\né😀\né" }]);
+		} else {
+			await expect(consumed).rejects.toThrow("MCP SSE event exceeds 15 bytes");
+			expect(events).toEqual([]);
+		}
+		expect(ids).toEqual(["prime", "first"]);
+		expect(retries).toEqual([12]);
+		expect(stream.locked).toBe(false);
+	});
+
+	it.each([false, true])("enforces the unfinished-line byte cap before a newline: overflow=%s", async (overflow) => {
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode(`data: ${"é".repeat(5)}${overflow ? "x" : ""}`));
+				controller.enqueue(new TextEncoder().encode("\r\n\n"));
+				controller.close();
+			},
+		});
+		const events: SseEvent[] = [];
+		const consumed = consumeSseStream(stream, { maxEventBytes: 16, onEvent: (event) => events.push(event) });
+		if (overflow) await expect(consumed).rejects.toThrow("MCP SSE event exceeds 16 bytes");
+		else {
+			await consumed;
+			expect(events).toEqual([{ data: "ééééé" }]);
+		}
+		expect(stream.locked).toBe(false);
+	});
+
+	it("flushes a fragmented incomplete UTF-8 sequence at EOF", async () => {
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode("data: "));
+				controller.enqueue(new Uint8Array([0xf0, 0x9f]));
+				controller.close();
+			},
+		});
+		const events: SseEvent[] = [];
+		await consumeSseStream(stream, { maxEventBytes: 9, onEvent: (event) => events.push(event) });
+		expect(events).toEqual([{ data: "\uFFFD" }]);
+		expect(stream.locked).toBe(false);
+	});
+
 	it("parses chunked CRLF events, comments, IDs, and multiline data", async () => {
 		const encoder = new TextEncoder();
 		const chunks = [': keepalive\r\nid: 7\r\ndata: {"one":\r\n', "data: 1}\r\n\r\n"];
@@ -301,6 +365,46 @@ describe("StreamableHttpTransport", () => {
 		await expect(client.connect(new StreamableHttpTransport({ url }))).rejects.toThrow(
 			"MCP HTTP request failed with status 400: Invalid Accept header",
 		);
+	});
+
+	it("retains the 8192 UTF-16-character error prefix and cancels a held-open body", async () => {
+		const text = `\uFEFF${"é😀".repeat(3000)}`;
+		const bytes = new TextEncoder().encode(text);
+		let offset = 0;
+		let cancelled = false;
+		const stream = new ReadableStream<Uint8Array>(
+			{
+				pull(controller) {
+					if (offset < bytes.length) {
+						const end = Math.min(offset + 127, bytes.length);
+						controller.enqueue(bytes.subarray(offset, end));
+						offset = end;
+					}
+					// Never closes: error handling must stop after its prefix.
+				},
+				cancel() {
+					cancelled = true;
+				},
+			},
+			{ highWaterMark: 0 },
+		);
+		const transport = new StreamableHttpTransport({
+			url: "https://example.test/mcp",
+			fetch: async () => new Response(stream, { status: 503 }),
+		});
+		try {
+			await transport.start();
+			await expect(transport.send({ jsonrpc: "2.0", id: 1, method: "ping" })).rejects.toMatchObject({
+				name: "McpHttpError",
+				status: 503,
+				body: `${"é😀".repeat(2730)}é\uD83D`,
+			});
+			expect(offset).toBeLessThan(bytes.length);
+			expect(cancelled).toBe(true);
+			expect(stream.locked).toBe(false);
+		} finally {
+			await transport.close();
+		}
 	});
 
 	it("hands 401 and insufficient-scope 403 responses to the auth provider with the rejected token", async () => {

@@ -793,7 +793,17 @@ export class ModelRuntime implements Models {
 		return this.stream(model, context, options).result();
 	}
 
-	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream {
+	/**
+	 * `onPrepared` is an internal observer for cache warming, called after auth/header
+	 * preparation and before provider dispatch. Prepared options are not replay options:
+	 * another request must resolve current credentials and headers again.
+	 */
+	streamSimple(
+		model: Model<Api>,
+		context: Context,
+		options?: ModelsSimpleStreamOptions,
+		onPrepared?: (model: Model<Api>, options: SimpleStreamOptions) => void,
+	): AssistantMessageEventStream {
 		const transcript = normalizeContext(context);
 		if (isVirtualModel(model)) {
 			// Requests outside the agent loop are routed here. Callers sized them before routing, so
@@ -811,12 +821,13 @@ export class ModelRuntime implements Models {
 				// resolves its own, so they are not sent to the wrong vendor.
 				const { apiKey, headers, env, ...rest } = options ?? {};
 				const auth = route.model.provider === model.provider ? { apiKey, headers, env } : {};
-				return this.streamSimple(route.model, context, { ...rest, ...auth, maxTokens, reasoning });
+				return this.streamSimple(route.model, context, { ...rest, ...auth, maxTokens, reasoning }, onPrepared);
 			});
 		}
 		return lazyStream(model, async () => {
 			assertChatModel(model);
 			const prepared = await this.prepareRequest(model, options);
+			onPrepared?.(prepared.model, prepared.options);
 			return prepared.provider.streamSimple(prepared.model, transcript, prepared.options as SimpleStreamOptions);
 		});
 	}

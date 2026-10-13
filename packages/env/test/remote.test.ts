@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
 import { getOrThrow, type ShellOutputInfo, type WatchChange } from "@earendil-works/pi-durable/env";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { Connection, nodePlatform } from "../src/connection.ts";
 import { RemoteExecutionEnv } from "../src/remote-env.ts";
 import { daemon } from "./daemon.ts";
@@ -26,6 +26,58 @@ function environment(): { env: RemoteExecutionEnv; connection: Connection } {
 }
 
 describe("RemoteExecutionEnv", () => {
+	it("continues a full text read past the opening size when the file grew, like Node", async () => {
+		const { env, connection } = environment();
+		writeFileSync(join(env.cwd, "growing.txt"), "a".repeat(512 * 1024 + 1));
+		const content = `\ufeff${"é".repeat(512 * 1024)}end`;
+		const request = connection.request.bind(connection);
+		const spy = vi.spyOn(connection, "request").mockImplementation(async (...args) => {
+			const reply = await request(...args);
+			if (args[0] === "open") writeFileSync(join(env.cwd, "growing.txt"), content);
+			return reply;
+		});
+		try {
+			expect(getOrThrow(await env.readTextFile("growing.txt", context))).toBe(content);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("retries an aborted long-line read without losing buffered text or split UTF-8", async () => {
+		const { env, connection } = environment();
+		const first = `${"a".repeat(65_532)}é${"x".repeat(131_072)}\r`;
+		const final = "é".repeat(65_536);
+		getOrThrow(
+			await env.writeFile(
+				"lines.txt",
+				Buffer.concat([Buffer.from(`\ufeff${first}\n\n${final}`), Buffer.from([0xe2, 0x82])]),
+				context,
+			),
+		);
+		const reader = getOrThrow(await env.openTextLineReader("lines.txt", context));
+		const controller = new AbortController();
+		const request = connection.request.bind(connection);
+		let reads = 0;
+		const spy = vi.spyOn(connection, "request").mockImplementation(async (...args) => {
+			const reply = await request(...args);
+			if (args[0] === "pread" && ++reads === 2) controller.abort();
+			return reply;
+		});
+		try {
+			expect(await reader.readLine(withAbortSignal(controller.signal, context))).toMatchObject({
+				ok: false,
+				error: { code: "aborted" },
+			});
+			expect(getOrThrow(await reader.readLine(context))).toEqual({ text: first, terminated: true });
+			expect(getOrThrow(await reader.readLine(context))).toEqual({ text: "", terminated: true });
+			expect(getOrThrow(await reader.readLine(context))).toEqual({ text: `${final}\ufffd`, terminated: false });
+			expect(getOrThrow(await reader.readLine(context))).toBeUndefined();
+		} finally {
+			spy.mockRestore();
+			await reader.close(context);
+		}
+	});
+
 	// https://github.com/earendil-works/pi/issues/10516
 	it("reports overflow for an oversized watch change without losing the connection or watcher", async () => {
 		const { env: base, connection } = environment();
@@ -135,7 +187,11 @@ describe("RemoteExecutionEnv", () => {
 
 	it("reports the remote system in Node's names", async () => {
 		const { connection } = environment();
-		expect(nodePlatform(await connection.info())).toEqual({ platform: process.platform, arch: process.arch });
+		const { platform, arch } = nodePlatform(await connection.info());
+		expect(platform).toBe(process.platform);
+		// CI runs the darwin-x64 release daemon on arm64 macOS through Rosetta, so it reports x64 to arm64 Node.
+		const rosetta = process.platform === "darwin" && process.arch === "arm64" && arch === "x64";
+		if (!rosetta) expect(arch).toBe(process.arch);
 		expect(nodePlatform({ os: "windows", arch: "aarch64" })).toEqual({ platform: "win32", arch: "arm64" });
 		expect(nodePlatform({ os: "macos", arch: "x86_64" })).toEqual({ platform: "darwin", arch: "x64" });
 	});
@@ -165,6 +221,7 @@ describe("RemoteExecutionEnv", () => {
 		expect([listed.entries.length, listed.truncated]).toEqual([10_100, false]);
 		const bounded = getOrThrow(await env.listFiles(".", { maxEntries: 5000 }, context));
 		expect([bounded.entries.length, bounded.truncated]).toEqual([5000, true]);
+		// Creating 10,000 files takes several seconds on Windows CI.
 	}, 30_000);
 
 	it("times out a command that produces no output", async () => {

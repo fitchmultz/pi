@@ -39,6 +39,7 @@ import type {
 import { closedError, scanAll, Waiters } from "./util.ts";
 
 type AnyTaskRecord = TaskRecord<JsonValue, JsonValue, JsonValue>;
+type IdleContext = { readonly since: number; readonly epoch: number };
 /** A record that can still run code: pending, running, or waiting. */
 type RunnableTaskRecord = Extract<
 	AnyTaskRecord,
@@ -213,10 +214,20 @@ export class TaskScheduler {
 	readonly #live = new Map<TaskId, AnyTaskRecord>();
 	/**
 	 * Context range last read through a task runtime, per conversation: a later read, by any of its tasks, scans only
-	 * newer entries. `idleSince` is the Harness time it was first seen idle. Derived and never persisted; dropped at the
-	 * first idle check after `settings.contextRetentionMs` of idleness, and at close.
+	 * newer entries. Derived and never persisted; dropped after `settings.contextRetentionMs` of idleness, and at close.
 	 */
-	readonly #contexts = new Map<ConversationId, { range: ContextRange; idleSince: number | undefined }>();
+	readonly #contexts = new Map<ConversationId, ContextRange>();
+	/** Idle ranges, oldest first; busy ranges are absent. Reads do not restart an idle period. */
+	#idleContexts = new Map<ConversationId, IdleContext>();
+	/** An ambiguous unloaded chain makes all scopes busy; their idle periods restart together once it is known. */
+	#idleUncertain = false;
+	#idleEpoch = 0;
+	#idleRestartedAt = 0;
+	#latestIdleTime = -Infinity;
+	/** Scopes affected by task changes, collected before their ownership chains can be swept. */
+	readonly #idleChecks = new Set<ConversationId>();
+	/** Idle waiters in unrelated scopes may unblock when an unloaded chain becomes known. */
+	#checkAllIdle = false;
 	/** Timer for the earliest expiry of an idle context, only where timers can be unreferenced (see `#scheduleExpiry`). */
 	#expiry: { readonly at: number; readonly timer: ReturnType<typeof setTimeout> } | undefined;
 	readonly #invocations = new Map<TaskId, Invocation>();
@@ -489,10 +500,28 @@ export class TaskScheduler {
 		}
 		// A cascade that a reservation or step found pending runs with the next commit of any kind.
 		if (this.#cascadePending) this.#scheduleReconcile();
+		if (changed && (this.#contexts.size > 0 || this.#idleWaiters.keys().length > 0)) {
+			const seen = new Set<Node>();
+			for (const change of publication.changes) {
+				if (change.type !== "task" || change.value.background) continue;
+				this.#checkIdleAbove(parentOf(change.value), seen);
+			}
+		}
 		this.#sweep();
 		if (!changed) return;
 		this.#settleIdle();
 		this.#kick();
+	}
+
+	#checkIdleAbove(start: Up, seen: Set<Node>): void {
+		for (const step of this.#above(start)) {
+			if ("unknown" in step) break;
+			const node = "task" in step ? step.task : conversationNode(step.conversation);
+			if (seen.has(node)) break;
+			seen.add(node);
+			if ("conversation" in step) this.#idleChecks.add(step.conversation);
+			else if (step.node.background) break;
+		}
 	}
 
 	/**
@@ -508,25 +537,87 @@ export class TaskScheduler {
 		}
 	}
 
-	/** Resolve idle waiters, and drop each kept context whose conversation has been idle for the retention period. */
+	/** Resolve affected idle waiters and ranges, and expire idle ranges oldest first. */
 	#settleIdle(): void {
 		for (const conversationId of this.#idleWaiters.keys()) {
-			if (this.#idle(conversationId)) this.#idleWaiters.resolve(conversationId);
+			if (
+				(conversationId === undefined || this.#checkAllIdle || this.#idleChecks.has(conversationId)) &&
+				this.#idle(conversationId)
+			) {
+				this.#idleWaiters.resolve(conversationId);
+			}
 		}
 		const now = this.#now();
 		const retention = this.#contextRetentionMs();
-		for (const [conversationId, kept] of this.#contexts) {
-			if (kept.idleSince !== undefined && now - kept.idleSince >= retention) {
-				this.#contexts.delete(conversationId);
-			} else if (!this.#idle(conversationId)) {
-				kept.idleSince = undefined;
-			} else if (retention > 0) {
-				kept.idleSince ??= now;
-			} else {
-				this.#contexts.delete(conversationId);
+		let uncertain = false;
+		if (this.#contexts.size > 0) {
+			for (const id of this.#unloaded) {
+				const record = this.#live.get(id);
+				if (
+					record !== undefined &&
+					!record.background &&
+					this.#inScope(parentOf(record), { roots: true }) === undefined
+				) {
+					uncertain = true;
+					break;
+				}
 			}
 		}
+		const wasUncertain = this.#idleUncertain;
+		if (wasUncertain && !uncertain) {
+			// Every scope was busy, even unrelated retained conversations. Restart their idle periods without a scan.
+			this.#idleEpoch++;
+			this.#idleRestartedAt = now;
+			this.#latestIdleTime = now;
+		}
+		if (!wasUncertain) this.#expireIdle(now, retention);
+		if (!uncertain) {
+			for (const conversationId of this.#idleChecks) {
+				if (!this.#contexts.has(conversationId)) continue;
+				if (!this.#idle(conversationId)) {
+					this.#idleContexts.delete(conversationId);
+				} else if (retention > 0) {
+					this.#retainIdle(conversationId, now);
+				} else {
+					this.#idleContexts.delete(conversationId);
+					this.#contexts.delete(conversationId);
+				}
+			}
+			// Nonpositive/NaN retention drops idle ranges even when the host clock moved backwards.
+			if (!(retention > 0)) {
+				for (const id of this.#idleContexts.keys()) this.#contexts.delete(id);
+				this.#idleContexts.clear();
+			}
+			this.#idleChecks.clear();
+		}
+		this.#idleUncertain = uncertain;
+		this.#checkAllIdle = false;
 		this.#scheduleExpiry();
+	}
+
+	#expireIdle(now: number, retention: number): void {
+		for (const [conversationId, kept] of this.#idleContexts) {
+			if (!(now - this.#idleSince(kept) >= retention)) break;
+			this.#idleContexts.delete(conversationId);
+			this.#contexts.delete(conversationId);
+		}
+	}
+
+	#idleSince(kept: IdleContext): number {
+		return kept.epoch === this.#idleEpoch ? kept.since : this.#idleRestartedAt;
+	}
+
+	#retainIdle(conversationId: ConversationId, now: number): void {
+		if (this.#idleContexts.has(conversationId)) return;
+		if (this.#idleContexts.size === 0) this.#latestIdleTime = now;
+		this.#idleContexts.set(conversationId, { since: now, epoch: this.#idleEpoch });
+		// Date.now() and host clocks can move backwards; keep expiry ordering correct on that uncommon path too.
+		if (now < this.#latestIdleTime) {
+			this.#idleContexts = new Map(
+				[...this.#idleContexts].sort((left, right) => this.#idleSince(left[1]) - this.#idleSince(right[1])),
+			);
+		}
+		this.#latestIdleTime = Math.max(this.#latestIdleTime, now);
 	}
 
 	/**
@@ -535,13 +626,11 @@ export class TaskScheduler {
 	 * Durable Object from being evicted, and eviction frees the contexts. There, task changes alone check expiry.
 	 */
 	#scheduleExpiry(): void {
-		const retention = this.#contextRetentionMs();
-		let at: number | undefined;
-		for (const kept of this.#contexts.values()) {
-			if (kept.idleSince !== undefined && (at === undefined || kept.idleSince + retention < at)) {
-				at = kept.idleSince + retention;
-			}
-		}
+		const oldest = this.#idleContexts.values().next();
+		const at =
+			oldest.done === true || this.#idleUncertain
+				? undefined
+				: this.#idleSince(oldest.value) + this.#contextRetentionMs();
 		if (this.#expiry !== undefined && this.#expiry.at === at) return;
 		if (this.#expiry !== undefined) clearTimeout(this.#expiry.timer);
 		this.#expiry = undefined;
@@ -729,7 +818,13 @@ export class TaskScheduler {
 				at = edge === null ? undefined : { task: edge };
 			}
 		}
-		for (const id of passed) this.#unloaded.delete(id);
+		for (const id of passed) {
+			if (this.#live.get(id)?.background === false) this.#checkAllIdle = true;
+			this.#unloaded.delete(id);
+		}
+		if (this.#contexts.size > 0 || this.#idleWaiters.keys().length > 0) {
+			this.#checkIdleAbove(start, new Set());
+		}
 	}
 
 	#setEdge(conversationId: ConversationId, owner: TaskId | null): void {
@@ -1087,6 +1182,8 @@ export class TaskScheduler {
 		this.#taskWaiters.rejectAll(error);
 		this.#idleWaiters.rejectAll(error);
 		this.#contexts.clear();
+		this.#idleContexts.clear();
+		this.#idleChecks.clear();
 		if (this.#expiry !== undefined) clearTimeout(this.#expiry.timer);
 		this.#expiry = undefined;
 	}
@@ -1746,7 +1843,7 @@ export class TaskScheduler {
 						conversationId,
 						context,
 						options?.at,
-						this.#contexts.get(conversationId)?.range,
+						this.#contexts.get(conversationId),
 					);
 					// Keep it unless the invocation ended or a concurrent read already kept a newer range.
 					const kept = this.#contexts.get(conversationId);
@@ -1754,15 +1851,18 @@ export class TaskScheduler {
 						range !== undefined &&
 						!this.#closing &&
 						!invocation.ended &&
-						(kept === undefined || kept.range.bounds.tail <= range.bounds.tail)
+						(kept === undefined || kept.bounds.tail <= range.bounds.tail)
 					) {
 						// A read of another, idle conversation starts or continues its retention period.
 						if (!this.#idle(conversationId)) {
-							this.#contexts.set(conversationId, { range, idleSince: undefined });
+							this.#contexts.set(conversationId, range);
+							this.#idleContexts.delete(conversationId);
+							this.#idleChecks.add(conversationId);
 						} else if (this.#contextRetentionMs() > 0) {
-							this.#contexts.set(conversationId, { range, idleSince: kept?.idleSince ?? this.#now() });
-							this.#scheduleExpiry();
+							this.#contexts.set(conversationId, range);
+							this.#retainIdle(conversationId, this.#now());
 						}
+						this.#scheduleExpiry();
 					}
 					return view;
 				}),

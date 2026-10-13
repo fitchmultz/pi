@@ -2,11 +2,6 @@ import { parse as partialParse } from "partial-json";
 
 const VALID_JSON_ESCAPES = new Set(['"', "\\", "/", "b", "f", "n", "r", "t", "u"]);
 
-function isControlCharacter(char: string): boolean {
-	const codePoint = char.codePointAt(0);
-	return codePoint !== undefined && codePoint >= 0x00 && codePoint <= 0x1f;
-}
-
 function escapeControlCharacter(char: string): string {
 	switch (char) {
 		case "\b":
@@ -30,14 +25,16 @@ function escapeControlCharacter(char: string): string {
  * - doubling backslashes before invalid escape characters
  */
 export function repairJson(json: string): string {
+	if (!/[\\\u0000-\u001f]/.test(json)) return json;
+
 	let repaired = "";
+	let spanStart = 0;
 	let inString = false;
 
 	for (let index = 0; index < json.length; index++) {
 		const char = json[index];
 
 		if (!inString) {
-			repaired += char;
 			if (char === '"') {
 				inString = true;
 			}
@@ -45,41 +42,37 @@ export function repairJson(json: string): string {
 		}
 
 		if (char === '"') {
-			repaired += char;
 			inString = false;
 			continue;
 		}
 
 		if (char === "\\") {
 			const nextChar = json[index + 1];
-			if (nextChar === undefined) {
-				repaired += "\\\\";
-				continue;
-			}
-
 			if (nextChar === "u") {
 				const unicodeDigits = json.slice(index + 2, index + 6);
 				if (/^[0-9a-fA-F]{4}$/.test(unicodeDigits)) {
-					repaired += `\\u${unicodeDigits}`;
 					index += 5;
 					continue;
 				}
 			}
 
-			if (VALID_JSON_ESCAPES.has(nextChar)) {
-				repaired += `\\${nextChar}`;
+			if (nextChar !== undefined && VALID_JSON_ESCAPES.has(nextChar)) {
 				index += 1;
 				continue;
 			}
 
-			repaired += "\\\\";
+			repaired += `${json.slice(spanStart, index)}\\\\`;
+			spanStart = index + 1;
 			continue;
 		}
 
-		repaired += isControlCharacter(char) ? escapeControlCharacter(char) : char;
+		if (char.charCodeAt(0) <= 0x1f) {
+			repaired += json.slice(spanStart, index) + escapeControlCharacter(char);
+			spanStart = index + 1;
+		}
 	}
 
-	return repaired;
+	return spanStart === 0 ? json : repaired + json.slice(spanStart);
 }
 
 export function parseJsonWithRepair<T>(json: string): T {

@@ -69,7 +69,8 @@ export interface StdioTransportOptions {
 export class StdioTransport extends TransportEvents implements McpTransport {
 	readonly options: Readonly<StdioTransportOptions>;
 	private child: ChildProcess | undefined;
-	private stdoutBuffer = Buffer.alloc(0);
+	private stdoutChunks: Buffer[] = [];
+	private stdoutBytes = 0;
 	private stderrBuffer = Buffer.alloc(0);
 	private started = false;
 	private closed = false;
@@ -116,10 +117,11 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 		child.stderr?.on("error", (error) => this.emitError(error));
 		child.on("close", () => {
 			this.child = undefined;
-			if (this.stdoutBuffer.toString("utf8").trim()) {
+			if (Buffer.concat(this.stdoutChunks, this.stdoutBytes).toString("utf8").trim()) {
 				this.emitError(new Error("MCP stdio server closed with an incomplete JSON-RPC message"));
 			}
-			this.stdoutBuffer = Buffer.alloc(0);
+			this.stdoutChunks = [];
+			this.stdoutBytes = 0;
 			this.emitClose();
 		});
 
@@ -179,23 +181,32 @@ export class StdioTransport extends TransportEvents implements McpTransport {
 	}
 
 	private handleStdout(chunk: Buffer | string): void {
-		this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
 		const maxMessageBytes = this.options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
+		let offset = 0;
 		while (true) {
-			const newline = this.stdoutBuffer.indexOf(0x0a);
+			const newline = buffer.indexOf(0x0a, offset);
+			const fragment = buffer.subarray(offset, newline < 0 ? buffer.length : newline);
+			this.stdoutBytes += fragment.length;
+			if (fragment.length > 0) this.stdoutChunks.push(fragment);
 			if (newline < 0) {
-				if (this.stdoutBuffer.length > maxMessageBytes) {
-					this.stdoutBuffer = Buffer.alloc(0);
+				if (this.stdoutBytes > maxMessageBytes) {
+					this.stdoutChunks = [];
+					this.stdoutBytes = 0;
 					this.emitError(new Error(`MCP stdio message exceeds ${maxMessageBytes} bytes`));
 				}
 				return;
 			}
-			const line = this.stdoutBuffer.subarray(0, newline);
-			this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
-			if (line.length > maxMessageBytes) {
+			const lineBytes = this.stdoutBytes;
+			const chunks = this.stdoutChunks;
+			this.stdoutChunks = [];
+			this.stdoutBytes = 0;
+			offset = newline + 1;
+			if (lineBytes > maxMessageBytes) {
 				this.emitError(new Error(`MCP stdio message exceeds ${maxMessageBytes} bytes`));
 				continue;
 			}
+			const line = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, lineBytes);
 			const text = line.toString("utf8").replace(/\r$/, "");
 			if (!text.trim()) continue;
 			try {

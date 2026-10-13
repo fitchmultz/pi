@@ -198,6 +198,73 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.truncation?.outputLines).toBe(2000);
 		});
 
+		it.each([
+			{ source: "", input: {}, expected: "" },
+			{ source: "one\n", input: { offset: 2 }, expected: "" },
+			{ source: "one\r\ntwo\rthree\n", input: { offset: 2 }, expected: "two\rthree\n" },
+			{
+				source: "one\ntwo\nthree\nfour\n",
+				input: { offset: 2.5, limit: 1.5 },
+				expected: "two\nthree\n\n[2 more lines in file. Use offset=4 to continue.]",
+			},
+			{
+				source: "one\ntwo\nthree\nfour",
+				input: { offset: 2, limit: -2 },
+				expected: "two\nthree\n\n[5 more lines in file. Use offset=0 to continue.]",
+			},
+		])("preserves paging and newline semantics for $input on $source", async ({ source, input, expected }) => {
+			const testFile = join(testDir, "read-paging.txt");
+			writeFileSync(testFile, source);
+			const result = await readTool.execute("read-paging", { path: testFile, ...input });
+			expect(getTextOutput(result)).toBe(expected);
+			expect(result.structuredContent).toBe(expected);
+			expect(result.details).toBeUndefined();
+		});
+
+		it("preserves selected UTF-8 byte totals at the head boundary", async () => {
+			const testFile = join(testDir, "read-bytes.txt");
+			const line = "é".repeat(25_600);
+			writeFileSync(testFile, `skip\n${line}\nlast\n`);
+			const result = await readTool.execute("read-bytes", { path: testFile, offset: 2 });
+			expect(getTextOutput(result)).toBe(
+				`${line}\n\n[Showing lines 2-2 of 4 (50.0KB limit). Use offset=3 to continue.]`,
+			);
+			expect(result.details?.truncation).toMatchObject({
+				content: line,
+				truncated: true,
+				truncatedBy: "bytes",
+				totalLines: 2,
+				totalBytes: 51_206,
+				outputLines: 1,
+				outputBytes: 51_200,
+				firstLineExceedsLimit: false,
+			});
+		});
+
+		it("honors cancellation during an async custom read and permits a later call", async () => {
+			const started = Promise.withResolvers<void>();
+			const pending = Promise.withResolvers<Buffer>();
+			const controller = new AbortController();
+			const tool = createReadTool(testDir, {
+				operations: {
+					access: async () => {},
+					readFile: async () => {
+						started.resolve();
+						return pending.promise;
+					},
+				},
+			});
+			const rejected = expect(tool.execute("read-abort", { path: "remote.txt" }, controller.signal)).rejects.toThrow(
+				"Operation aborted",
+			);
+			await started.promise;
+			controller.abort();
+			pending.resolve(Buffer.from("after\n"));
+			await rejected;
+			const result = await tool.execute("read-after-abort", { path: "remote.txt", limit: 1 });
+			expect(getTextOutput(result)).toBe("after\n\n[1 more lines in file. Use offset=2 to continue.]");
+		});
+
 		it("should detect image MIME type from file magic (not extension)", async () => {
 			const png1x1Base64 =
 				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAX+XDSwAAAABJRU5ErkJggg==";
@@ -906,6 +973,35 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("[1 matches limit reached. Use limit=2 for more, or refine pattern]");
 			// Ensure second match is not present
 			expect(output).not.toContain("match two");
+		});
+
+		it("preserves overlapping context, CR normalization and trailing empty lines with async custom reads", async () => {
+			const testFile = join(testDir, "overlap.txt");
+			writeFileSync(testFile, "zero\nmatch one\nmatch two\ntail\n");
+			const tool = createGrepTool(testDir, {
+				operations: {
+					isDirectory: async () => false,
+					readFile: async () => {
+						await Promise.resolve();
+						return "zero\r\nmatch one\rmatch two\r\ntail\r";
+					},
+				},
+			});
+			const result = await tool.execute("grep-overlap", { path: testFile, pattern: "match", context: 2 });
+			expect(getTextOutput(result)).toBe(
+				[
+					"overlap.txt-1- zero",
+					"overlap.txt:2: match one",
+					"overlap.txt-3- match two",
+					"overlap.txt-4- tail",
+					"overlap.txt-1- zero",
+					"overlap.txt-2- match one",
+					"overlap.txt:3: match two",
+					"overlap.txt-4- tail",
+					"overlap.txt-5- ",
+				].join("\n"),
+			);
+			expect(result.details).toBeUndefined();
 		});
 
 		it("should treat flag-like patterns as search text", async () => {

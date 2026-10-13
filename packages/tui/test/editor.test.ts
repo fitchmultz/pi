@@ -401,6 +401,22 @@ describe("Editor component", () => {
 	});
 
 	describe("Unicode text editing behavior", () => {
+		it("keeps sliced grapheme context after inserting a regional indicator", () => {
+			for (const [keys, expected] of [
+				[["\x1b[C", "x"], "🇩🇦🇧x🇨"],
+				[["\x1b[3~"], "🇩🇨"],
+				[["\x7f"], "🇦🇧🇨"],
+				[["\x1b[D", "x"], "x🇩🇦🇧🇨"],
+			] as const) {
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+				editor.setText("🇦🇧🇨");
+				editor.handleInput("\x01");
+				editor.handleInput("🇩");
+				for (const key of keys) editor.handleInput(key);
+				assert.strictEqual(editor.getText(), expected);
+			}
+		});
+
 		it("inserts mixed ASCII, umlauts, and emojis as literal text", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
@@ -875,6 +891,49 @@ describe("Editor component", () => {
 	});
 
 	describe("Word wrapping", () => {
+		it("reflows a rendered draft after editing, undo, insertion and padding changes", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const content = (width: number) =>
+				editor
+					.render(width)
+					.slice(1, -1)
+					.map((line) => stripTerminalSequences(line).trimEnd());
+			editor.setText("abcdefgh");
+			assert.deepStrictEqual(content(5), ["abcd", "efgh"]);
+			editor.handleInput("\x7f");
+			assert.deepStrictEqual(content(5), ["abcd", "efg"]);
+			editor.handleInput("\x1b[45;5u");
+			assert.deepStrictEqual(content(5), ["abcd", "efgh"]);
+			editor.insertTextAtCursor("\nxy");
+			assert.deepStrictEqual(content(5), ["abcd", "efgh", "xy"]);
+			editor.setPaddingX(1);
+			assert.deepStrictEqual(content(7), [" abcde", " fgh", " xy"]);
+		});
+
+		it("reflows after an autocomplete callback edits the existing lines array in place", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("abcdefgh");
+			editor.render(5);
+			editor.setAutocompleteProvider({
+				getSuggestions: async (lines) => {
+					lines[0] = "ABCD1234";
+					return null;
+				},
+				applyCompletion,
+			});
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.deepStrictEqual(
+				editor
+					.render(5)
+					.slice(1, -1)
+					.map((line) => stripTerminalSequences(line).trimEnd()),
+				["ABCD", "1234"],
+			);
+			editor.handleInput("\x1b[A");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 3 });
+		});
+
 		it("wraps at word boundaries instead of mid-word", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 			const width = 40;
@@ -3811,6 +3870,20 @@ describe("Editor component", () => {
 		function bigPaste(tag: string): string {
 			return Array.from({ length: 12 }, (_, i) => `${tag}${i}`).join("\n");
 		}
+
+		it("reflows unchanged marker text when setText clears its paste membership", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			editor.setText("prefix ");
+			editor.handleInput(`\x1b[200~${"x".repeat(2000)}\x1b[201~`);
+			const content = () =>
+				editor
+					.render(26)
+					.slice(1, -1)
+					.map((line) => stripTerminalSequences(line).trimEnd());
+			assert.deepStrictEqual(content(), ["prefix", "[paste #1 2000 chars]"]);
+			editor.setText("prefix [paste #1 2000 chars]");
+			assert.deepStrictEqual(content(), ["prefix [paste #1 2000", "chars]"]);
+		});
 
 		it("creates a paste marker for large pastes", () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
