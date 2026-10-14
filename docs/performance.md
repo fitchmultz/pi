@@ -4,6 +4,32 @@ The fork removes repeated work from native file tools, TUI rendering, model meta
 
 These are source-owner measurements of two measured source trees on one workstation, not of the final runtime: later prompt-cache, model-catalog and upstream v1.2.0 integration changes were not timed. They do not show that every CLI invocation, provider, device or downstream adapter becomes faster. Functional tests remain the authority for behavior, safety, cancellation and mutation isolation.
 
+## Turn-end context reads (2026-10-14)
+
+A long-running session can retain tens of thousands of archived entries while its active context is small. Boundary readers previously copied and indexed that entire ancestry for each preview. Pending-queue readers paid this cost even though they needed no projected messages. Context-usage reads and finalization also walked the ancestry again.
+
+Empty-draft previews now use the live manager with lazy projection fields. The manager incrementally maintains the active path, selected raw context entries and settings; each projection still creates fresh derived messages and containers. Navigation or a replaced entry list rebuilds the retained state. Nonempty drafts keep eager validation, and canonical context still refreshes after every boundary.
+
+The retained `sessions.mts` fixture now includes two pending-only readers, a context-usage reader, and a context-message/continuation reader. The synthetic comparison used baseline `2c0c79405`, 100,000 archived entries, a faux provider, identical dependency locks/model data, and diagnostics enabled for boundary runs. Three fresh-process pairs alternated root order; each operation had three warmups and 15 measured samples. All 18 processes passed and corresponding semantic witnesses matched. [Recorded inputs, hashes and process medians](turn-end-performance-results.json) identify the measured candidate.
+
+| Operation | Baseline median (range), ms | Candidate median (range), ms |
+| --- | ---: | ---: |
+| Whole faux prompt, context-reading boundary hooks | 129.1 (117.5–140.0) | 1.51 (1.43–2.06) |
+| Whole faux prompt, no-op boundary hooks | 44.3 (37.3–51.4) | 1.33 (0.85–1.55) |
+| Whole faux prompt, no boundary hooks | 14.3 (14.0–18.6) | 0.78 (0.63–1.40) |
+| First context-usage read after an append | 12.35 (11.00–12.56) | 0.67 (0.56–0.91) |
+| Warm compacted-context projection | 11.08 (6.00–13.79) | 0.00154 (0.00142–0.00171) |
+
+Values summarize the three process medians, not provider latency. Boundary/context runs started at one-minute load 18.7–19.6 on the shared workstation; projection runs spanned 10.0–18.9. Same-leaf scalar-cache reads remained tiny with overlapping ranges (0.016–0.021 ms before, 0.019–0.022 ms after for 100 reads). Short active paths with many off-branch entries were already fast. No absolute no-warning guarantee under arbitrary system load is implied.
+
+```sh
+node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" \
+  --groups sessions-boundary-100000,sessions-context-100000,sessions-projection-100000 \
+  --repeat 3 --out "$RESULTS/turn-end"
+```
+
+These results are separate from the older measurements below. Setup and source-root isolation follow the same reproduction instructions.
+
 ## Recorded results
 
 ### Measured trees and conditions

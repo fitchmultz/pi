@@ -4,6 +4,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { BoundaryContextPreview } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
@@ -22,57 +23,143 @@ describe("AgentSession actionable boundaries", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
-	it("settles no-op boundary handlers without copying history into preview managers", async () => {
+	it.each(["pending", "context"] as const)("settles %s readers without copying archived history", async (reader) => {
 		const boundaries: string[] = [];
+		const previews: Array<{
+			pending: string[];
+			messages?: string[];
+			entries?: string[];
+			llm?: string;
+			canContinue?: boolean;
+		}> = [];
+		const projectionCounts: number[] = [];
+		const manager = SessionManager.inMemory();
+		for (let i = 0; i < 1_000; i++) {
+			manager.appendMessage({ role: "user", content: "archived input", timestamp: i });
+		}
+		manager.appendCompaction("archived summary", null, 10_000);
+		const projections = vi.spyOn(manager, "buildSessionProjection");
+		const readPreview = (context: BoundaryContextPreview) => {
+			const before = projections.mock.calls.length;
+			const pending = context.pendingMessages.map(getMessageText);
+			previews.push(
+				reader === "pending"
+					? { pending }
+					: {
+							pending,
+							messages: context.contextMessages
+								.filter((message) => message.role !== "system")
+								.map(getMessageText),
+							entries: context.contextEntries
+								.flatMap((entry) => entry.messages)
+								.filter((message) => message.role !== "system")
+								.map(getMessageText),
+							llm: JSON.stringify(context.llmMessages),
+							canContinue: context.canContinue,
+						},
+			);
+			projectionCounts.push(projections.mock.calls.length - before);
+		};
 		const harness = await createHarness({
+			sessionManager: manager,
 			settings: { compaction: { enabled: false } },
 			extensionFactories: [
 				(pi) => {
 					pi.on("turn_end", (event) => {
 						boundaries.push(event.type);
+						if (reader === "pending") {
+							pi.sendMessage(
+								{ customType: "queued", content: "queued context", display: false },
+								{ triggerTurn: false },
+							);
+						}
+						readPreview(event.context);
 						return { entries: event.entries };
 					});
 					pi.on("agent_before_settle", (event) => {
 						boundaries.push(event.type);
+						readPreview(event.context);
 					});
 				},
 			],
 		});
 		harnesses.push(harness);
+		harness.session.refreshContext();
 		harness.setResponses([fauxAssistantMessage("done")]);
 		const previewManagers = vi.spyOn(SessionManager, "inMemory");
 		try {
 			await harness.session.prompt("start");
 			expect(boundaries).toEqual(["turn_end", "agent_before_settle"]);
 			expect(previewManagers).not.toHaveBeenCalled();
+			expect(projectionCounts).toEqual(reader === "pending" ? [0, 0] : [1, 1]);
+			expect(previews).toEqual(
+				Array.from({ length: 2 }, (_, index) =>
+					reader === "pending"
+						? { pending: index === 0 ? ["queued context"] : [] }
+						: {
+								pending: [],
+								messages: ["", "start", "done"],
+								entries: ["", "start", "done"],
+								llm: expect.stringContaining("archived summary"),
+								canContinue: false,
+							},
+				),
+			);
 			expect(harness.session.messages.filter((message) => message.role !== "system").map(getMessageText)).toEqual([
+				"",
 				"start",
 				"done",
+				...(reader === "pending" ? ["queued context"] : []),
 			]);
 			expect(harness.faux.state.callCount).toBe(1);
 			expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 		} finally {
 			previewManagers.mockRestore();
+			projections.mockRestore();
 		}
 	});
 
 	it.each(["turn_end", "agent_before_settle"] as const)(
 		"refreshes direct native changes despite empty drafts at %s",
 		async (boundary) => {
-			for (const mutation of ["edit", "branch", "reset", "reload", "messages", "pop", "splice", "nested"] as const) {
+			for (const mutation of [
+				"append",
+				"edit",
+				"branch",
+				"reset",
+				"reload",
+				"messages",
+				"pop",
+				"splice",
+				"nested",
+			] as const) {
 				const manager = SessionManager.inMemory();
 				manager.appendCustomMessageEntry("canonical", "canonical context", false);
+				let initialPreview: string[] = [];
+				let subsequentPreview: string[] = [];
+				let pendingPreview: string[] = [];
+				let canContinue = false;
 				const harness = await createHarness({
 					sessionManager: manager,
 					settings: { compaction: { enabled: false } },
 					extensionFactories: [
 						(pi) => {
-							const mutate = () => {
+							const mutate = (event: { context: BoundaryContextPreview }) => {
+								initialPreview = event.context.contextMessages
+									.filter((message) => message.role !== "system")
+									.map(getMessageText);
 								const user = manager
 									.getBranch()
 									.find((entry) => entry.type === "message" && entry.message.role === "user");
 								if (!user) throw new Error("missing user entry");
 								switch (mutation) {
+									case "append":
+										manager.appendCustomMessageEntry("native", "native append", false);
+										pi.sendMessage(
+											{ customType: "queued", content: "queued context", display: false },
+											{ triggerTurn: false },
+										);
+										break;
 									case "edit":
 										manager.appendContextEdit(user.id, { content: "native edit" });
 										break;
@@ -115,8 +202,20 @@ describe("AgentSession actionable boundaries", () => {
 									}
 								}
 							};
-							if (boundary === "turn_end") pi.on(boundary, mutate);
-							else pi.on(boundary, mutate);
+							const observe = (event: { context: BoundaryContextPreview }) => {
+								subsequentPreview = event.context.contextMessages
+									.filter((message) => message.role !== "system")
+									.map(getMessageText);
+								pendingPreview = event.context.pendingMessages.map(getMessageText);
+								canContinue = event.context.canContinue;
+							};
+							if (boundary === "turn_end") {
+								pi.on(boundary, mutate);
+								pi.on(boundary, observe);
+							} else {
+								pi.on(boundary, mutate);
+								pi.on(boundary, observe);
+							}
 						},
 					],
 				});
@@ -126,24 +225,40 @@ describe("AgentSession actionable boundaries", () => {
 
 				await harness.session.prompt("start");
 
-				const userTexts = harness.session.messages.filter((message) => message.role === "user").map(getMessageText);
-				expect(userTexts, mutation).toEqual(
+				expect(initialPreview, mutation).toEqual(["canonical context", "start", "done"]);
+				const expectedUsers =
 					mutation === "edit"
 						? ["native edit"]
 						: mutation === "reload"
 							? ["reloaded input"]
 							: mutation === "reset"
 								? []
-								: ["start"],
-				);
+								: ["start"];
+				const expectedAssistants = mutation === "branch" || mutation === "reset" ? [] : ["done"];
+				expect(subsequentPreview, mutation).toEqual([
+					...(mutation === "reset" ? [] : ["canonical context"]),
+					...expectedUsers,
+					...expectedAssistants,
+					...(mutation === "append" ? ["native append"] : []),
+				]);
+				expect(pendingPreview, mutation).toEqual(mutation === "append" ? ["queued context"] : []);
+				expect(canContinue, mutation).toBe(mutation === "append" || mutation === "branch");
+				const userTexts = harness.session.messages.filter((message) => message.role === "user").map(getMessageText);
+				expect(userTexts, mutation).toEqual(expectedUsers);
 				expect(
 					harness.session.messages.filter((message) => message.role === "assistant").map(getMessageText),
 					mutation,
-				).toEqual(mutation === "branch" || mutation === "reset" ? [] : ["done"]);
+				).toEqual(expectedAssistants);
 				expect(
 					harness.session.messages.filter((message) => message.role === "custom").map(getMessageText),
 					mutation,
-				).toEqual(mutation === "reset" ? [] : ["canonical context"]);
+				).toEqual(
+					mutation === "reset"
+						? []
+						: mutation === "append"
+							? ["canonical context", "native append", "queued context"]
+							: ["canonical context"],
+				);
 				expect(harness.eventsOfType("agent_settled"), mutation).toHaveLength(1);
 			}
 		},

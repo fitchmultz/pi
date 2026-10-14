@@ -1,0 +1,46 @@
+{
+  "date": "2026-10-14",
+  "baseline": "2c0c794053ee5e86ecd25d6c4d0979cf837756f7",
+  "candidate": "Uncommitted turn-end performance changes; exact measured owner hashes below",
+  "environment": { "node": "v24.21.0", "npm": "12.2.0", "platform": "darwin", "arch": "arm64", "cpu": "Apple M5 Pro", "cpuCount": 18 },
+  "packageLockSha256": "ea830a94e73ded3587508c8ae38f504ca88ff40e7c3f65cc8e8d1908eeb92b68",
+  "modelManifestSha256": "788f64f2caf7182d34760d34e1b30c7468bd548181914f38a43303e816737716",
+  "fixtureSha256": "ac86d6a97457e011d46095511e7071294d5a068a639ef3b9f8be316bc0012e61",
+  "sourceSha256": {
+    "before": {
+      "packages/coding-agent/src/core/agent-session.ts": "3765fab965799188ef0c0b0d80647af2b2efaa8e8faf2c3bead29db2152e0cdf",
+      "packages/coding-agent/src/core/session-manager.ts": "ad2a87b081679c15a90d0e6fbe686593e1c467612a18179dc0838b0d46352524"
+    },
+    "after": {
+      "packages/coding-agent/src/core/agent-session.ts": "3e4536ca5fd04be894eb427c3398df1d63eb8731a68da0269ce0ab982329b3d8",
+      "packages/coding-agent/src/core/session-manager.ts": "7b553959216d92fce734107a9a240e09b7101604cde42065736378b0919d6bf0"
+    }
+  },
+  "workload": {
+    "fixture": "scripts/performance/fixtures/sessions.mts",
+    "archivedEntries": 100000,
+    "payloadBytes": 128,
+    "processesPerRootPerCase": 3,
+    "samplesPerOperationPerProcess": 15,
+    "warmupOperations": 3,
+    "order": ["before", "after", "after", "before", "before", "after"],
+    "boundaryDiagnostics": "PI_EXTENSION_PERFORMANCE=1",
+    "verification": "All 18 processes passed; all corresponding semantic witnesses matched"
+  },
+  "startingLoad": {
+    "projection": { "before": [9.98291015625, 18.607421875, 18.607421875], "after": [14.30810546875, 18.607421875, 18.87890625] },
+    "boundary": { "before": [18.87890625, 19.28857421875, 19.58544921875], "after": [19.28857421875, 19.28857421875, 19.2978515625] },
+    "context": { "before": [19.2978515625, 18.71337890625, 18.71337890625], "after": [19.2978515625, 18.71337890625, 18.71337890625] }
+  },
+  "processMediansMs": {
+    "compacted-linear-ancestry": { "before": [13.78875, 11.082125, 6.004625], "after": [0.001708, 0.001542, 0.001417] },
+    "context-entries-linear": { "before": [37.07475, 14.941625, 6.342833], "after": [0.000458, 0.000458, 0.000458] },
+    "short-active-path-many-offbranch": { "before": [0.001167, 0.001, 0.000875], "after": [0.000959, 0.000833, 0.000917] },
+    "context-entries-offbranch": { "before": [0.000292, 0.000334, 0.000333], "after": [0.000167, 0.000167, 0.000167] },
+    "prompt-no-boundary-hooks": { "before": [13.977083, 14.32525, 18.553667], "after": [0.77725, 1.399417, 0.629958] },
+    "prompt-noop-boundary-hooks": { "before": [44.325667, 37.311875, 51.375833], "after": [1.326708, 1.553292, 0.84625] },
+    "prompt-context-reading-boundary-hooks": { "before": [139.962875, 129.122458, 117.480958], "after": [2.057041, 1.429333, 1.506] },
+    "same-leaf-context-usage-100-reads": { "before": [0.016833, 0.016125, 0.021459], "after": [0.020583, 0.018917, 0.021834] },
+    "new-leaf-context-usage": { "before": [12.354541, 12.56225, 11.000791], "after": [0.564125, 0.668, 0.90875] }
+  }
+}

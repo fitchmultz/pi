@@ -417,21 +417,22 @@ function buildSessionPath(
 	return path;
 }
 
-function getSessionContextSettings(path: SessionEntry[]): Pick<SessionContext, "thinkingLevel" | "model"> {
-	let thinkingLevel = "off";
-	let model: { provider: string; modelId: string } | null = null;
+type SessionContextSettings = Pick<SessionContext, "thinkingLevel" | "model">;
 
-	for (const entry of path) {
-		if (entry.type === "thinking_level_change") {
-			thinkingLevel = entry.thinkingLevel;
-		} else if (entry.type === "model_change") {
-			model = { provider: entry.provider, modelId: entry.modelId };
-		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			model = { provider: entry.message.provider, modelId: entry.message.model };
-		}
+function applySessionContextSettings(settings: SessionContextSettings, entry: SessionEntry): void {
+	if (entry.type === "thinking_level_change") {
+		settings.thinkingLevel = entry.thinkingLevel;
+	} else if (entry.type === "model_change") {
+		settings.model = { provider: entry.provider, modelId: entry.modelId };
+	} else if (entry.type === "message" && entry.message.role === "assistant") {
+		settings.model = { provider: entry.message.provider, modelId: entry.message.model };
 	}
+}
 
-	return { thinkingLevel, model };
+function getSessionContextSettings(path: SessionEntry[]): SessionContextSettings {
+	const settings: SessionContextSettings = { thinkingLevel: "off", model: null };
+	for (const entry of path) applySessionContextSettings(settings, entry);
+	return settings;
 }
 
 /**
@@ -554,8 +555,13 @@ export function buildSessionProjection(
 }
 
 function buildSessionProjectionFromPath(path: SessionEntry[]): SessionProjection {
-	const { thinkingLevel, model } = getSessionContextSettings(path);
-	const contextEntries = buildContextEntriesFromPath(path);
+	return projectContextEntries(buildContextEntriesFromPath(path), getSessionContextSettings(path));
+}
+
+function projectContextEntries(
+	contextEntries: SessionEntry[],
+	{ thinkingLevel, model }: SessionContextSettings,
+): SessionProjection {
 	const edits = new Map<string, ContextEditEntry>();
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
@@ -576,7 +582,7 @@ function buildSessionProjectionFromPath(path: SessionEntry[]): SessionProjection
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),
 		thinkingLevel,
-		model,
+		model: model && { ...model },
 	};
 }
 
@@ -996,6 +1002,21 @@ async function listSessionsFromDir(
 	}
 }
 
+/** Root-to-leaf ancestry for one leaf of one entry list. Appends extend it; other changes rebuild it on read. */
+interface ActiveBranch {
+	fileEntries: FileEntry[];
+	leafId: string | null;
+	path: SessionEntry[];
+	contextEntries: SessionEntry[];
+	settings: SessionContextSettings;
+}
+
+function contextEntriesFor(path: SessionEntry[]): SessionEntry[] {
+	const contextEntries = buildContextEntriesFromPath(path);
+	// Without a compaction the context is the path itself; keep a separate array so appends extend each once.
+	return contextEntries === path ? path.slice() : contextEntries;
+}
+
 /**
  * Manages conversation sessions as append-only trees stored in JSONL files.
  *
@@ -1022,6 +1043,7 @@ export class SessionManager {
 	private labelTimestampsById: Map<string, string> = new Map();
 	private latestSessionInfo: SessionInfoEntry | undefined;
 	private leafId: string | null = null;
+	private activeBranch: ActiveBranch | undefined;
 
 	private constructor(
 		cwd: string,
@@ -1222,6 +1244,14 @@ export class SessionManager {
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
 		if (entry.type === "session_info") this.latestSessionInfo = entry;
+		const branch = this.activeBranch;
+		if (branch?.fileEntries === this.fileEntries && branch.leafId === entry.parentId) {
+			branch.leafId = entry.id;
+			branch.path.push(entry);
+			applySessionContextSettings(branch.settings, entry);
+			if (entry.type === "compaction") branch.contextEntries = contextEntriesFor(branch.path);
+			else branch.contextEntries.push(entry);
+		}
 		try {
 			this._persist(entry);
 		} catch (error) {
@@ -1493,9 +1523,9 @@ export class SessionManager {
 	 * Use buildSessionContext() to get the resolved messages for the LLM.
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
+		if (fromId === undefined || fromId === this.leafId) return this._getActiveBranch().path.slice();
 		const path: SessionEntry[] = [];
-		const startId = fromId ?? this.leafId;
-		let current = startId ? this.byId.get(startId) : undefined;
+		let current = fromId ? this.byId.get(fromId) : undefined;
 		while (current) {
 			path.push(current);
 			current = current.parentId ? this.byId.get(current.parentId) : undefined;
@@ -1504,12 +1534,26 @@ export class SessionManager {
 		return path;
 	}
 
+	private _getActiveBranch(): ActiveBranch {
+		const cached = this.activeBranch;
+		if (cached?.fileEntries === this.fileEntries && cached.leafId === this.leafId) return cached;
+		const path = buildSessionPath(this.fileEntries, this.leafId, this.byId);
+		this.activeBranch = {
+			fileEntries: this.fileEntries,
+			leafId: this.leafId,
+			path,
+			contextEntries: contextEntriesFor(path),
+			settings: getSessionContextSettings(path),
+		};
+		return this.activeBranch;
+	}
+
 	/**
 	 * Build the active, compaction-aware entry list for context/rendering.
 	 * Uses tree traversal from current leaf.
 	 */
 	buildContextEntries(): SessionEntry[] {
-		return buildContextEntriesFromPath(buildSessionPath(this.fileEntries, this.leafId, this.byId));
+		return this._getActiveBranch().contextEntries.slice();
 	}
 
 	/**
@@ -1517,7 +1561,8 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildSessionProjection(): SessionProjection {
-		return buildSessionProjectionFromPath(buildSessionPath(this.fileEntries, this.leafId, this.byId));
+		const { contextEntries, settings } = this._getActiveBranch();
+		return projectContextEntries(contextEntries, settings);
 	}
 
 	buildSessionContext(): SessionContext {
