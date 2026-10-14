@@ -3,9 +3,6 @@ import { CodemodeSandbox } from "../../src/runtime/host.ts";
 const how = process.argv[2];
 if (how !== "abort" && how !== "timeout" && how !== "close") throw new Error(`Unknown stop mode: ${how}`);
 const started = performance.now();
-process.on("exit", () => {
-	console.log(JSON.stringify({ type: "exit", elapsedMs: performance.now() - started }));
-});
 const controller = new AbortController();
 let timer: ReturnType<typeof setTimeout> | undefined;
 let workerExited = false;
@@ -42,6 +39,7 @@ try {
 			type: "result",
 			kind: result.error.kind,
 			elapsedMs: performance.now() - started,
+			settledAt: Date.now(),
 			workerExited,
 		}),
 	);
