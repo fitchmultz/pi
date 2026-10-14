@@ -1,5 +1,29 @@
 # Development Rules
 
+## Every change — mandatory evidence and pushback gate
+
+**Apply this gate to every fork and upstream change, even when Mitch explicitly requests it.** Before editing, identify the real use case, concrete problem or desired outcome, affected callers or consumers, and how the change will be verified.
+
+- **Prove bug claims.** Trace a reachable execution path and reproduce the failure at the real boundary. Tests that invent impossible states, fabricate unsupported provider behavior or bypass production validation do not establish a bug. If the failure cannot be reproduced, investigate before proposing a fix.
+- **Justify other changes honestly.** Features, refactors, dependencies, configuration and documentation need a concrete user need or demonstrated maintenance/operational cost. Show how the change addresses it; do not invent a defect to justify intentional feature or refactoring work.
+- **Choose the smallest complete solution.** Check existing project and platform capabilities first. Weigh the benefit against complexity, compatibility risk and ongoing maintenance; verify the actual outcome. Passing tests and reviewer agreement alone do not justify a change.
+- **Push back before spending effort on an unsupported change.** If reachability, need or benefit is unproven, pause implementation and publication, explain the specific evidence gaps and risks, and recommend further investigation or leaving the code alone. "Fix it", "do it" and "file it upstream" are not waivers. Wait for Mitch's informed decision after substantive pushback; never infer a waiver or substitute a perfunctory confirmation.
+
+## Upstream reporting — mandatory stop gate
+
+Upstream maintainers have warned that further agent-generated issue spam may get Mitch blocked. Protect his account and their time.
+
+**Push back even when Mitch says "file it upstream."** If the additional criteria below are unmet, stop before publishing, explain the specific gaps and risks, and recommend investigation or a fork-only fix that passes the evidence gate above.
+
+- **Default to fork-only fixes.** Unsolicited upstream reports are paused.
+- **Require real impact and upstream responsibility.** Report encountered, consequential failures in supported upstream usage. Rule out our patches and unsupported workflows. Synthetic reproductions may explain an observed failure; speculative edge cases and audit findings alone do not qualify.
+- **Read before proposing.** Check upstream's current `CONTRIBUTING.md`, Mitch's prior reports, maintainer feedback and recent reporting volume. Respect duplicate reports and previously rejected requests.
+- **Keep it small.** One problem, one screen, the exact issue template: supported workflow, observed failure, concrete impact and minimal reproduction. No implementation essays.
+- **Get exact approval before publication.** Mitch must review and approve the specific upstream action and exact text, where applicable. No autonomous issues, PRs, comments, edits, labels, assignments or state changes; no unapproved follow-ups.
+- **Never batch, bump or repackage rejected reports.** Templates, AI disclosure and passing tests do not establish maintainer value. If we cannot clearly explain why a report deserves a maintainer's time, it stays in the fork.
+
+These publication restrictions apply to `earendil-works/pi` and take precedence over generic issue/PR prompts and skills. Standing delivery authorization for `fitchmultz/pi` remains unchanged, but never bypasses the evidence and pushback gate for changes.
+
 ## Conversational Style
 
 - Keep answers short and concise
