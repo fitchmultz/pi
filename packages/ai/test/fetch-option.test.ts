@@ -158,6 +158,59 @@ describe("fetch stream option", () => {
 		expect(globalThis.fetch).toBe(ambient);
 	});
 
+	it.each([
+		{ api: "google-generative-ai" as const, cancel: false },
+		{ api: "google-generative-ai" as const, cancel: true },
+		{ api: "google-vertex" as const, cancel: false },
+		{ api: "google-vertex" as const, cancel: true },
+	])("does not silently resume $api generation (cancel=$cancel)", async ({ api, cancel }) => {
+		// Provider refresh for #10909 must retain Pi's request/retry boundary.
+		const ambient = vi
+			.fn<FetchFunction>()
+			.mockResolvedValueOnce(
+				new Response(
+					`data: ${JSON.stringify({
+						candidates: [
+							{
+								content: { parts: [{ text: "partial" }] },
+								finishReason: "CONTINUATION",
+								continuationToken: "checkpoint",
+							},
+						],
+					})}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+			)
+			.mockResolvedValue(
+				new Response(
+					`data: ${JSON.stringify({
+						candidates: [{ content: { parts: [{ text: "resumed" }] }, finishReason: "STOP" }],
+					})}\n\n`,
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+			);
+		vi.stubGlobal("fetch", ambient);
+
+		const controller = new AbortController();
+		const options = {
+			apiKey: "test-key",
+			maxRetries: 0,
+			signal: controller.signal,
+			onProviderStreamEvent: () => {
+				if (cancel) controller.abort();
+			},
+		};
+		const result =
+			api === "google-generative-ai"
+				? await streamGoogleGenerativeAI(createModel(api), context, options).result()
+				: await streamGoogleVertex(createModel(api), context, options).result();
+
+		expect(ambient).toHaveBeenCalledOnce();
+		expect(result.stopReason).toBe(cancel ? "aborted" : "error");
+		expect(result.rawStopReason).toBe("CONTINUATION");
+		expect(result.content).toEqual([{ type: "text", text: "partial" }]);
+	});
+
 	it("uses fetch for image generation", async () => {
 		const { custom, fallback } = mockFetches();
 		const model: ImageModel<"openrouter-images"> = {
