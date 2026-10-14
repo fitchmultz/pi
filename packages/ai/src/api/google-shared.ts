@@ -6,28 +6,304 @@ import {
 	type Content,
 	FinishReason,
 	FunctionCallingConfigMode,
+	type GenerateContentConfig,
+	type GenerateContentParameters,
+	type GoogleGenAI,
 	ThinkingLevel as GoogleSdkThinkingLevel,
 	type Part,
 	type ThinkingConfig,
 } from "@google/genai";
-import { clampThinkingLevel } from "../models.ts";
+import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
+	AssistantMessage,
 	ImageContent,
 	Model,
 	StopReason,
 	StreamOptions,
 	TextContent,
+	ThinkingContent,
 	ThinkingLevel,
 	Tool,
+	ToolCall,
 	TranscriptContext,
 } from "../types.ts";
+import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
+import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
-import { collapseSystemMessages, withoutInitialSystemMessage } from "../utils/transcript.ts";
+import { getSystemMessageText } from "../utils/text.ts";
+import {
+	collapseSystemMessages,
+	getCurrentTools,
+	getInitialSystemMessage,
+	withoutInitialSystemMessage,
+} from "../utils/transcript.ts";
 import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
+import type { GoogleOptions } from "./google-generative-ai.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
+
+// Counter for generating unique tool call IDs
+let toolCallCounter = 0;
+
+export function streamGoogle(
+	api: GoogleApiType,
+	model: Model<GoogleApiType>,
+	context: TranscriptContext,
+	options: GoogleOptions | undefined,
+	createClient: () => GoogleGenAI,
+): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	const normalizedContext = collapseSystemMessages(context);
+
+	(async () => {
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "pending",
+			timestamp: Date.now(),
+		};
+
+		try {
+			const client = createClient();
+			let params = buildParams(model, normalizedContext, options);
+			const nextParams = await options?.onPayload?.(params, model);
+			if (nextParams !== undefined) {
+				params = nextParams as GenerateContentParameters;
+			}
+			const googleStream = await retryGoogleRequest(() => client.models.generateContentStream(params), options);
+
+			stream.push({ type: "start", partial: output });
+			let currentBlock: TextContent | ThinkingContent | null = null;
+			const blocks = output.content;
+			const blockIndex = () => blocks.length - 1;
+			const endCurrentBlock = () => {
+				if (!currentBlock) return;
+				if (currentBlock.type === "text") {
+					stream.push({
+						type: "text_end",
+						contentIndex: blockIndex(),
+						content: currentBlock.text,
+						partial: output,
+					});
+				} else {
+					stream.push({
+						type: "thinking_end",
+						contentIndex: blockIndex(),
+						content: currentBlock.thinking,
+						partial: output,
+					});
+				}
+				currentBlock = null;
+			};
+			for await (const chunk of googleStream) {
+				await options?.onProviderStreamEvent?.(chunk, model);
+				// @google/genai documents GenerateContentResponse.responseId as an output-only field
+				// used to identify each response. Keep the first non-empty one from the stream.
+				output.responseId ||= chunk.responseId;
+				const candidate = chunk.candidates?.[0];
+				if (candidate?.content?.parts) {
+					for (const part of candidate.content.parts) {
+						if (part.text !== undefined) {
+							const isThinking = isThinkingPart(part);
+							if (
+								!currentBlock ||
+								(isThinking && currentBlock.type !== "thinking") ||
+								(!isThinking && currentBlock.type !== "text")
+							) {
+								endCurrentBlock();
+								if (isThinking) {
+									currentBlock = { type: "thinking", thinking: "", thinkingSignature: undefined };
+									output.content.push(currentBlock);
+									stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
+								} else {
+									currentBlock = { type: "text", text: "" };
+									output.content.push(currentBlock);
+									stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
+								}
+							}
+							if (currentBlock.type === "thinking") {
+								currentBlock.thinking += part.text;
+								currentBlock.thinkingSignature = retainThoughtSignature(
+									currentBlock.thinkingSignature,
+									part.thoughtSignature,
+								);
+								stream.push({
+									type: "thinking_delta",
+									contentIndex: blockIndex(),
+									delta: part.text,
+									partial: output,
+								});
+							} else {
+								currentBlock.text += part.text;
+								currentBlock.textSignature = retainThoughtSignature(
+									currentBlock.textSignature,
+									part.thoughtSignature,
+								);
+								stream.push({
+									type: "text_delta",
+									contentIndex: blockIndex(),
+									delta: part.text,
+									partial: output,
+								});
+							}
+						}
+
+						if (part.functionCall) {
+							endCurrentBlock();
+
+							// Generate unique ID if not provided or if it's a duplicate
+							const providedId = part.functionCall.id;
+							const needsNewId =
+								!providedId || output.content.some((b) => b.type === "toolCall" && b.id === providedId);
+							const toolCallId = needsNewId
+								? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`
+								: providedId;
+
+							const toolCall: ToolCall = {
+								type: "toolCall",
+								id: toolCallId,
+								name: part.functionCall.name || "",
+								arguments: (part.functionCall.args as ToolCall["arguments"]) ?? {},
+								...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
+							};
+
+							output.content.push(toolCall);
+							stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
+							stream.push({
+								type: "toolcall_delta",
+								contentIndex: blockIndex(),
+								delta: JSON.stringify(toolCall.arguments),
+								partial: output,
+							});
+							stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
+						}
+					}
+				}
+
+				if (candidate?.finishReason) {
+					output.rawStopReason = candidate.finishReason;
+					output.stopReason = mapStopReason(candidate.finishReason);
+					if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
+						output.stopReason = "toolUse";
+					}
+				}
+
+				if (chunk.usageMetadata) {
+					output.usage = {
+						input:
+							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
+						output:
+							(chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
+						cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
+						cacheWrite: 0,
+						reasoning: chunk.usageMetadata.thoughtsTokenCount || 0,
+						totalTokens: chunk.usageMetadata.totalTokenCount || 0,
+						cost: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							total: 0,
+						},
+					};
+					calculateCost(model, output.usage);
+				}
+			}
+
+			endCurrentBlock();
+
+			if (options?.signal?.aborted) {
+				throw new Error("Request was aborted");
+			}
+
+			if (output.stopReason === "pending") {
+				throw new Error(
+					`${api === "google-vertex" ? "Google Vertex" : "Google"} stream ended without a finish reason`,
+				);
+			}
+			if (output.stopReason === "aborted" || output.stopReason === "error") {
+				const errorMessage = output.rawStopReason
+					? `Provider stopped with: ${output.rawStopReason}`
+					: "An unknown error occurred";
+				throw new Error(errorMessage);
+			}
+
+			stream.push({ type: "done", reason: output.stopReason, message: output });
+			stream.end();
+		} catch (error) {
+			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
+			output.errorMessage = formatProviderError(normalizeProviderError(error));
+			stream.push({ type: "error", reason: output.stopReason, error: output });
+			stream.end();
+		}
+	})();
+
+	return stream;
+}
+
+function buildParams(
+	model: Model<GoogleApiType>,
+	context: TranscriptContext,
+	options: GoogleOptions = {},
+): GenerateContentParameters {
+	const contents = convertMessages(model, context);
+	const initialSystemMessage = getInitialSystemMessage(context.messages);
+	const currentTools = getCurrentTools(context.messages);
+
+	const supportsStrictMode = supportsGoogleStrictToolSampling(model.id);
+	const functionCallingMode =
+		currentTools.length > 0
+			? resolveGoogleFunctionCallingMode(currentTools, options.toolChoice, supportsStrictMode)
+			: undefined;
+	const systemInstruction = initialSystemMessage ? getSystemMessageText(initialSystemMessage) : "";
+	const config: GenerateContentConfig = {
+		// Pi owns retry/continuation; do not silently resume inside the SDK.
+		automaticContinuation: false,
+		...(options.temperature !== undefined && { temperature: options.temperature }),
+		...(options.maxTokens !== undefined && { maxOutputTokens: options.maxTokens }),
+		...(systemInstruction && { systemInstruction: sanitizeSurrogates(systemInstruction) }),
+		...(currentTools.length > 0 && {
+			tools: convertTools(currentTools, false, supportsStrictMode),
+		}),
+		...(functionCallingMode !== undefined && {
+			toolConfig: { functionCallingConfig: { mode: functionCallingMode } },
+		}),
+	};
+
+	if (options.thinking?.enabled && model.reasoning) {
+		const thinkingConfig: ThinkingConfig = { includeThoughts: true };
+		if (options.thinking.level !== undefined) {
+			thinkingConfig.thinkingLevel = toGoogleSdkThinkingLevel(options.thinking.level);
+		} else if (options.thinking.budgetTokens !== undefined) {
+			thinkingConfig.thinkingBudget = options.thinking.budgetTokens;
+		}
+		config.thinkingConfig = thinkingConfig;
+	} else if (model.reasoning && options.thinking && !options.thinking.enabled) {
+		config.thinkingConfig = getDisabledGoogleThinkingConfig(model);
+	}
+
+	if (options.signal) {
+		if (options.signal.aborted) {
+			throw new Error("Request aborted");
+		}
+		config.abortSignal = options.signal;
+	}
+
+	return { model: model.id, contents, config };
+}
 
 /**
  * Thinking level for Gemini 3 models.
@@ -43,6 +319,23 @@ const GOOGLE_SDK_THINKING_LEVEL_MAP: Record<GoogleApiThinkingLevel, GoogleSdkThi
 	MEDIUM: GoogleSdkThinkingLevel.MEDIUM,
 	HIGH: GoogleSdkThinkingLevel.HIGH,
 };
+
+/** Map simple reasoning options while leaving token budgets provider-specific. */
+export function resolveGoogleSimpleThinking(
+	model: Model<GoogleApiType>,
+	reasoning: ThinkingLevel | undefined,
+	getBudget: (level: ResolvedGoogleThinkingLevel) => number,
+): NonNullable<GoogleOptions["thinking"]> {
+	if (!reasoning) return { enabled: false };
+
+	const clampedReasoning = clampThinkingLevel(model, reasoning);
+	if (clampedReasoning === "off") return { enabled: false };
+
+	const resolvedLevel = resolveGoogleThinkingLevel(model, clampedReasoning);
+	return usesGoogleThinkingLevel(model)
+		? { enabled: true, level: toGoogleThinkingLevel(resolvedLevel) }
+		: { enabled: true, budgetTokens: getBudget(resolvedLevel) };
+}
 
 /** Resolve a supported pi level or model-specific Google mapping to a standard Google level. */
 export function resolveGoogleThinkingLevel<T extends GoogleApiType>(

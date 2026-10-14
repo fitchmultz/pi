@@ -11,6 +11,7 @@ import {
 	hostNamed,
 	isChordError,
 	local,
+	memoryLinkPair,
 	method,
 	type Ref,
 	remote,
@@ -586,61 +587,173 @@ describe("review: prepare isolation and contracts", () => {
 });
 
 describe("review: ctx races", () => {
-	const Target = local("t.target", {
+	const Target = remote("t.target", {
 		version: 1,
 		input: Type.Object({}),
-		members: { hit: method() },
+		host: hostNamed("server"),
+		variants: { main: { methods: { hit: method(undefined, Type.String()), wait: method() } } },
 	});
+	const placements = ["local", "client", "host"] as const;
 
-	it("an aborted task ctx cannot start fresh calls", async () => {
-		const host = createHost({ self: { kind: "host" }, onError: () => {} });
-		const Runner = local("t.runner", { version: 1, input: Type.Object({}) });
+	async function fixture(placement: (typeof placements)[number]) {
+		const errors: unknown[] = [];
+		const onError = (error: unknown) => errors.push(error);
+		const server = createHost({ name: "server", self: "server", onError });
+		const other = createHost({ name: "other", self: "other", onError });
+		let owner = server;
+		if (placement !== "local") {
+			const [down, up] = memoryLinkPair();
+			server.accept(down, { principal: "caller", kind: placement, name: "caller" });
+			owner = createHost({
+				name: "caller",
+				self: "caller",
+				kind: placement,
+				onError,
+				upstream: { link: up, principal: "server" },
+			});
+		}
 		let hits = 0;
-		const go = latch();
-		let outcome: unknown;
-		host.serve(Target, () => ({
-			hit: () => {
+		const entered = Promise.withResolvers<void>();
+		const cancelled = Promise.withResolvers<void>();
+		server.serve(Target, () => ({
+			variant: "main",
+			hit: (ctx) => {
 				hits++;
+				return ctx.rootId;
+			},
+			wait: async (ctx) => {
+				entered.resolve();
+				await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve(), { once: true }));
+				cancelled.resolve();
 			},
 		}));
-		host.serve(Runner, (_input, _principal, self) => {
-			const target = self.get(Target, {});
-			self.task(async (ctx) => {
-				await go.promise;
-				outcome = await target.hit(ctx).catch((error: unknown) => error);
-			});
-			return {};
-		});
-		const runner = host.get(Runner, {});
-		await runner.ready;
-		const target = host.get(Target, {});
+		const target = owner.get(Target, {});
 		await target.ready;
-		runner.release();
-		await ticks();
-		go.open();
-		await ticks(20);
-		assert.equal(hits, 0);
-		assert.ok(isChordError(outcome, "aborted"));
+		return {
+			owner,
+			other,
+			target,
+			entered: entered.promise,
+			cancelled: cancelled.promise,
+			hits: () => hits,
+			close: async () => {
+				await owner.close();
+				if (owner !== server) await server.close();
+				await other.close();
+				assert.deepEqual(errors, []);
+			},
+		};
+	}
+
+	// #10959: reference admission must not depend on local placement or link kind.
+	it.each(placements)("expired, aborted, foreign and fabricated contexts are refused (%s)", async (placement) => {
+		const f = await fixture(placement);
+		try {
+			const first = await f.target.hit();
+			assert.notEqual(await f.target.hit(), first, "no ctx starts a fresh root per call");
+			await f.owner.root(async (ctx) => {
+				const root = await f.target.hit(ctx);
+				if (placement !== "client") assert.equal(root, ctx.rootId);
+			});
+			const attempt = (ctx: Ctx) => {
+				const before = f.hits();
+				// Calling with an invalid ctx rejects a promise; it must not throw synchronously.
+				return f.target.hit(ctx).then(
+					() => ({ hitsAdded: f.hits() - before }),
+					(error: unknown) => {
+						assert.ok(isChordError(error));
+						return { code: error.code, reason: error.reason, hitsAdded: f.hits() - before };
+					},
+				);
+			};
+			const fabricated: Ctx = {
+				signal: new AbortController().signal,
+				rootId: "fabricated",
+				codeVersion: 1,
+				principal: "caller",
+				get: () => {
+					throw new Error("fabricated ctx.get must not be used");
+				},
+			};
+			assert.deepEqual(
+				{
+					expired: await attempt(await f.owner.root((ctx) => ctx)),
+					aborted: await f.owner.root(attempt, { signal: AbortSignal.abort() }),
+					foreign: await f.other.root(attempt),
+					fabricated: await attempt(fabricated),
+				},
+				{
+					expired: { code: "aborted", reason: "expired", hitsAdded: 0 },
+					aborted: { code: "aborted", reason: undefined, hitsAdded: 0 },
+					foreign: { code: "invalid", reason: "foreign_ctx", hitsAdded: 0 },
+					fabricated: { code: "invalid", reason: "foreign_ctx", hitsAdded: 0 },
+				},
+			);
+		} finally {
+			await f.close();
+		}
 	});
 
-	it("an expired ctx and a foreign ctx are refused", async () => {
-		const host = createHost({ self: { kind: "host" }, onError: () => {} });
-		const other = createHost({ self: { kind: "host" }, onError: () => {} });
-		host.serve(Target, () => ({ hit: () => {} }));
-		const target = host.get(Target, {});
-		await target.ready;
-		const expired = await host.root((ctx) => ctx);
-		await assert.rejects(
-			target.hit(expired),
-			(error) => isChordError(error, "aborted") && error.reason === "expired",
-		);
-		const foreign = await other.root(async (ctx) => {
-			await assert.rejects(
-				target.hit(ctx),
-				(error) => isChordError(error, "invalid") && error.reason === "foreign_ctx",
-			);
-			return true;
-		});
-		assert.ok(foreign);
-	});
+	it.each(placements)(
+		"task calls start fresh roots, follow cancellation and refuse an aborted holder (%s)",
+		async (placement) => {
+			const f = await fixture(placement);
+			const holder = Promise.withResolvers<Ctx>();
+			const aborted = Promise.withResolvers<void>();
+			const done = latch();
+			const Runner = local("t.runner", { version: 1, input: Type.Object({}) });
+			f.owner.serve(Runner, (_input, _principal, self) => {
+				self.task(async (ctx) => {
+					holder.resolve(ctx);
+					ctx.signal.addEventListener("abort", () => aborted.resolve(), { once: true });
+					await done.promise;
+				});
+				return {};
+			});
+			try {
+				const runner = f.owner.get(Runner, {});
+				await runner.ready;
+				const ctx = await holder.promise;
+				const first = await f.target.hit(ctx);
+				assert.notEqual(first, ctx.rootId);
+				assert.notEqual(await f.target.hit(ctx), first, "holder calls start separate roots");
+				const waiting = f.target.wait(ctx).catch((error: unknown) => error);
+				await f.entered;
+				runner.release();
+				await aborted.promise;
+				await f.cancelled;
+				await waiting;
+				const before = f.hits();
+				await assert.rejects(f.target.hit(ctx), (error) => isChordError(error, "aborted"));
+				assert.equal(f.hits(), before);
+				done.open();
+				await ticks();
+				await assert.rejects(
+					f.target.hit(ctx),
+					(error) => isChordError(error, "aborted") && error.reason === "expired",
+				);
+			} finally {
+				done.open();
+				await f.close();
+			}
+		},
+	);
+
+	it.each(["client", "host"] as const)(
+		"calling a remote reference inside a factory still throws synchronously (%s)",
+		async (placement) => {
+			const f = await fixture(placement);
+			const Eager = local("t.eager-call", { version: 1, input: Type.Object({}) });
+			f.owner.serve(Eager, () => {
+				void f.target.hit();
+				return {};
+			});
+			try {
+				await assert.rejects(f.owner.get(Eager, {}).ready, (error) => isChordError(error, "not_ready"));
+				assert.equal(f.hits(), 0);
+			} finally {
+				await f.close();
+			}
+		},
+	);
 });

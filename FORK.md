@@ -49,10 +49,11 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates | `core/{cache-warmer,model-runtime,sdk}.ts`, `modes/interactive/interactive-mode.ts` | `cache-warmer.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
 | WebSocket text frames must not decode object-transport packing markers and bypass untrusted-client compression restrictions | `packages/chord/src/link.ts` | `packages/chord/test/websocket.test.ts` |
+| Local and remote references must reject foreign contexts before dispatch and share root admission ([#10959](https://github.com/earendil-works/pi/issues/10959)) | `packages/chord/src/{object,remote}.ts` | `packages/chord/test/review.test.ts` |
 | Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `utils/shell.ts`, `packages/coding-agent/examples/extensions/sandbox/index.ts`, `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
 | Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
 | HTML export must not replace the journal through any alias | `core/export-html/index.ts` | `file-safety.test.ts` |
-| Edits must preserve UTF-8 and untouched original text/boundaries | `core/tools/{edit,edit-diff}.ts`, `utils/text.ts` | `edit-byte-safety.test.ts` |
+| Edits must preserve UTF-8 and untouched original text/boundaries | Shared policy in `packages/durable/src/tools/edit-diff.ts`; byte I/O in `packages/durable/src/tools/edit.ts`, `core/tools/{edit,edit-diff}.ts`, `utils/text.ts` | `packages/durable/test/tools.test.ts`, `edit-byte-safety.test.ts` |
 | One auth-check failure must not hide healthy providers or replace saved/scoped selections | `packages/ai/src/models.ts`, `core/{model-runtime,model-resolver,sdk}.ts` | `packages/ai/test/models-runtime.test.ts`, `model-runtime-auth-options.test.ts`, `model-resolver.test.ts`, `agent-session-dynamic-provider.test.ts` |
 | Refresh admission must precede config I/O: awaited scopes follow current per-provider catalog/auth readiness, global availability reads cannot discard credential synchronization or make it join unrelated work, and full-pass auth failures retain provider-local diagnostics and sibling credential filters under scoped overlap. Scoped snapshot updates read only their own catalogs, so a refresh stays linear in the number of providers | `core/model-runtime.ts` | `model-runtime-refresh-order.test.ts`, `agent-session-dynamic-provider.test.ts`, `model-runtime-credential-sync.test.ts` |
 | OAuth state, cancellation and UI failures must retain listener/prompt cleanup | `packages/ai/src/auth/oauth/{callback-server,openai-chatgpt}.ts` | `packages/ai/test/{oauth-callback-server,openai-chatgpt-oauth}.test.ts` |
@@ -95,7 +96,7 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Normalize tool declarations once per comparison, index model overlays per read, repair JSON by spans, and drain Codex events without repeated array shifts | `packages/agent/src/agent-loop.ts`, `packages/ai/src/{utils/transcript,utils/json-parse,models,api/openai-codex-responses}.ts` | `packages/agent/test/agent.test.ts`, `packages/ai/test/{system-message-replay,json-parse,model-types,openai-codex-websocket-queue}.test.ts` |
 | Stream long-token wrapping, use native grapheme endpoints, and reuse only the current editor layout after comparing text, width and paste membership | `packages/tui/src/{utils,components/editor,components/input}.ts` | `packages/tui/test/{wrap-ansi,editor,input}.test.ts` |
 | Reuse unchanged assistant runs, reject plain prose before Mermaid lexing, and compute visible tree ancestry in one pass | `modes/interactive/components/{assistant-message,mermaid,tree-selector}.ts` | `{assistant-message,mermaid,tree-selector}.test.ts` |
-| Normalize edit text once and scan only requested read, grep and head-truncation ranges | `core/tools/{edit-diff,read,grep,truncate}.ts` | `edit-byte-safety.test.ts`, `tools.test.ts` |
+| Normalize edit text once and scan only requested read, grep and head-truncation ranges | `packages/durable/src/tools/edit-diff.ts`, `core/tools/{read,grep,truncate}.ts` | `packages/durable/test/tools.test.ts`, `edit-byte-safety.test.ts`, `tools.test.ts` |
 | Stop image encoding at the first fitting candidate without changing candidate order | `utils/image-resize-core.ts` | `image-processing.test.ts` |
 | Bound native Bash spill queues and wait for complete private files; push-only custom producers retain their existing callback contract | `core/{bash-executor,tools/bash,tools/output-accumulator}.ts`, `utils/{output-files,child-process}.ts` | `bash-spill.test.ts`, `private-spill.test.ts`, `streaming-file.test.ts` |
 | Skip disk reads only for acknowledged, confirmed-terminal background jobs during monitoring; explicit tools remain fresh | `extensions/background-command/{index,jobs}.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
@@ -135,7 +136,7 @@ The generated schemas are under `packages/coding-agent/schemas/` and use upstrea
 
 Package production uses the maintained `scripts/package-artifacts.mjs` and local consumer helpers,
 including npm 12's expected-package-keyed pack metadata. Selected workspaces pack in one npm process;
-Nix retains its eight raw named archives. Pinned fleet automation has migrated to the artifact API,
+Nix retains its nine raw named archives. Pinned fleet automation has migrated to the artifact API,
 and the obsolete `scripts/coding-agent-consumer.mjs` shim has been removed.
 Retained offline comparison fixtures are documented in [Performance reproduction](docs/performance.md).
 
@@ -195,6 +196,9 @@ runtime updates for YAML 2.9.1, Chalk 6.0.1, Ignore 7.0.12, Undici 8.11.2 and
 get-east-asian-width 1.7.0 and the fork's streaming-file dependency stream-chain 4.2.6.
 Root and generated installer locks stay together.
 Google GenAI automatic continuation is disabled so Pi still owns retries and cancellation.
+Generative AI and Vertex share stream processing and request construction in
+`packages/ai/src/api/google-shared.ts`; their adapters retain authentication, client setup,
+API identity and provider-specific thinking budgets.
 Return these changes to upstream when it includes equivalent behavior. Marked 18.1.1
 is deferred: its numeric entity decoding turns `&#27;[2J` into an active terminal escape
 in Pi's Markdown renderer ([Marked #4141](https://github.com/markedjs/marked/issues/4141)).

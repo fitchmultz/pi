@@ -369,7 +369,7 @@ export interface HostCore {
 		candidate?: boolean,
 	): RefCore;
 	addressOf(type: AnyContract, input: unknown, principal: unknown, candidate?: boolean): string;
-	root<T>(fn: (ctx: Ctx) => T | Promise<T>, options?: { codeVersion?: number; signal?: AbortSignal }): Promise<T>;
+	root<T>(fn: (ctx: CtxImpl) => T | Promise<T>, options?: { codeVersion?: number; signal?: AbortSignal }): Promise<T>;
 	touch(rootId: string, object: ObjectImpl): void;
 	forget(object: ObjectImpl): void;
 	/** The object finished its disposal. */
@@ -401,7 +401,7 @@ export class CtxImpl implements Ctx {
 	}
 
 	/** Throws unless this ctx may start work on `host` now (not expired, not aborted, not from another host). */
-	check(host: HostCore): void {
+	check(host: object): void {
 		if (this.host !== host) throw invalid("foreign_ctx", "ctx belongs to another host");
 		if (this.#closed) throw new ChordError("aborted", "ctx expired: its call already settled", { reason: "expired" });
 		if (this.signal.aborted) {
@@ -459,6 +459,19 @@ export class CtxImpl implements Ctx {
 		this.#release();
 		for (const ref of this.#refs.splice(0)) ref.release();
 	}
+}
+
+/** Admit a reference's ctx on its owning host; code holders start fresh roots cancelled with the holder. */
+export async function callWithContext<T>(
+	host: Pick<HostCore, "root">,
+	ctx: unknown,
+	call: (ctx: CtxImpl) => Promise<T>,
+): Promise<T> {
+	if (ctx !== undefined) {
+		if (!(ctx instanceof CtxImpl)) throw invalid("foreign_ctx", "ctx must come from a Chord host");
+		ctx.check(host);
+	}
+	return ctx === undefined || ctx.holder ? host.root(call, { signal: ctx?.signal }) : call(ctx);
 }
 
 /**
@@ -842,25 +855,11 @@ export class RefImpl {
 			const noArgs = takesNoArgs(this.contract, name);
 			caller = (...given) => {
 				// A method without arguments is called as `ref.name(ctx)`.
-				const [args, ctx] = (noArgs ? [undefined, given[0]] : given) as [unknown, Ctx | undefined];
+				const [args, ctx] = noArgs ? [undefined, given[0]] : given;
 				if (this.object.host.inFactory > 0) {
 					throw new ChordError("not_ready", `${this.address}.${name} called inside a factory`);
 				}
-				if (ctx !== undefined && !(ctx instanceof CtxImpl)) {
-					return Promise.reject(invalid("foreign_ctx", "ctx must come from a Chord host"));
-				}
-				if (ctx === undefined || ctx.holder) {
-					// A code holder (task) starts a fresh root per call, cancelled with the holder.
-					try {
-						ctx?.check(this.object.host);
-					} catch (error) {
-						return Promise.reject(error);
-					}
-					return this.object.host.root((root) => this.object.call(this, name, args, root as CtxImpl), {
-						signal: ctx?.signal,
-					});
-				}
-				return this.object.call(this, name, args, ctx);
+				return callWithContext(this.object.host, ctx, (root) => this.object.call(this, name, args, root));
 			};
 			this.callers.set(name, caller);
 		}
@@ -1342,7 +1341,7 @@ export class ObjectImpl {
 			if (decl === undefined || (this.status !== "live" && this.status !== "activating")) return;
 			const invocation = this.host.root((root) => {
 				this.lease(root);
-				const child = (root as CtxImpl).child(this);
+				const child = root.child(this);
 				return this.#invoke(async () => {
 					try {
 						await decl.fn(event, child);

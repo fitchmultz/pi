@@ -21,6 +21,7 @@ export const workspaceSourcePaths = {
 	codemodeIndex: fileURLToPath(new URL("./packages/codemode/src/index.ts", import.meta.url)),
 	codemodeDeclarations: fileURLToPath(new URL("./packages/codemode/src/declarations.ts", import.meta.url)),
 	codemodeSource: fileURLToPath(new URL("./packages/codemode/src/source.ts", import.meta.url)),
+	durableEditDiff: fileURLToPath(new URL("./packages/durable/src/tools/edit-diff.ts", import.meta.url)),
 	codingAgentIndex: fileURLToPath(new URL("./packages/coding-agent/src/index.ts", import.meta.url)),
 	tuiIndex: fileURLToPath(new URL("./packages/tui/src/index.ts", import.meta.url)),
 } as const;
@@ -56,6 +57,7 @@ export default defineConfig({
 			{ find: /^@earendil-works\/pi-codemode$/, replacement: workspaceSourcePaths.codemodeIndex },
 			{ find: /^@earendil-works\/pi-codemode\/declarations$/, replacement: workspaceSourcePaths.codemodeDeclarations },
 			{ find: /^@earendil-works\/pi-codemode\/source$/, replacement: workspaceSourcePaths.codemodeSource },
+			{ find: /^@earendil-works\/pi-durable\/tools\/edit-diff$/, replacement: workspaceSourcePaths.durableEditDiff },
 			{ find: /^@earendil-works\/pi-tui$/, replacement: workspaceSourcePaths.tuiIndex },
 		],
 	},

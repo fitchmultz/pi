@@ -562,7 +562,7 @@ export class HostImpl implements Host, HostCore {
 
 	// ─── roots ───
 
-	async root<T>(fn: (ctx: Ctx) => T | Promise<T>, options: RootOptions = {}): Promise<T> {
+	async root<T>(fn: (ctx: CtxImpl) => T | Promise<T>, options: RootOptions = {}): Promise<T> {
 		// The incarnation keeps root ids unique across restarts of a host with the same name.
 		const rootId = `${this.name}#${this.#incarnation}:${++this.#rootSeq}`;
 		this.#local.add(rootId);
@@ -578,7 +578,7 @@ export class HostImpl implements Host, HostCore {
 	async joinRoot<T>(
 		rootId: string,
 		codeVersionId: number,
-		fn: (ctx: Ctx) => T | Promise<T>,
+		fn: (ctx: CtxImpl) => T | Promise<T>,
 		options: { readonly principal?: unknown; readonly signal?: AbortSignal; readonly from?: Connection } = {},
 	): Promise<T> {
 		const codeVersion = this.codeVersions.get(codeVersionId);
