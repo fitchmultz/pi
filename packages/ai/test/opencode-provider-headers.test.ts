@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as googleApi from "../src/api/google-generative-ai.lazy.ts";
 import { fauxAssistantMessage } from "../src/providers/faux.ts";
+import { opencodeGoProvider } from "../src/providers/opencode-go.ts";
 import { withOpenCodeSessionHeader } from "../src/providers/opencode-headers.ts";
 import type { Api, Model, ProviderStreams, StreamOptions } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
@@ -42,6 +44,27 @@ function recordingStreams(capture: (options: StreamOptions | undefined) => void)
 }
 
 describe("OpenCode provider headers", () => {
+	it("routes OpenCode Go Gemini requests to the Google adapter with the session header", async () => {
+		let captured: StreamOptions | undefined;
+		const adapter = vi.spyOn(googleApi, "googleGenerativeAIApi").mockReturnValue(
+			recordingStreams((options) => {
+				captured = options;
+			}),
+		);
+		try {
+			const provider = opencodeGoProvider();
+			const result = await provider
+				.streamSimple({ ...model, provider: "opencode-go", api: "google-generative-ai" }, context, {
+					sessionId: "go-conversation",
+				})
+				.result();
+			expect(result.stopReason).toBe("stop");
+			expect(captured?.headers).toEqual({ "x-opencode-session": "go-conversation" });
+		} finally {
+			adapter.mockRestore();
+		}
+	});
+
 	// Regression test for https://github.com/earendil-works/pi/issues/9326
 	it.each(["stream", "streamSimple"] as const)(
 		"maps sessionId for %s requests even without cache retention",
