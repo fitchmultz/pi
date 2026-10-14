@@ -18,14 +18,12 @@ Native request admission then requires the same `cacheTraceContext.sessionId`; m
 different or invalid identities are not traced. This prevents inherited flags from tracing
 unrelated child sessions. An already-admitted recorder also stops when its directory or
 session flags no longer match. A managed launcher snapshots its environment: setting flags
-in a `pi restart` subprocess does not enable them in the replacement worker. A temporary
-observer may set and restore its own worker flags from `session_start`/`session_shutdown`
-after checking the exact session ID. Preserve the existing explicit CLI extension list
-when restarting; supplying `-e` replaces that whole list.
+in a `pi restart` subprocess does not enable them in the replacement worker. Preserve the
+existing explicit CLI extension list when restarting; supplying `-e` replaces that whole list.
 
 Unset the variable and quit every traced process to stop. The recorder opens and closes each write; it holds no persistent file handles. Delete the dedicated directory, including `investigation.key`, after extracting the needed private evidence. Do not reuse a directory/key for a different investigation or publish either the key or records.
 
-Collection stops 24 hours after key creation, at 16 MiB per process file, or if a record exceeds 256 KiB. There are at most 64 process slots; fingerprints cover at most 2,048 logical components and 2,048 content blocks. Limits stop recording and emit a coverage gap when possible; they never block model requests. Expired or unsafe storage is refused, not silently renewed. Records are not automatically purged: the owner must remove them within the investigation's 24-hour retention window, or explicitly retain selected evidence separately. A process that exits cannot enforce later disk deletion.
+Collection stops 24 hours after the shared key's mtime, at 16 MiB per recorder file, or if a record exceeds 256 KiB. Each loaded recorder module instance owns its writer; separately bundled or imported copies in one process can use separate files, so this is not a combined per-process budget. There are at most 64 file slots per investigation directory; fingerprints cover at most 2,048 logical components and 2,048 content blocks. Limits stop recording and emit a coverage gap when possible; they never block model requests. Expired or unsafe storage is refused, not silently renewed. Records are not automatically purged: the owner must remove them within the investigation's 24-hour retention window, or explicitly retain selected evidence separately. A process that exits cannot enforce later disk deletion.
 
 ## Privacy and fidelity
 
@@ -39,43 +37,22 @@ SDK provenance records purpose, session, active leaf, compaction/branch-summary 
 
 Warming is tagged separately while retaining the original request's identity. Native summaries are tagged `summary`; ordinary requests distinguish `parent` and `child`. Unknown routing, custom providers, unsupported adapters and nested calls without an explicit owner annotation cannot establish complete provenance. Custom injected Anthropic clients have explicit logical/wire-coverage gaps. The trace is not a universal observer of wrappers or server internals.
 
-## Native Anthropic timing
+## Anthropic capture boundaries
 
-The native Anthropic consumer records finite `monoMs` clocks (milliseconds on the process's
-monotonic clock), captured before recorder writes. Timing rows distinguish adapter entry,
-payload passes, actual delegate-fetch entry after fingerprinting,
-all three awaited option callback slots (also when unset), completed SSE frames before filtering, first native
-and content event types, `message_stop`, read waits, true decoder EOF, consumed-loop exit
-and adapter completion/error. HTTP request IDs prefer Anthropic's `request-id`, with a
-validated `x-request-id` fallback. Existing terminal and parsed-usage rows remain.
-The `http_response` row records header-arrival time, status, attempt identity and request ID.
+Anthropic tracing retains digests of final serialized payloads, payload-pass and attempt identities,
+HTTP response metadata, raw terminal usage and parsed usage. HTTP request IDs prefer
+Anthropic's validated `request-id`, with a validated `x-request-id` fallback. Generic rows
+retain process-local monotonic timestamps; these do not identify physical network arrival.
+`payloadPass` distinguishes strict-tool fallback payloads from retries within one pass;
+`attemptId` identifies each delegate fetch.
 
-Frame types are fixed enums; unknown types become `unknown` and pings remain absent from
-public provider events. Callback exits use `finally`, including thrown callbacks. Completion
-still waits for the body EOF: these observations do not change cancellation, retries,
-strict-tool fallback or stream output. `payloadPass` distinguishes strict fallback payloads
-from retries within one pass; `attemptId` identifies each delegate fetch. The writer's
-existing limits bound repetitive rows, with an explicit gap when collection stops.
-
-Each delta emits several timing rows. An offline sample with 1,000 deltas and one SSE frame
-per read used about 1.6 MB; chunking and other observations change that volume. The shared
-16 MiB per-process budget can therefore fill after about ten similarly chunked responses.
-Once `file_limit` is recorded, all native, lifecycle and HTTP observations in that process
-stop. Use a fresh traced worker for the next one or two request captures, check file size
-and coverage gaps before accepting evidence, then stop collection. If the file fills, mark
-the capture incomplete and restart only the traced worker before collecting again. Preserve
-the existing 24-hour key lifetime and private retention rules; do not rotate files in place
-or raise the privacy limits to keep tracing indefinitely.
-
-The exported `/utils/cache-trace` investigation helper `recordCacheTraceObservation` accepts
-only allowlisted lifecycle/HTTP phases and scalar metadata through the same private sink.
-A temporary observer can use passive Undici channels to measure physical send, body arrival
-and network completion separately from decoder EOF. Join HTTP/native records only by a
-validated server request ID; local HTTP ordinals or nearby timestamps do not prove identity
-under overlap. Monotonic clocks compare only within the same process, not across restarts.
-Public lifecycle observations mark the observer's dispatch position, not persistence or
-completion of every other handler. Synchronous tracing adds overhead and is not always-on
-telemetry. No natural stall or server-internal cause is established by installing it.
+The completed Anthropic stall campaign's per-read, SSE-frame and callback timing hooks and
+lifecycle/Undici observation helper have been retired. The generic recorder remains opt-in
+and off by default. It does not record pings or callback durations. This retirement does not
+change public provider events, callback ordering/errors, EOF completion, cancellation,
+retries, strict-tool fallback, cache behavior or usage accounting. Previously retained private
+traces, observer sources, keys and scalar reports remain forensic evidence; retiring code
+neither deletes them nor authorizes renewed collection.
 
 ## Offline classification
 

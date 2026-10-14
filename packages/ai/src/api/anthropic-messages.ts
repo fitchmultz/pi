@@ -37,7 +37,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
-import { type CacheTrace, createCacheTrace } from "../utils/cache-trace.ts";
+import { createCacheTrace } from "../utils/cache-trace.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
@@ -472,13 +472,11 @@ function consumeLine(text: string): { line: string; rest: string } | null {
 async function* iterateSseMessages(
 	body: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
-	trace?: CacheTrace,
 ): AsyncGenerator<ServerSentEvent> {
 	const reader = body.getReader();
 	const decoder = new TextDecoder();
 	const state: SseDecoderState = { event: null, data: [], raw: [] };
 	let buffer = "";
-	let readIndex = 0;
 
 	try {
 		while (true) {
@@ -486,22 +484,8 @@ async function* iterateSseMessages(
 				throw new Error("Request was aborted");
 			}
 
-			const index = ++readIndex;
-			const readEnterMs = trace ? performance.now() : undefined;
-			let read: Awaited<ReturnType<typeof reader.read>>;
-			try {
-				const pending = reader.read();
-				trace?.timing("read_enter", { index }, readEnterMs);
-				read = await pending;
-			} catch (error) {
-				trace?.timing("read_exit", { index, outcome: "error" });
-				throw error;
-			}
-			const { value, done } = read;
-			const readExitMs = trace ? performance.now() : undefined;
-			trace?.timing("read_exit", { index, done }, readExitMs);
+			const { value, done } = await reader.read();
 			if (done) {
-				trace?.timing("decoder_eof", {}, readExitMs);
 				break;
 			}
 
@@ -547,7 +531,6 @@ async function* iterateSseMessages(
 async function* iterateAnthropicEvents(
 	response: Response,
 	signal?: AbortSignal,
-	trace?: CacheTrace,
 ): AsyncGenerator<RawMessageStreamEvent> {
 	if (!response.body) {
 		throw new Error("Attempted to iterate over an Anthropic response with no body");
@@ -555,10 +538,8 @@ async function* iterateAnthropicEvents(
 
 	let sawMessageStart = false;
 	let sawMessageEnd = false;
-	let frameIndex = 0;
 
-	for await (const sse of iterateSseMessages(response.body, signal, trace)) {
-		trace?.timing("sse_frame", { index: ++frameIndex, eventType: sse.event ?? "unknown" });
+	for await (const sse of iterateSseMessages(response.body, signal)) {
 		if (sse.event === "error") {
 			throw new Error(sse.data);
 		}
@@ -593,8 +574,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	context: TranscriptContext,
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
-	const adapterEnterMs =
-		typeof process !== "undefined" && process.env?.PI_CACHE_TRACE_DIR ? performance.now() : undefined;
 	const stream = new AssistantMessageEventStream();
 	const normalizedContext = resolveTranscript(context, getAnthropicCompat(model).supportsMidConvoSystemMessages);
 	const currentTools = getCurrentTools(normalizedContext.messages);
@@ -620,14 +599,12 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			timestamp: Date.now(),
 		};
 
-		let trace: CacheTrace | undefined;
 		try {
 			let client: Anthropic;
-			trace = createCacheTrace(model, options, undefined, () => ({
+			const trace = createCacheTrace(model, options, undefined, () => ({
 				...model.compat,
 				...getAnthropicCompat(model),
 			}));
-			trace?.timing("adapter_enter", {}, adapterEnterMs);
 			let isOAuth: boolean;
 			let usageModel = model;
 			let inputTransformations: BetaInputTransformation[] | undefined;
@@ -680,13 +657,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				const built = buildParams(model, normalizedContext, isOAuth, options, disablePreferredStrictTools);
 				let params = built.params;
 				trace?.payloadPass();
-				let nextParams: unknown;
-				trace?.timing("callback_enter", { callback: "onPayload" });
-				try {
-					nextParams = await options?.onPayload?.(params, model);
-				} finally {
-					trace?.timing("callback_exit", { callback: "onPayload" });
-				}
+				const nextParams = await options?.onPayload?.(params, model);
 				if (nextParams !== undefined) {
 					params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
 				}
@@ -729,43 +700,15 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					});
 				}
 			}
-			trace?.timing("callback_enter", { callback: "onResponse" });
-			try {
-				await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			} finally {
-				trace?.timing("callback_exit", { callback: "onResponse" });
-			}
+			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
 			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
 			const blocks = output.content as Block[];
 
-			let sawNativeEvent = false;
-			let sawContentEvent = false;
-			let eventIndex = 0;
-			for await (const event of iterateAnthropicEvents(response, options?.signal, trace)) {
-				const index = ++eventIndex;
-				if (!sawNativeEvent) {
-					trace?.timing("first_native_event", { eventType: event.type });
-					sawNativeEvent = true;
-				}
-				if (!sawContentEvent && (event.type === "content_block_start" || event.type === "content_block_delta")) {
-					trace?.timing("first_content_event", {
-						eventType: event.type,
-						contentType:
-							(event.type === "content_block_start" ? event.content_block?.type : event.delta?.type) ??
-							"unknown",
-					});
-					sawContentEvent = true;
-				}
-				if (event.type === "message_stop") trace?.timing("message_stop");
+			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				trace?.terminal(event);
-				trace?.timing("callback_enter", { callback: "onProviderStreamEvent", index, eventType: event.type });
-				try {
-					await options?.onProviderStreamEvent?.(event, model);
-				} finally {
-					trace?.timing("callback_exit", { callback: "onProviderStreamEvent", index, eventType: event.type });
-				}
+				await options?.onProviderStreamEvent?.(event, model);
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
 					const transformations = event.message.input_transformations;
@@ -964,7 +907,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				}
 			}
 
-			trace?.timing("consumed_loop_exit");
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
 			}
@@ -989,11 +931,9 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				});
 			}
 
-			trace?.timing("adapter_done");
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			trace?.timing("adapter_error", { outcome: options?.signal?.aborted ? "aborted" : "error" });
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
 				// partialJson is only a streaming scratch buffer; never persist it.

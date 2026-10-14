@@ -18,7 +18,7 @@ import { stream as anthropic } from "../src/api/anthropic-messages.ts";
 import { stream as completions } from "../src/api/openai-completions.ts";
 import { stream as responses } from "../src/api/openai-responses.ts";
 import type { Model, StreamOptions } from "../src/types.ts";
-import { cacheTraceDigest, createCacheTrace, recordCacheTraceObservation } from "../src/utils/cache-trace.ts";
+import { cacheTraceDigest, createCacheTrace } from "../src/utils/cache-trace.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const originalDirectory = process.env.PI_CACHE_TRACE_DIR;
@@ -327,17 +327,11 @@ describe("private opt-in cache recorder", () => {
 		expect(fetch.mock.calls[0]?.[1]).toBe(init);
 		trace.event("send", { reason: { secret: "PRIVATE_NESTED_SECRET" } });
 		trace.event("PRIVATE_EVENT", { PRIVATE_FIELD: "PRIVATE_VALUE" });
-		trace.timing("PRIVATE_PHASE", { PRIVATE_FIELD: "PRIVATE_VALUE" });
-		trace.timing("read_enter", { index: Number.NaN });
-		trace.timing("callback_enter", { callback: "PRIVATE_CALLBACK" });
-		trace.timing("sse_frame", { eventType: "PRIVATE_EVENT_TYPE" });
-		trace.timing("first_content_event", { contentType: { private: "PRIVATE_OBJECT" } });
 		get.mockRestore();
 		const captured = records(path);
 		expect(captured.filter((record) => record.kind === "coverage_gap").length).toBeGreaterThan(0);
 		expect(JSON.stringify(captured)).not.toMatch(/PRIVATE_/);
 		expect(captured.find((record) => record.kind === "send")?.endpoint).toBe("https://provider.test");
-		expect(captured.filter((record) => record.kind === "timing" && record.eventType === "unknown")).toHaveLength(1);
 	});
 
 	it.each([
@@ -366,7 +360,7 @@ describe("private opt-in cache recorder", () => {
 		},
 	);
 
-	it("scopes inherited tracing to the exact session and stops already-admitted observers when disabled", () => {
+	it("scopes inherited tracing to the exact session and stops already-admitted recorders when disabled", () => {
 		const path = directory();
 		const sessionId = "01a135b8-dfbf-7122-9500-43010f4d51fe";
 		process.env.PI_CACHE_TRACE_SESSION_ID = sessionId;
@@ -375,22 +369,22 @@ describe("private opt-in cache recorder", () => {
 		expect(
 			createCacheTrace(model("anthropic-messages"), { cacheTraceContext: { sessionId: "other" } }),
 		).toBeUndefined();
-		recordCacheTraceObservation("other", "agent_start");
 		expect(readdirSync(path)).toEqual([]);
 		expect(compat).not.toHaveBeenCalled();
 		const trace = createCacheTrace(model("anthropic-messages"), { cacheTraceContext: { sessionId } })!;
-		recordCacheTraceObservation(sessionId, "agent_start");
-		recordCacheTraceObservation(sessionId, "http_headers", { requestId: "PRIVATE_ID", status: 200 });
-		recordCacheTraceObservation(sessionId, "http_headers", { status: Number.POSITIVE_INFINITY });
+		trace.payloadPass();
+		trace.terminal({ type: "message_stop" });
 		const captured = records(path);
-		expect(captured.filter((row) => row.kind === "observation")).toHaveLength(1);
+		expect(captured.filter((row) => row.kind === "terminal")).toHaveLength(1);
+		expect(captured.at(-1)?.payloadPass).toBe(1);
 		expect(JSON.stringify(captured)).not.toContain(sessionId);
 		delete process.env.PI_CACHE_TRACE_DIR;
-		trace.timing("adapter_done");
+		trace.payloadPass();
 		trace.terminal({ type: "message_stop" });
-		recordCacheTraceObservation(sessionId, "agent_end");
 		expect(records(path)).toEqual(captured);
 		process.env.PI_CACHE_TRACE_DIR = path;
+		trace.terminal({ type: "message_stop" });
+		expect(records(path).at(-1)).toMatchObject({ kind: "terminal", payloadPass: 2 });
 		process.env.PI_CACHE_TRACE_SESSION_ID = "*";
 		expect(createCacheTrace(model("anthropic-messages"), { cacheTraceContext: { sessionId } })).toBeUndefined();
 	});
@@ -540,7 +534,7 @@ describe("private opt-in cache recorder", () => {
 		expect(JSON.stringify(captured)).not.toContain("PRIVATE_LIMIT_TEXT");
 	});
 
-	it("caps a process file and expires the shared investigation rather than rotating silently", () => {
+	it("caps a recorder file and expires the shared investigation rather than rotating silently", () => {
 		const path = directory();
 		const trace = createCacheTrace(model("openai-responses"))!;
 		const payload = { input: Array.from({ length: 800 }, () => ({ content: "PRIVATE_LIMIT_TEXT" })) };

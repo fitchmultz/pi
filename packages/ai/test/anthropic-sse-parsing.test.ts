@@ -1,9 +1,6 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type Anthropic from "@anthropic-ai/sdk";
 import { Type } from "typebox";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
 import { getModel, normalizeContext } from "../src/compat.ts";
@@ -113,42 +110,55 @@ function createResponseModelSseResponse(model: string, contentBlock: ResponseCon
 }
 
 describe("Anthropic raw SSE parsing", () => {
-	it("observes filtered frames, brackets the final callback, and still waits for real decoder EOF", async () => {
-		const path = mkdtempSync(join(tmpdir(), "pi-anthropic-timing-"));
-		const previous = process.env.PI_CACHE_TRACE_DIR;
-		const filter = process.env.PI_CACHE_TRACE_SESSION_ID;
-		process.env.PI_CACHE_TRACE_DIR = path;
-		delete process.env.PI_CACHE_TRACE_SESSION_ID;
-		const rows = (): Record<string, unknown>[] =>
-			readdirSync(path)
-				.filter((name) => name.endsWith(".jsonl"))
-				.flatMap((name) =>
-					readFileSync(join(path, name), "utf8")
-						.trim()
-						.split("\n")
-						.map((line) => JSON.parse(line)),
-				);
-		const entered = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		let controller!: ReadableStreamDefaultController<Uint8Array>;
-		const body = new ReadableStream<Uint8Array>({
-			start(c) {
-				controller = c;
-			},
-		});
-		let settled = false;
-		const events: string[] = [];
-		try {
+	it.each(["close", "error", "abort"] as const)(
+		"filters non-message frames and awaits the final callback and body EOF (%s)",
+		async (ending) => {
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const nextRead = Promise.withResolvers<void>();
+			const abort = new AbortController();
+			let controller!: ReadableStreamDefaultController<Uint8Array>;
+			let reads = 0;
+			const body = new ReadableStream<Uint8Array>(
+				{
+					start(c) {
+						controller = c;
+					},
+					pull(c) {
+						if (++reads === 1) {
+							c.enqueue(
+								new TextEncoder().encode(
+									[
+										{ event: "ping", data: "not json" },
+										{ event: "unknown", data: "not json" },
+										...minimalAnthropicEvents,
+									]
+										.map(({ event, data }) => `event: ${event}\ndata: ${data}\n\n`)
+										.join(""),
+								),
+							);
+						} else nextRead.resolve();
+					},
+				},
+				{ highWaterMark: 0 },
+			);
+			let settled = false;
+			const callbacks: string[] = [];
 			const result = streamAnthropic(
 				getModel("anthropic", "claude-haiku-4-5"),
-				normalizeContext({ messages: [{ role: "user", content: "PRIVATE_PROMPT", timestamp: 1 }] }),
+				normalizeContext({ messages: [{ role: "user", content: "Hello", timestamp: 1 }] }),
 				{
 					client: createFakeAnthropicClient(new Response(body)),
-					onPayload: (payload) => payload,
-					onResponse: () => {},
+					signal: abort.signal,
+					onPayload: () => {
+						callbacks.push("onPayload");
+					},
+					onResponse: () => {
+						callbacks.push("onResponse");
+					},
 					onProviderStreamEvent: async (event) => {
 						const type = (event as { type: string }).type;
-						events.push(type);
+						callbacks.push(type);
 						if (type === "message_stop") {
 							entered.resolve();
 							await release.promise;
@@ -161,105 +171,70 @@ describe("Anthropic raw SSE parsing", () => {
 					settled = true;
 					return message;
 				});
-			controller.enqueue(
-				new TextEncoder().encode(
-					[
-						{ event: "ping", data: "PRIVATE_PING" },
-						{ event: "PRIVATE_EVENT", data: "PRIVATE_UNKNOWN" },
-						...minimalAnthropicEvents,
-					]
-						.map(({ event, data }) => `event: ${event}\ndata: ${data}\n\n`)
-						.join(""),
-				),
-			);
-			await entered.promise;
-			expect(settled).toBe(false);
-			expect(rows().some((row) => row.phase === "message_stop")).toBe(true);
-			expect(rows().some((row) => row.phase === "decoder_eof")).toBe(false);
-			expect(rows().some((row) => row.phase === "callback_exit" && row.eventType === "message_stop")).toBe(false);
-			release.resolve();
-			await vi.waitFor(() => expect(rows().some((row) => row.phase === "read_enter" && row.index === 2)).toBe(true));
-			expect(settled).toBe(false);
-			expect(rows().some((row) => row.phase === "decoder_eof")).toBe(false);
-			controller.close();
-			expect((await result).content).toEqual([{ type: "text", text: "Hello" }]);
-			expect((await result).stopReason).toBe("stop");
-			expect(events).toEqual(minimalAnthropicEvents.map((event) => event.event));
-			const captured = rows();
-			const times = [
-				captured.find((row) => row.phase === "message_stop"),
-				captured.find((row) => row.phase === "callback_enter" && row.eventType === "message_stop"),
-				captured.find((row) => row.phase === "callback_exit" && row.eventType === "message_stop"),
-				captured.find((row) => row.phase === "read_enter" && row.index === 2),
-				captured.find((row) => row.phase === "decoder_eof"),
-				captured.find((row) => row.phase === "consumed_loop_exit"),
-				captured.find((row) => row.phase === "adapter_done"),
-			].map((row) => row?.monoMs);
-			for (const time of times) expect(Number.isFinite(time)).toBe(true);
-			expect(times).toEqual([...times].sort((a, b) => Number(a) - Number(b)));
-			expect(captured.filter((row) => row.phase === "sse_frame").map((row) => row.eventType)).toEqual([
-				"ping",
-				"unknown",
-				...minimalAnthropicEvents.map((event) => event.event),
-			]);
-			expect(captured.find((row) => row.phase === "first_native_event")?.eventType).toBe("message_start");
-			expect(captured.find((row) => row.phase === "first_content_event")?.contentType).toBe("text");
-			expect(captured.filter((row) => row.phase === "read_exit").at(-1)?.done).toBe(true);
-			expect(JSON.stringify(captured)).not.toContain("PRIVATE_");
-		} finally {
-			release.resolve();
-			if (previous === undefined) delete process.env.PI_CACHE_TRACE_DIR;
-			else process.env.PI_CACHE_TRACE_DIR = previous;
-			if (filter === undefined) delete process.env.PI_CACHE_TRACE_SESSION_ID;
-			else process.env.PI_CACHE_TRACE_SESSION_ID = filter;
-			rmSync(path, { recursive: true, force: true });
-		}
-	});
-
-	it.each(["onPayload", "onResponse", "onProviderStreamEvent"] as const)(
-		"records %s exit when it throws without changing the native error",
-		async (callback) => {
-			const path = mkdtempSync(join(tmpdir(), "pi-anthropic-callback-"));
-			const previous = process.env.PI_CACHE_TRACE_DIR;
-			const filter = process.env.PI_CACHE_TRACE_SESSION_ID;
-			process.env.PI_CACHE_TRACE_DIR = path;
-			delete process.env.PI_CACHE_TRACE_SESSION_ID;
 			try {
-				const result = await streamAnthropic(
-					getModel("anthropic", "claude-haiku-4-5"),
-					normalizeContext({ messages: [{ role: "user", content: "Hello", timestamp: 1 }] }),
-					{
-						client: createFakeAnthropicClient(createSseResponse(minimalAnthropicEvents)),
-						[callback]: () => {
-							throw new Error("PRIVATE_CALLBACK_ERROR");
-						},
-					},
-				).result();
-				expect(result.stopReason).toBe("error");
-				expect(result.errorMessage).toBe("PRIVATE_CALLBACK_ERROR");
-				const captured = readdirSync(path)
-					.filter((name) => name.endsWith(".jsonl"))
-					.flatMap((name) =>
-						readFileSync(join(path, name), "utf8")
-							.trim()
-							.split("\n")
-							.map((line) => JSON.parse(line)),
-					);
-				expect(captured.filter((row) => row.callback === callback).map((row) => row.phase)).toEqual([
-					"callback_enter",
-					"callback_exit",
+				await entered.promise;
+				expect(settled).toBe(false);
+				expect(reads).toBe(1);
+				release.resolve();
+				await nextRead.promise;
+				expect(settled).toBe(false);
+				if (ending === "error") controller.error(new Error("body failed"));
+				else {
+					if (ending === "abort") abort.abort();
+					controller.close();
+				}
+				const message = await result;
+				expect(message.content).toEqual([{ type: "text", text: "Hello" }]);
+				expect(message.responseId).toBe("msg_test");
+				expect(message.usage).toMatchObject({ input: 12, output: 5, totalTokens: 17 });
+				expect(message.stopReason).toBe(ending === "close" ? "stop" : ending === "abort" ? "aborted" : "error");
+				expect(message.errorMessage).toBe(
+					ending === "close" ? undefined : ending === "abort" ? "Request was aborted" : "body failed",
+				);
+				expect(callbacks).toEqual([
+					"onPayload",
+					"onResponse",
+					...minimalAnthropicEvents.map((event) => event.event),
 				]);
-				expect(captured.at(-1).phase).toBe("adapter_error");
-				expect(JSON.stringify(captured)).not.toContain("PRIVATE_CALLBACK_ERROR");
+				expect(body.locked).toBe(false);
 			} finally {
-				if (previous === undefined) delete process.env.PI_CACHE_TRACE_DIR;
-				else process.env.PI_CACHE_TRACE_DIR = previous;
-				if (filter === undefined) delete process.env.PI_CACHE_TRACE_SESSION_ID;
-				else process.env.PI_CACHE_TRACE_SESSION_ID = filter;
-				rmSync(path, { recursive: true, force: true });
+				release.resolve();
+				controller.error(new Error("test cleanup"));
+				await result;
 			}
 		},
 	);
+
+	it.each(["onPayload", "onResponse", "onProviderStreamEvent"] as const)(
+		"preserves the native error when %s throws",
+		async (callback) => {
+			const result = await streamAnthropic(
+				getModel("anthropic", "claude-haiku-4-5"),
+				normalizeContext({ messages: [{ role: "user", content: "Hello", timestamp: 1 }] }),
+				{
+					client: createFakeAnthropicClient(createSseResponse(minimalAnthropicEvents)),
+					[callback]: () => {
+						throw new Error("callback failed");
+					},
+				},
+			).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("callback failed");
+		},
+	);
+
+	// Regression test for earendil-works/pi#3936.
+	it("rejects EOF before message_stop while retaining consumed content and usage", async () => {
+		const result = await streamAnthropic(
+			getModel("anthropic", "claude-haiku-4-5"),
+			normalizeContext({ messages: [{ role: "user", content: "Hello", timestamp: 1 }] }),
+			{ client: createFakeAnthropicClient(createSseResponse(minimalAnthropicEvents.slice(0, -1))) },
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Anthropic stream ended before message_stop");
+		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+		expect(result.usage).toMatchObject({ input: 12, output: 5, totalTokens: 17 });
+	});
 
 	it("forwards parsed provider stream events in order", async () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");

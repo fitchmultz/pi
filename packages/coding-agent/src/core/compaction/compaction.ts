@@ -241,17 +241,16 @@ export function estimateProjectedContextTokens(
 			projectedMessageIndex = nextMessageIndex;
 		}
 
-		const entryIndices = new Map(branchEntries.map((entry, index) => [entry.id, index]));
-		const usageEntryIndex = usageEntryId ? (entryIndices.get(usageEntryId) ?? -1) : -1;
+		const usageEntryIndex = usageEntryId ? branchEntries.findLastIndex((entry) => entry.id === usageEntryId) : -1;
+		let entryIndices: Map<string, number> | undefined;
 		let usageIsValid = usageEntryIndex >= 0;
 		for (let i = usageEntryIndex + 1; usageIsValid && i < branchEntries.length; i++) {
 			const entry = branchEntries[i];
-			if (
-				entry.type === "compaction" ||
-				(entry.type === "context_edit" &&
-					(entry.replacement !== null || (entryIndices.get(entry.targetId) ?? -1) <= usageEntryIndex))
-			) {
+			if (entry.type === "compaction" || (entry.type === "context_edit" && entry.replacement !== null)) {
 				usageIsValid = false;
+			} else if (entry.type === "context_edit") {
+				entryIndices ??= new Map(branchEntries.map((entry, index) => [entry.id, index]));
+				usageIsValid = (entryIndices.get(entry.targetId) ?? -1) > usageEntryIndex;
 			}
 		}
 		// Omitting a later retry attempt leaves the measured prefix unchanged;

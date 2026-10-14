@@ -32,6 +32,7 @@
 - Bound native Bash spill queues and wait for complete private spill files before returning. This bounded-memory path is slower on the recorded 64 MiB workload.
 - Skip disk reads for acknowledged terminal background jobs during monitoring; explicit status tools still read fresh state.
 - Batch workspace builds and npm/Nix packing, and retain PID-unique CPU profiles from every launcher and worker.
+- Skip unnecessary full archived-history indexing for recent context-usage estimates, preserving context-edit and compaction invalidation.
 
 ### Fixed
 
