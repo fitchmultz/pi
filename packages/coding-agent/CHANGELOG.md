@@ -23,6 +23,7 @@
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
 - Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Activation accepts upstream catalog removals and prints every removed model ID instead of blocking the update; direct installer runs still require explicit `--accept-model-removals`, while explicit rollback remains available. Restored Termux compiler preparation and isolated shell/exec environments.
 - Added frozen performance results and offline reproduction fixtures covering native tools, rendering, sessions, transports, storage and packaging. See [performance results and reproduction](../../docs/performance.md).
+- Changing the thinking level mid-session on OpenAI GPT-6 models (API key) now keeps the prompt cache ([#10853](https://github.com/earendil-works/pi/issues/10853))
 
 ### Changed
 
@@ -53,7 +54,6 @@
 - Fixed `/reload` re-enabling previously deselected default-active extension tools; new defaults and tools newly added to `defaultTools` still activate.
 - Fixed resized-image coordinate notes to use separate, unrounded x and y scales.
 - Fixed branch-summary budgets counting system declarations instead of conversation history.
-- Fixed empty quoted prompt-template arguments shifting later positional arguments.
 - Fixed piped stdin, file text, and an explicit CLI prompt being concatenated without separators.
 - Fixed whitespace-only combined CLI input starting an initial turn.
 - Fixed confirmed GPT-6 Astra Ultrafast cost estimates in OpenAI and legacy Codex Responses, including cached input and long-context pricing.
@@ -76,6 +76,11 @@
 - Pinned internal Pi dependencies to exact release versions to prevent fresh installs from mixing incompatible packages ([#10865](https://github.com/earendil-works/pi/issues/10865))
 - Fixed resumed sessions dropping tools activated during the session. Resume now restores the session's active tools, with `--tools +name`/`-name` entries applied to them, unless `--tools` with tool names, `--no-tools`, or `--no-builtin-tools` selects tools explicitly ([#10785](https://github.com/earendil-works/pi/issues/10785))
 - Fixed queued managed restarts to wait until admitted native work, including extension commands and handlers, completes.
+- Fixed stopping a codemode script or reaching its deadline waiting for a non-interruptible built-in to return on Bun ([#10748](https://github.com/earendil-works/pi/issues/10748))
+- Fixed repeated codemode timeouts or aborts accumulating surviving workers; admission now limits live workers to two across sessions, counting cancelled workers until actual exit ([#10748](https://github.com/earendil-works/pi/issues/10748))
+- Fixed `--model` choosing a provider by catalog order when several providers offer the match; Pi now prefers the provider with credentials and otherwise reports the ambiguity. `--models` and `enabledModels` add a model for each provider that offers it and warn about the ambiguity ([#10160](https://github.com/earendil-works/pi/issues/10160))
+- Fixed `read` line-range labels for numeric-string or null arguments in the TUI, session tree, HTML exports, and examples ([#9887](https://github.com/earendil-works/pi/issues/9887))
+- Fixed prompt templates dropping empty quoted arguments (`""` or `''`), which shifted later positional arguments and prevented positional defaults from applying ([#10867](https://github.com/earendil-works/pi/issues/10867))
 
 ## [1.2.0] - 2026-10-12
 

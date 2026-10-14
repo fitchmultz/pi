@@ -25,8 +25,9 @@ export interface PromptTemplate {
 export function parseCommandArgs(argsString: string): string[] {
 	const args: string[] = [];
 	let current = "";
+	// Tracks whether a token has started, so quoted empty strings ("" or '') are kept as arguments
+	let hasToken = false;
 	let inQuote: string | null = null;
-	let started = false;
 
 	for (let i = 0; i < argsString.length; i++) {
 		const char = argsString[i];
@@ -39,20 +40,20 @@ export function parseCommandArgs(argsString: string): string[] {
 			}
 		} else if (char === '"' || char === "'") {
 			inQuote = char;
-			started = true;
+			hasToken = true;
 		} else if (/\s/.test(char)) {
-			if (started) {
+			if (hasToken) {
 				args.push(current);
 				current = "";
-				started = false;
+				hasToken = false;
 			}
 		} else {
 			current += char;
-			started = true;
+			hasToken = true;
 		}
 	}
 
-	if (started) {
+	if (hasToken) {
 		args.push(current);
 	}
 

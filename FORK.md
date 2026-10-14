@@ -1,8 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `b9ab2a6238d2c91cf0c6ebf836dfd05883f9db51`
-(2026-10-13), including v1.2.0 and its follow-up fixes. It is upstream plus the features
+v1.0.0 and synchronized through upstream `9fe3f371622cad9cc1a3cbf044288abd0252192f`
+(2026-10-14), including v1.2.0 and its follow-up fixes. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 ## Fork features
@@ -35,8 +35,10 @@ These fixes remain until upstream supplies equivalent behavior, not merely close
 Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in the v1.1.0 sync); the fork keeps `private-spill.test.ts` as a regression guard.
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
 Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
+Empty quoted prompt-template arguments now follow upstream's token parser and positional-default regression coverage ([#10867](https://github.com/earendil-works/pi/issues/10867)); the equivalent fork implementation and tests are retired.
 Transcript resume now uses upstream's recorded active-tool loadout and `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785)); explicit tool selection and exclusion keep their precedence. Native complete working-session restore retains its saved current loadout and modifier policy.
 Claude 5.5 catalog entries now use upstream's models.dev metadata rather than the removed fallback definitions.
+OpenCode Go's Google adapter and inference endpoints now follow upstream; `packages/ai/test/opencode-provider-headers.test.ts` retains the Gemini routing regression guard.
 The Chord service-hydration array check ([#10509](https://github.com/earendil-works/pi/issues/10509)) was retired with upstream's Chord 2 runtime: the service runtime is gone, and every link, including the in-memory one, JSON-round-trips frames.
 See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),
 [Codemode](packages/codemode/CHANGELOG.md#unreleased) and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
@@ -75,7 +77,6 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Image coordinate notes need independent unrounded axis ratios | `utils/image-resize.ts` | `image-dimension-note.test.ts` |
 | Branch budgets must exclude system declarations not serialized as conversation | `core/compaction/branch-summarization.ts` | `branch-summarization.test.ts` |
 | Cache overlap estimates must follow native ancestry, identify expected model/provider transitions and distinguish current, prior observed, catalog and unknown read prices without changing real usage totals | `core/cache-stats.ts`, `modes/interactive/interactive-mode.ts` | `cache-stats.test.ts`, `interactive-mode-assistant-diagnostics.test.ts`, `suite/prompt-cache-prefix.test.ts` |
-| Empty quoted arguments must not shift template positions | `core/prompt-templates.ts` | `prompt-templates.test.ts` |
 | Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
 | Reload must preserve deselected default-active tools while adopting newly configured defaults, including saved `--tools +name/-name` modifiers | `core/agent-session.ts` | `default-tools-setting.test.ts` |
 | Extension cancellation must remain observable through run setup, post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal; upstream's `agent_settled.aborted` is captured before clearing that signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
@@ -138,12 +139,19 @@ Nix retains its eight raw named archives. Pinned fleet automation has migrated t
 and the obsolete `scripts/coding-agent-consumer.mjs` shim has been removed.
 Retained offline comparison fixtures are documented in [Performance reproduction](docs/performance.md).
 
-Chord follows upstream's schema-derived frame types, stricter contract tokens and error codes,
+Chord follows upstream's protocol 3, contract-owned placement, typed principals, named declarations,
+per-cell versions and initialization, host lifetimes, and reload/code-generation retirement.
+It also follows upstream's schema-derived frame types, stricter contract tokens and error codes,
 large-payload deflation, acknowledgement-based state flow control, and optional per-link call limits.
 `Link.send` reports encoded sizes when available; call results may overtake waiting state. The fork
 retains one compiled frame validator, the cursor-based publication drain, strict-JSON container hooks
 and public exports. Coding-agent uses Chord's JSON helpers, not its host/link transport; this sync
 establishes no current TUI or tool-performance improvement from those transport features.
+
+Model references follow upstream's shared provider-selection policy, including gateway IDs,
+thinking suffixes, authenticated-provider tie breaking and explicit-key ambiguity. The fork retains
+saved/scoped selections when a provider's auth check fails. Codemode follows upstream's prompt
+cancellation and two-live-worker admission limit, with the fork's safe arbitrary store keys retained.
 
 Streaming tool-call JSON now follows upstream's invalid `\u` repair without losing later fields,
 while retaining span-based repair and the original partial-parser fallback order. Anthropic error

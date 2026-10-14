@@ -382,9 +382,11 @@ describe("parseCommandArgs", () => {
 		expect(parseCommandArgs("a\tb\tc")).toEqual(["a", "b", "c"]);
 	});
 
-	test("should preserve quoted empty arguments", () => {
+	test("should handle quoted empty string", () => {
+		// Empty quotes keep their position as an empty argument (#10867)
 		expect(parseCommandArgs('"" " "')).toEqual(["", " "]);
-		expect(parseCommandArgs("first '' last \"\"")).toEqual(["first", "", "last", ""]);
+		expect(parseCommandArgs("a '' c")).toEqual(["a", "", "c"]);
+		expect(parseCommandArgs('a ""')).toEqual(["a", ""]);
 	});
 
 	test("should handle arguments with special characters", () => {
@@ -433,17 +435,22 @@ describe("parseCommandArgs", () => {
 // ============================================================================
 
 describe("expandPromptTemplate", () => {
-	test.each(['""', "''"])("keeps positional arguments after %s", (empty) => {
-		const result = expandPromptTemplate(`/review ${empty} src/auth.ts`, [
-			{
-				name: "review",
-				description: "Review a file",
-				content: `Review $2 in \${1:-brief} mode.`,
-				sourceInfo: { path: "/tmp/review.md", source: "local", scope: "temporary", origin: "top-level" },
-				filePath: "/tmp/review.md",
-			},
-		]);
-		expect(result).toBe("Review src/auth.ts in brief mode.");
+	// #10867
+	test("should use positional default for empty quoted argument without shifting later args", () => {
+		const template = {
+			name: "review",
+			description: "test",
+			content: `Review $2. Focus: \${1:-correctness}.`,
+			sourceInfo: { path: "/tmp/review.md", source: "local", scope: "temporary", origin: "top-level" } as const,
+			filePath: "/tmp/review.md",
+		};
+
+		expect(expandPromptTemplate('/review "" src/index.ts', [template])).toBe(
+			"Review src/index.ts. Focus: correctness.",
+		);
+		expect(expandPromptTemplate("/review '' src/index.ts", [template])).toBe(
+			"Review src/index.ts. Focus: correctness.",
+		);
 	});
 
 	test("should split template arguments on unquoted newlines", () => {
