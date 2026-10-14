@@ -212,8 +212,13 @@ describe("session context edits", () => {
 		expect(estimateProjectedContextTokens(session.buildSessionProjection(), session.getBranch()).tokens).toBe(0);
 	});
 
-	it("uses assistant usage captured after the latest context edit", () => {
+	it("uses recent assistant usage without rereading compacted ancestry", () => {
 		const session = SessionManager.inMemory();
+		const archivedEntries = 1_000;
+		for (let i = 0; i < archivedEntries; i++) {
+			session.appendMessage({ role: "user", content: "archived input", timestamp: i });
+		}
+		session.appendCompaction("previous work", null, 10_000);
 		const userId = session.appendMessage({ role: "user", content: "original", timestamp: Date.now() });
 		session.appendContextEdit(userId, { content: "edited" });
 		const response = assistant("answer");
@@ -221,10 +226,19 @@ describe("session context edits", () => {
 		session.appendMessage(response);
 		session.appendMessage({ role: "user", content: "next", timestamp: Date.now() });
 
-		const estimate = estimateProjectedContextTokens(session.buildSessionProjection(), session.getBranch());
+		let archivedReads = 0;
+		const branch = new Proxy(session.getBranch(), {
+			get(target, key, receiver) {
+				const index = typeof key === "string" ? Number(key) : Number.NaN;
+				if (Number.isInteger(index) && index >= 0 && index < archivedEntries) archivedReads++;
+				return Reflect.get(target, key, receiver);
+			},
+		});
+		const estimate = estimateProjectedContextTokens(session.buildSessionProjection(), branch);
 		expect(estimate.usageTokens).toBe(4_100);
 		expect(estimate.trailingTokens).toBe(1);
 		expect(estimate.tokens).toBe(4_101);
+		expect(archivedReads).toBe(0);
 	});
 
 	// Regression for upstream #10287: recovery omissions must not replace valid usage with a raw estimate.

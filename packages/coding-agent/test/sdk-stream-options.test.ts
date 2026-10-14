@@ -381,8 +381,13 @@ describe("createAgentSession stream options", () => {
 				expect(rows).toEqual(
 					expect.arrayContaining([
 						expect.objectContaining({ kind: "request" }),
-						expect.objectContaining({ phase: "decoder_eof" }),
-						expect.objectContaining({ phase: "adapter_done" }),
+						expect.objectContaining({ kind: "logical" }),
+						expect.objectContaining({ kind: "attempt" }),
+						expect.objectContaining({ kind: "terminal", type: "message_stop" }),
+						expect.objectContaining({
+							kind: "parsed_usage",
+							usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0, totalTokens: 2 },
+						}),
 					]),
 				);
 			}

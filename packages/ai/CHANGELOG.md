@@ -13,7 +13,6 @@
 ### Changed
 
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
-- Extended temporary opt-in Anthropic tracing with monotonic callback, SSE/read/EOF and attempt timing, validated standard request IDs, and exact-session filtering. Transport and completion behavior are unchanged.
 
 ### Fixed
 
@@ -43,6 +42,10 @@
 - Fixed Gemini 4 Argon requests on Google Vertex failing with "Thinking budget is not supported", and its thinking level being ignored on the Gemini API, by sending `thinkingLevel` for Gemini 4 and later models ([#10890](https://github.com/earendil-works/pi/issues/10890))
 - Fixed Xiaomi MiMo models failing with a 400 at the `minimal` thinking level by sending only the documented thinking on/off toggle and exposing only the `off` and `high` levels ([#10818](https://github.com/earendil-works/pi/issues/10818))
 - Fixed `openai-codex/gpt-6.1-sol` using a 272K context window instead of the 500K window Codex now provides ([#10840](https://github.com/earendil-works/pi/issues/10840))
+
+### Removed
+
+- Retired the completed Anthropic stall investigation's per-read, SSE-frame and callback timing instrumentation and lifecycle/Undici observation helper. Generic opt-in cache tracing, exact-session filtering, validated request IDs and native stream behavior are unchanged; retained investigation evidence is not deleted.
 
 ## [1.2.0] - 2026-10-12
 

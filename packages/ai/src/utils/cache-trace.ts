@@ -157,126 +157,9 @@ const SAFE_HEADERS = [
 ];
 
 type TraceModel = Pick<Model<Api>, "id" | "api" | "provider" | "baseUrl" | "compat">;
-const TIMING_PHASES = new Set([
-	"adapter_enter",
-	"payload_pass",
-	"fetch_delegate_enter",
-	"fetch_error",
-	"callback_enter",
-	"callback_exit",
-	"read_enter",
-	"read_exit",
-	"decoder_eof",
-	"sse_frame",
-	"first_native_event",
-	"first_content_event",
-	"message_stop",
-	"consumed_loop_exit",
-	"adapter_done",
-	"adapter_error",
-	"session_start",
-	"session_shutdown",
-	"input",
-	"before_agent_start",
-	"agent_start",
-	"turn_start",
-	"context",
-	"context_with_system",
-	"before_provider_headers",
-	"before_provider_request",
-	"after_provider_response",
-	"message_start",
-	"message_update_first",
-	"message_end",
-	"tool_execution_start",
-	"tool_execution_end",
-	"turn_end",
-	"agent_end",
-	"agent_before_settle",
-	"agent_settled",
-	"http_create",
-	"http_send",
-	"http_body_sent",
-	"http_headers",
-	"http_first_chunk",
-	"http_complete",
-	"http_error",
-	"observer_limit",
-]);
-const TIMING_ENUMS: Record<string, ReadonlySet<string>> = {
-	callback: new Set(["onPayload", "onResponse", "onProviderStreamEvent"]),
-	eventType: new Set([
-		"message_start",
-		"message_delta",
-		"message_stop",
-		"content_block_start",
-		"content_block_delta",
-		"content_block_stop",
-		"ping",
-		"error",
-		"unknown",
-	]),
-	contentType: new Set([
-		"text",
-		"thinking",
-		"redacted_thinking",
-		"tool_use",
-		"text_delta",
-		"thinking_delta",
-		"input_json_delta",
-		"signature_delta",
-		"unknown",
-	]),
-	route: new Set(["native", "gateway"]),
-	role: new Set(["user", "assistant", "toolResult", "unknown"]),
-	outcome: new Set(["completed", "error", "aborted", "unknown"]),
-	delivery: new Set(["steer", "followUp", "idle"]),
-	requestIdSource: new Set(["request-id", "x-request-id"]),
-};
-const TIMING_NUMBERS = new Set([
-	"index",
-	"ordinal",
-	"status",
-	"count",
-	"bytes",
-	"firstChunkMs",
-	"lastChunkMs",
-	"acceptedAt",
-	"queueResidenceMs",
-	"durationMs",
-	"turnIndex",
-]);
-
 function sessionAllowed(sessionId?: string): boolean {
 	const filter = typeof process === "undefined" ? undefined : process.env?.PI_CACHE_TRACE_SESSION_ID;
 	return !filter || (/^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(filter) && sessionId === filter);
-}
-
-function timingMetadata(phase: string, metadata: Metadata, monoMs: number): Metadata {
-	if (!TIMING_PHASES.has(phase) || !Number.isFinite(monoMs) || monoMs < 0) throw new Error("Unsafe timing");
-	const safe: Metadata = { phase, monoMs };
-	for (const [key, value] of Object.entries(metadata)) {
-		if (value === undefined) continue;
-		if (TIMING_NUMBERS.has(key) && typeof value === "number" && Number.isFinite(value) && value >= 0)
-			safe[key] = value;
-		else if (key === "done" && typeof value === "boolean") safe[key] = value;
-		else if (key === "requestId" && safeId(value)) safe[key] = value;
-		else if (typeof value === "string" && TIMING_ENUMS[key]?.has(value)) safe[key] = value;
-		else if (key === "eventType" || key === "contentType") safe[key] = "unknown";
-		else throw new Error("Unsafe timing metadata");
-	}
-	return safe;
-}
-
-/** Temporary exact-session lifecycle/Undici scalars, through the same bounded private sink. */
-export function recordCacheTraceObservation(sessionId: string, phase: string, metadata: Metadata = {}): void {
-	if (!sessionAllowed(sessionId) || typeof process === "undefined" || !process.env?.PI_CACHE_TRACE_DIR) return;
-	const monoMs = performance.now();
-	try {
-		const safe = timingMetadata(phase, metadata, monoMs);
-		const w = getWriter();
-		if (w) append(w, { kind: "observation", session: fingerprint(w, sessionId), ...safe });
-	} catch {}
 }
 
 type TraceOptions = Pick<ProviderRequestOptions, "cacheTraceContext" | "fetch">;
@@ -647,14 +530,9 @@ export class CacheTrace {
 		}
 	}
 
-	timing(phase: string, metadata: Metadata = {}, monoMs = performance.now(), attemptId = this.attemptId): void {
-		this.observe(() => this.write("timing", { ...timingMetadata(phase, metadata, monoMs), attemptId }));
-	}
-
 	payloadPass(): void {
 		this.observe(() => {
 			this.payloadPassIndex++;
-			this.timing("payload_pass");
 		});
 	}
 
@@ -969,20 +847,12 @@ export class CacheTrace {
 				} else this.gap("http_body_unobserved");
 				this.headers(init?.headers instanceof Headers ? init.headers : undefined);
 			});
-			const delegateEnterMs = performance.now();
 			try {
-				let pending: Promise<Response>;
-				try {
-					pending = (fetch ?? globalThis.fetch)(input, init);
-				} finally {
-					this.timing("fetch_delegate_enter", {}, delegateEnterMs, attemptId);
-				}
-				const response = await pending;
+				const response = await (fetch ?? globalThis.fetch)(input, init);
 				const monoMs = performance.now();
 				this.response(response, monoMs, attemptId);
 				return response;
 			} catch (error) {
-				this.timing("fetch_error", {}, performance.now(), attemptId);
 				this.event("attempt_error");
 				throw error;
 			}
