@@ -34,6 +34,37 @@ function text(message: { content: string | Array<{ type: string; text?: string }
 }
 
 describe("session context edits", () => {
+	it.each([false, true])("keeps returned arrays and derived messages defensive (compacted=%s)", (compacted) => {
+		const session = SessionManager.inMemory();
+		const customId = session.appendCustomMessageEntry("context", "canonical", false);
+		const modelId = session.appendModelChange("faux", "selected");
+		const compactionId = compacted ? session.appendCompaction("summary", customId, 100) : undefined;
+		const branchIds = compactionId ? [customId, modelId, compactionId] : [customId, modelId];
+		const contextIds = compactionId ? [compactionId, customId, modelId] : [customId, modelId];
+
+		session.getBranch().reverse();
+		session.getBranch(session.getLeafId()!).splice(0);
+		session.buildContextEntries().splice(0);
+		const projection = session.buildSessionProjection();
+		const custom = projection.messages.find((message) => message.role === "custom");
+		if (!custom || !projection.model) throw new Error("missing projected context");
+		custom.content = "caller mutation";
+		projection.model.modelId = "caller mutation";
+		for (const entry of projection.entries) entry.messages.splice(0);
+		projection.entries.splice(0);
+		projection.messages.splice(0);
+
+		expect(session.getBranch().map((entry) => entry.id)).toEqual(branchIds);
+		expect(session.buildContextEntries().map((entry) => entry.id)).toEqual(contextIds);
+		const fresh = session.buildSessionProjection();
+		expect(fresh.entries.map((entry) => entry.sourceEntry.id)).toEqual(contextIds);
+		expect(fresh.messages).toEqual([
+			...(compacted ? [expect.objectContaining({ role: "compactionSummary", summary: "summary" })] : []),
+			expect.objectContaining({ role: "custom", content: "canonical" }),
+		]);
+		expect(fresh.model).toEqual({ provider: "faux", modelId: "selected" });
+	});
+
 	it("omits a target only from model projection", () => {
 		const session = SessionManager.inMemory();
 		session.appendMessage({ role: "user", content: "request", timestamp: Date.now() });
@@ -59,8 +90,15 @@ describe("session context edits", () => {
 	it("replaces only content and lets the latest edit win", () => {
 		const session = SessionManager.inMemory();
 		const targetId = session.appendMessage(assistant("original"));
+		expect(session.buildSessionProjection().messages[0]).toMatchObject({
+			content: [{ type: "text", text: "original" }],
+		});
 		session.appendContextEdit(targetId, { content: [{ type: "text", text: "first" }] });
+		expect(session.buildSessionProjection().messages[0]).toMatchObject({
+			content: [{ type: "text", text: "first" }],
+		});
 		session.appendContextEdit(targetId, null);
+		expect(session.buildSessionProjection().messages).toEqual([]);
 		session.appendContextEdit(targetId, { content: [{ type: "text", text: "restored" }] });
 
 		const projected = session.buildSessionProjection().messages[0];
@@ -128,6 +166,8 @@ describe("session context edits", () => {
 
 	it("uses a self-referencing compaction to retain no preceding entries", () => {
 		const session = SessionManager.inMemory();
+		session.appendModelChange("faux", "selected");
+		session.appendThinkingLevelChange("high");
 		session.appendMessage({ role: "user", content: "discarded", timestamp: Date.now() });
 		const compactionId = session.appendCompaction("exact handoff", null, 100);
 		session.appendMessage({ role: "user", content: "after", timestamp: Date.now() });
@@ -138,6 +178,10 @@ describe("session context edits", () => {
 			"compactionSummary",
 			"user",
 		]);
+		expect(session.buildSessionContext()).toMatchObject({
+			model: { provider: "faux", modelId: "selected" },
+			thinkingLevel: "high",
+		});
 		expect(
 			session
 				.buildSessionProjection()
@@ -150,6 +194,10 @@ describe("session context edits", () => {
 		session.appendMessage({ role: "user", content: "summarized", timestamp: Date.now() });
 		const retainedId = session.appendMessage({ role: "user", content: "original retained", timestamp: Date.now() });
 		session.appendCompaction("summary", retainedId, 100);
+		expect(session.buildSessionProjection().messages).toEqual([
+			expect.objectContaining({ role: "compactionSummary", summary: "summary" }),
+			expect.objectContaining({ role: "user", content: "original retained" }),
+		]);
 		session.appendContextEdit(retainedId, { content: "edited retained" });
 
 		expect(

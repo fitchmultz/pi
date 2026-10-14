@@ -36,6 +36,7 @@ import type {
 	AssistantMessage,
 	AuthResult,
 	ImageContent,
+	Message,
 	Model,
 	ProviderHeaders,
 	SystemMessage,
@@ -1276,24 +1277,38 @@ export class AgentSession {
 		drafts: SessionBoundaryDraft[],
 		boundary: "turn_end" | "agent_before_settle",
 	): BoundaryContextPreview {
-		const projection = this._createBoundaryPreviewManager(drafts).buildSessionProjection();
-		const pendingMessages = this._getPendingBoundaryMessages();
-		const llmMessages = convertToLlm(projection.messages);
-		const finalRole = llmMessages[llmMessages.length - 1]?.role;
-		const hasNonSystemContext = llmMessages.some((message) => message.role !== "system");
-		const contextCanContinue = hasNonSystemContext && finalRole !== "assistant";
+		// Empty drafts preview the live session. Projection waits for the first field that needs it.
+		const manager = drafts.length === 0 ? this.sessionManager : this._createBoundaryPreviewManager(drafts);
 		const pendingCustomContext = this._pendingCustomMessages.length > 0;
+		const hasQueuedMessages = this.agent.hasQueuedMessages();
+		let projection: SessionProjection | undefined;
+		let llmMessages: Message[] | undefined;
+		const project = () => {
+			projection ??= manager.buildSessionProjection();
+			return projection;
+		};
+		const toLlm = () => {
+			llmMessages ??= convertToLlm(project().messages);
+			return llmMessages;
+		};
 		return {
-			contextEntries: projection.entries,
-			contextMessages: projection.messages,
-			llmMessages,
-			pendingMessages,
-			canContinue:
-				contextCanContinue ||
-				pendingCustomContext ||
-				(boundary === "turn_end"
-					? this.agent.hasQueuedMessages()
-					: finalRole === "assistant" && this.agent.hasQueuedMessages()),
+			get contextEntries() {
+				return project().entries;
+			},
+			get contextMessages() {
+				return project().messages;
+			},
+			get llmMessages() {
+				return toLlm();
+			},
+			pendingMessages: this._getPendingBoundaryMessages(),
+			get canContinue() {
+				if (pendingCustomContext || (boundary === "turn_end" && hasQueuedMessages)) return true;
+				const messages = toLlm();
+				const finalRole = messages[messages.length - 1]?.role;
+				if (finalRole === "assistant") return hasQueuedMessages;
+				return messages.some((message) => message.role !== "system");
+			},
 		};
 	}
 

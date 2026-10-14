@@ -32,7 +32,9 @@ describe("SessionManager append and tree traversal", () => {
 			const session = SessionManager.inMemory();
 
 			const msgId = session.appendMessage(userMsg("hello"));
+			expect(session.buildSessionContext().thinkingLevel).toBe("off");
 			const thinkingId = session.appendThinkingLevelChange("high");
+			expect(session.buildSessionContext().thinkingLevel).toBe("high");
 			const _msg2Id = session.appendMessage(assistantMsg("response"));
 
 			const entries = session.getEntries();
@@ -50,8 +52,11 @@ describe("SessionManager append and tree traversal", () => {
 			const session = SessionManager.inMemory();
 
 			const msgId = session.appendMessage(userMsg("hello"));
+			expect(session.buildSessionContext().model).toBeNull();
 			const modelId = session.appendModelChange("openai", "gpt-4");
+			expect(session.buildSessionContext().model).toEqual({ provider: "openai", modelId: "gpt-4" });
 			const _msg2Id = session.appendMessage(assistantMsg("response"));
+			expect(session.buildSessionContext().model).toEqual({ provider: "anthropic", modelId: "test" });
 
 			const entries = session.getEntries();
 			const modelEntry = entries.find((e) => e.type === "model_change");
@@ -412,6 +417,7 @@ describe("SessionManager append and tree traversal", () => {
 			session.appendMessage(userMsg("msg1"));
 			const id2 = session.appendMessage(assistantMsg("msg2"));
 			session.appendMessage(userMsg("msg3"));
+			expect(session.buildSessionContext().messages).toHaveLength(3);
 
 			// Branch from 2: 2 -> 4
 			session.branch(id2);

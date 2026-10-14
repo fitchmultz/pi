@@ -23,6 +23,7 @@ import { createHarness } from "/pi-performance-source/packages/coding-agent/test
 import { witness } from "../proof.mjs";
 
 const mode = process.argv[2] ?? "projection";
+if (mode === "boundary") process.env.PI_EXTENSION_PERFORMANCE = "1";
 const smoke = process.argv.includes("--smoke");
 const count = Number(process.env.SESSION_ENTRIES ?? (smoke ? 20 : 10_000));
 const iterations = Number(process.env.SESSION_ITERATIONS ?? (smoke ? 1 : 25));
@@ -283,8 +284,9 @@ if (mode === "projection") {
 		rmSync(directory, { recursive: true });
 	}
 } else if (mode === "boundary" || mode === "context" || mode === "working") {
-	for (const hooks of mode === "boundary" ? [false, true] : [false]) {
+	for (const hooks of mode === "boundary" ? [false, true, "readers"] : [false]) {
 		const manager = SessionManager.inMemory("/tmp", undefined, history(count));
+		const previews: Array<{ messages: number; pending: number; canContinue: boolean }> = [];
 		const harness = await createHarness({
 			sessionManager: manager,
 			settings: { compaction: { enabled: false } },
@@ -293,6 +295,28 @@ if (mode === "projection") {
 						(pi) => {
 							pi.on("turn_end", () => {});
 							pi.on("agent_before_settle", () => {});
+							if (hooks !== "readers") return;
+							// Completion delivery and Intercom each read only the pending queue.
+							for (let i = 0; i < 2; i++) {
+								pi.on("turn_end", (event) => {
+									assert.equal(event.context.pendingMessages.length, 0);
+								});
+							}
+							pi.on("turn_end", (_event, ctx) => {
+								assert.equal(typeof ctx.getContextUsage()?.tokens, "number");
+							});
+							pi.on("turn_end", (event) => {
+								const context = event.context;
+								const last = context.contextMessages.at(-1);
+								assert(last?.role === "assistant");
+								assert.deepEqual(last.content, [{ type: "text", text: "done" }]);
+								assert.equal(context.canContinue, false);
+								previews.push({
+									messages: context.contextMessages.length,
+									pending: context.pendingMessages.length,
+									canContinue: context.canContinue,
+								});
+							});
 						},
 					]
 				: undefined,
@@ -305,11 +329,22 @@ if (mode === "projection") {
 		};
 		try {
 			if (mode === "boundary") {
-				await measure(hooks ? "prompt-noop-boundary-hooks" : "prompt-no-boundary-hooks", async () => {
-					harness.setResponses([fauxAssistantMessage("done")]);
-					await harness.session.prompt("start");
-					return harness.faux.state.callCount;
-				});
+				await measure(
+					hooks === "readers"
+						? "prompt-context-reading-boundary-hooks"
+						: hooks
+							? "prompt-noop-boundary-hooks"
+							: "prompt-no-boundary-hooks",
+					async () => {
+						harness.setResponses([fauxAssistantMessage("done")]);
+						await harness.session.prompt("start");
+						return harness.faux.state.callCount;
+					},
+				);
+				if (hooks === "readers") {
+					assert.equal(previews.length, harness.faux.state.callCount);
+					witness("boundary-previews", { mode, count, payloadBytes, iterations }, previews);
+				}
 				witness(
 					"boundary-transcript",
 					{ mode, hooks, count, payloadBytes, iterations },
