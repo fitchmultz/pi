@@ -39,7 +39,7 @@ Warming is tagged separately while retaining the original request's identity. Na
 
 ## Anthropic capture boundaries
 
-Anthropic tracing retains final serialized payloads, payload-pass and attempt identities,
+Anthropic tracing retains digests of final serialized payloads, payload-pass and attempt identities,
 HTTP response metadata, raw terminal usage and parsed usage. HTTP request IDs prefer
 Anthropic's validated `request-id`, with a validated `x-request-id` fallback. Generic rows
 retain process-local monotonic timestamps; these do not identify physical network arrival.

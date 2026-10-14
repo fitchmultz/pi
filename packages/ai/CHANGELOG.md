@@ -13,6 +13,7 @@
 ### Changed
 
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
+- Extended temporary opt-in Anthropic cache tracing with payload-pass and attempt identities, validated `request-id` headers and exact-session filtering. Native stream behavior is unchanged.
 
 ### Fixed
 
@@ -45,7 +46,7 @@
 
 ### Removed
 
-- Retired the completed Anthropic stall investigation's per-read, SSE-frame and callback timing instrumentation and lifecycle/Undici observation helper. Generic opt-in cache tracing, exact-session filtering, validated request IDs and native stream behavior are unchanged; retained investigation evidence is not deleted.
+- Retired the fork's unreleased Anthropic stall timing hooks and lifecycle/Undici observation helper; generic opt-in cache tracing and retained investigation evidence remain.
 
 ## [1.2.0] - 2026-10-12
 

@@ -531,9 +531,7 @@ export class CacheTrace {
 	}
 
 	payloadPass(): void {
-		this.observe(() => {
-			this.payloadPassIndex++;
-		});
+		this.payloadPassIndex++;
 	}
 
 	gap(reason: string): void {
