@@ -3,7 +3,8 @@ import { type AnyContract, takesNoArgs } from "./contract.ts";
 import { applyImmutable, type Decoder, decoder } from "./delta/index.ts";
 import { ChordError } from "./errors.ts";
 import {
-	CtxImpl,
+	callWithContext,
+	type HostCore,
 	notifyStatus,
 	REF_BASE,
 	type RefCore,
@@ -34,10 +35,7 @@ export interface RemoteChannel {
 }
 
 /** What a remote reference needs from its host. */
-export interface RemoteHost {
-	readonly inFactory: number;
-	report(error: unknown): void;
-	root<T>(fn: (ctx: Ctx) => T | Promise<T>, options?: { signal?: AbortSignal }): Promise<T>;
+export interface RemoteHost extends Pick<HostCore, "inFactory" | "report" | "root"> {
 	forgetRemote(ref: RemoteRef): void;
 }
 
@@ -309,20 +307,10 @@ export class RemoteRef implements RefCore {
 			const noArgs = takesNoArgs(this.contract, name);
 			caller = (...given) => {
 				// A method without arguments is called as `ref.name(ctx)`.
-				const [args, ctx] = (noArgs ? [undefined, given[0]] : given) as [unknown, Ctx | undefined];
+				const [args, ctx] = noArgs ? [undefined, given[0]] : given;
 				if (this.host.inFactory > 0)
 					throw new ChordError("not_ready", `${this.address}.${name} called inside a factory`);
-				if (ctx instanceof CtxImpl) {
-					try {
-						ctx.check(ctx.host);
-					} catch (error) {
-						return Promise.reject(error);
-					}
-				}
-				if (ctx === undefined || (ctx instanceof CtxImpl && ctx.holder)) {
-					return this.host.root((root) => this.#call(name, args, root), { signal: ctx?.signal });
-				}
-				return this.#call(name, args, ctx);
+				return callWithContext(this.host, ctx, (root) => this.#call(name, args, root));
 			};
 			this.#callers.set(name, caller);
 		}

@@ -1,9 +1,4 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { constants } from "fs";
-import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
-import { type Static, Type } from "typebox";
-import { decodeUtf8, splitBom } from "../../utils/text.ts";
-import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import {
 	applyEditsToNormalizedContent,
 	detectLineEnding,
@@ -12,7 +7,12 @@ import {
 	generateUnifiedPatch,
 	normalizeToLF,
 	restoreLineEndings,
-} from "./edit-diff.ts";
+} from "@earendil-works/pi-durable/tools/edit-diff";
+import { constants } from "fs";
+import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
+import { type Static, Type } from "typebox";
+import { decodeUtf8, splitBom } from "../../utils/text.ts";
+import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { type EditRenderState, editRenderers } from "./renderers/edit.ts";

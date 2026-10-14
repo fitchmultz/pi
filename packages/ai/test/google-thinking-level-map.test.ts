@@ -209,4 +209,12 @@ describe("Google thinking level maps", () => {
 
 		expect(payload).toMatchObject({ config: { thinkingConfig: { thinkingBudget: 4321 } } });
 	});
+
+	it("retains provider-specific Gemini 2.5 Flash Lite minimum budgets", async () => {
+		const google = await captureGooglePayload(googleModel("gemini-2.5-flash-lite", {}), "minimal");
+		const vertex = await captureVertexPayload(vertexModel("gemini-2.5-flash-lite", {}), "minimal");
+
+		expect(google.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingBudget: 512 });
+		expect(vertex.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingBudget: 128 });
+	});
 });

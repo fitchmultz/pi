@@ -70,6 +70,15 @@ const BUDGETS = {
 		},
 		// The file tools reach their environment helpers and the Harness definitions they need, not the Harness itself.
 		"./tools": { maxFiles: 17, forbid: ["packages/durable/src/images/"] },
+		"./tools/edit-diff": {
+			maxFiles: 1,
+			forbid: [
+				"packages/durable/src/images/",
+				"packages/durable/src/env/",
+				"packages/durable/src/harness/",
+				"index.ts",
+			],
+		},
 	},
 };
 

@@ -10,7 +10,6 @@ import {
 	generateUnifiedPatch,
 	normalizeToLF,
 	restoreLineEndings,
-	stripBom,
 } from "./edit-diff.ts";
 import { requireEnv } from "./env.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
@@ -109,11 +108,18 @@ export function createEditTool(): ToolRegistration<typeof editSchema, EditToolDe
 						throw new Error(`Could not edit file: ${path}. Path is not a file.`);
 					}
 
-					const readResult = await env.readTextFile(absolutePath, context);
+					const readResult = await env.readBinaryFile(absolutePath, context);
 					if (!readResult.ok) throw editAccessError(path, readResult.error);
 					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
 
-					const { bom, text: content } = stripBom(readResult.value);
+					let rawContent: string;
+					try {
+						rawContent = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(readResult.value);
+					} catch {
+						throw new Error("Cannot edit file: input is not valid UTF-8.");
+					}
+					const bom = rawContent.startsWith("\uFEFF") ? "\uFEFF" : "";
+					const content = rawContent.slice(bom.length);
 					const originalEnding = detectLineEnding(content);
 					const normalizedContent = normalizeToLF(content);
 					const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);

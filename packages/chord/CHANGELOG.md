@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- Local and remote references share host-bound context admission and root selection, rejecting foreign or fabricated contexts before method execution ([#10959](https://github.com/earendil-works/pi/issues/10959)).
 - Reject object-transport packing markers in WebSocket text frames so clients cannot bypass packed-payload restrictions.
 - Forked child hosts no longer inherit their parent's `CHORD2_LOCK` unless explicitly configured.
 - `nodeLoader` registers every facet's directory before importing any, so a facet that imports a file of a facet listed after it gets the same module copy as that facet; before, the load order could produce duplicates.

@@ -125,9 +125,9 @@ function delay(ms: number): Promise<void> {
 }
 
 class SlowReadExecutionEnv extends NodeExecutionEnv {
-	override async readTextFile(path: string, context: Context): Promise<Result<string, FileError>> {
+	override async readBinaryFile(path: string, context: Context): Promise<Result<Uint8Array, FileError>> {
 		await delay(20);
-		return super.readTextFile(path, context);
+		return super.readBinaryFile(path, context);
 	}
 }
 
@@ -348,6 +348,74 @@ describe("durable tools", () => {
 	});
 
 	describe("edit", () => {
+		// Regression for upstream #10655: fuzzy edits must not rewrite unrelated text on the same line.
+		it.each(["\n", "\r\n"])("preserves same-line quotes and trailing spaces with %j endings", async (ending) => {
+			const env = createEnv();
+			getOrThrow(
+				await env.writeFile("edit.txt", `const value = “old”; // preserve “note”  ${ending}`, BACKGROUND_CONTEXT),
+			);
+			await run(createEditTool(), { path: "edit.txt", edits: [{ oldText: '"old"', newText: '"new"' }] }, env);
+			expect(getOrThrow(await env.readTextFile("edit.txt", BACKGROUND_CONTEXT))).toBe(
+				`const value = "new"; // preserve “note”  ${ending}`,
+			);
+		});
+
+		it("rejects invalid UTF-8 without changing any bytes", async () => {
+			const env = createEnv();
+			const bytes = Uint8Array.from([0x61, 0x3d, 0x31, 0x0a, 0xe9, 0x0a]);
+			getOrThrow(await env.writeFile("edit.txt", bytes, BACKGROUND_CONTEXT));
+			const { error } = await runFailing(
+				createEditTool(),
+				{ path: "edit.txt", edits: [{ oldText: "a=1", newText: "a=2" }] },
+				env,
+			);
+			expect(Uint8Array.from(getOrThrow(await env.readBinaryFile("edit.txt", BACKGROUND_CONTEXT)))).toEqual(bytes);
+			expect(error).toBeInstanceOf(Error);
+			expect(error.message).toBe("Cannot edit file: input is not valid UTF-8.");
+		});
+
+		it.each(["\n", "\r\n"])(
+			"maps mixed exact and fuzzy edits through Unicode while preserving literal CR (%j)",
+			async (ending) => {
+				const env = createEnv();
+				getOrThrow(
+					await env.writeFile(
+						"edit.txt",
+						`\uFEFFﬃ prefix  ${ending}😀cafe\u0301 “first” tail   ${ending}middle\rCR  ${ending}ＡＢＣ “second” tail   ${ending}keep  ${ending}`,
+						BACKGROUND_CONTEXT,
+					),
+				);
+				await run(
+					createEditTool(),
+					{
+						path: "edit.txt",
+						edits: [
+							{ oldText: "ＡＢＣ", newText: "EXACT" },
+							{ oldText: '"second"', newText: '"SECOND"' },
+							{ oldText: 'café "first"', newText: '"FIRST"' },
+						],
+					},
+					env,
+				);
+				expect(getOrThrow(await env.readTextFile("edit.txt", BACKGROUND_CONTEXT))).toBe(
+					`\uFEFFﬃ prefix  ${ending}😀"FIRST" tail   ${ending}middle\rCR  ${ending}EXACT "SECOND" tail   ${ending}keep  ${ending}`,
+				);
+			},
+		);
+
+		it.each([
+			{ text: "xﬃy", oldText: "fi", newText: "new" },
+			{ text: "x\u{1D400}y", oldText: "\uD835", newText: "new" },
+			{ text: "old", oldText: "old", newText: "\uDC00" },
+		])("rejects unsafe Unicode edits without writing ($text)", async ({ text, oldText, newText }) => {
+			const env = createEnv();
+			getOrThrow(await env.writeFile("edit.txt", text, BACKGROUND_CONTEXT));
+			await expect(run(createEditTool(), { path: "edit.txt", edits: [{ oldText, newText }] }, env)).rejects.toThrow(
+				/Unicode|boundary/,
+			);
+			expect(getOrThrow(await env.readTextFile("edit.txt", BACKGROUND_CONTEXT))).toBe(text);
+		});
+
 		it("applies disjoint edits and returns both diff formats", async () => {
 			const env = createEnv();
 			const original = "alpha\nbeta\ngamma\ndelta\n";
