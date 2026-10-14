@@ -4,7 +4,7 @@ import {
 	applyEditsToNormalizedContent,
 	generateDiffString,
 	generateUnifiedPatch,
-} from "/pi-performance-source/packages/coding-agent/src/core/tools/edit-diff.ts";
+} from "/pi-performance-source/packages/durable/src/tools/edit-diff.ts";
 import { resizeImage } from "/pi-performance-source/packages/coding-agent/src/utils/image-resize.ts";
 import { resizeImageInProcess } from "/pi-performance-source/packages/coding-agent/src/utils/image-resize-core.ts";
 import { loadPhoton } from "/pi-performance-source/packages/coding-agent/src/utils/photon.ts";

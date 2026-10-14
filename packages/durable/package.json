@@ -42,6 +42,12 @@
 			"import": "./dist/tools/index.js",
 			"default": "./dist/tools/index.js"
 		},
+		"./tools/edit-diff": {
+			"source": "./src/tools/edit-diff.ts",
+			"types": "./dist/tools/edit-diff.d.ts",
+			"import": "./dist/tools/edit-diff.js",
+			"default": "./dist/tools/edit-diff.js"
+		},
 		"./images": {
 			"source": "./src/images/index.ts",
 			"types": "./dist/images/index.d.ts",
