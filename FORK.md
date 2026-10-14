@@ -181,12 +181,16 @@ coverage explicitly; remove it when the investigation ends.
 - Default to upstream architecture. Do not re-add a dropped feature without the owner's approval.
 - Behavior covered by upstream replaces the fork version; delete the fork path.
 
-After the v1.0.1 sync, the fork carries reviewed leaf patches for YAML 2.9.1, Chalk
-6.0.1 and Ignore 7.0.11, with the root and generated installer locks kept together.
-Return these pins to upstream when it includes the same or newer fixes. Ignore 7.0.12
-is held by the two-day npm release-age gate. Marked 18.0.14 is deferred: its numeric
-entity decoding turns `&#27;[2J` into an active terminal escape in Pi's Markdown renderer.
-Transport, sandbox, schema, provider SDK and major-version updates remain upstream-led.
+The fork carries the coordinated provider/schema refresh proposed in upstream issue
+[#10909](https://github.com/earendil-works/pi/issues/10909), plus reviewed same-major
+runtime updates for YAML 2.9.1, Chalk 6.0.1, Ignore 7.0.12, Undici 8.11.2 and
+get-east-asian-width 1.7.0 and the fork's streaming-file dependency stream-chain 4.2.6.
+Root and generated installer locks stay together.
+Google GenAI automatic continuation is disabled so Pi still owns retries and cancellation.
+Return these changes to upstream when it includes equivalent behavior. Marked 18.1.1
+is deferred: its numeric entity decoding turns `&#27;[2J` into an active terminal escape
+in Pi's Markdown renderer ([Marked #4141](https://github.com/markedjs/marked/issues/4141)).
+Major-version migrations remain upstream-led.
 
 Dropped in the 1.0 rebuild: working-session checkpoints and safe sleep, `pi convert-session`, the
 old session-performance internals, `pi.recordUsage`, atomic write/edit publication
