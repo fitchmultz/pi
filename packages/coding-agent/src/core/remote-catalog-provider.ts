@@ -8,6 +8,7 @@ import {
 	type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
 import { normalizeCloudflareModel } from "@earendil-works/pi-ai/api/cloudflare";
+import { normalizeKimiCodingModel } from "@earendil-works/pi-ai/api/kimi";
 import { VERSION } from "../config.ts";
 import { fetchWithRetry } from "../utils/management-http.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
@@ -30,10 +31,10 @@ function isSupportedModelType(model: { type?: unknown }): boolean {
 	);
 }
 
-function mergeModels<TModel extends AnyModel>(baseline: readonly TModel[], dynamic: readonly TModel[]): TModel[] {
-	const merged = new Map<string, TModel>();
+function mergeModels(baseline: readonly AnyModel[], dynamic: readonly AnyModel[]): AnyModel[] {
+	const merged = new Map<string, AnyModel>();
 	for (const model of [...baseline, ...dynamic]) {
-		const normalized = normalizeCloudflareModel(model);
+		const normalized = normalizeKimiCodingModel(normalizeCloudflareModel(model));
 		merged.set(`${getModelType(normalized)}\0${normalized.id}`, normalized);
 	}
 	return [...merged.values()];
@@ -114,11 +115,7 @@ export function withRemoteCatalog(
 
 	return {
 		...provider,
-		getModels: () =>
-			mergeModels(
-				provider.getModels(),
-				dynamicModels.filter((model) => isModelType(model, "chat")),
-			),
+		getModels: () => mergeModels(provider.getModels(), dynamicModels).filter((model) => isModelType(model, "chat")),
 		getAllModels: () => mergeModels(provider.getAllModels?.() ?? provider.getModels(), dynamicModels),
 		refreshModels: async (context) => {
 			const stored = context.stored;

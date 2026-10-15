@@ -34,7 +34,8 @@ import type {
 } from "../../types.ts";
 import { nextCursor, type ScanStart, scanStart } from "../scan.ts";
 import type { SqliteDatabase, SqliteExecutor, SqliteValue } from "./database.ts";
-import { applySqliteMigrations } from "./migrations.ts";
+import { applySqliteMigrationsForSchema } from "./migrations.ts";
+import { createSqliteSchema, type SqliteSchema } from "./schema.ts";
 
 type StoredTask = TaskRecord<JsonValue, JsonValue, JsonValue>;
 type TableName = "conversation" | "entry" | "task" | "submission" | "document";
@@ -59,6 +60,14 @@ type DocumentAction = {
 type ScopeColumns = {
 	readonly scopeKind: DocumentRecord["scope"]["kind"];
 	readonly ownerId: number;
+};
+
+export type SqliteStorageOptions = {
+	/**
+	 * Prefix for every table and index in the durable schema. It must be a SQLite identifier and must not use
+	 * SQLite's reserved `sqlite_` prefix. Existing data is not migrated when this changes.
+	 */
+	readonly prefix?: string;
 };
 
 const parseJson = <T>(value: string): T => JSON.parse(value) as T;
@@ -143,26 +152,29 @@ const writeId = (write: StorageWrite): Id<string> | undefined => {
 /** Portable SQLite implementation of the Pico storage contract. */
 export class SqliteStorage implements Storage {
 	private readonly db: SqliteDatabase;
+	private readonly schema: SqliteSchema;
 	private nextId: number;
 	private closed = false;
 	private closing: Promise<void> | undefined;
 	private admittedReads = 0;
 	private readsDrained: (() => void) | undefined;
 
-	private constructor(db: SqliteDatabase, nextId: number) {
+	private constructor(db: SqliteDatabase, schema: SqliteSchema, nextId: number) {
 		this.db = db;
+		this.schema = schema;
 		this.nextId = nextId;
 	}
 
 	/** Initialize storage over an owned SQLite database facade. */
-	static async open(db: SqliteDatabase): Promise<SqliteStorage> {
+	static async open(db: SqliteDatabase, options: SqliteStorageOptions = {}): Promise<SqliteStorage> {
 		try {
-			await applySqliteMigrations(db);
+			const schema = createSqliteSchema(options.prefix);
+			await applySqliteMigrationsForSchema(db, schema);
 			const metadata = await db.get<MetadataRow>(
-				"SELECT next_id, next_seq FROM durable_metadata WHERE singleton = 1",
+				`SELECT next_id, next_seq FROM ${schema.tables.durableMetadata} WHERE singleton = 1`,
 			);
 			if (metadata === undefined) throw new Error("Durable SQLite metadata is missing");
-			return new SqliteStorage(db, Number(metadata.next_id));
+			return new SqliteStorage(db, schema, Number(metadata.next_id));
 		} catch (error) {
 			try {
 				await db.close();
@@ -179,19 +191,23 @@ export class SqliteStorage implements Storage {
 		const candidateNextId = this.candidateNextId(writes);
 		const seq = await this.db.transaction(async (transaction) => {
 			const metadata = await transaction.get<MetadataRow>(
-				"SELECT next_id, next_seq FROM durable_metadata WHERE singleton = 1",
+				`SELECT next_id, next_seq FROM ${this.schema.tables.durableMetadata} WHERE singleton = 1`,
 			);
 			if (metadata === undefined) throw new Error("Durable SQLite metadata is missing");
 			const committedSeq = seqFromNumber(metadata.next_seq);
 			const newClaims = await this.checkGlobalIds(transaction, writes);
 			await this.checkDocumentActions(transaction, documentActions);
 			for (const [id, table] of newClaims) {
-				await transaction.run("INSERT INTO record_ids (id, record_type) VALUES (?, ?)", id, table);
+				await transaction.run(
+					`INSERT INTO ${this.schema.tables.recordIds} (id, record_type) VALUES (?, ?)`,
+					id,
+					table,
+				);
 			}
 			for (const write of writes) await this.applyTableWrite(transaction, write, committedSeq);
 			await this.applyDocumentActions(transaction, documentActions, committedSeq);
 			await transaction.run(
-				"UPDATE durable_metadata SET next_id = ?, next_seq = ? WHERE singleton = 1",
+				`UPDATE ${this.schema.tables.durableMetadata} SET next_id = ?, next_seq = ? WHERE singleton = 1`,
 				String(Math.max(Number(metadata.next_id), candidateNextId)),
 				committedSeq + 1,
 			);
@@ -209,7 +225,7 @@ export class SqliteStorage implements Storage {
 
 	async conversation(id: ConversationId, _context: Context): Promise<ConversationRecord | undefined> {
 		this.assertOpen();
-		const row = await this.db.get<JsonRow>("SELECT record FROM conversations WHERE id = ?", id);
+		const row = await this.db.get<JsonRow>(`SELECT record FROM ${this.schema.tables.conversations} WHERE id = ?`, id);
 		return row === undefined ? undefined : parseJson<ConversationRecord>(row.record);
 	}
 
@@ -234,7 +250,7 @@ export class SqliteStorage implements Storage {
 		}
 		params.push(limit + 1);
 		const rows = await this.db.all<JsonRow>(
-			`SELECT record FROM conversations WHERE ${clauses.join(" AND ")} ORDER BY id ${scan.direction} LIMIT ?`,
+			`SELECT record FROM ${this.schema.tables.conversations} WHERE ${clauses.join(" AND ")} ORDER BY id ${scan.direction} LIMIT ?`,
 			...params,
 		);
 		return page(
@@ -293,7 +309,10 @@ export class SqliteStorage implements Storage {
 			conversation = await this.readConversation(conversationId);
 			if (conversation === undefined) throw new StorageRequestError(`Unknown conversation: ${conversationId}`);
 		}
-		const row = await this.db.get<EntryJsonRow>("SELECT record, commit_seq FROM entries WHERE id = ?", id);
+		const row = await this.db.get<EntryJsonRow>(
+			`SELECT record, commit_seq FROM ${this.schema.tables.entries} WHERE id = ?`,
+			id,
+		);
 		if (row === undefined) return undefined;
 		const entry = parseJson<EntryRecord>(row.record);
 		if (conversation !== undefined) {
@@ -319,11 +338,11 @@ export class SqliteStorage implements Storage {
 			const row =
 				upper === undefined
 					? await this.db.get<JsonRow>(
-							"SELECT record FROM entries WHERE conversation_id = ? AND head IS NOT NULL ORDER BY id DESC LIMIT 1",
+							`SELECT record FROM ${this.schema.tables.entries} WHERE conversation_id = ? AND head IS NOT NULL ORDER BY id DESC LIMIT 1`,
 							conversation.id,
 						)
 					: await this.db.get<JsonRow>(
-							"SELECT record FROM entries WHERE conversation_id = ? AND head IS NOT NULL AND id <= ? ORDER BY id DESC LIMIT 1",
+							`SELECT record FROM ${this.schema.tables.entries} WHERE conversation_id = ? AND head IS NOT NULL AND id <= ? ORDER BY id DESC LIMIT 1`,
 							conversation.id,
 							upper,
 						);
@@ -359,7 +378,7 @@ export class SqliteStorage implements Storage {
 			}
 			params.push(limit + 1 - values.length);
 			const rows = await this.db.all<JsonRow>(
-				`SELECT record FROM entries WHERE ${clauses.join(" AND ")} ORDER BY id DESC LIMIT ?`,
+				`SELECT record FROM ${this.schema.tables.entries} WHERE ${clauses.join(" AND ")} ORDER BY id DESC LIMIT ?`,
 				...params,
 			);
 			values.push(...rows.map((row) => parseJson<EntryRecord>(row.record)));
@@ -404,7 +423,7 @@ export class SqliteStorage implements Storage {
 			}
 			params.push(limit + 1 - values.length);
 			const rows = await this.db.all<JsonRow>(
-				`SELECT record FROM entries WHERE ${clauses.join(" AND ")} ORDER BY id ASC LIMIT ?`,
+				`SELECT record FROM ${this.schema.tables.entries} WHERE ${clauses.join(" AND ")} ORDER BY id ASC LIMIT ?`,
 				...params,
 			);
 			values.push(...rows.map((row) => parseJson<EntryRecord>(row.record)));
@@ -415,7 +434,7 @@ export class SqliteStorage implements Storage {
 
 	async task(id: TaskId, _context: Context): Promise<StoredTask | undefined> {
 		this.assertOpen();
-		const row = await this.db.get<JsonRow>("SELECT record FROM tasks WHERE id = ?", id);
+		const row = await this.db.get<JsonRow>(`SELECT record FROM ${this.schema.tables.tasks} WHERE id = ?`, id);
 		return row === undefined ? undefined : parseJson<StoredTask>(row.record);
 	}
 
@@ -452,7 +471,7 @@ export class SqliteStorage implements Storage {
 		}
 		params.push(limit + 1);
 		const rows = await this.db.all<JsonRow>(
-			`SELECT record FROM tasks WHERE ${clauses.join(" AND ")} ORDER BY id ${scan.direction} LIMIT ?`,
+			`SELECT record FROM ${this.schema.tables.tasks} WHERE ${clauses.join(" AND ")} ORDER BY id ${scan.direction} LIMIT ?`,
 			...params,
 		);
 		return page(
@@ -464,7 +483,7 @@ export class SqliteStorage implements Storage {
 
 	async submission(id: SubmissionId, _context: Context): Promise<SubmissionRecord | undefined> {
 		this.assertOpen();
-		const row = await this.db.get<JsonRow>("SELECT record FROM submissions WHERE id = ?", id);
+		const row = await this.db.get<JsonRow>(`SELECT record FROM ${this.schema.tables.submissions} WHERE id = ?`, id);
 		return row === undefined ? undefined : parseJson<SubmissionRecord>(row.record);
 	}
 
@@ -489,7 +508,7 @@ export class SqliteStorage implements Storage {
 		}
 		params.push(limit + 1);
 		const rows = await this.db.all<JsonRow>(
-			`SELECT record FROM submissions WHERE ${clauses.join(" AND ")} ORDER BY id ${scan.direction} LIMIT ?`,
+			`SELECT record FROM ${this.schema.tables.submissions} WHERE ${clauses.join(" AND ")} ORDER BY id ${scan.direction} LIMIT ?`,
 			...params,
 		);
 		return page(
@@ -506,7 +525,7 @@ export class SqliteStorage implements Storage {
 	): Promise<SubmissionRecord | undefined> {
 		this.assertOpen();
 		const row = await this.db.get<JsonRow>(
-			"SELECT record FROM submissions WHERE conversation_id = ? AND request_id = ?",
+			`SELECT record FROM ${this.schema.tables.submissions} WHERE conversation_id = ? AND request_id = ?`,
 			conversationId,
 			encodeIndexedString(requestId),
 		);
@@ -522,10 +541,10 @@ export class SqliteStorage implements Storage {
 		const parts = addressParts(address);
 		const sql =
 			at === "current"
-				? `SELECT record FROM documents
+				? `SELECT record FROM ${this.schema.tables.documents}
 					WHERE kind = ? AND scope_kind = ? AND owner_id = ? AND family = ? AND key_value = ?
 					AND retired_at IS NULL ORDER BY created_at DESC LIMIT 1`
-				: `SELECT record FROM documents
+				: `SELECT record FROM ${this.schema.tables.documents}
 					WHERE kind = ? AND scope_kind = ? AND owner_id = ? AND family = ? AND key_value = ?
 					AND created_at <= ? AND (retired_at IS NULL OR retired_at > ?)
 					ORDER BY created_at DESC LIMIT 1`;
@@ -563,7 +582,7 @@ export class SqliteStorage implements Storage {
 		}
 		params.push(limit + 1);
 		const rows = await this.db.all<JsonRow>(
-			`SELECT record FROM documents WHERE ${clauses.join(" AND ")} ORDER BY id LIMIT ?`,
+			`SELECT record FROM ${this.schema.tables.documents} WHERE ${clauses.join(" AND ")} ORDER BY id LIMIT ?`,
 			...params,
 		);
 		return page(
@@ -604,7 +623,7 @@ export class SqliteStorage implements Storage {
 	}
 
 	private async readConversation(id: ConversationId): Promise<ConversationRecord | undefined> {
-		const row = await this.db.get<JsonRow>("SELECT record FROM conversations WHERE id = ?", id);
+		const row = await this.db.get<JsonRow>(`SELECT record FROM ${this.schema.tables.conversations} WHERE id = ?`, id);
 		return row === undefined ? undefined : parseJson<ConversationRecord>(row.record);
 	}
 
@@ -613,7 +632,7 @@ export class SqliteStorage implements Storage {
 		id: DocumentId,
 		at: DocumentPoint,
 	): Promise<StoredDocument | undefined> {
-		const row = await executor.get<JsonRow>("SELECT record FROM documents WHERE id = ?", id);
+		const row = await executor.get<JsonRow>(`SELECT record FROM ${this.schema.tables.documents} WHERE id = ?`, id);
 		if (row === undefined) return undefined;
 		const record = parseJson<DocumentRecord>(row.record);
 		if (at !== "current" && isCurrentOnly(record)) {
@@ -622,7 +641,7 @@ export class SqliteStorage implements Storage {
 		if (!isAliveAt(record, at)) return undefined;
 		const upper = at === "current" ? Number.MAX_SAFE_INTEGER : at;
 		const base = await executor.get<RevisionRow>(
-			`SELECT seq, kind, version, content FROM document_revisions
+			`SELECT seq, kind, version, content FROM ${this.schema.tables.documentRevisions}
 				WHERE document_id = ? AND kind = 'base' AND seq <= ? ORDER BY seq DESC LIMIT 1`,
 			id,
 			upper,
@@ -630,7 +649,7 @@ export class SqliteStorage implements Storage {
 		if (base === undefined) throw new Error(`Document ${id} is missing a required base`);
 		let value = parseJson<JsonObject>(base.content);
 		const tail = await executor.all<RevisionRow>(
-			`SELECT seq, kind, version, content FROM document_revisions
+			`SELECT seq, kind, version, content FROM ${this.schema.tables.documentRevisions}
 				WHERE document_id = ? AND seq > ? AND seq <= ? ORDER BY seq`,
 			id,
 			base.seq,
@@ -665,8 +684,9 @@ export class SqliteStorage implements Storage {
 			const document = write.type === "document.create" || write.type === "document.copy";
 			const table: TableName = document ? "document" : write.type;
 			const id = document ? write.record.id : write.value.id;
-			const existing = (await executor.get<RecordIdRow>("SELECT record_type FROM record_ids WHERE id = ?", id))
-				?.record_type;
+			const existing = (
+				await executor.get<RecordIdRow>(`SELECT record_type FROM ${this.schema.tables.recordIds} WHERE id = ?`, id)
+			)?.record_type;
 			const earlier = claimed.get(id);
 			if (table === "conversation" || table === "entry" || table === "document") {
 				if (existing !== undefined) throw new Error(`ID ${id} already belongs to ${existing}`);
@@ -738,14 +758,14 @@ export class SqliteStorage implements Storage {
 			if (action.copy !== undefined && actions.has(action.copy.id)) {
 				throw new Error(`Document copy ${id} source is changed in the copy batch`);
 			}
-			const row = await executor.get<JsonRow>("SELECT record FROM documents WHERE id = ?", id);
+			const row = await executor.get<JsonRow>(`SELECT record FROM ${this.schema.tables.documents} WHERE id = ?`, id);
 			const existing = row === undefined ? undefined : parseJson<DocumentRecord>(row.record);
 			if (action.create === undefined && existing === undefined) throw new Error(`Unknown document: ${id}`);
 			if (action.create !== undefined && existing !== undefined) throw new Error(`Document ${id} already exists`);
 			if (existing?.retiredAt !== undefined) throw new Error(`Document ${id} is retired`);
 			if (action.content?.kind === "delta") {
 				const previous = await executor.get<{ readonly version: number }>(
-					"SELECT version FROM document_revisions WHERE document_id = ? ORDER BY seq DESC LIMIT 1",
+					`SELECT version FROM ${this.schema.tables.documentRevisions} WHERE document_id = ? ORDER BY seq DESC LIMIT 1`,
 					id,
 				);
 				if (previous === undefined) throw new Error(`Document ${id} delta has no base`);
@@ -775,7 +795,7 @@ export class SqliteStorage implements Storage {
 		const parts = addressParts(address);
 		const id = (
 			await executor.get<IdRow>(
-				`SELECT id FROM documents
+				`SELECT id FROM ${this.schema.tables.documents}
 				WHERE kind = ? AND scope_kind = ? AND owner_id = ? AND family = ? AND key_value = ? AND retired_at IS NULL
 				LIMIT 1`,
 				parts.kind,
@@ -792,7 +812,7 @@ export class SqliteStorage implements Storage {
 		switch (write.type) {
 			case "conversation":
 				await executor.run(
-					"INSERT INTO conversations (id, owner_conversation_id, owner_task_id, record) VALUES (?, ?, ?, ?)",
+					`INSERT INTO ${this.schema.tables.conversations} (id, owner_conversation_id, owner_task_id, record) VALUES (?, ?, ?, ?)`,
 					write.value.id,
 					write.value.owner?.conversationId ?? null,
 					write.value.owner?.taskId ?? null,
@@ -801,7 +821,7 @@ export class SqliteStorage implements Storage {
 				break;
 			case "entry":
 				await executor.run(
-					"INSERT INTO entries (id, conversation_id, head, commit_seq, record) VALUES (?, ?, ?, ?, ?)",
+					`INSERT INTO ${this.schema.tables.entries} (id, conversation_id, head, commit_seq, record) VALUES (?, ?, ?, ?, ?)`,
 					write.value.id,
 					write.value.conversationId,
 					write.value.head ?? null,
@@ -811,7 +831,7 @@ export class SqliteStorage implements Storage {
 				break;
 			case "task":
 				await executor.run(
-					`INSERT INTO tasks (id, conversation_id, kind, status, abort_requested, background, record)
+					`INSERT INTO ${this.schema.tables.tasks} (id, conversation_id, kind, status, abort_requested, background, record)
 						VALUES (?, ?, ?, ?, ?, ?, ?)
 						ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id, kind = excluded.kind,
 						status = excluded.status, abort_requested = excluded.abort_requested,
@@ -827,7 +847,7 @@ export class SqliteStorage implements Storage {
 				break;
 			case "submission":
 				await executor.run(
-					`INSERT INTO submissions (id, conversation_id, request_id, status, record) VALUES (?, ?, ?, ?, ?)
+					`INSERT INTO ${this.schema.tables.submissions} (id, conversation_id, request_id, status, record) VALUES (?, ?, ?, ?, ?)
 						ON CONFLICT(id) DO UPDATE SET conversation_id = excluded.conversation_id,
 						request_id = excluded.request_id, status = excluded.status, record = excluded.record`,
 					write.value.id,
@@ -881,7 +901,7 @@ export class SqliteStorage implements Storage {
 				};
 				const parts = addressParts(record);
 				await executor.run(
-					`INSERT INTO documents
+					`INSERT INTO ${this.schema.tables.documents}
 						(id, kind, family, key_value, scope_kind, owner_id, created_at, retired_at, record)
 						VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 					id,
@@ -900,11 +920,11 @@ export class SqliteStorage implements Storage {
 
 			if (content !== undefined) {
 				if (content.kind === "base" && isCurrentOnly(record)) {
-					await executor.run("DELETE FROM document_revisions WHERE document_id = ?", id);
+					await executor.run(`DELETE FROM ${this.schema.tables.documentRevisions} WHERE document_id = ?`, id);
 				}
 				const encodedContent = content.kind === "base" ? encodeJson(content.value) : encodeJson(content.ops);
 				await executor.run(
-					"INSERT INTO document_revisions (document_id, seq, kind, version, content) VALUES (?, ?, ?, ?, ?)",
+					`INSERT INTO ${this.schema.tables.documentRevisions} (document_id, seq, kind, version, content) VALUES (?, ?, ?, ?, ?)`,
 					id,
 					seq,
 					content.kind,
@@ -917,14 +937,14 @@ export class SqliteStorage implements Storage {
 				if (action.create === undefined) {
 					record = { ...record, retiredAt: seq };
 					await executor.run(
-						"UPDATE documents SET retired_at = ?, record = ? WHERE id = ?",
+						`UPDATE ${this.schema.tables.documents} SET retired_at = ?, record = ? WHERE id = ?`,
 						seq,
 						encodeJson(record),
 						id,
 					);
 				}
 				if (isCurrentOnly(record)) {
-					await executor.run("DELETE FROM document_revisions WHERE document_id = ?", id);
+					await executor.run(`DELETE FROM ${this.schema.tables.documentRevisions} WHERE document_id = ?`, id);
 				}
 			}
 		}

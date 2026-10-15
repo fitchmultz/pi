@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { convertMessages } from "../src/api/openai-completions.ts";
 import { getModel, normalizeContext, stream, streamSimple } from "../src/compat.ts";
 import type { AssistantMessage, Model, SimpleStreamOptions, Tool, ToolResultMessage } from "../src/types.ts";
+import { validateToolArguments } from "../src/utils/validation.ts";
 
 const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
@@ -805,6 +806,53 @@ describe("openai-completions tool_choice", () => {
 				arguments: { path: "README.md" },
 			},
 		]);
+	});
+
+	// #10944: optional arguments must not disappear into a successfully validated prefix.
+	it("rejects malformed final tool arguments instead of validating a partial prefix", async () => {
+		const argumentsJson = '{"path":"README.md","offset":.5,"limit":10}';
+		mockState.chunks = [
+			{
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									id: "call_1",
+									type: "function",
+									function: { name: "read", arguments: argumentsJson },
+								},
+							],
+						},
+						finish_reason: "tool_calls",
+					},
+				],
+			},
+		];
+		const tool: Tool = {
+			name: "read",
+			description: "Read file lines",
+			parameters: Type.Object({
+				path: Type.String(),
+				offset: Type.Optional(Type.Number()),
+				limit: Type.Optional(Type.Number()),
+			}),
+		};
+		const model = { ...localOpenAICompletionsModel, id: "local-model", name: "Local Model" };
+		const response = await streamSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "Read a short excerpt", timestamp: 0 }],
+				tools: [tool],
+			},
+			{ apiKey: "test" },
+		).result();
+		expect(response.stopReason).toBe("toolUse");
+		const toolCall = response.content[0];
+		if (toolCall?.type !== "toolCall") throw new Error("Expected toolCall content");
+		expect(() => validateToolArguments(tool, toolCall)).toThrow("Received arguments:");
+		expect(toolCall.argumentsError).toContain(argumentsJson);
 	});
 
 	it("coalesces tool call deltas by stable index when provider mutates ids mid-stream", async () => {

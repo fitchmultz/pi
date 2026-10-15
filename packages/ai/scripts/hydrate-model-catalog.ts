@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { normalizeCloudflareModel } from "../src/api/cloudflare.ts";
+import { normalizeKimiCodingModel } from "../src/api/kimi.ts";
 import type { AnyModel } from "../src/types.ts";
 import {
 	createModelDataManifest,
@@ -55,7 +56,8 @@ export function hydrateModelCatalog(
 		const entries: CatalogEntry[] = [];
 		for (const model of models) {
 			if (!isCatalogEntry(model)) throw new Error(`Model catalog has an invalid entry for provider ${provider}`);
-			entries.push(normalizeCloudflareModel(model as CatalogEntry & AnyModel));
+			const normalized = normalizeKimiCodingModel(normalizeCloudflareModel(model as CatalogEntry & AnyModel));
+			entries.push({ ...normalized, type: model.type });
 		}
 		const grouped = groupProviderModelData(provider, entries);
 		structure[provider] = grouped.structure;

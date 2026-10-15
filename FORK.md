@@ -1,9 +1,12 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `9fe3f371622cad9cc1a3cbf044288abd0252192f`
-(2026-10-14), including v1.2.0 and its follow-up fixes. It is upstream plus the features
+v1.0.0 and synchronized through upstream `5ab7fe74c400097b386662205cd93900695b8a71`
+(2026-10-15), including v1.2.0 and its follow-up fixes. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
+
+The [2026-10-15 integration record](docs/upstream-sync-2026-10-15.md) documents the
+measured divergence, preserved callers, new regressions and verification commands.
 
 ## Fork features
 
@@ -16,7 +19,7 @@ all-platform qualification.
 | --- | --- | --- | --- |
 | Managed restart: same-session replacement without replay, with readiness rollback | `cli/{launcher,restart-protocol}.ts`, `extensions/restart/`, `cli-launcher.ts` | `restart-launcher.test.ts`, `restart-tui.test.ts`, `restart-guidance.test.ts` | [Restart](packages/coding-agent/docs/restart.md) |
 | Detached `background_command`: durable jobs/logs and completion delivery | `extensions/background-command/`, worker asset in `config.ts` | `background-command-process.test.ts`, `suite/background-command-{session,guards}.test.ts`, `scripts/smoke-test-background-command-bundle.mjs` | [Background commands](packages/coding-agent/docs/background-command.md) |
-| `discover_tools`: initial capability summaries, full prior-turn instructions and stable positional declarations | `extensions/instruction-groups/`, narrow `refreshTools()` seam in `core/{agent-session,extensions/loader,extensions/types}.ts` | `suite/instruction-groups.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Instruction groups](packages/coding-agent/docs/instruction-groups.md) |
+| `discover_tools`: initial capability summaries, full prior-turn instructions and stable positional declarations | `extensions/instruction-groups/`, native deferred-tool restore in `core/agent-session.ts`, narrow `refreshTools()` seam in `core/{agent-session,extensions/loader,extensions/types}.ts` | `suite/instruction-groups.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Instruction groups](packages/coding-agent/docs/instruction-groups.md) |
 | JSON `read`: selection before paging/truncation, inherited by native factory consumers | `core/tools/{read,read-json}.ts` | `read-json.test.ts` | [SDK](packages/coding-agent/docs/sdk.md#json-selection-with-read) |
 | Compact activity: regroup native cards without replacing the whole TUI | `modes/interactive/{interactive-mode,components/activity}.ts`, card renderers, `core/settings-manager.ts` | `compact-view.test.ts`, `suite/regressions/compact-view.test.ts` | [Settings](packages/coding-agent/docs/settings.md) |
 | Immutable fork update: exact source/catalog, frozen install and guarded selection | `utils/{fork-update,fork-release-store}.ts`, `scripts/install-fork.mjs` | `fork-update.test.ts`, `scripts/install-fork.test.mjs` | [Install and activate](#install-and-activate) |
@@ -29,6 +32,10 @@ all-platform qualification.
 | Cloudflare Claude catalogs: canonical IDs and qualified Opus 5.5 positional controls/cache lifetimes | `packages/ai/src/api/cloudflare.ts`, generator/provider, `packages/ai/scripts/hydrate-model-catalog.ts` and `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Providers](packages/coding-agent/docs/providers.md), [Cache lifetimes](packages/coding-agent/docs/models.md#prompt-cache-lifetimes) |
 | Path hyperlinks: Markdown paths stay clickable after wrapping; terminals only regex-match one row and the source-transform seam cannot see codespans or code blocks | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` | [Terminal setup](packages/coding-agent/docs/terminal-setup.md#override-detected-capabilities) |
 
+Complete working state also depends on the queue/admission APIs in
+`packages/agent/src/agent.ts`, resource/settings capture, and bounded artifact I/O in
+`utils/streaming-file.ts`; these are part of the retained capability, not redundant helpers.
+
 ### Retained correctness deltas
 
 These fixes remain until upstream supplies equivalent behavior, not merely closes a report.
@@ -36,20 +43,24 @@ Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
 Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
 Empty quoted prompt-template arguments now follow upstream's token parser and positional-default regression coverage ([#10867](https://github.com/earendil-works/pi/issues/10867)); the equivalent fork implementation and tests are retired.
-Transcript resume now uses upstream's recorded active-tool loadout and `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785)); explicit tool selection and exclusion keep their precedence. Native complete working-session restore retains its saved current loadout and modifier policy.
+Transcript resume uses upstream's recorded active-tool loadout and `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785)). The fork reconciles temporarily deferred discovery tools when discovery is disabled or absent; explicit selections, exclusions and later deselection remain authoritative across subsequent resumes. Native complete working-session restore retains its exact saved current loadout and modifier policy.
 Claude 5.5 catalog entries now use upstream's models.dev metadata rather than the removed fallback definitions.
 OpenCode Go's Google adapter and inference endpoints now follow upstream; `packages/ai/test/opencode-provider-headers.test.ts` retains the Gemini routing regression guard.
 The Chord service-hydration array check ([#10509](https://github.com/earendil-works/pi/issues/10509)) was retired with upstream's Chord 2 runtime: the service runtime is gone, and every link, including the in-memory one, JSON-round-trips frames.
+Chord reference admission now follows upstream's foreign-context checks and root handling.
+The fork's shared admission helper and supporting type changes are retired; the local/client/host
+regression matrix remains in `packages/chord/test/review.test.ts`.
 See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),
 [Codemode](packages/codemode/CHANGELOG.md#unreleased) and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
+| Legacy published Kimi Coding catalogs must not break offline builds or revert the native OpenAI protocol on fetched/cached overlays; preserve effort/tool constraints and K3 cache-write pricing | `packages/ai/src/api/kimi.ts`, `packages/ai/scripts/{generate-models,hydrate-model-catalog}.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts` |
 | Git footers must catch branch changes missed while native watchers and polling baselines start | `core/footer-data-provider.ts` | `footer-data-provider.test.ts` |
 | Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates | `core/{cache-warmer,model-runtime,sdk}.ts`, `modes/interactive/interactive-mode.ts` | `cache-warmer.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
 | WebSocket text frames must not decode object-transport packing markers and bypass untrusted-client compression restrictions | `packages/chord/src/link.ts` | `packages/chord/test/websocket.test.ts` |
-| Local and remote references must reject foreign contexts before dispatch and share root admission ([#10959](https://github.com/earendil-works/pi/issues/10959)) | `packages/chord/src/{object,remote}.ts` | `packages/chord/test/review.test.ts` |
+| Releasing the last state view during hydration must not strand a shared method-only reference | `packages/chord/src/remote.ts` | `packages/chord/test/bindings.test.ts` |
 | Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `utils/shell.ts`, `packages/coding-agent/examples/extensions/sandbox/index.ts`, `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
 | Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
 | HTML export must not replace the journal through any alias | `core/export-html/index.ts` | `file-safety.test.ts` |
@@ -140,8 +151,12 @@ Nix retains its nine raw named archives. Pinned fleet automation has migrated to
 and the obsolete `scripts/coding-agent-consumer.mjs` shim has been removed.
 Retained offline comparison fixtures are documented in [Performance reproduction](docs/performance.md).
 
-Chord follows upstream's protocol 3, contract-owned placement, typed principals, named declarations,
+Chord follows upstream's protocol 4, contract-owned placement, typed principals, named declarations,
 per-cell versions and initialization, host lifetimes, and reload/code-generation retirement.
+`host.get` and `ctx.get` await readiness and state hydration; `host.hold` is the synchronous
+acquisition API. Protocol peers must upgrade together. Durable uses upstream's shared
+`@earendil-works/chord/output` implementation. Its public `utf8ByteLength` helper also
+backs Durable's internal truncation utilities.
 It also follows upstream's schema-derived frame types, stricter contract tokens and error codes,
 large-payload deflation, acknowledgement-based state flow control, and optional per-link call limits.
 `Link.send` reports encoded sizes when available; call results may overtake waiting state. The fork
@@ -155,8 +170,9 @@ saved/scoped selections when a provider's auth check fails. Codemode follows ups
 cancellation and two-live-worker admission limit, with the fork's safe arbitrary store keys retained.
 
 Streaming tool-call JSON now follows upstream's invalid `\u` repair without losing later fields,
-while retaining span-based repair and the original partial-parser fallback order. Anthropic error
-tool results replace images with text notes; successful result images and error text are preserved.
+while retaining span-based repair and the original partial-parser fallback order. Anthropic and
+Bedrock Claude error-result images follow all tool results of the turn; error text and successful
+result images retain their native placement.
 These behaviors have offline parser/payload regression coverage, not a live provider qualification.
 `/share` supports an explicit gist or Radius destination; its default `auto` selection is unchanged.
 
@@ -172,7 +188,10 @@ catalog entries with a non-canonical `baseUrl` do not receive these defaults.
 
 Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3 keeps
 the published $3/M five-minute cache-write rate, including Kimi Coding's implied
-estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)). Claude 5.5 pricing now follows
+estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)). Kimi Coding's shared
+metadata helper also migrates canonical legacy Anthropic catalog entries during
+offline hydration and fetched/cached runtime merges. Native OpenAI entries, custom
+endpoints and other providers are unchanged. Claude 5.5 pricing now follows
 models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`
@@ -193,7 +212,8 @@ coverage explicitly; remove it when the investigation ends.
 The fork carries the coordinated provider/schema refresh proposed in upstream issue
 [#10909](https://github.com/earendil-works/pi/issues/10909), plus reviewed same-major
 runtime updates for YAML 2.9.1, Chalk 6.0.1, Ignore 7.0.12, Undici 8.11.2 and
-get-east-asian-width 1.7.0 and the fork's streaming-file dependency stream-chain 4.2.6.
+get-east-asian-width 1.7.0 and the fork's streaming-file dependencies stream-chain 4.2.6
+and stream-json 3.7.0.
 Root and generated installer locks stay together.
 Google GenAI automatic continuation is disabled so Pi still owns retries and cancellation.
 Generative AI and Vertex share stream processing and request construction in
@@ -291,7 +311,9 @@ a staged release without selecting it. See [restart.md](packages/coding-agent/do
 
 `pi update --fork` does the fetch, build, stage and activate steps for you from the latest
 `fitchmultz/pi` main. It only updates an existing selector installation and leaves the previous
-release selectable at `<selector>.previous`. Its selector is
+release selectable at `<selector>.previous`. Unlike the manual installer's default, this
+owner-authorized updater accepts routine catalog removals and prints every removed ID;
+malformed or empty catalogs still fail closed. Its selector is
 `$(npm root -g)/@earendil-works/pi-coding-agent`; on Termux it is
 `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` with `~/.local/bin/pi`.
 

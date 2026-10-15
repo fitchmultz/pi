@@ -6,9 +6,14 @@
 
 - The env conformance suite now checks that aborting POSIX shell commands stops all process-group descendants without letting waiting shells run later steps. Custom environments may need changes to pass.
 
+### Added
+
+- `SqliteStorage.open(database, { prefix })` can namespace every table and index; `openNodeSqliteStorage()` and `openDurableObjectSqliteStorage()` forward it, for databases shared with host tables.
+
 ### Changed
 
 - Reduced retained-context scheduling and historical-read work, skipped redundant SQLite writes and avoided repeated copying of partial lines.
+- Cloudflare Durable Object SQLite adapters created for the same storage object now coordinate their operations, allowing multiple Pi storages to safely share one Durable Object database.
 
 ### Fixed
 
