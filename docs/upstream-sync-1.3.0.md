@@ -196,8 +196,8 @@ before merge; fresh catalog comparison and immutable installed-runtime tests mus
 pass before activation. The prior release remains available for rollback.
 
 Offline payloads do not establish live provider acceptance, billing or cache hits.
-Nix and non-host operating systems need their CI/platform checks. Windows,
-Termux-device and hosted Axiom behavior are not qualified by macOS tests. The
+Nix and non-host operating systems need their CI/platform checks. Windows and
+Termux-device behavior are not qualified by macOS tests. The
 pre-existing example-only Gondolin dependency reports a node-forge advisory with
 no available npm fix; no exploit in Pi's supported runtime was demonstrated, and
 this integration does not change that dependency.

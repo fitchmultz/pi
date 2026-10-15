@@ -252,7 +252,7 @@ directory is task-owned: the build script replaces its contents.
 The PR is mergeable only after configured CI and applicable review requirements
 pass and actionable findings are resolved. Chord protocol 4 peers must upgrade
 together; synchronous acquisition now uses `hold`, while `get` awaits readiness.
-Live paid-provider, Windows, Termux-device and hosted Axiom behavior are not
+Live paid-provider, Windows and Termux-device behavior are not
 qualified by offline tests. Local Nix qualification depends on CI because Nix is
 not installed on the development host. Merge and runtime activation remain an
 explicit later owner action for this task.

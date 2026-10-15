@@ -139,7 +139,7 @@ installer. Direct registry dependencies, including internal packages and the ret
 Chord dependency, use upstream's exact-version policy. It uses upstream's pre-commit hook and
 `npm run check`. Delivery evidence comes from
 `./test.sh`, installer/consumer tests, bundle smoke, and Linux/macOS CI; it does not establish live
-Windows, Termux-device or hosted Axiom acceptance.
+Windows or Termux-device acceptance.
 
 Configuration schemas, shared settings defaults, strict theme validation, and native fake-cursor
 markers follow upstream. `SettingsSchema` also describes the fork's `compactView` boolean or
@@ -217,6 +217,8 @@ coverage explicitly; remove it when the investigation ends.
 - Patch core only when no public seam exists. Keep the patch small and list it in the table above.
 - Default to upstream architecture. Do not re-add a dropped feature without the owner's approval.
 - Behavior covered by upstream replaces the fork version; delete the fork path.
+- Keep fork behavior and delivery checks grounded in Pi's supported workflows, not
+  downstream-application-specific requirements.
 
 The fork carries the coordinated provider/schema refresh proposed in upstream issue
 [#10909](https://github.com/earendil-works/pi/issues/10909), plus reviewed same-major
@@ -245,9 +247,7 @@ framework (1.0 already keeps prompts deterministic; only the observed instructio
 rewrite needed a fix). Dropped after the rebuild: overflow recovery through compaction hooks when
 nothing is old enough to summarize. It offered tiny, misreported overflows to hooks, against
 Posthorse's native-eligibility contract, and official 1.0 recovers a real full-window overflow
-after a reset on the next prompt. The live PTY RPC-to-TUI handoff (`attach_tui`) is also dropped:
-it is Axiom-specific, and Axiom pins `fitchmultz/pi` 7ca602dd and carries its own port. Reference
-implementation: 63401a044.
+after a reset on the next prompt. The live PTY RPC-to-TUI handoff (`attach_tui`) is also dropped.
 
 The focused native working-session and provider-auth-fallback APIs above are owner-authorized additions to the 1.0 foundation `a74a93cbbb17d8affae01f1b269f5e079cbb9ea3`. They do not restore the old checkpoint stack or `ambientAuth` API. Consumers must record the effective source including these additions; the foundation SHA alone does not identify this behavior.
 
