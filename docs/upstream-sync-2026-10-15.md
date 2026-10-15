@@ -93,10 +93,14 @@ used.
   duplicate old omission fixture. Combined test source is 247 → 163 lines;
   this is test maintenance reduction, not production performance.
 - **Models:** fresh hydration contains 1,609 chat models and 1,706 typed entries.
-  Compared with the pre-edit hydrated snapshot: zero IDs added or removed,
-  nine metadata entries changed. Model bytes are ignored build inputs; the
-  ordinary immutable installer will freeze them when this PR is merged and
-  staged. No unmerged runtime was activated.
+  Compared with the pre-edit hydrated snapshot: two IDs added, two removed and
+  ten metadata entries changed. The final refresh added
+  `opencode/nemotron-3.5-super-vl-free` and
+  `openrouter/nvidia/nemotron-3.5-super-vl:free`; OpenCode Go dropped
+  `minimax-m2.7` and `grok-4.6`. These are live catalog changes, not removed fork
+  capabilities. The earlier refresh had no ID changes. Model bytes are ignored
+  build inputs; the ordinary immutable installer will freeze them when this PR
+  is merged and staged. No unmerged runtime was activated.
 
 ## Proven failures
 
@@ -122,12 +126,34 @@ allowlists/exclusions, optional tools and separately deselected tools are
 negative controls. Native restoration now returns only the selected tools saved
 as temporarily suppressed when discovery is inactive or absent. The same failure was reproduced
 when settings disable the builtin on reload and is also repaired. The next
-unmanaged run retires returned deferrals, so later resume/discovery cannot undo
-explicit deselection. Delayed registration uses native pending tools; complete
-working-session restoration preserves its exact saved loadout and journal.
-Historical declarations remain unchanged. The public SDK reproduction passes
-eight selection scenarios; 145 focused tests cover these and the existing
-prompt-prefix, working-session and default-tool contracts.
+run reconciles old deferrals before discovery suppresses the new selection, so
+later resume/discovery cannot undo an explicit allowlist, exclusion or
+deselection. Newly selected optional tools remain selected. Delayed registration
+uses native pending tools; complete working-session restoration preserves its
+exact saved loadout and journal. Historical declarations remain unchanged. The
+public SDK reproduction passes 13 selection scenarios and seven sequential
+resumes; 150 focused tests cover these and the existing prompt-prefix,
+working-session and default-tool contracts.
+
+### Published Kimi catalog breaks Nix builds and reverts runtime metadata
+
+All three Nix platforms failed because the pinned catalog still describes Kimi
+Coding as Anthropic while its provider now uses OpenAI Chat Completions. The
+actual hash-verified pinned body reproduces the compile failure. The live
+published body is also legacy, so merely advancing the pin cannot repair it.
+A newer fetched or cached body also replaces an offline-hydrated OpenAI baseline
+with the legacy protocol at runtime; this was independently reproduced without
+network access using the actual published body.
+
+One shared helper now supplies the existing generator metadata and migrates
+canonical legacy Kimi Coding entries in hydration and runtime catalog merging.
+It preserves model IDs, non-protocol metadata, effort levels, Highspeed's tool
+constraints and the fork's K3 cache-write rate. Native OpenAI metadata, custom
+endpoints and other providers remain unchanged. The actual pinned 1,631-entry
+and live 1,706-entry catalogs both hydrate and compile. Relative to existing
+Cloudflare normalization, only four Kimi entries change, with zero unrelated
+changes or ID additions/removals. Tests cover fetched and restored overlays.
+No catalog publication, pin change or provider downgrade was needed.
 
 ### Upstream fixes verified at executable boundaries
 
@@ -151,15 +177,15 @@ Verified locally on macOS arm64, Node 24.21.0 and Bun 1.3.14:
 
 | Check | Result |
 | --- | --- |
-| `npm run check` | Passed; 1,540 files checked, no formatting fixes or diagnostics |
+| `npm run check` | Passed; 1,541 files checked, no formatting fixes or diagnostics |
 | `npm run build:offline` | Passed all 10 build workspaces; Node/Bun bundles produced |
 | Full `./test.sh` with the built `PI_TEST_COMPILED_CLI` | Passed; includes real-tmux Node restart and standalone extension resolution |
-| AI / coding-agent / Chord | 1,485 / 3,249 / 527 tests passed |
+| AI / coding-agent / Chord | 1,492 / 3,255 / 527 tests passed |
 | Durable, normal and immediate retention | 1,280 tests passed in each run |
 | Public package consumer installs | All 10 isolated npm consumers passed |
 | Bundled detached background job | Survived CLI exit and produced exact raw output |
 | Node and Bun CLI Codemode smoke | Both completed a local SSE tool-call/reply round trip |
-| SQLite fixture and SDK resume reproduction | Identical work/output witnesses; all eight resume scenarios passed |
+| SQLite fixture and SDK resume reproduction | Identical work/output witnesses; 13 scenarios and seven sequential resumes passed |
 
 The suite intentionally skips live-provider/e2e and unavailable-platform cases;
 these are not counted as passing. Consumer installation emits the existing
@@ -180,6 +206,10 @@ External runnable regression commands from the repository root:
   --root packages/coding-agent test/suite/instruction-groups.test.ts \
   test/suite/prompt-cache-prefix.test.ts test/suite/working-session.test.ts \
   test/default-tools-setting.test.ts
+./test.sh -- node node_modules/vitest/dist/cli.js --run \
+  --root packages/ai test/model-data-validation.test.ts
+./test.sh -- node node_modules/vitest/dist/cli.js --run \
+  --root packages/coding-agent test/remote-catalog-provider.test.ts
 ```
 
 Reproduce the packaged checks after `npm ci --ignore-scripts`,

@@ -95,10 +95,11 @@ When `discover_tools` is inactive or absent, the builtin does not manage instruc
 or gate calls, and owners supply their eager fallback. Journal resume and tree
 navigation restore the selected tools discovery deferred when discovery is inactive
 or absent; disabling the builtin on reload also gives them back. Allowlists,
-exclusions and resume tool modifiers still apply. The next unmanaged run retires
-returned deferrals so later restores do not undo explicit deselection; excluded
-tools remain deferred. Complete working-session restore keeps its exact saved
-loadout and journal until new input starts a run.
+exclusions and resume tool modifiers still apply. On the next run, the current
+selection supersedes old deferrals: unmanaged runs retire them, and explicit
+allowlists keep only still-selected tools deferred. Later default resumes therefore
+do not undo exclusions or deselection. Complete working-session restore keeps its
+exact saved loadout and journal until new input starts a run.
 
 A replacement discover tool must implement the collector contract to manage owners;
 otherwise owners remain eager.

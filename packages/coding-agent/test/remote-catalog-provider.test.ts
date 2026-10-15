@@ -8,6 +8,7 @@ import {
 	type Provider,
 	type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
+import { kimiCodingProvider } from "@earendil-works/pi-ai/providers/kimi-coding";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VERSION } from "../src/config.ts";
 import {
@@ -78,6 +79,36 @@ async function refreshProvider(
 afterEach(() => vi.restoreAllMocks());
 
 describe("remote catalog provider", () => {
+	it("migrates fetched and restored legacy Kimi Coding catalogs over an offline-hydrated baseline", async () => {
+		const baseline = kimiCodingProvider().getModels();
+		const legacy = baseline.map((entry) => ({
+			...entry,
+			name: `Published ${entry.id}`,
+			api: "anthropic-messages",
+			baseUrl: "https://api.kimi.com/coding",
+			compat: { allowEmptySignature: true, forceAdaptiveThinking: true },
+			thinkingLevelMap: entry.id === "kimi-for-coding-highspeed" ? undefined : entry.thinkingLevelMap,
+			cost: { ...entry.cost, cacheWrite: 0 },
+		}));
+		const expected = baseline.map((entry) => ({ ...entry, name: `Published ${entry.id}` }));
+		const fetchSpy = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValue(
+				new Response(JSON.stringify(legacy), { headers: { "last-modified": "Thu, 15 Oct 2026 00:00:00 GMT" } }),
+			);
+		// Nix's deterministic hydration stamp is 1970, so the published body is newer.
+		const makeProvider = () => withRemoteCatalog(kimiCodingProvider(), "https://pi.dev", 0);
+		const store = new InMemoryModelsStore();
+		const provider = makeProvider();
+		await refreshProvider(provider, store);
+		expect(provider.getModels()).toEqual(expected);
+		const restored = makeProvider();
+		await refreshProvider(restored, store, { allowNetwork: false });
+		expect(restored.getModels()).toEqual(expected);
+		expect(restored.getAllModels?.()).toEqual(expected);
+		expect(fetchSpy).toHaveBeenCalledTimes(1);
+	});
+
 	// #127: newer pi.dev overlays must not reintroduce the invalid dotted passthrough ID.
 	it("normalizes fetched and restored Cloudflare Claude IDs before merging with the baseline", async () => {
 		const baseline: Model<"anthropic-messages"> = {

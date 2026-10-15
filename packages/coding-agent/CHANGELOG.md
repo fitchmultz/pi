@@ -36,7 +36,8 @@
 
 ### Fixed
 
-- Fixed journal resume, tree navigation and builtin-disabling reload losing selected tools deferred by instruction discovery; eager fallback preserves tool restrictions and later deselection without changing historical declarations.
+- Fixed journal resume, tree navigation and builtin-disabling reload losing selected tools deferred by instruction discovery; eager fallback preserves explicit selections, exclusions and later deselection across subsequent resumes without changing historical declarations.
+- Fixed newer fetched or cached legacy Kimi Coding catalogs reverting the native OpenAI protocol and tool/thinking compatibility after offline hydration.
 - Fixed stale footer branches when a branch change is missed during Git watcher startup.
 - Fixed model refreshes rereading every provider's model catalog once per provider, which slowed startup and raised memory use, more so when an extension registered or overrode a provider. Each refresh now reads a provider's catalog a fixed number of times.
 - Fixed provider availability refreshes resolving an isolated routing provider's ignored stored API key, which could run that account's secret-manager command or fail its readiness.

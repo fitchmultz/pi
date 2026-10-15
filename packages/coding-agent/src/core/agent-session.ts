@@ -477,8 +477,8 @@ export class AgentSession {
 	 * `setActiveToolsByName()` deactivates a tool or the next agent run starts.
 	 */
 	private _pendingToolNames = new Set<string>();
-	/** Remaining discovery deferrals to persist only once an unmanaged run starts. */
-	private _deferredToolRecord?: string[];
+	/** Reconcile saved discovery deferrals with the current selection on the first run. */
+	private _retireDeferredTools = false;
 	private _usesDefaultTools: boolean;
 	private _defaultToolModifiers: string[];
 	/** Original patterns retained for native working-session persistence. */
@@ -556,6 +556,7 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		if (this._usesDefaultTools) this._restoreToolsFromTranscript(this._defaultToolModifiers);
+		else this._retireDeferredTools = this._getDeferredToolNames().length > 0;
 		this.agent.beforeMutation = this.workingSessionGate.beforeMutation;
 		this.sessionManager.beforeMutation = this.workingSessionGate.beforeMutation;
 		this.settingsManager.beforeMutation = this.workingSessionGate.beforeMutation;
@@ -795,11 +796,7 @@ export class AgentSession {
 		this._pendingToolNames = new Set([...memory.activeTools, ...memory.pendingTools]);
 		this._refreshToolRegistry({ activeToolNames: memory.activeTools });
 		this._setActiveTools([...memory.activeTools, ...memory.pendingTools]);
-		const deferred = this._getDeferredToolNames();
-		this._deferredToolRecord =
-			deferred.length && !this.getActiveToolNames().includes("discover_tools")
-				? deferred.filter((name) => !this._isAllowedTool(name))
-				: undefined;
+		this._retireDeferredTools = this._getDeferredToolNames().length > 0;
 		this._baseSystemPromptOptions = memory.prompt;
 		this._runSystemPromptOptions = memory.runPrompt;
 		for (const [name, value] of memory.flags)
@@ -2156,14 +2153,13 @@ export class AgentSession {
 	 */
 	private _restoreToolsFromTranscript(modifiers: readonly string[] = []): void {
 		this._pendingToolNames.clear();
-		this._deferredToolRecord = undefined;
+		const deferred = this._getDeferredToolNames();
+		this._retireDeferredTools = deferred.length > 0;
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
 		if (!current) return;
 		const declared = (current.toolsAdded ?? []).map((tool) => tool.name);
 		let names = applyToolModifiers(declared, modifiers);
 		if (!(names.includes("discover_tools") && this._toolRegistry.has("discover_tools"))) {
-			const deferred = this._getDeferredToolNames();
-			if (deferred.length) this._deferredToolRecord = deferred.filter((name) => !this._isAllowedTool(name));
 			names = applyToolModifiers([...new Set([...declared, ...deferred])], modifiers);
 		}
 		this._pendingToolNames = new Set(names.filter((name) => this._isAllowedTool(name)));
@@ -2210,13 +2206,6 @@ export class AgentSession {
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
 		this._failedResponse = undefined;
 		this._recordSelection();
-		if (this._deferredToolRecord && !this.getActiveToolNames().includes("discover_tools")) {
-			this.sessionManager.appendCustomEntry("pi:instruction-groups", {
-				enabled: [],
-				inactive: this._deferredToolRecord,
-			});
-		}
-		this._deferredToolRecord = undefined;
 		// The run records the loadout in the transcript; restored tools that did not register by now
 		// are dropped, so a tool that never registers does not stay pending.
 		this._pendingToolNames.clear();
@@ -2257,6 +2246,23 @@ export class AgentSession {
 			await this._checkCompaction(lastAssistant, false);
 		}
 
+		// Retire old deferrals before discovery suppresses this run's selected tools.
+		if (this._retireDeferredTools) {
+			const deferred = this._getDeferredToolNames();
+			const active = new Set(this.getActiveToolNames());
+			const selected = new Set(
+				this._usesDefaultTools || this._restoredWorkingSession
+					? applyToolModifiers(
+							deferred.filter((name) => this._isAllowedTool(name)),
+							this._defaultToolModifiers,
+						)
+					: [...active, ...this._pendingToolNames],
+			);
+			const inactive = active.has("discover_tools") ? deferred.filter((name) => selected.has(name)) : [];
+			if (inactive.length !== deferred.length)
+				this.sessionManager.appendCustomEntry("pi:instruction-groups", { enabled: [], inactive });
+			this._retireDeferredTools = false;
+		}
 		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
 		const result = await this._extensionRunner.emitBeforeAgentStart(trigger, this._baseSystemPromptOptions);
 		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
@@ -4123,7 +4129,7 @@ export class AgentSession {
 		});
 		if (wasManaged && !this.getActiveToolNames().includes("discover_tools")) {
 			const deferred = this._getDeferredToolNames();
-			if (deferred.length) this._deferredToolRecord = deferred.filter((name) => !this._isAllowedTool(name));
+			this._retireDeferredTools = deferred.length > 0;
 			for (const name of deferred) if (this._isAllowedTool(name)) this._pendingToolNames.add(name);
 			this._setActiveTools([...this.getActiveToolNames(), ...deferred]);
 		}

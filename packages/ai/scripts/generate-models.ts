@@ -5,6 +5,13 @@ import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { getEffortThinkingLevelMap, type ModelsDevReasoningOption } from "./models-dev-reasoning-options.ts";
 import { type AiGatewayPricing, getAiGatewayCost } from "./ai-gateway-pricing.ts";
+import {
+	getKimiCodingMetadata,
+	KIMI_CODING_K3_STYLE_MODEL_IDS,
+	KIMI_K3_COST,
+	KIMI_K3_OPENAI_COMPAT,
+	KIMI_OPENAI_COMPAT,
+} from "../src/api/kimi.ts";
 import { buildOpenRouterCatalog, type OpenRouterCatalog, type OpenRouterModelListItem } from "./openrouter-catalog.ts";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
@@ -339,29 +346,6 @@ const QWEN_TOKEN_PLAN_INDIVIDUAL_MODEL_IDS = new Set<string>([
 ]);
 
 const KIMI_K3_MAX_TOKENS = 131072;
-// Default five-minute cache writes: https://platform.kimi.ai/docs/pricing/chat
-const KIMI_K3_COST = {
-	input: 3,
-	output: 15,
-	cacheRead: 0.3,
-	cacheWrite: 3,
-} as const;
-// Kimi Chat Completions settings shared by Moonshot and Kimi Coding.
-const KIMI_OPENAI_COMPAT: OpenAICompletionsCompat = {
-	supportsStore: false,
-	supportsDeveloperRole: false,
-	supportsReasoningEffort: false,
-	maxTokensField: "max_tokens",
-	supportsStrictMode: false,
-	thinkingFormat: "deepseek",
-};
-// Kimi K3-style models take reasoning_effort and need earlier reasoning sent back.
-const KIMI_K3_OPENAI_COMPAT: OpenAICompletionsCompat = {
-	...KIMI_OPENAI_COMPAT,
-	requiresReasoningContentOnAssistantMessages: true,
-	thinkingFormat: "openai",
-	supportsReasoningEffort: true,
-};
 const OPENROUTER_KIMI_K3_MODEL_IDS = new Set(["moonshotai/kimi-k3", "~moonshotai/kimi-latest"]);
 
 const ANT_LING_RING_THINKING_LEVEL_MAP = {
@@ -1787,11 +1771,6 @@ const KIMI_CODING_IMPLIED_COSTS: Record<string, Model<Api>["cost"]> = {
 	"kimi-for-coding": { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
 	"kimi-for-coding-highspeed": { input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 },
 };
-// Models whose https://api.kimi.com/coding/v1/models entry reports effort levels and
-// dynamic tool loading (tools declared in later system messages). Highspeed reports
-// neither and rejects tool-bearing system messages with a 400.
-const KIMI_CODING_K3_STYLE_MODEL_IDS = new Set(["k3", "k3-256k", "kimi-for-coding"]);
-
 // Kimi Coding uses Chat Completions, the same protocol as the official Kimi Code client.
 function createKimiCodingModels(kimiModels: Record<string, ModelsDevModel>): Model<"openai-completions">[] {
 	const models: Model<"openai-completions">[] = [];
@@ -1806,15 +1785,8 @@ function createKimiCodingModels(kimiModels: Record<string, ModelsDevModel>): Mod
 		models.push({
 			id: modelId,
 			name: m.name || modelId,
-			api: "openai-completions",
 			provider: "kimi-coding",
-			baseUrl: "https://api.kimi.com/coding/v1",
-			compat: {
-				...(isK3Style ? KIMI_K3_OPENAI_COMPAT : KIMI_OPENAI_COMPAT),
-				// All models accept system text after the conversation starts.
-				supportsMidConvoSystemMessages: true,
-				...(isK3Style ? { supportsMidConvoToolAdditions: true } : {}),
-			},
+			...getKimiCodingMetadata(modelId, effortLevels),
 			reasoning: m.reasoning === true,
 			input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
 			cost: {
@@ -1825,8 +1797,6 @@ function createKimiCodingModels(kimiModels: Record<string, ModelsDevModel>): Mod
 			},
 			contextWindow: m.limit?.context || 4096,
 			maxTokens: m.limit?.output || 4096,
-			// Kimi Code reports every model as always-thinking.
-			thinkingLevelMap: { ...effortLevels, off: null },
 		});
 	}
 	return models;

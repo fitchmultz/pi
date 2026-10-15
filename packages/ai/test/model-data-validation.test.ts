@@ -162,6 +162,86 @@ describe("published model catalog hydration", () => {
 		});
 	});
 
+	it.each(["k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed"])(
+		"migrates published Kimi Coding %s to its native protocol without changing model metadata",
+		(id) => {
+			const { dataDir, packageRoot, values } = createFixture("kimi-coding");
+			const catalogPath = join(packageRoot, "catalog.json");
+			const isK3Style = id !== "kimi-for-coding-highspeed";
+			const model = {
+				...chatModel(values),
+				id,
+				api: "anthropic-messages",
+				baseUrl: "https://api.kimi.com/coding",
+				compat: { allowEmptySignature: true, forceAdaptiveThinking: true },
+				reasoning: true,
+				cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+				...(isK3Style
+					? {
+							thinkingLevelMap: {
+								minimal: null,
+								low: "low",
+								medium: null,
+								high: "high",
+								xhigh: null,
+								max: "max",
+							},
+						}
+					: {}),
+			};
+			writeFileSync(catalogPath, JSON.stringify({ "kimi-coding": [model] }));
+
+			hydrateModelCatalog(packageRoot, catalogPath);
+			const groups: Record<string, Record<string, unknown>> = JSON.parse(
+				readFileSync(join(dataDir, "kimi-coding.json"), "utf8"),
+			);
+			expect(Object.keys(groups)).toEqual(["openai-completions"]);
+			expect(groups["openai-completions"][`chat:${id}`]).toEqual({
+				...model,
+				api: "openai-completions",
+				baseUrl: "https://api.kimi.com/coding/v1",
+				compat: {
+					supportsStore: false,
+					supportsDeveloperRole: false,
+					supportsReasoningEffort: isK3Style,
+					maxTokensField: "max_tokens",
+					supportsStrictMode: false,
+					thinkingFormat: isK3Style ? "openai" : "deepseek",
+					supportsMidConvoSystemMessages: true,
+					...(isK3Style
+						? { requiresReasoningContentOnAssistantMessages: true, supportsMidConvoToolAdditions: true }
+						: {}),
+				},
+				thinkingLevelMap: { ...model.thinkingLevelMap, off: null },
+				cost: { ...model.cost, cacheWrite: id === "k3" ? 3 : 0 },
+			});
+			expect(() => validateModelDataDirectory(readModelDataStructure(packageRoot), dataDir)).not.toThrow();
+		},
+	);
+
+	it.each([
+		["kimi-coding", "openai-completions", "https://api.kimi.com/coding/v1"],
+		["kimi-coding", "anthropic-messages", "https://proxy.example.test/coding"],
+		["test-provider", "anthropic-messages", "https://api.kimi.com/coding"],
+	])("preserves explicit metadata for %s %s at %s", (provider, api, baseUrl) => {
+		const { dataDir, packageRoot, values } = createFixture(provider);
+		const catalogPath = join(packageRoot, "catalog.json");
+		const model = {
+			...chatModel(values),
+			id: "k3",
+			api,
+			baseUrl,
+			compat: { supportsMidConvoSystemMessages: false },
+			thinkingLevelMap: { off: "none", low: "low" },
+		};
+		writeFileSync(catalogPath, JSON.stringify({ [provider]: [model] }));
+		hydrateModelCatalog(packageRoot, catalogPath);
+		const groups: Record<string, Record<string, unknown>> = JSON.parse(
+			readFileSync(join(dataDir, `${provider}.json`), "utf8"),
+		);
+		expect(groups[api]["chat:k3"]).toEqual(model);
+	});
+
 	it("keys chat and image models with the same id separately", () => {
 		const { packageRoot, values } = createFixture();
 		const image = {

@@ -43,7 +43,7 @@ Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
 Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
 Empty quoted prompt-template arguments now follow upstream's token parser and positional-default regression coverage ([#10867](https://github.com/earendil-works/pi/issues/10867)); the equivalent fork implementation and tests are retired.
-Transcript resume now uses upstream's recorded active-tool loadout and `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785)); explicit tool selection and exclusion keep their precedence. Native complete working-session restore retains its saved current loadout and modifier policy.
+Transcript resume uses upstream's recorded active-tool loadout and `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785)). The fork reconciles temporarily deferred discovery tools when discovery is disabled or absent; explicit selections, exclusions and later deselection remain authoritative across subsequent resumes. Native complete working-session restore retains its exact saved current loadout and modifier policy.
 Claude 5.5 catalog entries now use upstream's models.dev metadata rather than the removed fallback definitions.
 OpenCode Go's Google adapter and inference endpoints now follow upstream; `packages/ai/test/opencode-provider-headers.test.ts` retains the Gemini routing regression guard.
 The Chord service-hydration array check ([#10509](https://github.com/earendil-works/pi/issues/10509)) was retired with upstream's Chord 2 runtime: the service runtime is gone, and every link, including the in-memory one, JSON-round-trips frames.
@@ -55,6 +55,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
+| Legacy published Kimi Coding catalogs must not break offline builds or revert the native OpenAI protocol on fetched/cached overlays; preserve effort/tool constraints and K3 cache-write pricing | `packages/ai/src/api/kimi.ts`, `packages/ai/scripts/{generate-models,hydrate-model-catalog}.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts` |
 | Git footers must catch branch changes missed while native watchers and polling baselines start | `core/footer-data-provider.ts` | `footer-data-provider.test.ts` |
 | Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates | `core/{cache-warmer,model-runtime,sdk}.ts`, `modes/interactive/interactive-mode.ts` | `cache-warmer.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
@@ -187,7 +188,10 @@ catalog entries with a non-canonical `baseUrl` do not receive these defaults.
 
 Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3 keeps
 the published $3/M five-minute cache-write rate, including Kimi Coding's implied
-estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)). Claude 5.5 pricing now follows
+estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)). Kimi Coding's shared
+metadata helper also migrates canonical legacy Anthropic catalog entries during
+offline hydration and fetched/cached runtime merges. Native OpenAI entries, custom
+endpoints and other providers are unchanged. Claude 5.5 pricing now follows
 models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`
