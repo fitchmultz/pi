@@ -6,6 +6,8 @@
 
 - Reuse normalized tool definitions during native agent-loop comparisons.
 
+## [1.3.0] - 2026-10-15
+
 ## [1.2.0] - 2026-10-12
 
 ## [1.1.0] - 2026-10-07

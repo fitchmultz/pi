@@ -19,6 +19,29 @@ function getGitSource(repoRoot) {
 	return { commit, dirty: status.length > 0 };
 }
 
+export function parseNpmPackOutput(output, expectedNames) {
+	const expected = new Set(expectedNames);
+	const parsed = JSON.parse(output);
+	const entries = Array.isArray(parsed)
+		? parsed.map((packed) => [packed?.name, packed])
+		: parsed && typeof parsed === "object" ? Object.entries(parsed) : [];
+	if (entries.length !== expected.size) throw new Error("npm pack returned an unexpected package count");
+	const packedByName = new Map();
+	const filenames = new Set();
+	for (const [name, packed] of entries) {
+		if (
+			!expected.has(name) || packed?.name !== name || packedByName.has(name) ||
+			typeof packed.filename !== "string" || !/^[^/\\]+\.tgz$/.test(packed.filename) ||
+			filenames.has(packed.filename) || !Array.isArray(packed.files)
+		) {
+			throw new Error(`npm pack returned an unexpected result for ${name}`);
+		}
+		packedByName.set(name, packed);
+		filenames.add(packed.filename);
+	}
+	return expectedNames.map((name) => packedByName.get(name));
+}
+
 export function packWorkspacePackages(packages, tarballDirectory, npmOptions = {}) {
 	mkdirSync(tarballDirectory, { recursive: true });
 	const expected = new Set();
@@ -39,26 +62,7 @@ export function packWorkspacePackages(packages, tarballDirectory, npmOptions = {
 		maxBuffer: 16 * 1024 * 1024,
 		stdio: ["inherit", "pipe", "inherit"],
 	});
-	const parsed = JSON.parse(output);
-	const entries = Array.isArray(parsed)
-		? parsed.map((packed) => [packed?.name, packed])
-		: parsed && typeof parsed === "object" ? Object.entries(parsed) : [];
-	if (entries.length !== packages.length) throw new Error("npm pack returned an unexpected package count");
-	const packedByName = new Map();
-	const filenames = new Set();
-	for (const [name, packed] of entries) {
-		if (
-			!expected.has(name) || packed?.name !== name || packedByName.has(name) ||
-			typeof packed.filename !== "string" || !/^[^/\\]+\.tgz$/.test(packed.filename) ||
-			filenames.has(packed.filename) || !Array.isArray(packed.files)
-		) {
-			throw new Error(`npm pack returned an unexpected result for ${name}`);
-		}
-		packedByName.set(name, packed);
-		filenames.add(packed.filename);
-	}
-
-	return packages.map((pkg) => packedByName.get(pkg.name));
+	return parseNpmPackOutput(output, [...expected]);
 }
 
 function packPackages(repoRoot, packages, tarballDirectory, npmOptions) {
