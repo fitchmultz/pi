@@ -131,9 +131,14 @@ later resume/discovery cannot undo an explicit allowlist, exclusion or
 deselection. Newly selected optional tools remain selected. Delayed registration
 uses native pending tools; complete working-session restoration preserves its
 exact saved loadout and journal. Historical declarations remain unchanged. The
-public SDK reproduction passes 13 selection scenarios and seven sequential
-resumes; 150 focused tests cover these and the existing prompt-prefix,
-working-session and default-tool contracts.
+one-time reconciliation distinguishes an initial explicit selection from
+transcript restoration: tree navigation retains saved deferrals, while SDK
+deselection before the first prompt remains authoritative. Both failures have
+native-boundary RED/GREEN evidence; treating every selection as transcript
+policy was also tested and rejected because it resurrected a deselected tool.
+The public SDK reproduction passes 14 selection scenarios, eight sequential
+resumes and saved-JSONL tree navigation; 151 focused tests cover these and the
+existing prompt-prefix, working-session and default-tool contracts.
 
 ### Published Kimi catalog breaks Nix builds and reverts runtime metadata
 
@@ -180,12 +185,12 @@ Verified locally on macOS arm64, Node 24.21.0 and Bun 1.3.14:
 | `npm run check` | Passed; 1,541 files checked, no formatting fixes or diagnostics |
 | `npm run build:offline` | Passed all 10 build workspaces; Node/Bun bundles produced |
 | Full `./test.sh` with the built `PI_TEST_COMPILED_CLI` | Passed; includes real-tmux Node restart and standalone extension resolution |
-| AI / coding-agent / Chord | 1,492 / 3,255 / 527 tests passed |
+| AI / coding-agent / Chord | 1,492 / 3,256 / 527 tests passed |
 | Durable, normal and immediate retention | 1,280 tests passed in each run |
 | Public package consumer installs | All 10 isolated npm consumers passed |
 | Bundled detached background job | Survived CLI exit and produced exact raw output |
 | Node and Bun CLI Codemode smoke | Both completed a local SSE tool-call/reply round trip |
-| SQLite fixture and SDK resume reproduction | Identical work/output witnesses; 13 scenarios and seven sequential resumes passed |
+| SQLite fixture and SDK resume reproduction | Identical work/output witnesses; 14 scenarios, eight sequential resumes and tree navigation passed |
 
 The suite intentionally skips live-provider/e2e and unavailable-platform cases;
 these are not counted as passing. Consumer installation emits the existing
@@ -195,6 +200,17 @@ changed for this integration. CI and review outcomes are recorded on the PR.
 The pre-edit build passed. Pre-edit check and suite failures were limited to
 references to the delisted OpenRouter `claude-sonnet-4`; incoming already updates
 those references. They are not new regressions or claimed fork fixes.
+
+Prompt-cache checks compare real adapter payloads, not just compatibility flags:
+supported positional updates keep the serialized message prefix and initial tool
+declarations unchanged. Anthropic checks also cover cache lifetimes and explicit
+opt-outs; Kimi checks keep K3-style additions in later system messages while
+retaining Highspeed's required top-level-tool fallback. Resume/tree checks retain
+historical system messages, and complete working-session restore retains its
+saved journal. Providers without positional support retain their existing
+fallback behavior; changing their prompt or top-level tools can still invalidate
+a cache. These are offline serialization guarantees, not measured live cache
+hits, latency or billing.
 
 External runnable regression commands from the repository root:
 
@@ -207,7 +223,8 @@ External runnable regression commands from the repository root:
   test/suite/prompt-cache-prefix.test.ts test/suite/working-session.test.ts \
   test/default-tools-setting.test.ts
 ./test.sh -- node node_modules/vitest/dist/cli.js --run \
-  --root packages/ai test/model-data-validation.test.ts
+  --root packages/ai test/model-data-validation.test.ts \
+  test/transcript-tool-changes.test.ts
 ./test.sh -- node node_modules/vitest/dist/cli.js --run \
   --root packages/coding-agent test/remote-catalog-provider.test.ts
 ```

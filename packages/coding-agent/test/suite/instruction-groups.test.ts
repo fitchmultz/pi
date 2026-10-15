@@ -180,6 +180,13 @@ describe("on-demand instruction groups", () => {
 			selection: ["read", "discover_tools", "browse", "optional"],
 			active: true,
 		},
+		{
+			mode: "explicit deselection",
+			excludedToolNames: [],
+			factories: selectedOwners,
+			selection: ["read", "discover_tools", "browse", "optional"],
+			active: false,
+		},
 	])("restores saved selected tools with $mode without rewriting the prefix", async (testCase) => {
 		const original = await suppressed();
 		const resumed = await setup({
@@ -189,6 +196,8 @@ describe("on-demand instruction groups", () => {
 			extensionFactories: testCase.factories,
 			excludedToolNames: testCase.excludedToolNames,
 		});
+		if (testCase.mode === "explicit deselection")
+			resumed.session.setActiveToolsByName(resumed.session.getActiveToolNames().filter((name) => name !== "browse"));
 		expect(resumed.sessionManager.getBranch()).toEqual(original.sessionManager.getBranch());
 		const managed = resumed.session.getActiveToolNames().includes("discover_tools");
 		resumed.setResponses([
@@ -738,11 +747,17 @@ describe("on-demand instruction groups", () => {
 			(context) => {
 				expect(getCurrentTools(context.messages).map((tool) => tool.name)).not.toContain("browse");
 				expect(JSON.stringify(context.messages)).not.toContain(full);
-				return done();
+				return discover();
 			},
+			() => {
+				expect.soft(getToolResult(harness, "discover_tools").isError).toBe(false);
+				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
+			},
+			done(),
 		]);
 		await harness.session.prompt("old branch");
-		expect(harness.session.getActiveToolNames()).not.toContain("browse");
+		expect(getToolResult(harness, "browse").isError).toBe(false);
+		expect(harness.session.getActiveToolNames()).toContain("browse");
 		await harness.session.navigateTree(after);
 		harness.setResponses([
 			(context) => {

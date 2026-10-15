@@ -477,8 +477,8 @@ export class AgentSession {
 	 * `setActiveToolsByName()` deactivates a tool or the next agent run starts.
 	 */
 	private _pendingToolNames = new Set<string>();
-	/** Reconcile saved discovery deferrals with the current selection on the first run. */
-	private _retireDeferredTools = false;
+	/** Selection source for reconciling saved discovery deferrals on the next run. */
+	private _deferredToolSelection?: "explicit" | "transcript";
 	private _usesDefaultTools: boolean;
 	private _defaultToolModifiers: string[];
 	/** Original patterns retained for native working-session persistence. */
@@ -556,7 +556,7 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		if (this._usesDefaultTools) this._restoreToolsFromTranscript(this._defaultToolModifiers);
-		else this._retireDeferredTools = this._getDeferredToolNames().length > 0;
+		else this._deferredToolSelection = this._getDeferredToolNames().length ? "explicit" : undefined;
 		this.agent.beforeMutation = this.workingSessionGate.beforeMutation;
 		this.sessionManager.beforeMutation = this.workingSessionGate.beforeMutation;
 		this.settingsManager.beforeMutation = this.workingSessionGate.beforeMutation;
@@ -796,7 +796,7 @@ export class AgentSession {
 		this._pendingToolNames = new Set([...memory.activeTools, ...memory.pendingTools]);
 		this._refreshToolRegistry({ activeToolNames: memory.activeTools });
 		this._setActiveTools([...memory.activeTools, ...memory.pendingTools]);
-		this._retireDeferredTools = this._getDeferredToolNames().length > 0;
+		this._deferredToolSelection = this._getDeferredToolNames().length ? "transcript" : undefined;
 		this._baseSystemPromptOptions = memory.prompt;
 		this._runSystemPromptOptions = memory.runPrompt;
 		for (const [name, value] of memory.flags)
@@ -2154,7 +2154,7 @@ export class AgentSession {
 	private _restoreToolsFromTranscript(modifiers: readonly string[] = []): void {
 		this._pendingToolNames.clear();
 		const deferred = this._getDeferredToolNames();
-		this._retireDeferredTools = deferred.length > 0;
+		this._deferredToolSelection = deferred.length ? "transcript" : undefined;
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
 		if (!current) return;
 		const declared = (current.toolsAdded ?? []).map((tool) => tool.name);
@@ -2247,11 +2247,11 @@ export class AgentSession {
 		}
 
 		// Retire old deferrals before discovery suppresses this run's selected tools.
-		if (this._retireDeferredTools) {
+		if (this._deferredToolSelection) {
 			const deferred = this._getDeferredToolNames();
 			const active = new Set(this.getActiveToolNames());
 			const selected = new Set(
-				this._usesDefaultTools || this._restoredWorkingSession
+				this._deferredToolSelection === "transcript"
 					? applyToolModifiers(
 							deferred.filter((name) => this._isAllowedTool(name)),
 							this._defaultToolModifiers,
@@ -2261,7 +2261,7 @@ export class AgentSession {
 			const inactive = active.has("discover_tools") ? deferred.filter((name) => selected.has(name)) : [];
 			if (inactive.length !== deferred.length)
 				this.sessionManager.appendCustomEntry("pi:instruction-groups", { enabled: [], inactive });
-			this._retireDeferredTools = false;
+			this._deferredToolSelection = undefined;
 		}
 		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
 		const result = await this._extensionRunner.emitBeforeAgentStart(trigger, this._baseSystemPromptOptions);
@@ -4129,7 +4129,7 @@ export class AgentSession {
 		});
 		if (wasManaged && !this.getActiveToolNames().includes("discover_tools")) {
 			const deferred = this._getDeferredToolNames();
-			this._retireDeferredTools = deferred.length > 0;
+			this._deferredToolSelection = deferred.length ? "transcript" : undefined;
 			for (const name of deferred) if (this._isAllowedTool(name)) this._pendingToolNames.add(name);
 			this._setActiveTools([...this.getActiveToolNames(), ...deferred]);
 		}
