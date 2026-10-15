@@ -477,6 +477,8 @@ export class AgentSession {
 	 * `setActiveToolsByName()` deactivates a tool or the next agent run starts.
 	 */
 	private _pendingToolNames = new Set<string>();
+	/** Remaining discovery deferrals to persist only once an unmanaged run starts. */
+	private _deferredToolRecord?: string[];
 	private _usesDefaultTools: boolean;
 	private _defaultToolModifiers: string[];
 	/** Original patterns retained for native working-session persistence. */
@@ -793,6 +795,11 @@ export class AgentSession {
 		this._pendingToolNames = new Set([...memory.activeTools, ...memory.pendingTools]);
 		this._refreshToolRegistry({ activeToolNames: memory.activeTools });
 		this._setActiveTools([...memory.activeTools, ...memory.pendingTools]);
+		const deferred = this._getDeferredToolNames();
+		this._deferredToolRecord =
+			deferred.length && !this.getActiveToolNames().includes("discover_tools")
+				? deferred.filter((name) => !this._isAllowedTool(name))
+				: undefined;
 		this._baseSystemPromptOptions = memory.prompt;
 		this._runSystemPromptOptions = memory.runPrompt;
 		for (const [name, value] of memory.flags)
@@ -2131,20 +2138,34 @@ export class AgentSession {
 		};
 	}
 
+	/** Selected tools deferred by extensions/instruction-groups on the current raw branch. */
+	private _getDeferredToolNames(): string[] {
+		let names: string[] = [];
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type !== "custom" || entry.customType !== "pi:instruction-groups") continue;
+			const inactive = (entry.data as { inactive?: unknown } | null)?.inactive;
+			if (Array.isArray(inactive)) names = inactive.filter((name): name is string => typeof name === "string");
+		}
+		return names;
+	}
+
 	/**
-	 * Restore the active tool loadout declared by the session transcript, if it declares one.
-	 * Tools reachable only from other tools are never declared, but they do not depend on the active
-	 * set, so the transcript's declarations are the whole loadout.
+	 * Restore declared tools and, when discovery is inactive or absent, the selected tools it deferred.
+	 * Tools reachable only from other tools do not depend on the active set.
 	 * @param modifiers `+name`/`-name` entries applied to the restored loadout.
 	 */
 	private _restoreToolsFromTranscript(modifiers: readonly string[] = []): void {
 		this._pendingToolNames.clear();
+		this._deferredToolRecord = undefined;
 		const current = getCurrentSystemMessage(this.sessionManager.buildSessionContext().messages);
 		if (!current) return;
-		const names = applyToolModifiers(
-			(current.toolsAdded ?? []).map((tool) => tool.name),
-			modifiers,
-		);
+		const declared = (current.toolsAdded ?? []).map((tool) => tool.name);
+		let names = applyToolModifiers(declared, modifiers);
+		if (!(names.includes("discover_tools") && this._toolRegistry.has("discover_tools"))) {
+			const deferred = this._getDeferredToolNames();
+			if (deferred.length) this._deferredToolRecord = deferred.filter((name) => !this._isAllowedTool(name));
+			names = applyToolModifiers([...new Set([...declared, ...deferred])], modifiers);
+		}
 		this._pendingToolNames = new Set(names.filter((name) => this._isAllowedTool(name)));
 		this._setActiveTools(names);
 	}
@@ -2189,6 +2210,13 @@ export class AgentSession {
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
 		this._failedResponse = undefined;
 		this._recordSelection();
+		if (this._deferredToolRecord && !this.getActiveToolNames().includes("discover_tools")) {
+			this.sessionManager.appendCustomEntry("pi:instruction-groups", {
+				enabled: [],
+				inactive: this._deferredToolRecord,
+			});
+		}
+		this._deferredToolRecord = undefined;
 		// The run records the loadout in the transcript; restored tools that did not register by now
 		// are dropped, so a tool that never registers does not stay pending.
 		this._pendingToolNames.clear();
@@ -4067,6 +4095,7 @@ export class AgentSession {
 
 	private async _reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
 		const oldRunner = this._extensionRunner;
+		const wasManaged = this.getActiveToolNames().includes("discover_tools");
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
 		oldRunner.invalidate();
@@ -4092,6 +4121,12 @@ export class AgentSession {
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
+		if (wasManaged && !this.getActiveToolNames().includes("discover_tools")) {
+			const deferred = this._getDeferredToolNames();
+			if (deferred.length) this._deferredToolRecord = deferred.filter((name) => !this._isAllowedTool(name));
+			for (const name of deferred) if (this._isAllowedTool(name)) this._pendingToolNames.add(name);
+			this._setActiveTools([...this.getActiveToolNames(), ...deferred]);
+		}
 		await this._modelRuntime.refresh({ allowNetwork: false });
 
 		const hasBindings =

@@ -92,8 +92,16 @@ Return all safety, usage, and project instructions; avoid duplicate eager
 above without importing a fork-specific runtime value.
 
 When `discover_tools` is inactive or absent, the builtin does not manage instructions
-or gate calls, and owners supply their eager fallback. A replacement discover tool
-must implement the collector contract to manage owners; otherwise owners remain eager.
+or gate calls, and owners supply their eager fallback. Journal resume and tree
+navigation restore the selected tools discovery deferred when discovery is inactive
+or absent; disabling the builtin on reload also gives them back. Allowlists,
+exclusions and resume tool modifiers still apply. The next unmanaged run retires
+returned deferrals so later restores do not undo explicit deselection; excluded
+tools remain deferred. Complete working-session restore keeps its exact saved
+loadout and journal until new input starts a run.
+
+A replacement discover tool must implement the collector contract to manage owners;
+otherwise owners remain eager.
 
 ## Persistence and request boundaries
 

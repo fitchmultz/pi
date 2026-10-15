@@ -169,7 +169,7 @@ The archive includes release model data and native prebuilds. `--offline-model-d
 
 We treat npm dependency changes as reviewed code changes.
 
-- Direct external dependencies are pinned to exact versions. Internal workspace packages remain version-ranged.
+- Direct registry dependencies, including internal workspace packages, are pinned to exact versions.
 - `.npmrc` sets `save-exact=true` and `min-release-age=2` to avoid same-day dependency releases during npm resolution.
 - `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
 - `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent install lock.

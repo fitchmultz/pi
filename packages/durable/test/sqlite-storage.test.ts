@@ -35,7 +35,7 @@ afterEach(async () => {
 	tempDirectories.clear();
 });
 
-async function createSqliteStorage(options: { readonly walAutoCheckpointPages?: number } = {}) {
+async function createSqliteStorage(options: NodeSqliteStorageOptions = {}) {
 	const directory = await mkdtemp(join(tmpdir(), "pi-durable-sqlite-"));
 	tempDirectories.add(directory);
 	const path = join(directory, "storage.sqlite");
@@ -110,23 +110,27 @@ class ReopeningStorage implements Storage {
 	}
 }
 
-registerStorageConformance({ describe, expect, it }, "SqliteStorage", async (use) =>
-	use((await createSqliteStorage()).storage),
-);
+for (const prefix of [undefined, "pi_"]) {
+	const options = { prefix };
+	const name = prefix === undefined ? "SqliteStorage" : "SqliteStorage with prefix";
+	registerStorageConformance({ describe, expect, it }, name, async (use) =>
+		use((await createSqliteStorage(options)).storage),
+	);
 
-registerStorageConformance({ describe, expect, it }, "SqliteStorage across reopen", async (use) => {
-	const directory = await mkdtemp(join(tmpdir(), "pi-durable-sqlite-conformance-"));
-	const path = join(directory, "storage.sqlite");
-	const created = await openNodeSqliteStorage(path);
-	await created.close(context);
-	const storage = new ReopeningStorage(await openNodeSqliteStorage(path), path);
-	try {
-		await use(storage);
-	} finally {
-		await storage.close(context);
-		await rm(directory, { recursive: true, force: true });
-	}
-});
+	registerStorageConformance({ describe, expect, it }, `${name} across reopen`, async (use) => {
+		const directory = await mkdtemp(join(tmpdir(), "pi-durable-sqlite-conformance-"));
+		const path = join(directory, "storage.sqlite");
+		const created = await openNodeSqliteStorage(path, options);
+		await created.close(context);
+		const storage = new ReopeningStorage(await openNodeSqliteStorage(path, options), path, options);
+		try {
+			await use(storage);
+		} finally {
+			await storage.close(context);
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+}
 
 function entry(id: EntryId, conversationId: ConversationId, data?: JsonValue): EntryRecord {
 	return { id, conversationId, kind: "message", ...(data === undefined ? {} : { data }) };
@@ -188,6 +192,46 @@ describe("Pico SqliteStorage", () => {
 				context,
 			),
 		).toBe(3);
+	});
+
+	it("namespaces tables and indexes with a prefix across reopen", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "pi-durable-sqlite-"));
+		tempDirectories.add(directory);
+		const path = join(directory, "storage.sqlite");
+		const host = new DatabaseSync(path);
+		try {
+			host.exec("CREATE TABLE tasks (text TEXT)");
+		} finally {
+			host.close();
+		}
+		const storage = await openNodeSqliteStorage(path, { prefix: "pi_" });
+		expect(await createRoot(storage)).toBe(1);
+		await storage.close(context);
+
+		const reopened = await openNodeSqliteStorage(path, { prefix: "pi_" });
+		openStorages.add(reopened);
+		expect(await reopened.conversation(ROOT_CONVERSATION_ID, context)).toEqual({ id: ROOT_CONVERSATION_ID });
+		const database = new DatabaseSync(path);
+		try {
+			const names = database
+				.prepare("SELECT name FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%'")
+				.all()
+				.map((row) => String(row.name));
+			expect(names.filter((name) => !name.startsWith("pi_"))).toEqual(["tasks"]);
+			expect(names).toContain("pi_tasks");
+		} finally {
+			database.close();
+		}
+	});
+
+	it("rejects an invalid prefix before creating the database", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "pi-durable-sqlite-"));
+		tempDirectories.add(directory);
+		const databaseDirectory = join(directory, "nested");
+		await expect(
+			openNodeSqliteStorage(join(databaseDirectory, "storage.sqlite"), { prefix: "bad-prefix" }),
+		).rejects.toThrow("Invalid SQLite schema prefix");
+		await expect(stat(databaseDirectory)).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
 	it("rejects persisted metadata corruption on reopen", async () => {

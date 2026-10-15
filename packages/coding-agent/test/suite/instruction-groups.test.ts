@@ -1,6 +1,9 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	collapseSystemMessages,
 	fauxAssistantMessage,
+	fauxProvider,
 	fauxToolCall,
 	getCurrentSystemMessage,
 	getCurrentTools,
@@ -12,9 +15,12 @@ import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { openWorkingSession } from "../../src/core/working-session.ts";
 import {
+	createAgentSession,
 	createCodemodeExtension,
+	DefaultResourceLoader,
 	type InstructionGroupCollector,
 	instructionGroupsExtension,
+	SettingsManager,
 } from "../../src/index.ts";
 import { createHarness, getToolResult, type Harness } from "./harness.ts";
 
@@ -81,6 +87,194 @@ describe("on-demand instruction groups", () => {
 		await harness.session.bindExtensions({});
 		return harness;
 	}
+
+	const selectedOwners = [
+		instructionGroupsExtension,
+		owner,
+		(pi: ExtensionAPI) => {
+			pi.registerTool({
+				name: "deselected",
+				label: "deselected",
+				description: "Separately deselected grouped tool",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [], details: undefined }),
+			});
+			pi.events.on("pi:instruction-groups", (data) =>
+				(data as InstructionGroupCollector).register({
+					name: "other",
+					description: "Other",
+					tools: ["deselected"],
+					instructions: () => later,
+				}),
+			);
+		},
+	];
+	async function suppressed() {
+		const original = await setup({ initialActiveToolNames: undefined, extensionFactories: selectedOwners });
+		original.session.setActiveToolsByName(
+			original.session.getActiveToolNames().filter((name) => name !== "deselected"),
+		);
+		original.setResponses([done()]);
+		await original.session.prompt("unrelated work");
+		expect(original.sessionManager.getBranch().findLast((entry) => entry.type === "custom")).toMatchObject({
+			data: { enabled: [], inactive: ["browse"] },
+		});
+		return original;
+	}
+	function savedBranch(original: Harness) {
+		return SessionManager.inMemory(original.tempDir, undefined, [
+			original.sessionManager.getHeader()!,
+			...original.sessionManager.getBranch(),
+		]);
+	}
+
+	// fork bug: deferred grouped tools lost on unmanaged resume.
+	it.each([
+		{ mode: "excluded discovery", excludedToolNames: ["discover_tools"], factories: selectedOwners, active: true },
+		{ mode: "absent factory", excludedToolNames: [], factories: selectedOwners.slice(1), active: true },
+		{
+			mode: "excluded grouped tool",
+			excludedToolNames: ["discover_tools", "browse"],
+			factories: selectedOwners,
+			active: false,
+		},
+	])("restores saved selected tools with $mode without rewriting the prefix", async (testCase) => {
+		const original = await suppressed();
+		const resumed = await setup({
+			initialActiveToolNames: undefined,
+			sessionManager: savedBranch(original),
+			extensionFactories: testCase.factories,
+			excludedToolNames: testCase.excludedToolNames,
+		});
+		expect(resumed.sessionManager.getBranch()).toEqual(original.sessionManager.getBranch());
+		resumed.setResponses([
+			(context) => {
+				expect(context.messages[0]).toEqual(original.session.messages[0]);
+				expect(JSON.stringify(context.messages)).toContain(full);
+				expect.soft(getCurrentTools(context.messages).some((tool) => tool.name === "browse")).toBe(testCase.active);
+				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
+			},
+			done(),
+		]);
+		await resumed.session.prompt("use the selected browser");
+		expect.soft(getToolResult(resumed, "browse").isError).toBe(!testCase.active);
+		for (const name of ["optional", "deselected"]) expect(resumed.session.getActiveToolNames()).not.toContain(name);
+		if (!testCase.active)
+			expect(resumed.sessionManager.getBranch().findLast((entry) => entry.type === "custom")).toMatchObject({
+				data: { inactive: ["browse"] },
+			});
+		if (testCase.mode === "excluded discovery") {
+			await resumed.session.navigateTree(original.sessionManager.getLeafId()!);
+			expect(resumed.session.getActiveToolNames()).toContain("browse");
+		}
+	});
+
+	it("retires deferrals lazily across delayed registration and exact working-session restore", async () => {
+		const original = await suppressed();
+		let register!: () => void;
+		const resumed = await setup({
+			initialActiveToolNames: undefined,
+			sessionManager: savedBranch(original),
+			excludedToolNames: ["discover_tools"],
+			extensionFactories: [
+				instructionGroupsExtension,
+				(pi) => {
+					register = () =>
+						pi.registerTool({ ...original.session.getToolDefinition("browse")!, defaultActive: false });
+				},
+			],
+		});
+		const pending = await resumed.session.acquireWorkingSession();
+		await pending.release();
+		expect(pending.state.pendingTools).toContain("browse");
+		expect(resumed.sessionManager.getBranch()).toEqual(original.sessionManager.getBranch());
+		register();
+		expect(resumed.session.getActiveToolNames()).toContain("browse");
+		resumed.session.setActiveToolsByName(resumed.session.getActiveToolNames().filter((name) => name !== "browse"));
+		const captured = await resumed.session.acquireWorkingSession();
+		await captured.release();
+		const restored = await createHarness({
+			sessionManager: openWorkingSession(captured.state),
+			extensionFactories: selectedOwners,
+		});
+		harnesses.push(restored);
+		restored.session.restoreWorkingSession(captured.state);
+		await restored.session.bindExtensions({});
+		expect(restored.session.getActiveToolNames()).toEqual(captured.state.activeTools);
+		expect(restored.sessionManager.getEntries()).toEqual(captured.state.entries);
+		restored.setResponses([done()]);
+		await restored.session.prompt("keep browser deselected");
+		const unmanaged = await setup({
+			initialActiveToolNames: undefined,
+			sessionManager: savedBranch(restored),
+			extensionFactories: selectedOwners,
+			excludedToolNames: ["discover_tools"],
+		});
+		expect(unmanaged.session.getActiveToolNames()).not.toContain("browse");
+		const managed = await setup({
+			initialActiveToolNames: undefined,
+			sessionManager: savedBranch(restored),
+			extensionFactories: selectedOwners,
+		});
+		managed.setResponses([
+			discover(),
+			fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" }),
+			done(),
+		]);
+		await managed.session.prompt("discovery must not resurrect deselected browser");
+		expect(getToolResult(managed, "browse").isError).toBe(true);
+		expect(managed.session.getActiveToolNames()).not.toContain("browse");
+	});
+
+	it("hands deferred tools back when reload disables the builtin, without reselecting them on a later reload", async () => {
+		const resources = await setup();
+		const faux = fauxProvider();
+		const settingsManager = SettingsManager.create(resources.tempDir, resources.tempDir);
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: resources.tempDir,
+			agentDir: resources.tempDir,
+			settingsManager,
+			extensionFactories: [
+				{ name: "instruction-groups", factory: instructionGroupsExtension, builtin: true, replaceable: true },
+				owner,
+				(pi) => pi.registerProvider(faux.provider),
+			],
+		});
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd: resources.tempDir,
+			agentDir: resources.tempDir,
+			model: faux.getModel(),
+			modelRuntime: resources.session.modelRuntime,
+			resourceLoader,
+			settingsManager,
+			sessionManager: SessionManager.inMemory(resources.tempDir),
+		});
+		try {
+			const errors: string[] = [];
+			await session.bindExtensions({ onError: (error) => errors.push(error.error) });
+			faux.setResponses([done()]);
+			await session.prompt("defer browser");
+			expect(session.getActiveToolNames()).not.toContain("browse");
+			writeFileSync(
+				join(resources.tempDir, "settings.json"),
+				JSON.stringify({ extensions: ["-builtin:instruction-groups"] }),
+			);
+			await session.reload();
+			expect(session.getActiveToolNames()).toContain("browse");
+			faux.setResponses([fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" }), done()]);
+			await session.prompt("use eager browser");
+			expect(
+				session.messages.findLast((message) => message.role === "toolResult" && message.toolName === "browse"),
+			).toMatchObject({ isError: false, content: [{ type: "text", text: "acted" }] });
+			session.setActiveToolsByName(session.getActiveToolNames().filter((name) => name !== "browse"));
+			await session.reload();
+			expect(session.getActiveToolNames()).not.toContain("browse");
+			expect(errors).toEqual([]);
+		} finally {
+			session.dispose();
+		}
+	});
 
 	it.each(["direct", "codemode-only"] as const)(
 		"advertises sorted permitted capabilities before discovery in %s mode without activation or index churn",
