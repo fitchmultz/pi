@@ -3091,10 +3091,11 @@ export class InteractiveMode {
 			onHandle?: (handle: OverlayHandle) => void;
 		},
 	): Promise<T> {
-		const savedText = this.editor.getText();
+		let savedText: string | undefined;
 		const isOverlay = options?.overlay ?? false;
 
 		const restoreEditor = () => {
+			if (savedText === undefined) return;
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
 			this.editor.setText(savedText);
@@ -3104,15 +3105,9 @@ export class InteractiveMode {
 
 		return new Promise((resolve, reject) => {
 			let component: Component & { dispose?(): void };
+			let overlayHandle: OverlayHandle | undefined;
 			let closed = false;
-
-			const close = (result: T) => {
-				if (closed) return;
-				closed = true;
-				if (isOverlay) this.ui.hideOverlay();
-				else restoreEditor();
-				// Note: both branches above already call requestRender
-				resolve(result);
+			const disposeComponent = () => {
 				try {
 					component?.dispose?.();
 				} catch {
@@ -3120,11 +3115,25 @@ export class InteractiveMode {
 				}
 			};
 
+			const close = (result: T) => {
+				if (closed) return;
+				closed = true;
+				// Remove this overlay, not the topmost one: another overlay may have opened above it.
+				if (isOverlay) overlayHandle?.hide();
+				else restoreEditor();
+				// Note: both branches above already call requestRender
+				resolve(result);
+				disposeComponent();
+			};
+
 			this.session.workingSessionGate
 				.run(async () => factory(this.ui, theme, this.keybindings, close))
 				.then((c) => {
-					if (closed) return;
 					component = c;
+					if (closed) {
+						disposeComponent();
+						return;
+					}
 					if (isOverlay) {
 						// Resolve overlay options - can be static or dynamic function
 						const resolveOptions = (): OverlayOptions | undefined => {
@@ -3139,11 +3148,12 @@ export class InteractiveMode {
 							const w = (component as { width?: number }).width;
 							return w ? { width: w } : undefined;
 						};
-						const handle = this.ui.showOverlay(component, resolveOptions());
+						overlayHandle = this.ui.showOverlay(component, resolveOptions());
 						// Expose handle to caller for visibility control
-						options?.onHandle?.(handle);
+						options?.onHandle?.(overlayHandle);
 					} else {
 						this.disposeActiveSelector();
+						savedText = this.editor.getText();
 						this.editorContainer.clear();
 						this.editorContainer.addChild(component);
 						this.ui.setFocus(component);

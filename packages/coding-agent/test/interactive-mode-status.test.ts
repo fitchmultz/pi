@@ -2,10 +2,11 @@ import { homedir } from "node:os";
 import * as path from "node:path";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
+import { CancellableLoader } from "../../tui/src/components/cancellable-loader.ts";
 import { type Component, Container, type Focusable, type TUI } from "../../tui/src/tui.ts";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import type { AutocompleteProviderFactory } from "../src/core/extensions/types.ts";
+import type { AutocompleteProviderFactory, ExtensionUIContext } from "../src/core/extensions/types.ts";
 import type { QuietStartup } from "../src/core/settings-manager.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import { WorkingSessionGate } from "../src/core/working-session.ts";
@@ -35,6 +36,7 @@ class TestFocusableComponent implements Component, Focusable {
 
 	handleInput(data: string): void {
 		this.inputs.push(data);
+		this.text += data;
 	}
 
 	getText(): string {
@@ -231,25 +233,14 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 });
 
 describe("InteractiveMode.showExtensionCustom", () => {
-	beforeAll(() => {
-		initTheme("dark");
-	});
+	beforeAll(() => initTheme("dark"));
 
-	test("overlay custom UI reclaims input after non-overlay custom UI closes", async () => {
+	function createCustomUIFixture() {
 		const terminal = new VirtualTerminal(80, 24);
 		const ui: TUI = new TuiMainScreen(terminal);
 		const editorContainer = new Container();
 		const editor = new TestFocusableComponent("EDITOR");
-		const palette = new TestFocusableComponent("PALETTE");
-		const overlay = new TestFocusableComponent("OVERLAY");
-		const replacement = new TestFocusableComponent("REPLACEMENT");
-		let closeOverlay: (value: string) => void = () => {
-			throw new Error("closeOverlay was not initialized");
-		};
-		let closeReplacement: (value: string) => void = () => {
-			throw new Error("closeReplacement was not initialized");
-		};
-		const fakeThis = {
+		const host = {
 			session: { workingSessionGate: new WorkingSessionGate() },
 			editor,
 			editorContainer,
@@ -257,19 +248,27 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			ui,
 			disposeActiveSelector: vi.fn(),
 		};
-		const showExtensionCustom = <T>(
-			factory: (tui: TUI, theme: unknown, keybindings: unknown, done: (result: T) => void) => Component,
-			options?: { overlay?: boolean },
-		): Promise<T> =>
-			(InteractiveMode as any).prototype.showExtensionCustom.call(fakeThis, factory, options) as Promise<T>;
-
+		const custom = (
+			InteractiveMode as unknown as { prototype: { showExtensionCustom: ExtensionUIContext["custom"] } }
+		).prototype.showExtensionCustom.bind(host);
 		editorContainer.addChild(editor);
 		ui.addChild(editorContainer);
+		ui.setFocus(editor);
+		return { terminal, ui, editor, custom };
+	}
+
+	test("overlay custom UI reclaims input after non-overlay custom UI closes", async () => {
+		const { terminal, ui, editor, custom } = createCustomUIFixture();
+		const palette = new TestFocusableComponent("PALETTE");
+		const overlay = new TestFocusableComponent("OVERLAY");
+		const replacement = new TestFocusableComponent("REPLACEMENT");
+		let closeOverlay!: (value: string) => void;
+		let closeReplacement!: (value: string) => void;
 		ui.addChild(palette);
 		ui.setFocus(palette);
 		ui.start();
 		try {
-			const overlayPromise = showExtensionCustom<string>(
+			const overlayPromise = custom<string>(
 				(_tui, _theme, _keybindings, done) => {
 					closeOverlay = done;
 					return overlay;
@@ -279,29 +278,154 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			await flushTui(ui, terminal);
 			expect(overlay.focused).toBe(true);
 
-			const replacementPromise = showExtensionCustom<string>((_tui, _theme, _keybindings, done) => {
+			const replacementPromise = custom<string>((_tui, _theme, _keybindings, done) => {
 				closeReplacement = done;
 				return replacement;
 			});
 			await flushTui(ui, terminal);
 			expect(replacement.focused).toBe(true);
-
 			closeReplacement("done");
 			await replacementPromise;
 			await flushTui(ui, terminal);
 			terminal.sendInput("x");
 			await flushTui(ui, terminal);
-
 			expect(overlay.inputs).toEqual(["x"]);
 			expect(editor.inputs).toEqual([]);
 			expect(overlay.focused).toBe(true);
-
 			closeOverlay("closed");
 			await overlayPromise;
 		} finally {
 			ui.stop();
 		}
 	});
+
+	// Regression test for #10648: closing a lower overlay removed the topmost overlay instead.
+	test.each([
+		{ lowerKind: "capturing", nonCapturing: false },
+		{ lowerKind: "non-capturing", nonCapturing: true },
+	])(
+		"closing a lower $lowerKind overlay custom UI removes its own overlay, not the topmost one",
+		async ({ nonCapturing }) => {
+			const { terminal, ui, editor, custom } = createCustomUIFixture();
+			const lower = new TestFocusableComponent("LOWER");
+			const upper = new TestFocusableComponent("UPPER");
+			let closeLower!: (value: string) => void;
+			let closeUpper!: (value: string) => void;
+			ui.start();
+			try {
+				const lowerPromise = custom<string>(
+					(_tui, _theme, _keybindings, done) => {
+						closeLower = done;
+						return lower;
+					},
+					{ overlay: true, overlayOptions: { nonCapturing } },
+				);
+				await flushTui(ui, terminal);
+				const upperPromise = custom<string>(
+					(_tui, _theme, _keybindings, done) => {
+						closeUpper = done;
+						return upper;
+					},
+					{ overlay: true },
+				);
+				await flushTui(ui, terminal);
+				expect(upper.focused).toBe(true);
+				closeLower("lower closed");
+				await expect(lowerPromise).resolves.toBe("lower closed");
+				await flushTui(ui, terminal);
+				const viewport = terminal.getViewport().join("\n");
+				expect(viewport).toContain("UPPER");
+				expect(viewport).not.toContain("LOWER");
+				terminal.sendInput("x");
+				await flushTui(ui, terminal);
+				expect(upper.inputs).toEqual(["x"]);
+				expect(lower.inputs).toEqual([]);
+				closeUpper("upper closed");
+				await expect(upperPromise).resolves.toBe("upper closed");
+				await flushTui(ui, terminal);
+				expect(ui.hasOverlay()).toBe(false);
+				expect(editor.focused).toBe(true);
+			} finally {
+				ui.stop();
+			}
+		},
+	);
+
+	test.each(["synchronous", "cache-promise"])(
+		"disposes a component completed during %s initialization",
+		async (completion) => {
+			const { terminal, ui, custom } = createCustomUIFixture();
+			let loader: CancellableLoader | undefined;
+			const dispose = vi.fn();
+			ui.start();
+			try {
+				await expect(
+					custom<string>((tui, _theme, _keys, done) => {
+						loader = new CancellableLoader(
+							tui,
+							(text) => text,
+							(text) => text,
+							"Cached preview",
+						);
+						const originalDispose = loader.dispose.bind(loader);
+						loader.dispose = () => {
+							dispose();
+							originalDispose();
+						};
+						if (completion === "synchronous") done("cached");
+						else void Promise.resolve("cached").then(done);
+						return loader;
+					}),
+				).resolves.toBe("cached");
+				await flushTui(ui, terminal);
+				expect(dispose).toHaveBeenCalledTimes(1);
+				expect(terminal.getViewport().join("\n")).not.toContain("Cached preview");
+			} finally {
+				loader?.dispose();
+				ui.stop();
+			}
+		},
+	);
+
+	test.each(["successful", "rejected"])(
+		"preserves typing before a %s asynchronous factory settles",
+		async (outcome) => {
+			const { terminal, ui, editor, custom } = createCustomUIFixture();
+			let finish!: () => void;
+			let fail!: (error: Error) => void;
+			const initialization = new Promise<void>((resolve, reject) => {
+				finish = resolve;
+				fail = reject;
+			});
+			let close!: (value: string) => void;
+			editor.setText("original ");
+			ui.start();
+			try {
+				const opening = custom<string>(async (_tui, _theme, _keys, done) => {
+					close = done;
+					await initialization;
+					return new TestFocusableComponent("ASYNC PREVIEW");
+				});
+				const settled = opening.catch((error: Error) => error.message);
+				terminal.sendInput("new typed draft");
+				await flushTui(ui, terminal);
+				expect(editor.getText()).toBe("original new typed draft");
+				if (outcome === "successful") {
+					finish();
+					await flushTui(ui, terminal);
+					expect(terminal.getViewport().join("\n")).toContain("ASYNC PREVIEW");
+					close("closed");
+					expect(await settled).toBe("closed");
+				} else {
+					fail(new Error("preview unavailable"));
+					expect(await settled).toBe("preview unavailable");
+				}
+				expect(editor.getText()).toBe("original new typed draft");
+			} finally {
+				ui.stop();
+			}
+		},
+	);
 });
 
 describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () => {

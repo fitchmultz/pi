@@ -1,11 +1,13 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `5ab7fe74c400097b386662205cd93900695b8a71`
-(2026-10-15), including v1.2.0 and its follow-up fixes. It is upstream plus the features
+v1.0.0 and synchronized through upstream `4954d760504c11df9b2cbdc040346107b6a8153d`
+(2026-10-15), including v1.3.0 and its follow-up fixes. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
-The [2026-10-15 integration record](docs/upstream-sync-2026-10-15.md) documents the
+The [v1.3.0 integration record](docs/upstream-sync-1.3.0.md) documents the current
+baseline, preserved callers, new regressions and verification commands. The
+[earlier 2026-10-15 integration record](docs/upstream-sync-2026-10-15.md) documents the
 measured divergence, preserved callers, new regressions and verification commands.
 
 ## Fork features
@@ -51,7 +53,7 @@ Chord reference admission now follows upstream's foreign-context checks and root
 The fork's shared admission helper and supporting type changes are retired; the local/client/host
 regression matrix remains in `packages/chord/test/review.test.ts`.
 See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),
-[Codemode](packages/codemode/CHANGELOG.md#unreleased) and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
+[Codemode](packages/codemode/CHANGELOG.md) and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
@@ -82,6 +84,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | An oversized Env watch change must report `overflow` instead of stopping the daemon's output writer ([#10516](https://github.com/earendil-works/pi/issues/10516)) | `packages/env/daemon/src/watch.rs` | `packages/env/test/remote.test.ts` |
 | Equivalent known-hosts path spellings must serialize accept/forget rewrites ([#10517](https://github.com/earendil-works/pi/issues/10517)) | `packages/env/src/ssh.ts`, `packages/env/test/ssh.test.ts` | `packages/env/test/ssh.test.ts` |
 | Replayed signatures count toward context estimates | `packages/ai/src/utils/estimate.ts` | `packages/ai/test/context-estimate.test.ts` |
+| Model-switch output limits must use target-model usage and native replay, not charge reasoning dropped from the request | `packages/ai/src/{utils/estimate,utils/transform-messages,api/simple-options}.ts`; the existing public `api/transform-messages` entry re-exports the shared implementation | `packages/ai/test/context-estimate.test.ts` |
 | Retry omissions after a valid usage anchor must not re-estimate its unchanged prefix ([#10287](https://github.com/earendil-works/pi/issues/10287), [#10068](https://github.com/earendil-works/pi/issues/10068)); compaction must count replayed reasoning signatures (estimate portion of [#9409](https://github.com/earendil-works/pi/issues/9409)), while text summaries budget only serialized content | `core/compaction/{compaction,branch-summarization}.ts`, `core/bug-report.ts` | `session-context-edit.test.ts`, `branch-summarization.test.ts`, `suite/agent-session-context-usage.test.ts` |
 | Dialog input needs xterm printable decoding, grapheme-safe replacement and correct mouse columns | `packages/tui/src/components/input.ts` | `packages/tui/test/{input,mouse-components}.test.ts` |
 | Hyperlink control payloads must stay byte-identical | `packages/tui/src/utils.ts` | `packages/tui/test/truncate-to-width.test.ts` |
@@ -91,6 +94,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Cache overlap estimates must follow native ancestry, identify expected model/provider transitions and distinguish current, prior observed, catalog and unknown read prices without changing real usage totals | `core/cache-stats.ts`, `modes/interactive/interactive-mode.ts` | `cache-stats.test.ts`, `interactive-mode-assistant-diagnostics.test.ts`, `suite/prompt-cache-prefix.test.ts` |
 | Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
 | Reload must preserve deselected default-active tools while adopting newly configured defaults, including saved `--tools +name/-name` modifiers | `core/agent-session.ts` | `default-tools-setting.test.ts` |
+| Custom UI must dispose components completed during factory initialization and preserve drafts typed before an asynchronous factory mounts | `modes/interactive/interactive-mode.ts` | `interactive-mode-status.test.ts` |
 | Extension cancellation must remain observable through run setup, post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal; upstream's `agent_settled.aborted` is captured before clearing that signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
 | Repeated context-usage reads must reuse the last scalar without rescanning archived ancestry; native leaf identity and effective model limits preserve compaction, edits, branches and reload/restore behavior | `core/agent-session.ts` | `suite/agent-session-context-usage.test.ts` |
 | Session hot paths incrementally retain active ancestry, compaction-aware raw context entries and model/thinking settings; projected messages and returned arrays remain fresh. Entry-list and leaf identity invalidate reuse on reload or navigation. The latest name stays indexed; branch-summary admission stays linear, file forks reuse a private exclusive descriptor, and custom-flat listings reject unrelated cwd headers before reading bodies | `core/session-manager.ts`, `core/compaction/branch-summarization.ts` | `session-manager/*.test.ts`, `session-context-edit.test.ts`, `branch-summarization.test.ts`, `file-safety.test.ts` |
@@ -178,7 +182,12 @@ These behaviors have offline parser/payload regression coverage, not a live prov
 
 Anthropic native tool changes follow upstream's inline definitions and fixed initial tool list,
 including same-name redefinitions. The fork retains request-wide strict-schema budgets and passive
-cache tracing. ChatGPT OAuth follows upstream's mandatory callback listener and port-conflict
+cache tracing. Cross-model thinking removal and custom-overlay ownership follow upstream 1.3.0.
+The pure replay implementation is shared with target-aware output budgeting under `utils/`;
+the existing public API path remains available and entry-graph restrictions are unchanged.
+Catalog release validation follows upstream, with the fork's existing npm pack metadata
+validator reused for both npm array and package-keyed output.
+ChatGPT OAuth follows upstream's mandatory callback listener and port-conflict
 failure while keeping the fork's cancellation, state validation and cleanup safeguards. Cloudflare
 Claude-ID generation already produces canonical IDs upstream. The shared helper also canonicalizes
 provider inputs, remote overlays and pinned catalog hydration. For canonical Cloudflare Opus 5.5 it

@@ -1,5 +1,15 @@
-import type { AssistantMessage, ImageContent, Message, TextContent, TranscriptContext, Usage } from "../types.ts";
+import type {
+	Api,
+	AssistantMessage,
+	ImageContent,
+	Message,
+	Model,
+	TextContent,
+	TranscriptContext,
+	Usage,
+} from "../types.ts";
 import { getSystemMessageText } from "./text.ts";
+import { transformMessages } from "./transform-messages.ts";
 
 export interface ContextUsageEstimate {
 	/** Estimated total context tokens. */
@@ -68,7 +78,10 @@ export function estimateMessageTokens(message: Message): number {
 	return Math.ceil(chars / CHARS_PER_TOKEN);
 }
 
-function getLastAssistantUsageInfo(messages: readonly Message[]): { usage: Usage; index: number } | undefined {
+function getLastAssistantUsageInfo(
+	messages: readonly Message[],
+	model?: Model<Api>,
+): { usage: Usage; index: number } | undefined {
 	let latestPrefixTimestamp = Number.NEGATIVE_INFINITY;
 	let usageInfo: { usage: Usage; index: number } | undefined;
 
@@ -81,6 +94,10 @@ function getLastAssistantUsageInfo(messages: readonly Message[]): { usage: Usage
 			const usageAppliesToPrefix = assistant.timestamp >= latestPrefixTimestamp;
 			if (
 				usageAppliesToPrefix &&
+				(!model ||
+					(assistant.provider === model.provider &&
+						assistant.api === model.api &&
+						assistant.model === model.id)) &&
 				assistant.stopReason !== "aborted" &&
 				assistant.stopReason !== "error" &&
 				calculateContextTokens(assistant.usage) > 0
@@ -94,21 +111,25 @@ function getLastAssistantUsageInfo(messages: readonly Message[]): { usage: Usage
 	return usageInfo;
 }
 
-export function estimateContextTokens(context: TranscriptContext | readonly Message[]): ContextUsageEstimate {
+/** With a target model, reuse only its usage and estimate the remaining messages after native replay transforms. */
+export function estimateContextTokens(
+	context: TranscriptContext | readonly Message[],
+	model?: Model<Api>,
+): ContextUsageEstimate {
 	const messages = "messages" in context ? context.messages : context;
-	const usageInfo = getLastAssistantUsageInfo(messages);
-	if (usageInfo) {
-		const usageTokens = calculateContextTokens(usageInfo.usage);
-		let trailingTokens = 0;
-		for (let i = usageInfo.index + 1; i < messages.length; i++) {
-			trailingTokens += estimateMessageTokens(messages[i]);
-		}
-		return { tokens: usageTokens + trailingTokens, usageTokens, trailingTokens, lastUsageIndex: usageInfo.index };
-	}
-
-	let tokens = 0;
-	for (const message of messages) tokens += estimateMessageTokens(message);
-	return { tokens, usageTokens: 0, trailingTokens: tokens, lastUsageIndex: null };
+	const usageInfo = getLastAssistantUsageInfo(messages, model);
+	const usageTokens = usageInfo ? calculateContextTokens(usageInfo.usage) : 0;
+	// Select the anchor before transforming: omitted attempts must not change its original index.
+	const suffix = messages.slice(usageInfo ? usageInfo.index + 1 : 0);
+	const replay = model ? transformMessages(suffix, model) : suffix;
+	let trailingTokens = 0;
+	for (const message of replay) trailingTokens += estimateMessageTokens(message);
+	return {
+		tokens: usageTokens + trailingTokens,
+		usageTokens,
+		trailingTokens,
+		lastUsageIndex: usageInfo?.index ?? null,
+	};
 }
 
 function estimateToolsTokens(tools: readonly unknown[] | undefined): number {
