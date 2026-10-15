@@ -217,8 +217,6 @@ coverage explicitly; remove it when the investigation ends.
 - Patch core only when no public seam exists. Keep the patch small and list it in the table above.
 - Default to upstream architecture. Do not re-add a dropped feature without the owner's approval.
 - Behavior covered by upstream replaces the fork version; delete the fork path.
-- Keep fork behavior and delivery checks grounded in Pi's supported workflows, not
-  downstream-application-specific requirements.
 
 The fork carries the coordinated provider/schema refresh proposed in upstream issue
 [#10909](https://github.com/earendil-works/pi/issues/10909), plus reviewed same-major
