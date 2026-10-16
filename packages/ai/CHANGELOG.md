@@ -28,6 +28,7 @@
 - Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
 - Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
 - Fixed canonical Cloudflare AI Gateway Opus 5.5 catalog defaults omitting positional system, tool and effort controls and five-minute/one-hour cache lifetimes, including pinned catalog hydration; explicit metadata, compatibility opt-outs and catalog entries with a non-canonical `baseUrl` remain unchanged.
+- Fixed Cloudflare AI Gateway GPT models on the `/openai` Responses route rewriting the cached prompt prefix after every mid-session system update or tool load. Models that accept mid-conversation developer messages and `additional_tools` at OpenAI now default to both on Cloudflare, including fetched and restored catalog overlays; explicit metadata and catalog entries with a non-canonical `baseUrl` remain unchanged.
 
 ### Removed
 
