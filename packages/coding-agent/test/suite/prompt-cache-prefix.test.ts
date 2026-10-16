@@ -51,6 +51,12 @@ it.each([
 		toolAdditions: true,
 		scriptOnly: false,
 	},
+	{
+		model: getBuiltinModel("cloudflare-ai-gateway", "gpt-6-astra"),
+		systemPatches: true,
+		toolAdditions: true,
+		scriptOnly: false,
+	},
 	{ model: getBuiltinModel("zai", "glm-5.3"), systemPatches: false, toolAdditions: false, scriptOnly: true },
 	{
 		model: getBuiltinModel("deepseek", "deepseek-flash"),

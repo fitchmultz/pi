@@ -28,12 +28,41 @@ export function normalizeCloudflareModelId(provider: string, api: string, id: st
 		: id;
 }
 
+/**
+ * Direct OpenAI models that accept developer messages and `additional_tools` items mid-conversation
+ * (`OPENAI_MID_CONVO_SYSTEM_MESSAGE_MODEL_IDS` in generate-models.ts). Cloudflare's /openai route passes
+ * both through unchanged. The defaults live here rather than in the generator because pi.dev overlays,
+ * published upstream without them, replace generated entries. A parity test keeps this list in sync.
+ */
+const OPENAI_POSITIONAL_MODEL_IDS = new Set([
+	"gpt-5.4",
+	"gpt-5.4-mini",
+	"gpt-5.4-pro",
+	"gpt-5.5",
+	"gpt-5.6-sol",
+	"gpt-5.6-terra",
+	"gpt-5.6-luna",
+	"gpt-6-astra",
+	"gpt-6-sol",
+	"gpt-6-luna",
+	"gpt-6.1-sol",
+]);
+
 export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel): TModel {
 	const id = normalizeCloudflareModelId(model.provider, model.api, model.id);
 	const normalized = id === model.id ? model : { ...model, id };
+	if (!isModelType(normalized, "chat") || normalized.provider !== "cloudflare-ai-gateway") return normalized;
 	if (
-		!isModelType(normalized, "chat") ||
-		normalized.provider !== "cloudflare-ai-gateway" ||
+		normalized.api === "openai-responses" &&
+		normalized.baseUrl === CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL &&
+		OPENAI_POSITIONAL_MODEL_IDS.has(normalized.id)
+	) {
+		return {
+			...normalized,
+			compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true, ...normalized.compat },
+		};
+	}
+	if (
 		normalized.api !== "anthropic-messages" ||
 		normalized.id !== "claude-opus-5-5" ||
 		normalized.baseUrl !== CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL

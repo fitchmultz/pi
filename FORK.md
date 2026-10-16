@@ -31,7 +31,7 @@ all-platform qualification.
 | Auth fallback: ephemeral credentials without replacing native provider/catalog/transport | `core/{model-runtime,provider-composer}.ts`, `core/extensions/provider-registrations.ts` | `model-runtime-auth-options.test.ts` | [Auth fallback](packages/coding-agent/docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider) |
 | Opt-in slow diagnostics: native synchronous handlers and footer frames need dispatch attribution | `core/extensions/{runner,wrapper}.ts`; `PI_EXTENSION_PERFORMANCE=1` | `extensions-performance.test.ts` | [Extensions](packages/coding-agent/docs/extensions.md#opt-in-performance-warnings) |
 | Temporary passive tracing: public hooks do not yet cover final serialization/consumed attempts | `packages/ai/src/utils/cache-trace.ts`, native adapter hooks, `core/cache-trace-context.ts`, `scripts/cache-trace-report.mjs` | `packages/ai/test/cache-trace.test.ts`, `sdk-stream-options.test.ts`, `scripts/cache-trace-report.test.mjs` | [Fidelity and retirement](packages/coding-agent/docs/cache-tracing.md) |
-| Cloudflare Claude catalogs: canonical IDs and qualified Opus 5.5 positional controls/cache lifetimes | `packages/ai/src/api/cloudflare.ts`, generator/provider, `packages/ai/scripts/hydrate-model-catalog.ts` and `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Providers](packages/coding-agent/docs/providers.md), [Cache lifetimes](packages/coding-agent/docs/models.md#prompt-cache-lifetimes) |
+| Cloudflare catalogs: canonical Claude IDs, qualified Opus 5.5 positional controls/cache lifetimes, and direct-OpenAI positional defaults for `/openai` Responses models | `packages/ai/src/api/cloudflare.ts`, generator/provider, `packages/ai/scripts/hydrate-model-catalog.ts` and `core/remote-catalog-provider.ts` | `packages/ai/test/{model-data-validation,cloudflare-openai-positional}.test.ts`, `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Providers](packages/coding-agent/docs/providers.md), [Cache lifetimes](packages/coding-agent/docs/models.md#prompt-cache-lifetimes) |
 | Path hyperlinks: Markdown paths stay clickable after wrapping; terminals only regex-match one row and the source-transform seam cannot see codespans or code blocks | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` | [Terminal setup](packages/coding-agent/docs/terminal-setup.md#override-detected-capabilities) |
 
 Complete working state also depends on the queue/admission APIs in
@@ -192,7 +192,11 @@ failure while keeping the fork's cancellation, state validation and cleanup safe
 Claude-ID generation already produces canonical IDs upstream. The shared helper also canonicalizes
 provider inputs, remote overlays and pinned catalog hydration. For canonical Cloudflare Opus 5.5 it
 restores positional system/tool/effort controls and defaults absent cache metadata to five-minute
-and one-hour lifetimes. Explicit compatibility flags and whole cache metadata objects are preserved;
+and one-hour lifetimes. Cloudflare `/openai` Responses entries for the GPT models whose direct
+OpenAI entries accept mid-conversation developer messages and `additional_tools` get both flags too:
+the published catalog lists only OpenCode and Copilot as Responses proxies, so without them every
+system update or tool load rewrote the cached prompt prefix. A parity test keeps that model list
+aligned with the generator's. Explicit compatibility flags and whole cache metadata objects are preserved;
 catalog entries with a non-canonical `baseUrl` do not receive these defaults.
 
 Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3 keeps

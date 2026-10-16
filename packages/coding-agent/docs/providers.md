@@ -215,6 +215,9 @@ Claude models on the `/anthropic` passthrough use Anthropic's hyphenated IDs, su
 `claude-opus-4-6`. Pi normalizes dotted versions from bundled and refreshed pi.dev catalogs.
 Other gateway APIs and providers keep their own IDs.
 
+GPT models on the `/openai` passthrough send mid-conversation system updates and newly loaded
+tools in place, as direct OpenAI does, so the cached prompt prefix survives them.
+
 ### Cloudflare Workers AI
 
 Workers AI requires a token and account ID:
