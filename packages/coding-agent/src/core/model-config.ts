@@ -49,6 +49,7 @@ const ModelDefinitionSchema = Type.Object({
 });
 
 const ModelOverrideSchema = Type.Object({
+	hidden: Type.Optional(Type.Boolean()),
 	name: Type.Optional(Type.String({ minLength: 1 })),
 	reasoning: Type.Optional(Type.Boolean()),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
