@@ -383,8 +383,13 @@ describe("private opt-in cache recorder", () => {
 		trace.terminal({ type: "message_stop" });
 		expect(records(path)).toEqual(captured);
 		process.env.PI_CACHE_TRACE_DIR = path;
+		const fsModule = process.getBuiltinModule("node:fs") as typeof import("node:fs");
+		const lstatSpy = vi.spyOn(fsModule, "lstatSync");
+		trace.terminal({ type: "content_block_delta", delta: { type: "text_delta", text: "hello" } });
+		expect(lstatSpy).not.toHaveBeenCalled();
 		trace.terminal({ type: "message_stop" });
-		expect(records(path).at(-1)).toMatchObject({ kind: "terminal", payloadPass: 2 });
+		expect(lstatSpy).toHaveBeenCalled();
+		expect(records(path).at(-1)).toMatchObject({ kind: "terminal", payloadPass: 2, sequence: 3 });
 		process.env.PI_CACHE_TRACE_SESSION_ID = "*";
 		expect(createCacheTrace(model("anthropic-messages"), { cacheTraceContext: { sessionId } })).toBeUndefined();
 	});

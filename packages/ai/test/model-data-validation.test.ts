@@ -233,6 +233,7 @@ describe("published model catalog hydration", () => {
 			baseUrl,
 			compat: { supportsMidConvoSystemMessages: false },
 			thinkingLevelMap: { off: "none", low: "low" },
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 5 },
 		};
 		writeFileSync(catalogPath, JSON.stringify({ [provider]: [model] }));
 		hydrateModelCatalog(packageRoot, catalogPath);
@@ -240,6 +241,31 @@ describe("published model catalog hydration", () => {
 			readFileSync(join(dataDir, `${provider}.json`), "utf8"),
 		);
 		expect(groups[api]["chat:k3"]).toEqual(model);
+	});
+
+	it.each([
+		["kimi-coding", "k3", "https://api.kimi.com/coding/v1"],
+		["moonshotai", "kimi-k3", "https://api.moonshot.ai/v1"],
+		["moonshotai-cn", "kimi-k3", "https://api.moonshot.cn/v1"],
+	])("restores Kimi K3 $3/M cacheWrite rate for canonical %s/%s during hydration", (provider, id, baseUrl) => {
+		const { dataDir, packageRoot, values } = createFixture(provider);
+		const catalogPath = join(packageRoot, "catalog.json");
+		const model = {
+			...chatModel(values),
+			id,
+			api: "openai-completions",
+			baseUrl,
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+		};
+		writeFileSync(catalogPath, JSON.stringify({ [provider]: [model] }));
+		hydrateModelCatalog(packageRoot, catalogPath);
+		const groups: Record<string, Record<string, unknown>> = JSON.parse(
+			readFileSync(join(dataDir, `${provider}.json`), "utf8"),
+		);
+		expect(groups["openai-completions"][`chat:${id}`]).toEqual({
+			...model,
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 },
+		});
 	});
 
 	it("keys chat and image models with the same id separately", () => {

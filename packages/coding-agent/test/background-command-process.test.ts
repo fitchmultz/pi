@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -18,14 +19,16 @@ it("delivers once across two processes sharing a session and another process res
 	const owner = SessionManager.create(root, join(root, "sessions"));
 	owner.appendMessage({ role: "user", content: "Saved session", timestamp: Date.now() });
 	const release = join(root, "release");
+	const stopConcurrent = join(root, "stop-concurrent");
+	const stopResumed = join(root, "stop-resumed");
 	const command = `while [ ! -f '${release}' ]; do sleep 0.02; done; printf finished`;
 	const jobs = backgroundCommandDirectory(owner);
 	const job = await startBackgroundCommand(jobs, command, { command, cwd: root, env: getShellEnv() });
 	const fixture = fileURLToPath(new URL("./fixtures/background-command-resume.ts", import.meta.url));
 	const resolver = fileURLToPath(new URL("../src/experimental/source-resolver.ts", import.meta.url));
 	const children: ReturnType<typeof spawn>[] = [];
-	function resume() {
-		const child = spawn(process.execPath, ["--import", resolver, fixture, owner.getSessionFile()!], {
+	function resume(stopFile: string) {
+		const child = spawn(process.execPath, ["--import", resolver, fixture, owner.getSessionFile()!, stopFile], {
 			stdio: ["ignore", "pipe", "pipe"],
 			env: { ...process.env, PI_OFFLINE: "1" },
 		});
@@ -51,6 +54,7 @@ it("delivers once across two processes sharing a session and another process res
 			});
 		});
 		return {
+			child,
 			ready: Promise.race([
 				ready,
 				done.then(() => {
@@ -61,10 +65,27 @@ it("delivers once across two processes sharing a session and another process res
 		};
 	}
 	try {
-		const first = resume();
-		const second = resume();
+		const first = resume(stopConcurrent);
+		const second = resume(stopConcurrent);
 		await Promise.all([first.ready, second.ready]);
+		expect(first.child.exitCode).toBeNull();
+		expect(second.child.exitCode).toBeNull();
 		writeFileSync(release, "go");
+		await expect
+			.poll(
+				() =>
+					SessionManager.open(owner.getSessionFile()!)
+						.getEntries()
+						.filter((entry) => entry.type === "custom_message" && entry.customType === BACKGROUND_COMMAND_NOTICE)
+						.length,
+				{ timeout: 5000 },
+			)
+			.toBe(1);
+		// Keep both competing readers alive past the next poll window before releasing them.
+		await delay(200);
+		expect(first.child.exitCode).toBeNull();
+		expect(second.child.exitCode).toBeNull();
+		writeFileSync(stopConcurrent, "stop");
 		const calls = await Promise.all([first.done, second.done]);
 		expect(calls.reduce((sum, count) => sum + count, 0)).toBe(1);
 		const restored = SessionManager.open(owner.getSessionFile()!);
@@ -73,7 +94,11 @@ it("delivers once across two processes sharing a session and another process res
 			.filter((entry) => entry.type === "custom_message" && entry.customType === BACKGROUND_COMMAND_NOTICE);
 		expect(notices).toHaveLength(1);
 		expect(notices[0]).toMatchObject({ details: { jobIds: [job.id] } });
-		expect(await resume().done).toBe(0);
+		const third = resume(stopResumed);
+		await third.ready;
+		await delay(1100);
+		writeFileSync(stopResumed, "stop");
+		expect(await third.done).toBe(0);
 	} finally {
 		for (const child of children) if (child.exitCode === null) child.kill("SIGKILL");
 		await cancelBackgroundCommand(jobs, job.id);

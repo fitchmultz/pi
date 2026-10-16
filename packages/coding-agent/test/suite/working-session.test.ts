@@ -1927,6 +1927,103 @@ describe("Native working sessions", () => {
 		}
 	});
 
+	it("pauses remaining TUI startup messages under a turn save and restores compact tool expansion", async () => {
+		const firstTurn = deferred();
+		const h = await createHarness({
+			settings: { compactView: true },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_start", (_event, ctx) => {
+						ctx.ui.setToolsExpanded(true);
+					});
+				},
+			],
+		});
+		harnesses.push(h);
+		h.setResponses([
+			async () => {
+				await firstTurn.promise;
+				return fauxAssistantMessage("first startup turn complete");
+			},
+			fauxAssistantMessage("second startup turn complete"),
+		]);
+		initTheme("dark");
+		const mode = new InteractiveMode(
+			{
+				session: h.session,
+				setBeforeSessionInvalidate() {},
+				setRebindSession() {},
+			} as unknown as AgentSessionRuntime,
+			{
+				terminal: new VirtualTerminal(80, 40),
+				tuiMode: "regular",
+				initialMessage: "first startup input",
+				initialMessages: ["second startup input"],
+			},
+		);
+		const view = mode as unknown as {
+			isShuttingDown: boolean;
+			chatContainer: { render(width: number): string[] };
+		};
+		view.isShuttingDown = true;
+		try {
+			const runPromise = mode.run();
+			await vi.waitFor(() => expect(h.faux.state.callCount).toBe(1));
+			const acquisition = h.session.acquireWorkingSession({ boundary: "turn" });
+			firstTurn.resolve();
+			const hold = await acquisition;
+			expect(hold.state.mode).toMatchObject({
+				kind: "tui",
+				data: {
+					pendingUserInputs: ["second startup input"],
+					compactView: true,
+					toolOutputExpanded: true,
+				},
+			});
+			expect(h.faux.state.callCount).toBe(1);
+
+			const { session: restoredSession } = await createAgentSession({
+				workingSession: hold.state,
+				modelRuntime: h.session.modelRuntime,
+				resourceLoader: h.session.resourceLoader,
+			});
+			const restoredMode = new InteractiveMode(
+				{
+					session: restoredSession,
+					setBeforeSessionInvalidate() {},
+					setRebindSession() {},
+				} as unknown as AgentSessionRuntime,
+				{ terminal: new VirtualTerminal(80, 40) },
+			);
+			const restoredView = restoredMode as unknown as {
+				isInitialized: boolean;
+				isShuttingDown: boolean;
+				chatContainer: { render(width: number): string[] };
+				rebindCurrentSession(): Promise<void>;
+				showStatus(message: string): void;
+			};
+			restoredView.isInitialized = true;
+			restoredView.isShuttingDown = true;
+			try {
+				await restoredView.rebindCurrentSession();
+				restoredView.showStatus("restored activity detail");
+				const rendered = restoredView.chatContainer.render(80).join("\n");
+				expect(rendered).toContain("▾ Activity");
+				expect(rendered).toContain("restored activity detail");
+			} finally {
+				restoredMode.stop("resume-hint");
+				restoredSession.dispose();
+			}
+
+			await hold.release();
+			await vi.waitFor(() => expect(h.faux.state.callCount).toBe(2));
+			void runPromise;
+		} finally {
+			firstTurn.resolve();
+			mode.stop("resume-hint");
+		}
+	});
+
 	it("replays terminal input once when save preparation fails before host readiness", async () => {
 		const preparation = deferred();
 		let preparing = false;

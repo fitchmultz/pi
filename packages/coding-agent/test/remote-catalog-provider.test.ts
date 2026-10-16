@@ -109,6 +109,51 @@ describe("remote catalog provider", () => {
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it.each([
+		["kimi-coding", "k3", "https://api.kimi.com/coding/v1"],
+		["moonshotai", "kimi-k3", "https://api.moonshot.ai/v1"],
+		["moonshotai-cn", "kimi-k3", "https://api.moonshot.cn/v1"],
+	])(
+		"preserves Kimi K3 $3/M cacheWrite rate on fetched and restored %s/%s OpenAI catalogs",
+		async (providerId, id, baseUrl) => {
+			const baseline: Model<"openai-completions"> = {
+				...model(id),
+				provider: providerId,
+				baseUrl,
+				cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 },
+			};
+			const remote = [{ ...baseline, name: `Published ${id}`, cost: { ...baseline.cost, cacheWrite: 0 } }];
+			vi.spyOn(globalThis, "fetch").mockResolvedValue(
+				new Response(JSON.stringify(remote), { headers: { "last-modified": "Thu, 15 Oct 2026 00:00:00 GMT" } }),
+			);
+			const makeProvider = () =>
+				withRemoteCatalog(
+					createProvider({
+						id: providerId,
+						auth: { apiKey: { name: "Offline", resolve: async () => ({ auth: {} }) } },
+						models: [baseline],
+						api: {
+							stream: () => {
+								throw new Error("unused");
+							},
+							streamSimple: () => {
+								throw new Error("unused");
+							},
+						},
+					}),
+					"https://pi.dev",
+					0,
+				);
+			const store = new InMemoryModelsStore();
+			const provider = makeProvider();
+			await refreshProvider(provider, store);
+			expect(provider.getModels()[0]?.cost.cacheWrite).toBe(3);
+			const restored = makeProvider();
+			await refreshProvider(restored, store, { allowNetwork: false });
+			expect(restored.getModels()[0]?.cost.cacheWrite).toBe(3);
+		},
+	);
+
 	// #127: newer pi.dev overlays must not reintroduce the invalid dotted passthrough ID.
 	it("normalizes fetched and restored Cloudflare Claude IDs before merging with the baseline", async () => {
 		const baseline: Model<"anthropic-messages"> = {

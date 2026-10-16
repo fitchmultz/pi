@@ -143,6 +143,16 @@ const NUMBER_METADATA = new Set([
 	"inputItems",
 	"logicalInputItems",
 ]);
+const TERMINAL_EVENT_TYPES = new Set([
+	"response.completed",
+	"response.done",
+	"response.incomplete",
+	"response.failed",
+	"message_start",
+	"message_delta",
+	"message_stop",
+	"chat.usage",
+]);
 const SAFE_HEADERS = [
 	"anthropic-beta",
 	"openai-beta",
@@ -749,25 +759,29 @@ export class CacheTrace {
 	}
 
 	terminal(event: unknown): void {
-		this.observe(() => {
-			const root = object(event);
-			const sequence = ++this.sequence;
+		if (
+			this.writer.stopped ||
+			typeof process === "undefined" ||
+			process.env?.PI_CACHE_TRACE_DIR !== this.writer.directory ||
+			!sessionAllowed(this.sessionId)
+		)
+			return;
+		let root: Metadata;
+		let choice: Metadata;
+		let type: unknown;
+		let sequence: number;
+		try {
+			root = object(event);
+			sequence = ++this.sequence;
 			const choices = Array.isArray(root.choices) ? root.choices : [];
-			const choice = object(choices[0]);
-			const type = root.type ?? (root.usage || choice.usage || choice.finish_reason ? "chat.usage" : undefined);
-			if (
-				![
-					"response.completed",
-					"response.done",
-					"response.incomplete",
-					"response.failed",
-					"message_start",
-					"message_delta",
-					"message_stop",
-					"chat.usage",
-				].includes(String(type))
-			)
-				return;
+			choice = object(choices[0]);
+			type = root.type ?? (root.usage || choice.usage || choice.finish_reason ? "chat.usage" : undefined);
+			if (!TERMINAL_EVENT_TYPES.has(String(type))) return;
+		} catch {
+			this.gap("observer_failure");
+			return;
+		}
+		this.observe(() => {
 			const response = object(root.response ?? root.message ?? root);
 			const usageOwner = type === "chat.usage" && !root.usage && choice.usage ? choice : response;
 			const usage = object(usageOwner.usage);
