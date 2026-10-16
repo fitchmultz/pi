@@ -23,6 +23,28 @@ function linkTarget(text: string): string | undefined {
 	return pathToFileURL(path.startsWith("~/") ? homedir() + path.slice(1) : path).href;
 }
 
+function isSingleCodespanLink(text: string): boolean {
+	if (/[\r\n"'<>`]|^$/.test(text)) {
+		return false;
+	}
+	if (!/\s/.test(text)) {
+		return /^(?:https?:\/\/|~?\/)/.test(text);
+	}
+	if (
+		!/^~?\//.test(text) ||
+		/[|;&$]/.test(text) ||
+		/\s-[A-Za-z0-9-]/.test(text) ||
+		/\s(?:~?\/|https?:\/\/)/.test(text)
+	) {
+		return false;
+	}
+	const pathWithoutPosition = text.replace(/(?::\d+){1,2}$/, "");
+	return (
+		pathWithoutPosition.lastIndexOf(" ") < pathWithoutPosition.lastIndexOf("/") ||
+		/\.[A-Za-z0-9]{1,16}$/.test(pathWithoutPosition)
+	);
+}
+
 class StrictStrikethroughTokenizer extends Tokenizer {
 	override del(src: string): Tokens.Del | undefined {
 		const match = STRICT_STRIKETHROUGH_REGEX.exec(src);
@@ -500,6 +522,20 @@ export class Markdown implements Component {
 		return start < text.length ? result + style(text.slice(start)) : result;
 	}
 
+	private renderCodespan(text: string): string {
+		const style = (segment: string) => this.theme.code(segment);
+		if (this.renderingLinkText || !getCapabilities().hyperlinks) {
+			return style(text);
+		}
+		if (isSingleCodespanLink(text)) {
+			const target = linkTarget(text);
+			if (target) {
+				return hyperlink(style(text), target);
+			}
+		}
+		return this.renderLinkableText(text, style);
+	}
+
 	private renderToken(
 		token: Token,
 		width: number,
@@ -732,7 +768,7 @@ export class Markdown implements Component {
 				}
 
 				case "codespan":
-					result += this.renderLinkableText(token.text, (text) => this.theme.code(text)) + stylePrefix;
+					result += this.renderCodespan(token.text) + stylePrefix;
 					break;
 
 				case "link": {

@@ -184,9 +184,17 @@ ${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario
 		},
 	);
 
-	it.skipIf(process.platform === "win32").each(["SIGINT", "SIGHUP", "SIGTERM"] as const)(
-		"allows a worker to close gracefully after %s without duplicate delivery",
-		async (signal) => {
+	it
+		.skipIf(process.platform === "win32")
+		.each(
+			(["SIGINT", "SIGHUP", "SIGTERM"] as const).flatMap((signal) =>
+				(["group", "pid"] as const)
+					.filter((target) => !(signal === "SIGTERM" && target === "group"))
+					.map((target) => ({ signal, target })),
+			),
+		)(
+		"allows a worker to close gracefully after $target $signal without duplicate delivery",
+		async ({ signal, target }) => {
 			const f = await fixture();
 			const runtime = f.release(
 				"A",
@@ -221,7 +229,7 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 			});
 			try {
 				await expect.poll(() => output, { timeout: 5000 }).toContain("Worker ready");
-				process.kill(signal === "SIGTERM" ? child.pid! : -child.pid!, signal);
+				process.kill(target === "pid" ? child.pid! : -child.pid!, signal);
 				expect(await exited).toBe(0);
 				expect(output).toContain("Graceful close done");
 				expect(output.split("Signal handled once")).toHaveLength(2);

@@ -201,11 +201,12 @@ aligned with the generator's. Explicit compatibility flags and whole cache metad
 catalog entries with a non-canonical `baseUrl` do not receive these defaults.
 
 Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3 keeps
-the published $3/M five-minute cache-write rate, including Kimi Coding's implied
-estimate ([pricing](https://platform.kimi.ai/docs/pricing/chat)). Kimi Coding's shared
-metadata helper also migrates canonical legacy Anthropic catalog entries during
-offline hydration and fetched/cached runtime merges. Native OpenAI entries, custom
-endpoints and other providers are unchanged. Claude 5.5 pricing now follows
+the published $3/M five-minute cache-write rate across canonical Kimi Coding and
+Moonshot OpenAI entries and Kimi Coding's implied estimate
+([pricing](https://platform.kimi.ai/docs/pricing/chat)). Kimi Coding's shared
+metadata helper also migrates canonical legacy Anthropic catalog entries and restores
+omitted K3 cache-write rates during offline hydration and fetched/cached runtime
+merges. Custom endpoints and other providers are unchanged. Claude 5.5 pricing now follows
 models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`

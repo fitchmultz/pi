@@ -1720,6 +1720,37 @@ bar`,
 			assert.ok(joined.includes(`\x1b]8;;${url}\x1b\\~/notes/todo.md:12`), JSON.stringify(joined));
 			assert.strictEqual(joined.match(/\x1b\]8;;file:/g)?.length, 1, "Only the path should be linked");
 		});
+
+		it("should link full inline codespan paths containing spaces or closing punctuation without linking command flags", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			const spacedPath = "~/Library/Application Support/pi/settings.json";
+			const spacedUrl = pathToFileURL(join(homedir(), "Library/Application Support/pi/settings.json")).href;
+			const spacedJoined = new Markdown(`\`${spacedPath}:14\``, 0, 0, defaultMarkdownTheme).render(120).join("");
+			assert.ok(spacedJoined.includes(`\x1b]8;;${spacedUrl}\x1b\\`), JSON.stringify(spacedJoined));
+
+			const routeGroupPath = "/app/(dashboard)/[id]/page.tsx";
+			const routeGroupUrl = pathToFileURL(routeGroupPath).href;
+			const routeGroupJoined = new Markdown(
+				`\`${routeGroupPath}\` and \`/tmp/report(final)\``,
+				0,
+				0,
+				defaultMarkdownTheme,
+			)
+				.render(120)
+				.join("");
+			assert.ok(routeGroupJoined.includes(`\x1b]8;;${routeGroupUrl}\x1b\\`), JSON.stringify(routeGroupJoined));
+			assert.ok(
+				routeGroupJoined.includes(`\x1b]8;;${pathToFileURL("/tmp/report(final)").href}\x1b\\`),
+				JSON.stringify(routeGroupJoined),
+			);
+
+			const commandJoined = new Markdown("`/bin/echo hello`", 0, 0, defaultMarkdownTheme).render(120).join("");
+			assert.ok(
+				commandJoined.includes(`\x1b]8;;${pathToFileURL("/bin/echo").href}\x1b\\`),
+				JSON.stringify(commandJoined),
+			);
+			assert.ok(!commandJoined.includes("echo%20hello"), JSON.stringify(commandJoined));
+		});
 	});
 
 	describe("HTML-like tags in text", () => {

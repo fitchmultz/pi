@@ -112,7 +112,16 @@ export async function superviseCli(
 		const handler = () => {
 			stopping = signal;
 			// The terminal already delivers SIGINT/SIGHUP to the foreground process group.
-			if (signal === "SIGTERM") child?.kill(signal);
+			if (signal === "SIGTERM") {
+				child?.kill(signal);
+			} else if (child) {
+				const target = child;
+				setTimeout(() => {
+					if (target.exitCode === null && target.signalCode === null) {
+						target.kill(signal);
+					}
+				}, 300).unref();
+			}
 		};
 		process.on(signal, handler);
 		return () => process.off(signal, handler);

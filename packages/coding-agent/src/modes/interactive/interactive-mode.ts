@@ -643,6 +643,12 @@ export class InteractiveMode {
 			tuiMode = data.tuiMode;
 		}
 		this.options = { ...options, tuiMode };
+		if (options.initialMessage !== undefined) {
+			this.pendingUserInputs.push(options.initialMessage);
+		}
+		if (options.initialMessages) {
+			this.pendingUserInputs.push(...options.initialMessages);
+		}
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
 		this.runtimeHost.setBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
@@ -1281,23 +1287,31 @@ export class InteractiveMode {
 		void this.maybeWarnAboutAnthropicSubscriptionAuth();
 
 		// Process initial messages
-		if (initialMessage) {
+		if (!this.pendingUserInputs) {
+			this.pendingUserInputs = [
+				...(initialMessage !== undefined ? [initialMessage] : []),
+				...(initialMessages ?? []),
+			];
+		}
+		let pendingInitialImages = initialMessage !== undefined ? initialImages : undefined;
+		let remainingStartupInputs = (initialMessage !== undefined ? 1 : 0) + (initialMessages?.length ?? 0);
+		while (remainingStartupInputs > 0 && this.pendingUserInputs.length > 0) {
+			while (this.session.workingSessionGate.reserved) {
+				await this.session.workingSessionGate.waitForRelease();
+			}
+			const message = this.pendingUserInputs.shift()!;
+			remainingStartupInputs--;
+			const images = pendingInitialImages;
+			pendingInitialImages = undefined;
 			try {
-				await this.session.prompt(initialMessage, { images: initialImages });
+				if (images) {
+					await this.session.prompt(message, { images });
+				} else {
+					await this.session.prompt(message);
+				}
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
-			}
-		}
-
-		if (initialMessages) {
-			for (const message of initialMessages) {
-				try {
-					await this.session.prompt(message);
-				} catch (error: unknown) {
-					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-					this.showError(errorMessage);
-				}
 			}
 		}
 
@@ -1307,6 +1321,9 @@ export class InteractiveMode {
 		while (true) {
 			const userInput = await this.getUserInput();
 			try {
+				while (this.session.workingSessionGate.reserved) {
+					await this.session.workingSessionGate.waitForRelease();
+				}
 				await this.session.prompt(userInput);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
@@ -2202,12 +2219,17 @@ export class InteractiveMode {
 				)
 					throw new Error("Invalid native TUI working-session buffers");
 				this.switchTuiMode(data.tuiMode);
-				this.pendingUserInputs = data.pendingUserInputs;
+				this.pendingUserInputs = [...this.pendingUserInputs, ...data.pendingUserInputs];
 				this.compactionQueuedMessages = data.compactionQueuedMessages;
 				this.editor.setText(data.draft);
 				this.compactView = data.compactView as CompactView;
-				this.chatContainer.setCompactView(this.compactView);
 				this.toolOutputExpanded = data.toolOutputExpanded;
+				this.chatContainer.setCompactView(this.compactView);
+				this.chatContainer.setExpanded(this.toolOutputExpanded);
+				const activeHeader = this.customHeader ?? this.builtInHeader;
+				if (isExpandable(activeHeader)) {
+					activeHeader.setExpanded(this.getStartupExpansionState());
+				}
 				this.restoredInputPaused = true;
 			},
 		});

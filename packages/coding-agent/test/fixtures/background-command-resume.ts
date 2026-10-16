@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -12,7 +13,10 @@ const h = await createHarness({
 h.setResponses([fauxAssistantMessage("Completion consumed")]);
 await h.session.bindExtensions({ mode: "rpc" });
 console.log("ready");
-await delay(2500);
+const stopFile = process.argv[3];
+while (stopFile && !existsSync(stopFile)) {
+	await delay(25);
+}
 await h.session.waitForIdle();
 console.log(JSON.stringify({ calls: h.faux.state.callCount }));
 await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });

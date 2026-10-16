@@ -294,6 +294,39 @@ describe("AgentSessionRuntime characterization", () => {
 		},
 	);
 
+	it("does not block ordinary dispose when an active tool ignores abort", async () => {
+		let toolStarted!: () => void;
+		let releaseTool!: () => void;
+		let shutdownEmitted = false;
+		const toolStartedPromise = new Promise<void>((resolve) => {
+			toolStarted = resolve;
+		});
+		const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_shutdown", () => {
+				shutdownEmitted = true;
+			});
+			pi.registerTool({
+				name: "unresponsive",
+				label: "Unresponsive",
+				description: "Ignores AbortSignal until released",
+				parameters: Type.Object({}),
+				execute: () =>
+					new Promise<AgentToolResult<unknown>>((resolve) => {
+						toolStarted();
+						releaseTool = () => resolve({ content: [{ type: "text", text: "done" }], details: {} });
+					}),
+			});
+		});
+		faux.setResponses([fauxAssistantMessage(fauxToolCall("unresponsive", {}), { stopReason: "toolUse" })]);
+		const promptPromise = runtime.session.prompt("run unresponsive tool").catch(() => {});
+		await toolStartedPromise;
+
+		await expect(runtime.dispose()).resolves.toBeUndefined();
+		expect(shutdownEmitted).toBe(true);
+		releaseTool();
+		await promptPromise;
+	});
+
 	it("does not await readiness or certify an unready final exit", async () => {
 		const { runtime, tempDir } = await createRuntimeForTest(() => {});
 		runtime.session.setWorkingSessionReady(false);

@@ -423,10 +423,13 @@ export class AgentSessionRuntime {
 		const session = this.session;
 		await session.workingSessionGate.finalExit(async () => {
 			await session.cancelWorkingSession("Native runtime is exiting");
-			await session.abort();
 			const event: SessionShutdownEvent = { type: "session_shutdown", reason: "quit" };
-			if (this.strictFinalization) await session.extensionRunner.emitShutdownStrict(event);
-			else await emitSessionShutdownEvent(session.extensionRunner, event);
+			if (this.strictFinalization) {
+				await session.abort();
+				await session.extensionRunner.emitShutdownStrict(event);
+			} else {
+				await emitSessionShutdownEvent(session.extensionRunner, event);
+			}
 			await this.finalization?.(session);
 			this.beforeSessionInvalidate?.();
 			session.dispose();
