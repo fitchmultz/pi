@@ -22,6 +22,7 @@
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
 - Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Activation accepts upstream catalog removals and prints every removed model ID instead of blocking the update; direct installer runs still require explicit `--accept-model-removals`, while explicit rollback remains available. Restored Termux compiler preparation and isolated shell/exec environments.
 - Added frozen performance results and offline reproduction fixtures covering native tools, rendering, sessions, transports, storage and packaging. See [performance results and reproduction](../../docs/performance.md).
+- Added `hidden: true` to `models.json` `modelOverrides` to remove individual built-in, extension or custom models from a provider, for example superseded versions in `/model` and `--list-models`. See [Choose a Model](docs/models.md).
 
 ### Changed
 

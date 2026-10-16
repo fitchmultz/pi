@@ -587,9 +587,11 @@ export function composeModelProvider(
 				...models.filter((model) => !isModelType(model, "chat")),
 			];
 		}
-		return models.map((model) => {
+		return models.flatMap((model): AnyModel[] => {
+			if (!isModelType(model, "chat")) return [model];
 			const override = config?.modelOverrides?.[model.id];
-			return override && isModelType(model, "chat") ? applyModelOverride(model, override) : model;
+			if (!override) return [model];
+			return override.hidden ? [] : [applyModelOverride(model, override)];
 		});
 	};
 	// Validate eagerly so registration/reload reports structural errors immediately.

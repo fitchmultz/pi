@@ -182,6 +182,9 @@
                 "^.*$": {
                   "type": "object",
                   "properties": {
+                    "hidden": {
+                      "type": "boolean"
+                    },
                     "name": {
                       "type": "string",
                       "minLength": 1

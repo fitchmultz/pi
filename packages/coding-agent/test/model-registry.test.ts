@@ -708,6 +708,27 @@ describe("ModelRegistry", () => {
 			expect(opus?.name).not.toBe("Custom Sonnet Name");
 		});
 
+		test("hidden override removes built-in and custom models from the provider", async () => {
+			writeRawModelsJson({
+				anthropic: {
+					models: [{ id: "claude-custom", api: "anthropic-messages" }],
+					modelOverrides: {
+						"claude-fable-5": { hidden: true },
+						"claude-custom": { hidden: true },
+					},
+				},
+			});
+
+			const registry = await createModelRegistry(authStorage, modelsJsonPath);
+			const ids = getModelsForProvider(registry, "anthropic").map((m) => m.id);
+
+			expect(registry.getError()).toBeUndefined();
+			expect(ids).not.toContain("claude-fable-5");
+			expect(ids).not.toContain("claude-custom");
+			expect(ids).toContain("claude-opus-5");
+			expect(registry.find("anthropic", "claude-fable-5")).toBeUndefined();
+		});
+
 		test("Anthropic model override replaces allowed fallback metadata", async () => {
 			const allowedFallbackModels = [
 				{

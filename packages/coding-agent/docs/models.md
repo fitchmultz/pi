@@ -78,6 +78,20 @@ The dummy key makes the model available to Pi; Ollama ignores it. For an authent
 
 Opening `/model` reloads the file. A `models` entry adds or replaces a model with the same ID on that provider. Use `modelOverrides` to change metadata for an existing built-in or extension-provided model without replacing the provider's model list. Unknown override IDs are ignored.
 
+Set `"hidden": true` in a model's override to remove it from that provider, for example to drop superseded versions from `/model` and `--list-models`. A hidden model cannot be selected or resolved by ID; delete the override to restore it.
+
+```json
+{
+  "providers": {
+    "anthropic": {
+      "modelOverrides": {
+        "claude-sonnet-4-5": { "hidden": true }
+      }
+    }
+  }
+}
+```
+
 ### Describe model input and caching
 
 Use `inputLimits.images.resize` to control how Pi encodes new image attachments, `read` results, and tool-result images before storing them in conversation history:
