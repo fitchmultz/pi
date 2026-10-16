@@ -1294,33 +1294,24 @@ export class InteractiveMode {
 			];
 		}
 		let pendingInitialImages = initialMessage !== undefined ? initialImages : undefined;
-		const initialFollowUpCount = initialMessages?.length ?? 0;
-		if (!this.restoredInputPaused || initialMessage !== undefined || (initialMessages?.length ?? 0) > 0) {
-			while (this.pendingUserInputs.length > 0) {
-				while (this.session.workingSessionGate.reserved) {
-					await this.session.workingSessionGate.waitForRelease();
-				}
-				if (this.restoredInputPaused && initialMessage === undefined && (initialMessages?.length ?? 0) === 0) {
-					break;
-				}
-				const message = this.pendingUserInputs.shift()!;
-				const images =
-					pendingInitialImages && this.pendingUserInputs.length === initialFollowUpCount
-						? pendingInitialImages
-						: undefined;
+		let remainingStartupInputs = (initialMessage !== undefined ? 1 : 0) + (initialMessages?.length ?? 0);
+		while (remainingStartupInputs > 0 && this.pendingUserInputs.length > 0) {
+			while (this.session.workingSessionGate.reserved) {
+				await this.session.workingSessionGate.waitForRelease();
+			}
+			const message = this.pendingUserInputs.shift()!;
+			remainingStartupInputs--;
+			const images = pendingInitialImages;
+			pendingInitialImages = undefined;
+			try {
 				if (images) {
-					pendingInitialImages = undefined;
+					await this.session.prompt(message, { images });
+				} else {
+					await this.session.prompt(message);
 				}
-				try {
-					if (images) {
-						await this.session.prompt(message, { images });
-					} else {
-						await this.session.prompt(message);
-					}
-				} catch (error: unknown) {
-					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-					this.showError(errorMessage);
-				}
+			} catch (error: unknown) {
+				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+				this.showError(errorMessage);
 			}
 		}
 
@@ -2228,7 +2219,7 @@ export class InteractiveMode {
 				)
 					throw new Error("Invalid native TUI working-session buffers");
 				this.switchTuiMode(data.tuiMode);
-				this.pendingUserInputs = [...data.pendingUserInputs, ...this.pendingUserInputs];
+				this.pendingUserInputs = [...this.pendingUserInputs, ...data.pendingUserInputs];
 				this.compactionQueuedMessages = data.compactionQueuedMessages;
 				this.editor.setText(data.draft);
 				this.compactView = data.compactView as CompactView;

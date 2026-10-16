@@ -2002,6 +2002,7 @@ describe("Native working sessions", () => {
 			const restoredView = restoredMode as unknown as {
 				isInitialized: boolean;
 				isShuttingDown: boolean;
+				restoredInputPaused: boolean;
 				pendingUserInputs: string[];
 				chatContainer: { render(width: number): string[] };
 				rebindCurrentSession(): Promise<void>;
@@ -2011,11 +2012,23 @@ describe("Native working sessions", () => {
 			restoredView.isShuttingDown = true;
 			try {
 				await restoredView.rebindCurrentSession();
-				expect(restoredView.pendingUserInputs).toEqual(["second startup input", "third startup input"]);
+				expect(restoredView.pendingUserInputs).toEqual(["third startup input", "second startup input"]);
+				expect(restoredView.restoredInputPaused).toBe(true);
 				restoredView.showStatus("restored activity detail");
 				const rendered = restoredView.chatContainer.render(80).join("\n");
 				expect(rendered).toContain("▾ Activity");
 				expect(rendered).toContain("restored activity detail");
+				const promptSpy = vi.spyOn(restoredSession, "prompt").mockResolvedValue(undefined);
+				vi.spyOn(restoredMode, "getUserInput").mockImplementation(() => new Promise<string>(() => {}));
+				void restoredMode.run();
+				await vi.waitFor(() =>
+					expect(promptSpy).toHaveBeenCalledWith("third startup input", {
+						images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+					}),
+				);
+				expect(promptSpy).toHaveBeenCalledTimes(1);
+				expect(restoredView.pendingUserInputs).toEqual(["second startup input"]);
+				expect(restoredView.restoredInputPaused).toBe(true);
 			} finally {
 				restoredMode.stop("resume-hint");
 				restoredSession.dispose();
