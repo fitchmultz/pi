@@ -1287,7 +1287,14 @@ export class InteractiveMode {
 		void this.maybeWarnAboutAnthropicSubscriptionAuth();
 
 		// Process initial messages
+		if (!this.pendingUserInputs) {
+			this.pendingUserInputs = [
+				...(initialMessage !== undefined ? [initialMessage] : []),
+				...(initialMessages ?? []),
+			];
+		}
 		let pendingInitialImages = initialMessage !== undefined ? initialImages : undefined;
+		const initialFollowUpCount = initialMessages?.length ?? 0;
 		if (!this.restoredInputPaused || initialMessage !== undefined || (initialMessages?.length ?? 0) > 0) {
 			while (this.pendingUserInputs.length > 0) {
 				while (this.session.workingSessionGate.reserved) {
@@ -1297,8 +1304,13 @@ export class InteractiveMode {
 					break;
 				}
 				const message = this.pendingUserInputs.shift()!;
-				const images = pendingInitialImages;
-				pendingInitialImages = undefined;
+				const images =
+					pendingInitialImages && this.pendingUserInputs.length === initialFollowUpCount
+						? pendingInitialImages
+						: undefined;
+				if (images) {
+					pendingInitialImages = undefined;
+				}
 				try {
 					if (images) {
 						await this.session.prompt(message, { images });

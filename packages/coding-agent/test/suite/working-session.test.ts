@@ -1993,11 +1993,16 @@ describe("Native working sessions", () => {
 					setBeforeSessionInvalidate() {},
 					setRebindSession() {},
 				} as unknown as AgentSessionRuntime,
-				{ terminal: new VirtualTerminal(80, 40) },
+				{
+					terminal: new VirtualTerminal(80, 40),
+					initialMessage: "third startup input",
+					initialImages: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+				},
 			);
 			const restoredView = restoredMode as unknown as {
 				isInitialized: boolean;
 				isShuttingDown: boolean;
+				pendingUserInputs: string[];
 				chatContainer: { render(width: number): string[] };
 				rebindCurrentSession(): Promise<void>;
 				showStatus(message: string): void;
@@ -2006,6 +2011,7 @@ describe("Native working sessions", () => {
 			restoredView.isShuttingDown = true;
 			try {
 				await restoredView.rebindCurrentSession();
+				expect(restoredView.pendingUserInputs).toEqual(["second startup input", "third startup input"]);
 				restoredView.showStatus("restored activity detail");
 				const rendered = restoredView.chatContainer.render(80).join("\n");
 				expect(rendered).toContain("▾ Activity");

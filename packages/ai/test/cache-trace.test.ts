@@ -1,3 +1,4 @@
+import type * as FsModule from "node:fs";
 import {
 	chmodSync,
 	mkdirSync,
@@ -383,7 +384,7 @@ describe("private opt-in cache recorder", () => {
 		trace.terminal({ type: "message_stop" });
 		expect(records(path)).toEqual(captured);
 		process.env.PI_CACHE_TRACE_DIR = path;
-		const fsModule = process.getBuiltinModule("node:fs") as typeof import("node:fs");
+		const fsModule = process.getBuiltinModule("node:fs") as typeof FsModule;
 		const lstatSpy = vi.spyOn(fsModule, "lstatSync");
 		trace.terminal({ type: "content_block_delta", delta: { type: "text_delta", text: "hello" } });
 		expect(lstatSpy).not.toHaveBeenCalled();

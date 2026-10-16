@@ -35,6 +35,7 @@
 
 ### Fixed
 
+- Fixed non-strict session shutdowns waiting on unresponsive provider aborts, interactive startup prompts bypassing the working-session save gate or losing compact-view expansion on restore, and managed launcher `SIGINT`/`SIGHUP` forwarding when the worker runs outside the terminal process group.
 - Fixed journal resume, tree navigation and builtin-disabling reload losing selected tools deferred by instruction discovery; eager fallback preserves explicit selections, exclusions and later deselection across subsequent resumes without changing historical declarations.
 - Fixed newer fetched or cached legacy Kimi Coding catalogs reverting the native OpenAI protocol and tool/thinking compatibility after offline hydration.
 - Fixed stale footer branches when a branch change is missed during Git watcher startup.
