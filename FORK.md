@@ -1,8 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `4954d760504c11df9b2cbdc040346107b6a8153d`
-(2026-10-15), including v1.3.0 and its follow-up fixes. It is upstream plus the features
+v1.0.0 and synchronized through upstream `8efd314fa3d3232ce197d8d7a6a5660530b9d83e`
+(2026-10-16), including v1.3.0 and its follow-up fixes. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 The [v1.3.0 integration record](docs/upstream-sync-1.3.0.md) documents the current
@@ -148,7 +148,8 @@ markers follow upstream. `SettingsSchema` also describes the fork's `compactView
 cursor mode draws only the focused terminal cursor, while unfocused fake cursors remain visible.
 The generated schemas are under `packages/coding-agent/schemas/` and use upstream's
 `https://pi.dev/schemas/*.schema.json` IDs. They match the hosted files except for the fork's
-`compactView` setting, which the hosted settings schema accepts as an extra key.
+`compactView` setting, which the hosted settings schema accepts as an extra key, and
+`modelOverrides.hidden` in `models.schema.json` and `docs/models-configuration.md`.
 
 Package production uses the maintained `scripts/package-artifacts.mjs` and local consumer helpers,
 including npm 12's expected-package-keyed pack metadata. Selected workspaces pack in one npm process;
