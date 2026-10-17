@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Context } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { ToolExecutionApi, ToolExecutionResult } from "@earendil-works/pi-durable";
+import type { ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { ExecutionEnv, FileError, Result } from "@earendil-works/pi-durable/env";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { createBashTool, createReadTool } from "@earendil-works/pi-durable/tools";
@@ -343,6 +343,7 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 				env,
 				outputWindow: undefined,
 				output: (chunk: string | Uint8Array) => output.push(String(chunk)),
+				// As the Harness: the output so far (these outputs stay below the tool's limits).
 				retainedOutput: () => ({ text: output.join(""), truncated: false }),
 				diagnostic: () => {},
 				details: async () => {},
@@ -360,11 +361,7 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 				return { error: (error as Error).message, output: output.join("") };
 			}
 		};
-		const cases: [
-			ReturnType<typeof createReadTool> | ReturnType<typeof createBashTool>,
-			object,
-			{ result: ToolExecutionResult; output: string }?,
-		][] = [
+		const cases: [ReturnType<typeof createReadTool> | ReturnType<typeof createBashTool>, object][] = [
 			[createReadTool(), { path: "text.txt" }],
 			[createReadTool(), { path: "text.txt", offset: 2, limit: 1 }],
 			[createReadTool(), { path: "big.txt" }],
@@ -372,54 +369,18 @@ describe("RemoteExecutionEnv against NodeExecutionEnv", () => {
 			[createReadTool(), { path: "bom.txt" }],
 			[createReadTool(), { path: "bad.txt" }],
 			[createReadTool(), { path: "missing.txt" }],
-			// Independent executions need not interleave stdout/stderr alike; conformance covers mixed-stream content.
-			[
-				createBashTool(),
-				{ command: "cat text.txt; exit 0" },
-				{
-					result: { structuredOutput: { output: "one\ntwo\n\nthree", truncated: false, exitCode: 0 } },
-					output: "one\ntwo\n\nthree",
-				},
-			],
-			[
-				createBashTool(),
-				{ command: "cat text.txt >&2; echo err >&2; exit 0" },
-				{
-					result: { structuredOutput: { output: "one\ntwo\n\nthreeerr\n", truncated: false, exitCode: 0 } },
-					output: "one\ntwo\n\nthreeerr\n",
-				},
-			],
-			[
-				createBashTool(),
-				{ command: "exit 3" },
-				{
-					result: {
-						structuredOutput: { output: "", truncated: false, exitCode: 3 },
-						isError: true,
-						diagnostics: [{ severity: "error", code: "exit_code", message: "Command exited with code 3" }],
-					},
-					output: "",
-				},
-			],
-			[
-				createBashTool(),
-				{ command: "printf 'a\\nb'; ls" },
-				{
-					result: {
-						structuredOutput: {
-							output: "a\nbbad.txt\nbig.txt\nbom.txt\nlong.txt\ntext.txt\n",
-							truncated: false,
-							exitCode: 0,
-						},
-					},
-					output: "a\nbbad.txt\nbig.txt\nbom.txt\nlong.txt\ntext.txt\n",
-				},
-			],
+			// stdout and stderr are separate pipes, read concurrently: their order relative to each other is not fixed,
+			// so each case writes to one of them.
+			[createBashTool(), { command: "cat text.txt; exit 0" }],
+			[createBashTool(), { command: "echo err >&2; exit 0" }],
+			[createBashTool(), { command: "exit 3" }],
+			[createBashTool(), { command: "printf 'a\\nb'; ls" }],
 		];
-		for (const [tool, args, contract] of cases) {
+		for (const [tool, args] of cases) {
 			const expected = normalize(await run(local, tool, args), roots[0]);
+			// A bash case returns a result (a nonzero exit is an error result): a throw on both sides would compare equal.
+			if (tool.name === "bash") expect(expected, JSON.stringify(args)).toHaveProperty("result");
 			const actual = normalize(await run(remote, tool, args), roots[1]);
-			if (contract !== undefined) expect(expected, JSON.stringify(args)).toEqual(contract);
 			expect(actual, JSON.stringify(args)).toEqual(expected);
 		}
 	}, 60_000);

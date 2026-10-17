@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+<<<<<<< HEAD
 ### Changed
 
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
@@ -9,6 +10,8 @@
 
 ### Fixed
 
+- Fixed whitespace-only tool output (for example a bare `\r\n` from bash) being sent as-is to OpenAI Completions, OpenAI Responses, and Google providers; it now uses the same placeholder as empty output, since some providers reject whitespace-only tool content with a 400 ([#8720](https://github.com/earendil-works/pi/issues/8720))
+- Fixed automatic retry not triggering for gateway upstream failures such as `upstream_error: Upstream request failed`, `upstream_stream_read_error`, and `Upstream HTTP/2 stream failed` ([#10920](https://github.com/earendil-works/pi/issues/10920))
 - Fixed successful retry backoffs retaining abort listeners ([#10506](https://github.com/earendil-works/pi/issues/10506)).
 - Fixed Kimi K3 fallback, canonical Kimi/Moonshot catalog overlays, and Kimi Coding implied estimates omitting the default five-minute cache-write price.
 - Fixed offline builds from published catalogs still containing legacy Kimi Coding Anthropic entries; hydration now applies the native OpenAI protocol and compatibility metadata without changing custom endpoints.
@@ -33,7 +36,6 @@
 ### Removed
 
 - Retired the fork's unreleased Anthropic stall timing hooks and lifecycle/Undici observation helper; generic opt-in cache tracing and retained investigation evidence remain.
-
 ## [1.3.0] - 2026-10-15
 
 ### Breaking Changes
@@ -57,6 +59,7 @@
 - Fixed OpenCode Go MiniMax M2.7 failing with "Model does not support this protocol" by using the Anthropic Messages API
 - Fixed automatic retry not triggering for gateway `Unable to forward upstream stream` errors ([#10920](https://github.com/earendil-works/pi/issues/10920))
 - Fixed automatic retry not triggering for `The service is temporarily unavailable` errors, which also made compaction fail on the first attempt ([#10965](https://github.com/earendil-works/pi/issues/10965))
+- Fixed automatic retry not triggering when the Google Vertex OAuth token refresh fails with a transient network error such as `request to https://oauth2.googleapis.com/token failed, reason:` ([#10996](https://github.com/earendil-works/pi/issues/10996))
 - Fixed OpenAI-compatible responses showing thinking after the answer when a proxy such as LiteLLM sends reasoning and content in the same stream chunk ([#10926](https://github.com/earendil-works/pi/issues/10926))
 - Fixed Gemini 4 Argon requests on Google Vertex failing with "Thinking budget is not supported", and its thinking level being ignored on the Gemini API, by sending `thinkingLevel` for Gemini 4 and later models ([#10890](https://github.com/earendil-works/pi/issues/10890))
 - Fixed Xiaomi MiMo models failing with a 400 at the `minimal` thinking level by sending only the documented thinking on/off toggle and exposing only the `off` and `high` levels ([#10818](https://github.com/earendil-works/pi/issues/10818))

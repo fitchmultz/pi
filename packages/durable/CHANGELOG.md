@@ -6,12 +6,19 @@
 
 - The env conformance suite now checks that aborting POSIX shell commands stops all process-group descendants without letting waiting shells run later steps. Custom environments may need changes to pass.
 
+### Added
+
+- `settings.compaction.modelOverrides` sets compaction thresholds per model, keyed by exact `"provider/modelId"`, so one harness can serve small- and large-window models; the threshold check, overflow recovery, and the compaction task use the entry of the model they act for ([#10942](https://github.com/earendil-works/pi/issues/10942)).
+- `HarnessOptions.models` and `HarnessOptions.settings` also accept a function returning the current value, like `env`. Generation, compaction, hooks and tools call it at each use (`api.models` reads the current value at each access), so a host can replace its model configuration or settings without reopening the Harness. A plain object still works.
+
 ### Changed
 
+- `ToolControl.terminate` is now typed `boolean` instead of `true`, matching `pi-agent-core` and `pi-coding-agent`; `false` does not end the run ([#10858](https://github.com/earendil-works/pi/issues/10858)).
 - Reduced retained-context scheduling and historical-read work, skipped redundant SQLite writes and avoided repeated copying of partial lines.
 
 ### Fixed
 
+- The README's Errors section now limits the `StorageRequestError` exemption to reads: a `StorageRequestError` thrown by `commit()` or `mintId()` fails the Harness like any other storage error ([#11014](https://github.com/earendil-works/pi/issues/11014)).
 - Fuzzy edits preserve untouched text on the same line, Unicode boundaries and literal carriage returns. Editing invalid UTF-8 now fails without rewriting the file ([#10655](https://github.com/earendil-works/pi/issues/10655)).
 - An aborted or timed-out `NodeExecutionEnv.exec()` shell command on macOS no longer runs its later steps after the current step is killed.
 

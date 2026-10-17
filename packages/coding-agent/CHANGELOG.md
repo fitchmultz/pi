@@ -10,6 +10,7 @@
 
 ### Added
 
+- Added a Models Configuration reference generated from the `models.json` schema, listing all provider, model, model override, and compatibility fields ([#10790](https://github.com/earendil-works/pi/issues/10790))
 - Added a sorted, permission-filtered instruction-group capability index to initial prompts and a static `discover_tools` hint. Listing and enabling groups leave the index and discovery declaration unchanged.
 - Added complete native working-session save and restore through the SDK and `--working-session`, with private local control and completed-exit receipts. See [Native working sessions](docs/working-session.md).
 - Added `registerProviderAuthFallback()` for ephemeral provider-scoped authentication with native credential precedence, catalogs and transport. See [Provider authentication fallback](docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider).
@@ -26,6 +27,7 @@
 
 ### Changed
 
+- `generateSummary()` and `generateSummaryWithUsage()` now ignore their `reserveTokens` parameter. Summary requests use the model's output limit instead.
 - Published settings, models, keybindings, and theme schemas using upstream's shared runtime definitions; the fork settings schema retains boolean and `"hybrid"` compact activity preferences.
 - Reduced repeated session-history work, assistant/tree rendering and native read, grep, edit and image processing.
 - Bound native Bash spill queues and wait for complete private spill files before returning. This bounded-memory path is slower on the recorded 64 MiB workload.
@@ -35,6 +37,8 @@
 
 ### Fixed
 
+- Fixed compaction and branch summaries failing with "generation hit the token cap" when reasoning used most of the fixed summary output limit. Summaries now use the model's output limit, and `compaction.reserveTokens` only controls when compaction starts ([#9512](https://github.com/earendil-works/pi/issues/9512), [#9075](https://github.com/earendil-works/pi/issues/9075)).
+- Fixed `models.schema.json` missing descriptions for provider and model fields, so editors showed no hints for them ([#10790](https://github.com/earendil-works/pi/issues/10790))
 - Fixed non-strict session shutdowns waiting on unresponsive provider aborts, interactive startup prompts bypassing the working-session save gate or losing compact-view expansion on restore, and managed launcher `SIGINT`/`SIGHUP` forwarding when the worker runs outside the terminal process group.
 - Fixed journal resume, tree navigation and builtin-disabling reload losing selected tools deferred by instruction discovery; eager fallback preserves explicit selections, exclusions and later deselection across subsequent resumes without changing historical declarations.
 - Fixed newer fetched or cached legacy Kimi Coding catalogs reverting the native OpenAI protocol and tool/thinking compatibility after offline hydration.
@@ -100,6 +104,10 @@
 
 - Changed the `kimi-coding` provider to use OpenAI Chat Completions at `https://api.kimi.com/coding/v1`, the protocol used by the official Kimi Code client. K3, K3-256K, and Kimi For Coding now accept tools added mid-conversation without invalidating the prompt cache. `models.json` overrides of the `kimi-coding` base URL must now include `/v1` ([#10720](https://github.com/earendil-works/pi/issues/10720))
 - Changed model switching to drop thinking blocks from earlier assistant messages produced by a different model, instead of sending them as plain text. The new model previously saw the old model's reasoning as part of its replies and could start writing its own reasoning into the visible answer ([#10995](https://github.com/earendil-works/pi/issues/10995))
+
+### Changed
+
+- Changed the default NVIDIA model to `nvidia/nemotron-3.5-super-vl-120b-a12b` ([#10910](https://github.com/earendil-works/pi/pull/10910) by [@cv](https://github.com/cv))
 
 ### Fixed
 

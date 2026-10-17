@@ -136,7 +136,8 @@ export interface ConversationHandle {
 /** Post-tools controls requested by a tool result. */
 export type ToolControl = {
 	readonly addTools?: readonly string[];
-	readonly terminate?: true;
+	/** End the run without another model request when every result of the round sets it to `true`; `false` is a no-op. */
+	readonly terminate?: boolean;
 	readonly handoff?: string;
 };
 
@@ -210,7 +211,7 @@ export interface ToolExecutionApi<TDetails extends JsonValue = JsonValue> extend
 	readonly registry: RegistrySnapshot;
 	/** The calling conversation's agent, as the tool task's phase resolved it. */
 	agent(context: Context): Promise<Agent>;
-	/** `HarnessOptions.models`: the catalog, credentials, and request transforms generation uses. */
+	/** The current `HarnessOptions.models`, read at each access: the catalog, credentials, and request transforms. */
 	readonly models: Models;
 	/** Built by `HarnessOptions.env` for this call; `undefined` without an environment. */
 	readonly env: ExecutionEnv | undefined;
@@ -507,6 +508,14 @@ export type CompactionPolicy = {
 };
 
 /**
+ * Harness-wide compaction settings. `modelOverrides` is keyed by exact `"provider/modelId"`; each field it sets
+ * replaces the harness-wide one for that model, so small- and large-window models can share a harness.
+ */
+export type CompactionSettings = Partial<CompactionPolicy> & {
+	readonly modelOverrides?: Readonly<Record<string, Partial<CompactionPolicy>>>;
+};
+
+/**
  * How often running progress is committed. Each progress commit is a storage write; a host whose storage is remote can
  * commit less often, so live answers and tool output appear in larger steps.
  */
@@ -532,7 +541,7 @@ export type HarnessSettings = {
 	readonly extensions?: readonly Extension[];
 	readonly stream?: ConversationStreamOptions;
 	readonly retry?: Partial<ConversationRetryPolicy>;
-	readonly compaction?: Partial<CompactionPolicy>;
+	readonly compaction?: CompactionSettings;
 	readonly progress?: Partial<ProgressPolicy>;
 	readonly toolExecution?: ToolExecutionMode;
 	readonly steeringMode?: QueueMode;
@@ -556,7 +565,8 @@ export type Settings = {
 	readonly extensions?: readonly Extension[];
 	readonly stream: ConversationStreamOptions;
 	readonly retry: ConversationRetryPolicy;
-	readonly compaction: CompactionPolicy;
+	/** Harness-wide policy over the defaults; per-model overrides apply where the model is known. */
+	readonly compaction: CompactionPolicy & Pick<CompactionSettings, "modelOverrides">;
 	readonly progress: ProgressPolicy;
 	readonly toolExecution: ToolExecutionMode;
 	readonly steeringMode: QueueMode;
@@ -574,10 +584,14 @@ export type EnvTarget = {
 };
 
 export type HarnessOptions<Tool extends ToolRegistration = ToolRegistration> = {
-	/** pi-ai model access used by generation. */
-	readonly models: Models;
+	/**
+	 * pi-ai model access used by generation, compaction, hooks and tools: a `Models`, or a function returning the current
+	 * one, called at each use, so a host can replace its model configuration without reopening the Harness.
+	 */
+	readonly models: Models | (() => Models);
 	readonly registry: RegistryReader<Tool>;
-	readonly settings?: HarnessSettings;
+	/** Run settings, or a function returning the current ones; read at each use either way. */
+	readonly settings?: HarnessSettings | (() => HarnessSettings | undefined);
 	/** Builds a conversation's environment at each use. Never called on the Session line; may be async. */
 	readonly env?: (target: EnvTarget, context: Context) => ExecutionEnv | undefined | Promise<ExecutionEnv | undefined>;
 	/**
@@ -745,7 +759,7 @@ export interface Harness extends Session {
 export interface HookApi extends DocumentReader {
 	readonly taskId: TaskId;
 	readonly conversationId: ConversationId;
-	/** `HarnessOptions.models`. */
+	/** The current `HarnessOptions.models`, read at each access. */
 	readonly models: Models;
 	memo<T extends JsonValue>(name: string, context: Context): Promise<T | undefined>;
 	memo<T extends JsonValue>(name: string, candidate: T, context: Context): Promise<T>;
