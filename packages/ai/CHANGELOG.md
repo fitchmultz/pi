@@ -2,7 +2,6 @@
 
 ## [Unreleased]
 
-<<<<<<< HEAD
 ### Changed
 
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
@@ -36,6 +35,7 @@
 ### Removed
 
 - Retired the fork's unreleased Anthropic stall timing hooks and lifecycle/Undici observation helper; generic opt-in cache tracing and retained investigation evidence remain.
+
 ## [1.3.0] - 2026-10-15
 
 ### Breaking Changes
