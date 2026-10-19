@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { gunzipSync } from "node:zlib";
 import {
 	type CacheRetention,
 	fauxAssistantMessage,
@@ -465,7 +466,11 @@ it.each([
 				const request = new Request(input, init);
 				urls.push(request.url);
 				headers.push(request.headers);
-				captures.push((await request.json()) as NativePayload);
+				const payload =
+					request.headers.get("content-encoding") === "gzip"
+						? JSON.parse(gunzipSync(Buffer.from(await request.arrayBuffer())).toString("utf8"))
+						: await request.json();
+				captures.push(payload as NativePayload);
 				const events = [
 					{
 						type: "message_start",

@@ -838,7 +838,8 @@ export class CacheTrace {
 		});
 	}
 
-	wrapFetch(fetch?: typeof globalThis.fetch): typeof globalThis.fetch {
+	/** Supply the SDK's serialized JSON separately when the wire body is compressed. */
+	wrapFetch(fetch?: typeof globalThis.fetch, logicalBody?: string): typeof globalThis.fetch {
 		return async (input, init) => {
 			// Never inspect token exchanges made by an SDK credential chain.
 			let providerRequest = false;
@@ -849,10 +850,11 @@ export class CacheTrace {
 			const attemptId = this.attempt("sse");
 			this.observe(() => {
 				if (typeof init?.body === "string" || init?.body instanceof Uint8Array) {
-					const digest = fingerprint(this.writer, init.body);
+					const body = logicalBody ?? init.body;
+					const digest = fingerprint(this.writer, body);
 					if (!this.sdkLogicalBody) {
 						this.sdkLogicalBody = digest;
-						if (typeof init.body === "string") this.logical(init.body);
+						if (typeof body === "string") this.logical(body);
 						else this.gap("logical_capture_incomplete");
 					} else if (this.sdkLogicalBody.hmac !== digest.hmac) this.gap("retry_logical_body_changed");
 					this.wire(init.body, { endpoint: String(input), full: true });

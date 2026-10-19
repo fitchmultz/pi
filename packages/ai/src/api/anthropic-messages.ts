@@ -45,6 +45,7 @@ import { parseJsonWithRepair, parseStreamingJson, parseToolCallArguments } from 
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
+import { createRequestCompressionFetch } from "../utils/request-compression.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import {
@@ -53,7 +54,6 @@ import {
 	resolveTranscript,
 	type TranscriptContext,
 } from "../utils/transcript.ts";
-
 import {
 	getJsonSchemaToolParameters,
 	resolveJsonSchemaStrictSampling,
@@ -637,14 +637,17 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					model,
 					apiKey,
 					options?.headers,
-					federation ? options?.fetch : (trace?.wrapFetch(options?.fetch) ?? options?.fetch),
+					federation ? options?.fetch : createRequestCompressionFetch("anthropic-messages", options?.fetch, trace),
 					copilotDynamicHeaders,
 					cacheSessionId,
 					federation,
 				);
 				client = created.client;
 				// Keep the federation owner's shared credential cache and original fetch identity.
-				if (federation && trace) client = client.withOptions({ fetch: trace.wrapFetch(options?.fetch) });
+				if (federation)
+					client = client.withOptions({
+						fetch: createRequestCompressionFetch("anthropic-messages", options?.fetch, trace),
+					});
 				isOAuth = created.isOAuthToken;
 			}
 			const requestOptions = {
