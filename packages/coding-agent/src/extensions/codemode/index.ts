@@ -9,7 +9,8 @@
 import type { ExtensionAPI, ExtensionFactory } from "../../core/extensions/types.ts";
 import { SETTINGS_DEFAULTS } from "../../core/settings-defaults.ts";
 import type { CodemodeMode } from "../../core/settings-manager.ts";
-import { createCodemodeToolDefinition } from "./tool.ts";
+import { codemodeBackgroundMessageRenderer } from "./renderer.ts";
+import { CODEMODE_BACKGROUND_COMPLETION_TYPE, createCodemodeToolDefinition } from "./tool.ts";
 
 export interface CodemodeExtensionOptions {
 	/** Overrides the `codemode.mode` setting. */
@@ -31,6 +32,7 @@ function readInlineBudget(pi: ExtensionAPI): number | undefined {
 
 export function createCodemodeExtension(options: CodemodeExtensionOptions = {}): ExtensionFactory {
 	return (pi) => {
+		pi.registerMessageRenderer(CODEMODE_BACKGROUND_COMPLETION_TYPE, codemodeBackgroundMessageRenderer);
 		pi.registerTool({
 			...createCodemodeToolDefinition({
 				appendEntry: (customType, data) => pi.appendEntry(customType, data),

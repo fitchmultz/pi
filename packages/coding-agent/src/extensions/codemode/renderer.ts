@@ -7,8 +7,14 @@
  * Nested calls are not separate tool rows because they never reach the model as tool calls.
  */
 
+import type { TextContent } from "@earendil-works/pi-ai";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import type { ToolDefinition } from "../../core/extensions/types.ts";
+import type {
+	BackgroundToolMessageDetails,
+	MessageRenderOptions,
+	ToolDefinition,
+} from "../../core/extensions/types.ts";
+import type { CustomMessage } from "../../core/messages.ts";
 import { getTextOutput, replaceTabs, startToolTimer, str, toolTimerText } from "../../core/tools/render-utils.ts";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
@@ -20,6 +26,8 @@ const CALL_PREVIEW_COUNT = 8;
 const OUTPUT_PREVIEW_LINES = 5;
 const COLLAPSED_ARGS_CHARS = 80;
 const SCRIPT_HEADER = /^Script (completed|failed)\nWall time [\d.]+ seconds\nOutput:\n$/;
+/** The session prefixes a completion with `Background run <run id> completed.`; the row states it. */
+const BACKGROUND_HEADER = /^Background run [^\n]* (?:completed|failed)\.\r?\n/;
 
 function expandHint(theme: Theme, hidden: number, noun: string): string {
 	return `${theme.fg("muted", `... (${hidden} more ${noun},`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
@@ -62,6 +70,24 @@ function formatCall(call: CodemodeNestedCall, theme: Theme, expanded: boolean): 
 	return line;
 }
 
+function callsBlock(calls: readonly CodemodeNestedCall[], expanded: boolean, theme: Theme): string | undefined {
+	if (calls.length === 0) return undefined;
+	const shown = expanded ? calls : calls.slice(-CALL_PREVIEW_COUNT);
+	const lines = shown.map((call) => formatCall(call, theme, expanded));
+	if (shown.length < calls.length) {
+		lines.unshift(
+			`${theme.fg("muted", `... (${calls.length - shown.length} earlier calls,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+		);
+	}
+	// Collapsed rows hide earlier calls, so the total covers every call.
+	const priced = calls.filter((call) => call.cost);
+	if (priced.length > 1) {
+		const total = priced.reduce((sum, call) => sum + (call.cost ?? 0), 0);
+		lines.push(theme.fg("muted", `Model calls: ${formatCost(total)}`));
+	}
+	return lines.join("\n");
+}
+
 export const codemodeRenderers: Pick<
 	ToolDefinition<any, CodemodeToolDetails | undefined>,
 	"renderCall" | "renderResult"
@@ -97,23 +123,10 @@ export const codemodeRenderers: Pick<
 		const timerText = toolTimerText(context, options.isPartial);
 		const component = (context.lastComponent as Container | undefined) ?? new Container();
 		component.clear();
-		const calls = result.details?.calls ?? [];
-		if (calls.length > 0) {
-			const shown = options.expanded ? calls : calls.slice(-CALL_PREVIEW_COUNT);
-			const lines = shown.map((call) => formatCall(call, theme, options.expanded));
-			if (shown.length < calls.length) {
-				lines.unshift(
-					`${theme.fg("muted", `... (${calls.length - shown.length} earlier calls,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
-				);
-			}
-			// Collapsed rows hide earlier calls, so the total covers every call.
-			const priced = calls.filter((call) => call.cost);
-			if (priced.length > 1) {
-				const total = priced.reduce((sum, call) => sum + (call.cost ?? 0), 0);
-				lines.push(theme.fg("muted", `Model calls: ${formatCost(total)}`));
-			}
+		const block = callsBlock(result.details?.calls ?? [], options.expanded, theme);
+		if (block) {
 			component.addChild(new Spacer(1));
-			component.addChild(new Text(lines.join("\n"), 0, 0));
+			component.addChild(new Text(block, 0, 0));
 		}
 
 		// Drop the "Script completed\nWall time ...\nOutput:\n" header. Rejected input (invalid options)
@@ -154,3 +167,54 @@ export const codemodeRenderers: Pick<
 		return component;
 	},
 };
+
+/** The completion message of a background script: the run, its nested calls, and the script output. */
+export function codemodeBackgroundMessageRenderer(
+	message: CustomMessage<BackgroundToolMessageDetails<CodemodeToolDetails>>,
+	options: MessageRenderOptions,
+	theme: Theme,
+): Container {
+	const component = new Container();
+	const details = message.details;
+	const outcome = details?.isError ? theme.fg("error", "failed") : theme.fg("success", "completed");
+	const runId = details?.runId ? ` ${theme.fg("dim", details.runId)}` : "";
+	component.addChild(
+		new Text(
+			`${theme.fg("toolTitle", theme.bold("codemode"))} ${theme.fg("muted", "background")} ${outcome}${runId}`,
+			0,
+			0,
+		),
+	);
+
+	const block = callsBlock(details?.resultDetails?.calls ?? [], options.expanded, theme);
+	if (block) {
+		component.addChild(new Spacer(1));
+		component.addChild(new Text(block, 0, 0));
+	}
+
+	const blocks =
+		typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
+	const texts = blocks.filter((block): block is TextContent => block.type === "text").map((block) => block.text);
+	// The run header repeats the title line; the script's own header keeps its wall time. Result blocks
+	// follow each other directly, their own newlines included.
+	const output = replaceTabs(texts.join("").replace(BACKGROUND_HEADER, "")).trim();
+	if (output) {
+		const color = details?.isError ? "error" : "toolOutput";
+		const styled = output
+			.split("\n")
+			.map((line) => theme.fg(color, line))
+			.join("\n");
+		component.addChild(new Spacer(1));
+		component.addChild(
+			options.expanded
+				? new Text(styled, 0, 0)
+				: new VisualLinePreview({
+						text: styled,
+						maxVisualLines: OUTPUT_PREVIEW_LINES,
+						keep: "start",
+						formatHint: (hidden) => expandHint(theme, hidden, "lines"),
+					}),
+		);
+	}
+	return component;
+}

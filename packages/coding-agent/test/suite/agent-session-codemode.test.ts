@@ -492,7 +492,7 @@ describe("codemode options and store", () => {
 		expect(invalid.content).toEqual([
 			{
 				type: "text",
-				text: "@options only supports `max_output_tokens` and `timeout_ms`; got `yield`",
+				text: "@options only supports `max_output_tokens`, `timeout_ms` and `background`; got `yield`",
 			},
 		]);
 
@@ -627,6 +627,20 @@ describe("codemode options and store", () => {
 		const tool = createCodemodeTool();
 		const result = await tool.execute("direct", { code: increment });
 		expect(result.content[1]).toEqual({ type: "text", text: "1" });
+	});
+
+	it("rejects a background script without a host that can report it later", async () => {
+		const tool = createCodemodeTool();
+		const result = await tool.execute("direct", { code: '// @options: {"background": true}\nreturn 1;' });
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: "Background codemode scripts need a session tool context that can report a result after the tool call returns; this host cannot run one.",
+			},
+		]);
+		// Nothing started: no worker, no store write.
+		expect(result.details).toEqual({ calls: [] });
 	});
 
 	it("loads the values written on the current branch", async () => {

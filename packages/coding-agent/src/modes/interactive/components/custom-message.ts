@@ -1,8 +1,18 @@
 import type { TextContent } from "@earendil-works/pi-ai";
 import type { Component, TuiMouseEvent } from "@earendil-works/pi-tui";
-import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	Box,
+	Container,
+	getCapabilities,
+	Image,
+	Markdown,
+	type MarkdownTheme,
+	Spacer,
+	Text,
+} from "@earendil-works/pi-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
+import { ensurePngTranscoder } from "../../../utils/image-convert.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 
 /**
@@ -18,6 +28,9 @@ export class CustomMessageComponent extends Container {
 	private _expanded = false;
 	private outputPad: number;
 	private compactView: boolean;
+	private showImages: boolean;
+	private imageWidthCells: number;
+	private imageChildren: Component[] = [];
 
 	constructor(
 		message: CustomMessage<unknown>,
@@ -25,6 +38,8 @@ export class CustomMessageComponent extends Container {
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		outputPad = 1,
 		compactView = false,
+		showImages = true,
+		imageWidthCells = 60,
 	) {
 		super();
 		this.message = message;
@@ -32,6 +47,8 @@ export class CustomMessageComponent extends Container {
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
 		this.compactView = compactView;
+		this.showImages = showImages;
+		this.imageWidthCells = imageWidthCells;
 
 		this.addChild(new Spacer(1));
 
@@ -66,6 +83,19 @@ export class CustomMessageComponent extends Container {
 		this.rebuild();
 	}
 
+	setShowImages(show: boolean): void {
+		if (this.showImages === show) return;
+		this.showImages = show;
+		this.rebuild();
+	}
+
+	setImageWidthCells(width: number): void {
+		const cells = Math.max(1, Math.floor(width));
+		if (this.imageWidthCells === cells) return;
+		this.imageWidthCells = cells;
+		this.rebuild();
+	}
+
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		const result = super.handleMouse(event);
 		if (result || !this.compactView || event.type !== "click" || event.button !== "left") return result;
@@ -89,6 +119,8 @@ export class CustomMessageComponent extends Container {
 			this.customComponent = undefined;
 		}
 		this.removeChild(this.box);
+		for (const child of this.imageChildren) this.removeChild(child);
+		this.imageChildren = [];
 
 		// Try custom renderer first - it handles its own styling
 		if (this.customRenderer) {
@@ -102,6 +134,7 @@ export class CustomMessageComponent extends Container {
 					// Custom renderer provides its own styled component
 					this.customComponent = component;
 					this.addChild(component);
+					this.addImages();
 					return;
 				}
 			} catch {
@@ -135,5 +168,27 @@ export class CustomMessageComponent extends Container {
 				color: (text: string) => theme.fg("customMessageText", text),
 			}),
 		);
+
+		this.addImages();
+	}
+
+	/** Image blocks of the message, drawn like the images of a tool result. */
+	private addImages(): void {
+		if (typeof this.message.content === "string") return;
+		if (!getCapabilities().images || !this.showImages || (this.compactView && !this._expanded)) return;
+		for (const block of this.message.content) {
+			if (block.type !== "image" || !block.data || !block.mimeType) continue;
+			const spacer = new Spacer(1);
+			const image = new Image(
+				block.data,
+				block.mimeType,
+				{ fallbackColor: (text: string) => theme.fg("customMessageText", text) },
+				{ maxWidthCells: this.imageWidthCells },
+			);
+			if (block.mimeType !== "image/png") ensurePngTranscoder(() => this.invalidate());
+			this.imageChildren.push(spacer, image);
+			this.addChild(spacer);
+			this.addChild(image);
+		}
 	}
 }

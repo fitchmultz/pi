@@ -14,8 +14,34 @@ A script may start with an options line. It must be the first line; an options l
 
 - `max_output_tokens` (default 10000) limits the output. Longer output keeps its start and end, and the full text is written to a temp file whose path is included in the result. A script fails when its output passes 16777216 characters of text and base64 image data or 100000 `text()`, `image()`, and `console` calls; write large data to a file with a tool instead.
 - `timeout_ms` is a hard deadline for the whole script. It is unset by default. Image generation can take minutes, so do not set a short deadline for scripts that generate images.
+- `background` (default `false`) runs the script after the tool call returns. See [Background scripts](#background-scripts).
 
 The result starts with `Script completed` or `Script failed`, the wall time, and the output. Text and image items appear in order, each on its own line. When the output has more than one text item (from `text()` or `return`), each starts with a `==> text N/M <==` line. `console` calls follow in one `<console_output>` block with one line per call. A failed script keeps its partial output, followed by `Script error:` and the error. Tool calls are real: calls made before a failure are not undone. Calls still running when the script ends are cancelled, and unawaited promises are discarded.
+
+## Background scripts
+
+Add `"background": true` to the options line when a script is slow and the rest of the turn does not need its result:
+
+```js
+// @options: {"background": true, "timeout_ms": 600000}
+const report = await tools.bash({ command: "npm run slow-analysis" });
+text(report.output);
+```
+
+The tool call returns at once with a receipt that names the run:
+
+```
+Script running in background.
+Run 01J... . Its result arrives as a message when the script finishes.
+```
+
+The run ID is the ID of the tool call that started the script. When the script finishes, one message arrives with the same output the tool call would have returned: `Background run <run id> completed.` or `failed.`, the wall time, the output, images (each after the temp file it was saved to), and on failure the error and the calls that ran before it. The message reaches the model as a steering message and starts a turn, so the model can react without another prompt.
+
+A background script behaves like any other script: same tools, globals, `models` calls, memory and output limits, and the same limit of two live workers per pi process. Calls it makes are recorded in the completion message's details, and their usage is added to the session cost once when the completion is delivered. `store()` writes apply only if the script succeeds, at completion.
+
+Calls a script makes share one nested-call queue with other scripts. A tool that runs sequentially does not overlap another call waiting in that queue, but a background script never blocks a tool call the model makes directly.
+
+[Background commands](background-command.md) are for work that must outlive pi. A background script belongs to its session and is stopped when the session is aborted, disposed, reloaded, or navigated to another branch. A save in progress keeps a background script running, reports it as a blocker, and delivers its completion after the save.
 
 ## Globals
 

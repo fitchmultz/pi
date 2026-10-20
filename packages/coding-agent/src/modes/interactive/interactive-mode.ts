@@ -4088,6 +4088,8 @@ export class InteractiveMode {
 						this.getMarkdownThemeWithSettings(),
 						this.outputPad,
 						!!this.compactView,
+						this.settingsManager.getShowImages(),
+						this.settingsManager.getImageWidthCells(),
 					);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
@@ -5210,7 +5212,7 @@ export class InteractiveMode {
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof CustomMessageComponent) {
 								child.setShowImages(enabled);
 							}
 						}
@@ -5218,7 +5220,7 @@ export class InteractiveMode {
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof CustomMessageComponent) {
 								child.setImageWidthCells(width);
 							}
 						}

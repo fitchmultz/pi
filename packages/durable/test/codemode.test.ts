@@ -209,6 +209,19 @@ describe("durable code mode", () => {
 		await harness.close(context);
 	});
 
+	it("rejects a script that asks for a background run it cannot report on", async () => {
+		const chat = codemodeChat();
+		const setup = chat.setup;
+		setup.faux.setResponses([script('// @options: {"background": true}\nreturn 1;'), DONE]);
+		const { harness, root } = await openChat(await openNodeSqliteStorage(await sqlitePath()), setup);
+		await (await root.submit({ type: "input", content: "go" }, context)).wait(context);
+		const result = await resultText(setup, root);
+		expect(result.isError).toBe(true);
+		expect(result.text).toContain("@options only supports `max_output_tokens` and `timeout_ms`; got `background`");
+		expect(await nestedCount(harness), "no nested call runs").toBe(0);
+		expect(chat.vm.starts).toBe(0);
+	});
+
 	it("resumes a script after a restart without running its finished calls again", async () => {
 		const chat = codemodeChat();
 		const { harness, result } = await restart(

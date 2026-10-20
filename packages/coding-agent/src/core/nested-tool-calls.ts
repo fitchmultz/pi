@@ -149,6 +149,11 @@ interface CallScope {
 	nextId: number;
 	/** Set inside a call that holds the exclusive queue, so its own nested calls do not wait on it. */
 	holdsQueue: boolean;
+	/**
+	 * The launching call of the background run this scope belongs to, including its descendants. The
+	 * record is taken by that owner at settlement, not at the launching tool result.
+	 */
+	backgroundOwner?: string;
 }
 
 function textOf(result: AgentToolResult<unknown>): string {
@@ -215,6 +220,7 @@ export class NestedToolCallRunner {
 			recorder: scope.recorder,
 			nextId: 1,
 			holdsQueue: scope.holdsQueue || exclusive,
+			...(scope.backgroundOwner === undefined ? {} : { backgroundOwner: scope.backgroundOwner }),
 		});
 		let outcome: AgentToolCallOutcome;
 		try {
@@ -252,12 +258,43 @@ export class NestedToolCallRunner {
 	/** Remove and return the record of the nested calls a model-issued call made. */
 	takeRecord(toolCallId: string): NestedCallSummary | undefined {
 		const scope = this.scopes.get(toolCallId);
+		// A background run's record belongs to its owner, which takes it once at settlement.
+		if (!scope || scope.backgroundOwner !== undefined) return undefined;
 		this.scopes.delete(toolCallId);
-		if (!scope) return undefined;
 		return { calls: scope.recorder.snapshot(), usage: scope.recorder.totalUsage };
 	}
 
+	detach(callerId: string): void {
+		const scope = this.scopes.get(callerId);
+		if (scope) scope.backgroundOwner ??= callerId;
+		else
+			this.scopes.set(callerId, {
+				recorder: new NestedCallRecorder(),
+				nextId: 1,
+				holdsQueue: false,
+				backgroundOwner: callerId,
+			});
+	}
+
+	takeDetached(callerId: string): NestedCallSummary | undefined {
+		const scope = this.scopes.get(callerId);
+		if (scope?.backgroundOwner !== callerId) return undefined;
+		this.scopes.delete(callerId);
+		return { calls: scope.recorder.snapshot(), usage: scope.recorder.totalUsage };
+	}
+
+	backgroundOwner(callerId: string): string | undefined {
+		return this.scopes.get(callerId)?.backgroundOwner;
+	}
+
+	/** Whether `callerId` is inside a detached background run, including its nested tools. */
+	isDetached(callerId: string): boolean {
+		return this.scopes.get(callerId)?.backgroundOwner !== undefined;
+	}
+
 	clear(): void {
-		this.scopes.clear();
+		for (const [callerId, scope] of this.scopes) {
+			if (scope.backgroundOwner === undefined) this.scopes.delete(callerId);
+		}
 	}
 }

@@ -3,7 +3,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ToolRenderContext } from "../src/core/extensions/types.ts";
-import { codemodeRenderers } from "../src/extensions/codemode/renderer.ts";
+import { codemodeBackgroundMessageRenderer, codemodeRenderers } from "../src/extensions/codemode/renderer.ts";
 import type { CodemodeToolDetails } from "../src/extensions/codemode/tool.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
@@ -126,5 +126,34 @@ describe("codemode renderer", () => {
 		component.updateResult({ content: [], details: { calls: [] }, isError: false, durationMs: 5_100 }, false);
 		expect(text()).toContain("Took 5.1s");
 		expect(text()).not.toContain("Elapsed");
+	});
+
+	it("renders a background run's completion message with its calls and output", () => {
+		const calls = [{ id: "call/1", name: "read", args: '{"path":"a"}', status: "ok" as const, durationMs: 5 }];
+		const message = {
+			role: "custom" as const,
+			customType: "codemode-background",
+			content: [
+				{ type: "text" as const, text: "Background run call completed.\n" },
+				{ type: "text" as const, text: "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+				{ type: "text" as const, text: "hello" },
+			],
+			display: true,
+			timestamp: 0,
+			details: {
+				runId: "call",
+				isError: false,
+				resultDetails: { calls },
+			},
+		};
+		const component = codemodeBackgroundMessageRenderer(message, { expanded: true, outputPad: 1 }, theme);
+		const text = stripVTControlCharacters(component.render(200).join("\n"))
+			.split("\n")
+			.map((line) => line.trimEnd())
+			.join("\n")
+			.trim();
+		expect(text).toBe(
+			'codemode background completed call\n\n✓ read {"path":"a"} 5ms\n\nScript completed\nWall time 0.1 seconds\nOutput:\nhello',
+		);
 	});
 });

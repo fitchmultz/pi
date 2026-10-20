@@ -3,7 +3,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { contentText, type Message } from "@earendil-works/pi-ai";
+import { contentText, type Message, type NestedToolCalls } from "@earendil-works/pi-ai";
 
 // ============================================================================
 // File Operation Tracking
@@ -25,12 +25,24 @@ export function createFileOps(): FileOperations {
 
 /**
  * Extract file operations from tool calls in an assistant message, or from the nested calls
- * recorded on a tool result.
+ * recorded on a tool result or on a background run's completion message.
  */
 export function extractFileOpsFromMessage(message: AgentMessage, fileOps: FileOperations): void {
 	if (message.role === "toolResult") {
 		// Calls made from codemode scripts are recorded on the script's result.
 		for (const call of message.nestedCalls?.calls ?? []) addFileOp(call.name, call.arguments, fileOps);
+		return;
+	}
+	if (message.role === "custom") {
+		// A background script's calls arrive later, on its completion message.
+		const details = message.details as { nestedCalls?: NestedToolCalls } | undefined;
+		const calls = details?.nestedCalls?.calls;
+		// Details are extension-supplied, so foreign shapes are ignored rather than thrown on.
+		if (!Array.isArray(calls)) return;
+		for (const call of calls) {
+			if (typeof call !== "object" || call === null) continue;
+			addFileOp(call.name, call.arguments, fileOps);
+		}
 		return;
 	}
 	if (message.role !== "assistant") return;

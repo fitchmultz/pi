@@ -68,7 +68,8 @@ export function getUsageCostBreakdown(entries: SessionEntry[]): UsageCostBreakdo
 			key = `${entry.message.provider}/${entry.message.responseModel ?? entry.message.model}`;
 			usage = entry.message.usage;
 		} else if (entry.type === "usage") {
-			key = `${entry.provider}/${entry.model}`;
+			// Usage without a provider and model (background tool runs) belongs to the tool row.
+			key = entry.provider || entry.model ? `${entry.provider}/${entry.model}` : "Tools/summaries";
 			usage = entry.usage;
 		} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
 			key = "Tools/summaries";

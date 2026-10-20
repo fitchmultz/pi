@@ -29,6 +29,7 @@ import type {
 	JsonValue,
 	Message,
 	Model,
+	NestedToolCalls,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
 	Provider,
@@ -374,6 +375,27 @@ export interface ExecuteToolOptions {
 	onUpdate?: AgentToolUpdateCallback;
 }
 
+/** A tool result for a background run, with one deferred session write. */
+export interface BackgroundToolResult<TDetails = unknown> extends AgentToolResult<TDetails> {
+	/**
+	 * Runs once at delivery, after any working-session hold is released and before the usage entry
+	 * and completion message. Use it for store writes, which must not happen while the session is
+	 * reserved for saving.
+	 */
+	commit?: () => void;
+}
+
+/** Details of the completion message a background tool run delivers. */
+export interface BackgroundToolMessageDetails<TDetails = unknown> {
+	/** Run ID, which is the id of the tool call that started the run. */
+	runId: string;
+	isError: boolean;
+	/** Bounded native record of the run's nested calls, taken once at settlement. */
+	nestedCalls?: NestedToolCalls;
+	/** The tool's own details, for its message renderer. */
+	resultDetails?: TDetails;
+}
+
 /**
  * Context passed to tool `execute()` in a session: the extension context plus `executeTool()`
  * for running other tools through the same validation, hooks, and permission checks as
@@ -394,6 +416,21 @@ export interface ExtensionToolContext extends ExtensionContext {
 	 * errors come back as `isError: true`.
 	 */
 	executeTool(name: string, args: unknown, options?: ExecuteToolOptions): Promise<AgentToolCallOutcome>;
+
+	/**
+	 * Run work after this tool call returns. One run per model-issued tool call; nested tool calls
+	 * cannot start one. The work keeps this context and remains owned by this session, so it is not
+	 * durable across process exit.
+	 *
+	 * `signal` aborts on session abort, dispose, reload, replacement, or tree navigation. The work's
+	 * `ctx.executeTool()` calls use this context and are recorded once in a detached scope. The
+	 * completion is delivered as one custom message after this tool call's result is persisted.
+	 * Returns the run ID, which is the tool call ID.
+	 */
+	runInBackground<TDetails>(
+		customType: string,
+		work: (signal: AbortSignal) => Promise<BackgroundToolResult<TDetails>>,
+	): string;
 }
 
 /**
@@ -2254,6 +2291,12 @@ export interface ExtensionContextActions {
 		args: unknown,
 		options: ExecuteToolOptions,
 	) => Promise<AgentToolCallOutcome>;
+	/** Backs `ExtensionToolContext.runInBackground()`. Without it, background runs are rejected. */
+	runInBackground?: (
+		callerId: string,
+		customType: string,
+		work: (signal: AbortSignal) => Promise<BackgroundToolResult<unknown>>,
+	) => string;
 	/** Backs `ExtensionToolContext.tools`. */
 	getCallableTools?: () => readonly AgentTool[];
 }
