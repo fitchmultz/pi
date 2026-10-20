@@ -925,11 +925,17 @@
 
       /** The nested calls recorded on a tool result or on a background run's completion message. */
       function renderNestedCallsHtml(nested) {
-        // Custom-message details are extension-supplied JSON, so skip foreign elements.
+        // Custom-message details are extension-supplied JSON, so skip elements that are not native
+        // records: every field interpolated below throws when it is an object with a broken toString.
         if (!nested || !Array.isArray(nested.calls)) return '';
-        const calls = nested.calls.filter(c => typeof c === 'object' && c !== null);
-        if (calls.length === 0) return '';
         const icons = { ok: '✓', error: '✗', unfinished: '…' };
+        const calls = nested.calls.filter(c => typeof c === 'object' && c !== null
+          && typeof c.name === 'string'
+          && typeof c.status === 'string' && Object.hasOwn(icons, c.status)
+          && (c.error === undefined || typeof c.error === 'string')
+          && (c.durationMs === undefined || typeof c.durationMs === 'number')
+          && (c.argumentsBytes === undefined || typeof c.argumentsBytes === 'number'));
+        if (calls.length === 0) return '';
         const lines = calls.map(c => {
           const args = c.arguments ? JSON.stringify(c.arguments) : `[arguments omitted, ${c.argumentsBytes} bytes]`;
           const duration = c.durationMs !== undefined ? ` ${c.durationMs}ms` : '';

@@ -35,8 +35,22 @@ const foreign: CustomMessageEntry = {
 	customType: "other-extension",
 	display: true,
 	content: [{ type: "text", text: "unrelated" }],
-	details: { nestedCalls: { calls: [null] } },
 };
+
+function foreignWithNestedCalls(calls: unknown[]): CustomMessageEntry {
+	return { ...foreign, details: { nestedCalls: { calls } } };
+}
+
+const brokenCoercion = { toString: 5 };
+
+const nonNativeElements: Array<[string, unknown[]]> = [
+	["a null element", [null]],
+	["a non-string error", [{ name: "read", status: "error", error: 5 }]],
+	["an uncoercible name", [{ name: brokenCoercion, status: "ok" }]],
+	["an uncoercible status", [{ name: "read", status: brokenCoercion }]],
+	["an uncoercible duration", [{ name: "read", status: "ok", durationMs: brokenCoercion }]],
+	["an uncoercible argument size", [{ name: "read", status: "ok", argumentsBytes: brokenCoercion }]],
+];
 
 // The exported page evaluates template.js in the browser with vendor libraries and the base64
 // session payload. Run this checkout's template against the same inputs to observe real output.
@@ -66,6 +80,13 @@ function loadRenderEntry(entry: CustomMessageEntry): (entry: CustomMessageEntry)
 	);
 }
 
+function renderCustomMessage(entry: CustomMessageEntry): string {
+	const html = loadRenderEntry(entry)(entry);
+	expect(html).toContain("[other-extension]");
+	expect(html).toContain("unrelated");
+	return html;
+}
+
 describe("HTML export of a background completion", () => {
 	it("keeps the completion's text, its image, and its nested call record", () => {
 		const html = loadRenderEntry(completion)(completion);
@@ -78,14 +99,35 @@ describe("HTML export of a background completion", () => {
 		expect(html).toContain("read");
 	});
 
-	it("ignores a foreign custom message's malformed nested call record", () => {
-		const render = loadRenderEntry(foreign);
-		let html = "";
-		expect(() => {
-			html = render(foreign);
-		}).not.toThrow();
-		expect(html).toContain("[other-extension]");
-		expect(html).toContain("unrelated");
-		expect(html).not.toContain("Nested calls");
+	it("renders a native nested call record with a multiline error and omitted arguments", () => {
+		const entry = foreignWithNestedCalls([
+			{ name: "edit", status: "error", argumentsBytes: 9000, durationMs: 12, error: "first line\nsecond line" },
+		]);
+		const html = renderCustomMessage(entry);
+
+		expect(html).toContain("Nested calls: 1");
+		expect(html).toContain("[arguments omitted, 9000 bytes]");
+		expect(html).toContain("12ms");
+		expect(html).toContain("first line");
+		expect(html).toContain("second line");
 	});
+
+	it("counts only native elements of a nested call record", () => {
+		const entry = foreignWithNestedCalls([
+			{ name: "grep", status: "ok", arguments: { pattern: "x" } },
+			{ name: brokenCoercion, status: "ok" },
+		]);
+		const html = renderCustomMessage(entry);
+
+		expect(html).toContain("Nested calls: 1");
+		expect(html).toContain("grep");
+	});
+
+	for (const [label, calls] of nonNativeElements) {
+		it(`skips ${label} in a foreign custom message's nested call record`, () => {
+			const html = renderCustomMessage(foreignWithNestedCalls(calls));
+
+			expect(html).not.toContain("Nested calls");
+		});
+	}
 });
