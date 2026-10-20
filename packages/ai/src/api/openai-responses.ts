@@ -22,6 +22,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
+import { createRequestCompressionFetch } from "../utils/request-compression.ts";
 import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -196,7 +197,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				normalizedContext,
 				apiKey,
 				options?.headers,
-				trace?.wrapFetch(options?.fetch) ?? options?.fetch,
+				createRequestCompressionFetch("openai-responses", options?.fetch, trace),
 				cacheSessionId,
 			);
 			let params = buildParams(

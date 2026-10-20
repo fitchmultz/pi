@@ -2835,7 +2835,16 @@ describe("openai-codex streaming", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
-	it("zstd-compresses SSE request bodies", async () => {
+	it.each([
+		"",
+		"   ",
+		"https://chatgpt.com/backend-api",
+		"https://chatgpt.com/backend-api/",
+		"https://chatgpt.com/backend-api/codex",
+		"https://chatgpt.com/backend-api/codex/",
+		"https://chatgpt.com/backend-api/codex/responses",
+		"https://chatgpt.com/backend-api/codex/responses/",
+	])("zstd-compresses SSE request bodies for canonical endpoint %j", async (baseUrl) => {
 		const token = mockToken();
 		const encoder = new TextEncoder();
 		const sse = buildSSEPayload({ status: "completed" });
@@ -2868,7 +2877,7 @@ describe("openai-codex streaming", () => {
 			name: "GPT-5.1 Codex",
 			api: "openai-codex-responses",
 			provider: "openai-codex",
-			baseUrl: "https://chatgpt.com/backend-api",
+			baseUrl,
 			reasoning: true,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -2906,6 +2915,64 @@ describe("openai-codex streaming", () => {
 
 		expect(capturedEncoding).toBe("zstd");
 		expect(capturedBody).toBeInstanceOf(Uint8Array);
+	});
+
+	describe.each(["sse", "auto"] as const)("request compression with %s transport", (transport) => {
+		it.each([
+			["https://proxy.example.test/backend-api", "https://proxy.example.test/backend-api/codex/responses"],
+			["http://chatgpt.com/backend-api", "http://chatgpt.com/backend-api/codex/responses"],
+			["https://chatgpt.com/custom", "https://chatgpt.com/custom/codex/responses"],
+			["https://api.openai.com/v1", "https://api.openai.com/v1/codex/responses"],
+		])("does not assume request compression support for %s", async (baseUrl, expectedUrl) => {
+			// Exercise both direct SSE and the supported fallback when WebSockets are unavailable.
+			vi.stubGlobal("WebSocket", undefined);
+			const fetchMock = vi.fn<typeof fetch>(
+				async () =>
+					new Response(buildSSEPayload({ status: "completed" }), {
+						headers: { "content-type": "text/event-stream" },
+					}),
+			);
+			const model: Model<"openai-codex-responses"> = {
+				id: "gpt-5.1-codex",
+				name: "GPT-5.1 Codex",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				baseUrl,
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 400000,
+				maxTokens: 128000,
+			};
+			const context = normalizeContext({
+				messages: [{ role: "user", content: "compress me ".repeat(400), timestamp: 1 }],
+			});
+			let payload: unknown;
+			const result = await streamOpenAICodexResponses(model, context, {
+				apiKey: mockToken(),
+				transport,
+				sessionId: "custom-endpoint-compression",
+				fetch: fetchMock,
+				onPayload: (body) => {
+					payload = body;
+				},
+			}).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			const [url, init] = fetchMock.mock.calls[0];
+			expect(url).toBe(expectedUrl);
+			expect(init?.body).toBe(JSON.stringify(payload));
+			expect(new Headers(init?.headers).get("content-encoding")).toBeNull();
+			if (transport === "auto") {
+				expect(getOpenAICodexWebSocketDebugStats("custom-endpoint-compression")).toMatchObject({
+					websocketFailures: 1,
+					sseFallbacks: 1,
+					websocketFallbackActive: true,
+				});
+			}
+		});
 	});
 
 	it("uses exponential backoff across repeated SSE retries without retry headers", async () => {

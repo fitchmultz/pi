@@ -400,10 +400,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				}
 			}
 
-			// Compress the request body once for the SSE path. The Codex backend
-			// decodes Content-Encoding: zstd; the WebSocket transport above sends the
-			// uncompressed JSON frame, matching the official Codex client.
-			const compressedBody = compressRequestBodyZstd(bodyJson);
+			// Compress once for the known Codex SSE endpoint, not custom endpoints whose
+			// request-encoding support is unknown. WebSockets send uncompressed JSON.
+			const sseUrl = resolveCodexUrl(model.baseUrl);
+			const compressedBody =
+				sseUrl === `${DEFAULT_CODEX_BASE_URL}/codex/responses` ? compressRequestBodyZstd(bodyJson) : null;
 			if (compressedBody) {
 				sseHeaders.set("content-encoding", "zstd");
 			}
@@ -426,14 +427,14 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					try {
 						trace?.attempt("sse");
 						trace?.wire(sseBody, {
-							endpoint: resolveCodexUrl(model.baseUrl),
+							endpoint: sseUrl,
 							compression: compressedBody ? "zstd" : "none",
 							full: true,
 							inputItems: body.input?.length ?? 0,
 							stickySse: isWebSocketSseFallbackActive(cacheSessionId),
 						});
 						trace?.headers(sseHeaders);
-						response = await (options?.fetch ?? globalThis.fetch)(resolveCodexUrl(model.baseUrl), {
+						response = await (options?.fetch ?? globalThis.fetch)(sseUrl, {
 							method: "POST",
 							headers: sseHeaders,
 							body: sseBody,
