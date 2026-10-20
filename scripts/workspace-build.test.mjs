@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, delimiter, join } from "node:path";
@@ -138,7 +138,24 @@ test("returns the failed build status after draining owned children without star
 	});
 	assert.equal(result.status, 17, `${result.stdout}${result.stderr}`);
 	const events = (await readFile(fixture.events, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-	assert.deepEqual(events.filter((event) => event.phase === "start").map((event) => event.name).sort(), ["chord", "tui"]);
+	const started = events.filter((event) => event.phase === "start").map((event) => event.name);
+	// Chord depends on telemetry, so telemetry, tui, and other independent packages may start first.
+	assert.ok(started.includes("chord"));
+	assert.ok(started.includes("tui"));
+	const manifests = new Map(fixture.packages.map((pkg) => [basename(pkg.directory), JSON.parse(readFileSync(join(pkg.directory, "package.json"), "utf8"))]));
+	const dependents = new Set(["chord"]);
+	for (let changed = true; changed; ) {
+		changed = false;
+		for (const [name, manifest] of manifests) {
+			if (dependents.has(name)) continue;
+			const dependencies = Object.keys(manifest.dependencies ?? {});
+			if ([...dependents].some((dependent) => dependencies.includes(manifests.get(dependent).name))) {
+				dependents.add(name);
+				changed = true;
+			}
+		}
+	}
+	assert.deepEqual(started.filter((name) => dependents.has(name)), ["chord"]);
 	assert.ok(events.some((event) => event.name === "chord" && event.phase === "failed"));
 	assert.ok(events.some((event) => event.name === "tui" && event.phase === "finish"), "the remaining child must finish before the root returns");
 });

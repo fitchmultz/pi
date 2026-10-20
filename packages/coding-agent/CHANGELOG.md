@@ -84,6 +84,8 @@
 - Fixed queued managed restarts to wait until admitted native work, including extension commands and handlers, completes.
 - Fixed custom extension UI leaking components that finish during factory initialization and losing editor text typed while an asynchronous factory is pending.
 - Fixed model-catalog compatibility checks crashing on npm 12's keyed `npm pack --json` metadata; release checks and workspace packing share the existing validation.
+- Fixed `pi update` failing with "Managed install marker is missing or invalid" when `managed-install.json` starts with a UTF-8 BOM, which Windows PowerShell 5.1 adds when it rewrites the file.
+- Fixed HTML export showing literal asterisks for Markdown bold and italic next to CJK punctuation ([#3353](https://github.com/earendil-works/pi/issues/3353), [#10154](https://github.com/earendil-works/pi/issues/10154))
 
 ## [1.3.0] - 2026-10-15
 

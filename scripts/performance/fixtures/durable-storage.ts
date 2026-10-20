@@ -29,6 +29,8 @@ const Doc = defineDoc<{ blob: string; count: number }>({
 	kind: "probe.large",
 	version: 1,
 	scope: "session",
+	// The delta phases measure ordinary commits, so never checkpoint.
+	checkpointWhen: () => false,
 	initial: () => ({ blob, count: 0 }),
 });
 const queries = new Map<string, { calls: number; stringBindingBytes: number }>();

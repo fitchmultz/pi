@@ -10,6 +10,7 @@ interface CapturedResponsesPayload {
 	prompt_cache_key?: string;
 	session_id?: string;
 	tools?: Array<{ name?: string; strict?: boolean }>;
+	input?: Array<{ type?: string; tools?: Array<{ name?: string; strict?: boolean }> }>;
 }
 
 function getHeader(headers: CapturedHeaders, name: string): string | null {
@@ -148,9 +149,10 @@ describe("openai-responses provider defaults", () => {
 			if (event.type === "done" || event.type === "error") break;
 		}
 
+		// gpt-5.4 declares its tools in additional_tools items; tool_choice applies to them.
 		expect(capturedPayload).toMatchObject({
 			tool_choice: "required",
-			tools: [expect.objectContaining({ name: "ping" })],
+			input: [{ type: "additional_tools", tools: [expect.objectContaining({ name: "ping" })] }, expect.anything()],
 		});
 	});
 
@@ -199,7 +201,9 @@ describe("openai-responses provider defaults", () => {
 		}
 
 		expect(model.compat?.supportsStrictMode).toBe(true);
-		expect(capturedPayload?.tools).toEqual([
+		const declaredTools =
+			capturedPayload?.input?.find((item) => item.type === "additional_tools")?.tools ?? capturedPayload?.tools;
+		expect(declaredTools).toEqual([
 			expect.objectContaining({ name: "ordinary", strict: false }),
 			expect.objectContaining({ name: "constrained", strict: true }),
 		]);

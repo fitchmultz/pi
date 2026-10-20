@@ -1,8 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `8efd314fa3d3232ce197d8d7a6a5660530b9d83e`
-(2026-10-16), including v1.3.0 and its follow-up fixes. It is upstream plus the features
+v1.0.0 and synchronized through upstream `396ecd7b8f3a146b8af98206d18df1bcc2c08f4e`
+(2026-10-20), including v1.3.0 and its follow-up fixes. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
 The [v1.3.0 integration record](docs/upstream-sync-1.3.0.md) documents the current
@@ -34,6 +34,7 @@ all-platform qualification.
 | Temporary passive tracing: public hooks do not yet cover final serialization/consumed attempts | `packages/ai/src/utils/cache-trace.ts`, native adapter hooks, `core/cache-trace-context.ts`, `scripts/cache-trace-report.mjs` | `packages/ai/test/cache-trace.test.ts`, `sdk-stream-options.test.ts`, `scripts/cache-trace-report.test.mjs` | [Fidelity and retirement](packages/coding-agent/docs/cache-tracing.md) |
 | Cloudflare catalogs: canonical Claude IDs, qualified Opus 5.5 positional controls/cache lifetimes, and direct-OpenAI positional defaults for `/openai` Responses models | `packages/ai/src/api/cloudflare.ts`, generator/provider, `packages/ai/scripts/hydrate-model-catalog.ts` and `core/remote-catalog-provider.ts` | `packages/ai/test/{model-data-validation,cloudflare-openai-positional}.test.ts`, `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Providers](packages/coding-agent/docs/providers.md), [Cache lifetimes](packages/coding-agent/docs/models.md#prompt-cache-lifetimes) |
 | Path hyperlinks: Markdown paths stay clickable after wrapping; terminals only regex-match one row and the source-transform seam cannot see codespans or code blocks | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` | [Terminal setup](packages/coding-agent/docs/terminal-setup.md#override-detected-capabilities) |
+| Source-conditioned resolution: the telemetry root export names only `dist`, so Chord/Durable source tests fail on a checkout without a prior build (upstream's `./render` export already carries `source`) | `packages/telemetry/package.json` | `packages/chord/test/context.test.ts`, `packages/durable/test/harness-telemetry.test.ts` | - |
 
 Complete working state also depends on the queue/admission APIs in
 `packages/agent/src/agent.ts`, resource/settings capture, and bounded artifact I/O in
@@ -119,8 +120,11 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Compile upstream's single Chord frame schema once, drain publications by cursor, and accumulate MCP lines and error prefixes without repeated copying | `packages/chord/src/{wire,publish}.ts`, `packages/mcp/src/transports/{stdio,streamable-http}.ts` | `packages/chord/test/{links-review,state}.test.ts`, `packages/mcp/test/{stdio,streamable-http}.test.ts` |
 | Limit retained-context scheduler work, binary-search historical revisions, avoid redundant SQLite writes, and join long lines at their boundary | `packages/durable/src/{harness/scheduler,storage/memory,storage/sqlite/storage,env/node}.ts` | `packages/durable/test/{harness-context,memory-storage,sqlite-storage,env-node}.test.ts` |
 | Count decoded lengths with scratch storage, reuse frame payload allocation without retaining large metadata, bound read-ahead, and precompute directory sort keys | `packages/env/daemon/src/{decode,scan,frame}.rs`, `packages/env/src/remote-env.ts` | Native daemon tests, `packages/env/test/{connection,remote,differential}.test.ts` |
-| Append native eval journals and validate reports once; avoid repeated retained-array copying in the opt-in telemetry adapter | `packages/evals/src/{cli,report}.ts`, `packages/telemetry/src/memory.ts` | `packages/evals/test/{cli,report}.test.ts`, `packages/telemetry/test/conformance.test.ts` |
+| Append native eval journals and validate reports once | `packages/evals/src/{cli,report}.ts` | `packages/evals/test/{cli,report}.test.ts` |
 | Build ready workspaces two at a time, batch selected npm packs, avoid unused native-path Biome WASM loading, and retain every startup worker profile | `scripts/{build,package-artifacts,pack-nix-packages,biome-check,profile-coding-agent-node}.mjs`, `nix/package.nix` | `scripts/{workspace-build,package-artifacts,package-artifact-cli,profile-coding-agent-node}.test.mjs` |
+
+Upstream's rewritten in-memory telemetry adapter copies only incoming attribute values, so the
+fork's retained-array optimization and its changelog entry are retired.
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
@@ -161,8 +165,10 @@ Chord follows upstream's protocol 4, contract-owned placement, typed principals,
 per-cell versions and initialization, host lifetimes, and reload/code-generation retirement.
 `host.get` and `ctx.get` await readiness and state hydration; `host.hold` is the synchronous
 acquisition API. Protocol peers must upgrade together. Durable uses upstream's shared
-`@earendil-works/chord/output` implementation. Its public `utf8ByteLength` helper also
-backs Durable's internal truncation utilities.
+`@earendil-works/chord/output` implementation; its public `utf8ByteLength` helper also
+backs Durable's internal truncation utilities. Durable's portable SQLite interfaces, Node and
+Cloudflare drivers, and migration runner now come from `@earendil-works/chord/sqlite`, while Durable
+keeps its storage implementations and schema migrations and re-exports the moved public names.
 It also follows upstream's schema-derived frame types, stricter contract tokens and error codes,
 large-payload deflation, acknowledgement-based state flow control, and optional per-link call limits.
 `Link.send` reports encoded sizes when available; call results may overtake waiting state. The fork
