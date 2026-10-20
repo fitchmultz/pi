@@ -1,4 +1,4 @@
-import type { TelemetryContext } from "@earendil-works/pi-telemetry";
+import type { TelemetrySpan } from "@earendil-works/pi-telemetry";
 import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AzureOpenAIResponsesOptions } from "./api/azure-openai-responses.ts";
 import type { BedrockOptions } from "./api/bedrock-converse-stream.ts";
@@ -175,8 +175,8 @@ export interface CacheTraceContext {
 /** Authentication, HTTP transport, and lifecycle callbacks shared by provider requests. */
 export interface ProviderRequestOptions<TModel = Model<Api>> {
 	signal?: AbortSignal;
-	/** Explicit parent context for telemetry produced by this logical request. */
-	telemetryContext?: TelemetryContext;
+	/** Explicit parent span for telemetry produced by this logical request. */
+	telemetry?: TelemetrySpan;
 	/** Metadata for the temporary PI_CACHE_TRACE_DIR opt-in local recorder. */
 	cacheTraceContext?: CacheTraceContext;
 	apiKey?: string;

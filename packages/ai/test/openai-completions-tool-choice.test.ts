@@ -1809,14 +1809,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("uses OpenRouter reasoning object instead of reasoning_effort", async () => {
-		// This checks the provider's wire format, not current catalog membership.
-		const model = {
-			...localOpenAICompletionsModel,
-			id: "reasoning-model",
-			name: "OpenRouter reasoning fixture",
-			provider: "openrouter",
-			baseUrl: "https://openrouter.ai/api/v1",
-		} satisfies Model<"openai-completions">;
+		const model = getModel("openrouter", "deepseek/deepseek-r1-0528")!;
 		let payload: unknown;
 
 		await streamSimple(

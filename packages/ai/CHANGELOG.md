@@ -2,9 +2,21 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed provider request option `telemetryContext` to `telemetry?: TelemetrySpan`, without a compatibility alias. Pass a parent span, not an adapter.
+- `resolveTranscriptTools()` now takes a `TranscriptToolSupport` (`"none"`, `"additions"`, or `"changes"`) instead of a boolean, and `TranscriptTools.anchorsAdditions` is replaced by `foldedSystemMessages`, the number of leading system messages folded into `requestTools` ([#10940](https://github.com/earendil-works/pi/issues/10940))
+
+### Added
+
+- Added `AI_TELEMETRY_SCHEMA` and opt-in `pi.ai.request`/`pi.ai.poll` tracing around Models requests, with content-free first-event, block-size, and final usage attributes, plus duration, token, and USD cost metrics through `telemetry.metrics`.
+- Failed model request spans report `provider_error` status with up to 500 error-message characters; cancelled requests keep `ok` status with `stop: "aborted"`.
+- Added `MiniMax-M3.1-Flash` to the `minimax` and `minimax-cn` providers, with thinking levels low through max sent as `output_config.effort`. Thinking cannot be turned off for this model. New MiniMax models from models.dev now appear without a manual allowlist entry; only the older M2, M2.1, M2.5, and M2.5-highspeed models stay hidden ([#11121](https://github.com/earendil-works/pi/issues/11121))
+
 ### Changed
 
 - Added lossless request-body compression for direct Anthropic Messages (gzip) and public OpenAI Responses (zstd), with runtime/size guards and explicit encoding opt-out. Restricted existing Codex SSE zstd to its canonical endpoint rather than arbitrary custom URLs. See [support boundaries and measurement](../../docs/compression.md).
+- Grok 4.3 and Grok 4.5 on the `xai` provider now offer the `xhigh` thinking level, matching the reasoning efforts xAI supports for these models.
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
 - Extended temporary opt-in Anthropic cache tracing with payload-pass and attempt identities, validated `request-id` headers and exact-session filtering. Native stream behavior is unchanged.
 
@@ -36,6 +48,7 @@
 ### Removed
 
 - Retired the fork's unreleased Anthropic stall timing hooks and lifecycle/Undici observation helper; generic opt-in cache tracing and retained investigation evidence remain.
+- Fixed OpenAI Responses deferred tool loads rewriting the top-level tool list, and losing the prompt cache, on every load after a tool removal. Models with `additional_tools` now declare all tools in `additional_tools` items, starting with one at the head of the input, so removals (announced as text) and redefinitions no longer rewrite the prefix. Tool search and Kimi tool messages rewrite the top-level tools once per removal or redeclaration and keep later loads anchored ([#10940](https://github.com/earendil-works/pi/issues/10940))
 
 ## [1.3.0] - 2026-10-15
 
