@@ -321,10 +321,12 @@ describe("AgentSession dynamic provider registration", () => {
 		async (mode) => {
 			const credentials = AuthStorage.inMemory();
 			const modelRuntime = await ModelRuntime.create({ credentials, modelsPath: null });
-			const modelId = "gpt-5.3-codex-spark";
+			// Follow the built-in catalog rather than pinning a model that a data refresh can remove.
+			const modelId = modelRuntime.getModels("openai-codex")[0]?.id;
+			expect(modelId).toBeDefined();
 			const settingsManager = SettingsManager.inMemory({
 				defaultProvider: "openai-codex",
-				defaultModel: modelId,
+				defaultModel: modelId!,
 			});
 			const backgroundConfig = Promise.withResolvers<void>();
 			const startupAuthEntered = Promise.withResolvers<void>();
