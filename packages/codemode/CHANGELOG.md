@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `background` source option and an optional `CodemodeSourceCapabilities` argument to `parseCodemodeSource()`. A caller that can report a result after the tool call returns passes `{ background: true }`; every other caller keeps rejecting the field with the existing error text.
+
 ## [1.3.0] - 2026-10-15
 
 ### Breaking Changes

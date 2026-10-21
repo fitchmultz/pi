@@ -29,6 +29,7 @@ import type { VirtualModelDefinition } from "../virtual-models.ts";
 import type { WorkingSessionReadiness, WorkingSessionSaveEvent } from "../working-session.ts";
 import type {
 	AgentBeforeSettleEvent,
+	BackgroundToolResult,
 	BeforeAgentStartCustomEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -431,6 +432,7 @@ export class ExtensionRunner {
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () =>
 		normalizeBuildSystemPromptOptions({ cwd: this.cwd });
 	private executeToolFn: ExtensionContextActions["executeTool"];
+	private runInBackgroundFn: ExtensionContextActions["runInBackground"];
 	private getCallableToolsFn: () => readonly AgentTool[] = () => [];
 	/** Registered MCP servers already reported as unhandled. */
 	private readonly reportedMcpServers = new Set<string>();
@@ -508,6 +510,7 @@ export class ExtensionRunner {
 		this.getSystemPromptOptionsFn =
 			contextActions.getSystemPromptOptions ?? (() => normalizeBuildSystemPromptOptions({ cwd: this.cwd }));
 		this.executeToolFn = contextActions.executeTool;
+		this.runInBackgroundFn = contextActions.runInBackground;
 		this.getCallableToolsFn = contextActions.getCallableTools ?? (() => []);
 
 		// Servers registered from now on reach the extension that connects them right away. Servers
@@ -1073,8 +1076,9 @@ export class ExtensionRunner {
 	/**
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
+	 * `signal` overrides `ctx.signal` for work that belongs to a call other than the current run.
 	 */
-	createContext(): ExtensionContext {
+	createContext(signal?: AbortSignal): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
 		const getScopedModels = this.getScopedModels;
@@ -1125,7 +1129,7 @@ export class ExtensionRunner {
 			},
 			get signal() {
 				runner.assertActive();
-				return runner.getSignalFn();
+				return signal ?? runner.getSignalFn();
 			},
 			abort: () => {
 				runner.assertActive();
@@ -1156,12 +1160,12 @@ export class ExtensionRunner {
 
 	/**
 	 * Create the context for executing the tool call `toolCallId`: the extension context plus
-	 * `tools` and `executeTool()`. `signal` is the default signal of nested calls.
+	 * `tools`, `executeTool()`, and `runInBackground()`. `signal` is the default signal of nested calls.
 	 */
 	createToolContext(toolCallId: string, signal: AbortSignal | undefined): ExtensionToolContext {
 		const runner = this;
 		// createContext() returns a fresh object, so adding properties does not affect other contexts.
-		return Object.defineProperties(this.createContext() as ExtensionToolContext, {
+		return Object.defineProperties(this.createContext(signal) as ExtensionToolContext, {
 			tools: {
 				get() {
 					runner.assertActive();
@@ -1182,6 +1186,15 @@ export class ExtensionRunner {
 						};
 					}
 					return runner.executeToolFn(toolCallId, name, args, { ...options, signal: options.signal ?? signal });
+				},
+			},
+			runInBackground: {
+				value: (customType: string, work: (signal: AbortSignal) => Promise<BackgroundToolResult<unknown>>) => {
+					runner.assertActive();
+					if (!runner.runInBackgroundFn) {
+						throw new Error("Background tool runs are not available in this context");
+					}
+					return runner.runInBackgroundFn(toolCallId, customType, work);
 				},
 			},
 		});
@@ -1408,8 +1421,8 @@ export class ExtensionRunner {
 		return modified ? currentMessage : undefined;
 	}
 
-	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolResult(event: ToolResultEvent, signal?: AbortSignal): Promise<ToolResultEventResult | undefined> {
+		const ctx = this.createContext(signal);
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 
@@ -1469,8 +1482,8 @@ export class ExtensionRunner {
 		};
 	}
 
-	async emitToolCall(event: ToolCallEvent): Promise<ToolCallEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolCall(event: ToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined> {
+		const ctx = this.createContext(signal);
 		let result: ToolCallEventResult | undefined;
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "tool_call")) {

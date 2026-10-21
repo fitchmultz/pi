@@ -262,6 +262,23 @@ Declare `outputSchema` and return a matching `structuredContent` when the result
 
 A tool can run other tools with `ctx.executeTool(name, args, { signal, onUpdate })`. Nested calls go through argument validation and the `tool_call` and `tool_result` handlers like model-issued calls, and emit `tool_execution_start`, `tool_execution_update`, and `tool_execution_end`; all of these events carry `parentToolCallId`, and their `toolCallId` is assigned by pi as `<parent id>/<n>`. These ids do not appear as tool calls or tool results in the transcript. Nested calls do not add transcript entries: their results only reach the calling tool, which reports them itself, for example through `onUpdate` and `details`. The session keeps a bounded record of them (name, arguments, status, duration, error; never results) as `nestedCalls` on the calling tool's result message. It is used for compaction file lists and shown in HTML exports. Arguments over 8 KiB per call or 32 KiB per tool result are omitted, at most 256 calls are kept, and `complete: false` marks a record that lost anything. The `usage` of nested results, at every depth, is added to the calling tool's result `usage`, so a tool reports only its own usage, not that of the tools it called. `ctx.tools` lists the tools `ctx.executeTool()` can call. `tool_result` handlers that redact `content` should also replace `structuredContent`; replacing only `content` drops it.
 
+A tool that takes long can return a receipt and finish its work later with `ctx.runInBackground(customType, work)`. The call must be the model-issued call that is running: nested calls cannot start one, and each can start only one run. `work(signal)` returns the same result shape plus an optional `commit()` callback for session writes that must wait for a safe boundary. Returns the run ID, which is the tool call ID.
+
+```typescript
+execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+  if (!params.background) return runScript(params, signal, onUpdate);
+  ctx.runInBackground("my-tool-background", async (runSignal) => {
+    const result = await runScript(params, runSignal);
+    return { ...result, commit: () => saveState(result.state) };
+  });
+  return { content: [{ type: "text", text: `Started. Run ${toolCallId}.` }], details: {} };
+};
+```
+
+The run's `ctx.executeTool()` calls keep the calling tool's context, origin assistant message, and nested call record, so `tool_call` and `tool_result` events still carry the launching `parentToolCallId`, and their handlers see the run's `ctx.signal`. When the work finishes, the session delivers one custom message of type `customType` whose `content` is `Background run <run id> completed.` or `failed.` followed by the result content, and whose `details` is a `BackgroundToolMessageDetails`: `runId` (also the tool call ID), `isError`, `nestedCalls` (the bounded record of the run's calls), and `resultDetails` (the tool's own details). Register a message renderer for `customType` to present it; image blocks in the content are drawn below the rendered message like a tool result's images. The session sends it only after the receipt is persisted, as a steering message, so the model sees it without another prompt; when the session is idle that starts a turn. Images are normalized like a tool result's and stay in the message content, after the line naming the temp file each was saved to. Nested and model usage of the run is added to the session cost once, when the message is delivered.
+
+`signal` aborts when the session is aborted, disposed, reloaded, or navigated to another branch. The run is not durable: it ends with the process. A working-session save reports a live run as a blocker and keeps it running; the run's `commit()`, usage, and message wait for the save to finish. Work that must survive pi belongs in a durable job framework such as the `background_command` tool, not in a tool run.
+
 See [`hello.ts`](../examples/extensions/hello.ts), [`todo.ts`](../examples/extensions/todo.ts), [`dynamic-tools.ts`](../examples/extensions/dynamic-tools.ts), and [`truncated-tool.ts`](../examples/extensions/truncated-tool.ts).
 
 ### Tool exposure

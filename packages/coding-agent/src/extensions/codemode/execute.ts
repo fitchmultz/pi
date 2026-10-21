@@ -18,6 +18,7 @@ import {
 	type CodemodeOutputItem,
 	type CodemodeResult,
 	CodemodeSandbox,
+	type CodemodeSourceOptions,
 	type CodemodeTool,
 	loadQuickJSWasm,
 	parseCodemodeSource,
@@ -32,6 +33,7 @@ import { combineUsage } from "../../core/usage-totals.ts";
 import { writeOutputFile } from "../../utils/output-files.ts";
 import { Bm25Ranker, createToolSearchDocument, DEFAULT_TOOL_SEARCH_LIMIT } from "../tool-search/tool.ts";
 import {
+	CODEMODE_BACKGROUND_COMPLETION_TYPE,
 	CODEMODE_DOCS_PATH,
 	CODEMODE_STORE_ENTRY_TYPE,
 	type CodemodeModelRuntime,
@@ -445,8 +447,67 @@ export async function executeCodemode(
 	ctx: ExtensionToolContext | undefined,
 	options: CodemodeToolOptions = {},
 ): Promise<AgentToolResult<CodemodeToolDetails>> {
+	const { code, options: sourceOptions } = parseCodemodeSource(input.code, { background: true });
+	if (sourceOptions.background) return startBackgroundCodemode(toolCallId, code, sourceOptions, ctx, options);
+	const run = startScript(toolCallId, code, sourceOptions, signal, onUpdate, ctx, options);
+	const result = await run.finished;
+	run.commit();
+	return result;
+}
+
+function startBackgroundCodemode(
+	toolCallId: string,
+	code: string,
+	sourceOptions: CodemodeSourceOptions,
+	ctx: ExtensionToolContext | undefined,
+	options: CodemodeToolOptions,
+): AgentToolResult<CodemodeToolDetails> {
+	if (!ctx?.runInBackground) {
+		return {
+			content: [
+				{
+					type: "text",
+					text: "Background codemode scripts need a session tool context that can report a result after the tool call returns; this host cannot run one.",
+				},
+			],
+			details: { calls: [] },
+			isError: true,
+		};
+	}
+	const runId = ctx.runInBackground<CodemodeToolDetails>(CODEMODE_BACKGROUND_COMPLETION_TYPE, async (runSignal) => {
+		// No onUpdate: this call already returned, and the completion message carries the record.
+		const run = startScript(toolCallId, code, sourceOptions, runSignal, undefined, ctx, options);
+		const result = await run.finished;
+		return { ...result, commit: run.commit };
+	});
+	return {
+		content: [
+			{
+				type: "text",
+				text: `Script running in background.\nRun ${runId}. Its result arrives as a message when the script finishes.`,
+			},
+		],
+		details: { calls: [], background: { runId } },
+	};
+}
+
+/** A started script, with the store write that must happen once at a safe write boundary. */
+interface ScriptRun {
+	/** The formatted result, without the script's store writes applied. */
+	finished: Promise<AgentToolResult<CodemodeToolDetails>>;
+	commit: () => void;
+}
+
+function startScript(
+	toolCallId: string,
+	code: string,
+	sourceOptions: CodemodeSourceOptions,
+	signal: AbortSignal | undefined,
+	onUpdate: ((result: AgentToolResult<CodemodeToolDetails>) => void) | undefined,
+	ctx: ExtensionToolContext | undefined,
+	options: CodemodeToolOptions,
+): ScriptRun {
 	const startedAt = performance.now();
-	const { code, options: sourceOptions } = parseCodemodeSource(input.code);
 	const calls: CodemodeNestedCall[] = [];
 	// Usage of the script's `models.*` calls. Nested tool calls report theirs through the session.
 	let modelUsage: Usage | undefined;
@@ -525,52 +586,58 @@ export async function executeCodemode(
 	});
 
 	let result: CodemodeResult;
-	try {
-		const store = ctx ? readCodemodeStore(ctx.sessionManager.getBranch()) : {};
-		result = await sandbox.execute(code, { signal, store });
-	} finally {
-		await sandbox.close();
-	}
-	// Calls still marked running were cut off by the script ending, a timeout, or an abort.
-	for (const call of calls) {
-		if (call.status === "running") call.status = "cancelled";
-	}
-
-	const scriptOutput = [...result.output];
-	if (result.ok) {
-		const { set, delete: deleted } = result.storeWrites;
-		if (Object.keys(set).length > 0 || deleted.length > 0) {
-			options.appendEntry?.(CODEMODE_STORE_ENTRY_TYPE, { set, delete: deleted });
+	const finished = (async (): Promise<AgentToolResult<CodemodeToolDetails>> => {
+		try {
+			const store = ctx ? readCodemodeStore(ctx.sessionManager.getBranch()) : {};
+			result = await sandbox.execute(code, { signal, store });
+		} finally {
+			await sandbox.close();
 		}
-		// pi extension: a returned value is appended like text().
-		if (result.value !== undefined) scriptOutput.push({ type: "text", text: valueText(result.value) });
-	}
-	const items = formatOutput(scriptOutput);
-	if (!result.ok) items.push({ type: "text", text: `Script error:\n${formatError(result, calls)}` });
-	if (generatedImages > 0 && !items.some((item) => item.type === "image")) {
-		items.push({
-			type: "text",
-			text: `Note: models.generateImages() returned ${generatedImages} image${generatedImages === 1 ? "" : "s"} that the script did not show. Show each image block of result.output with image(block).`,
-		});
-	}
+		// Calls still marked running were cut off by the script ending, a timeout, or an abort.
+		for (const call of calls) {
+			if (call.status === "running") call.status = "cancelled";
+		}
 
-	const truncated = await truncateOutput(
-		joinAdjacentText(items),
-		sourceOptions.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
-	);
-	// After truncation, which joins the text items and moves images after them, so each path stays
-	// next to its image and is never cut.
-	const output = joinAdjacentText(await saveImages(truncated.items));
-	const wallTime = ((performance.now() - startedAt) / 1000).toFixed(1);
-	const header = `${result.ok ? "Script completed" : "Script failed"}\nWall time ${wallTime} seconds\nOutput:\n`;
-	const details = snapshot();
-	if (truncated.fullOutputPath) details.fullOutputPath = truncated.fullOutputPath;
-	return {
-		content: [{ type: "text", text: header }, ...output],
-		details,
-		...(modelUsage ? { usage: modelUsage } : {}),
-		...(result.ok ? {} : { isError: true }),
+		const scriptOutput = [...result.output];
+		if (result.ok) {
+			// pi extension: a returned value is appended like text().
+			if (result.value !== undefined) scriptOutput.push({ type: "text", text: valueText(result.value) });
+		}
+		const items = formatOutput(scriptOutput);
+		if (!result.ok) items.push({ type: "text", text: `Script error:\n${formatError(result, calls)}` });
+		if (generatedImages > 0 && !items.some((item) => item.type === "image")) {
+			items.push({
+				type: "text",
+				text: `Note: models.generateImages() returned ${generatedImages} image${generatedImages === 1 ? "" : "s"} that the script did not show. Show each image block of result.output with image(block).`,
+			});
+		}
+
+		const truncated = await truncateOutput(
+			joinAdjacentText(items),
+			sourceOptions.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS,
+		);
+		// After truncation, which joins the text items and moves images after them, so each path stays
+		// next to its image and is never cut.
+		const output = joinAdjacentText(await saveImages(truncated.items));
+		const wallTime = ((performance.now() - startedAt) / 1000).toFixed(1);
+		const header = `${result.ok ? "Script completed" : "Script failed"}\nWall time ${wallTime} seconds\nOutput:\n`;
+		const details = snapshot();
+		if (truncated.fullOutputPath) details.fullOutputPath = truncated.fullOutputPath;
+		return {
+			content: [{ type: "text", text: header }, ...output],
+			details,
+			...(modelUsage ? { usage: modelUsage } : {}),
+			...(result.ok ? {} : { isError: true }),
+		};
+	})();
+	// Store writes wait for a safe session write boundary; a failed script never writes.
+	const commit = () => {
+		if (!result.ok) return;
+		const { set, delete: deleted } = result.storeWrites;
+		if (Object.keys(set).length === 0 && deleted.length === 0) return;
+		options.appendEntry?.(CODEMODE_STORE_ENTRY_TYPE, { set, delete: deleted });
 	};
+	return { finished, commit };
 }
 
 /**

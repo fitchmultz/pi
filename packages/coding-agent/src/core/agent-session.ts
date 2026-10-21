@@ -83,6 +83,8 @@ import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
 	type AgentActivityOutcome,
+	type BackgroundToolMessageDetails,
+	type BackgroundToolResult,
 	type BoundaryContextPreview,
 	type ContextUsage,
 	type ExecuteToolOptions,
@@ -118,7 +120,7 @@ import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
 import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
-import { NestedToolCallRunner } from "./nested-tool-calls.ts";
+import { type NestedCallSummary, NestedToolCallRunner } from "./nested-tool-calls.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
@@ -376,6 +378,34 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
+interface BackgroundToolRun {
+	/** Run ID, which is the id of the model-issued tool call that started the run. */
+	runId: string;
+	customType: string;
+	/** Aborts the work on session abort, dispose, reload, replacement, or tree navigation. */
+	controller: AbortController;
+	/** The assistant message that issued the launching call, used as the origin of late nested calls. */
+	originAssistant: AssistantMessage;
+	/** Set once the launching tool result is persisted, so no completion can precede its receipt. */
+	receiptReady: boolean;
+	/** Resolves when the work and its usage bookkeeping are complete, however the run ends. */
+	settled: Promise<void>;
+	state: BackgroundToolRunState;
+}
+
+type BackgroundToolRunState =
+	| { status: "running" }
+	| {
+			status: "settled";
+			result: BackgroundToolResult<unknown>;
+			nested: NestedCallSummary | undefined;
+			/** False once the run is cancelled: its usage is still recorded, its writes and message are not. */
+			deliver: boolean;
+			/** Completed steps, in order. A throw or a save hold leaves the current step for the next pass. */
+			step: "commit" | "usage" | "message";
+	  }
+	| { status: "done" };
+
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
@@ -507,8 +537,16 @@ export class AgentSession {
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
-	/** Created on the first `ctx.executeTool()` call. */
+	/** Created on the first `ctx.executeTool()` call or background run. */
 	private _nestedToolCalls: NestedToolCallRunner | undefined;
+	/**
+	 * ponytail: these live and die with the process. Work that must survive pi belongs in the durable
+	 * job framework (the `background_command` builtin), not in a run held only by this map.
+	 */
+	private readonly _backgroundRuns = new Map<string, BackgroundToolRun>();
+	private _backgroundDelivery: Promise<void> | undefined;
+	private _backgroundDeliveryRequested = false;
+	private _disposed = false;
 	/** Declared tools whose declarations requests leave out, from `prepareLoadout` hooks. */
 	private _hiddenDeclarations: ReadonlySet<string> = new Set();
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
@@ -563,6 +601,7 @@ export class AgentSession {
 		this.settingsManager.runWorkingSessionActivity = (action) => this.workingSessionGate.run(action);
 		this.agent.onTurnBoundary = () => this._grantWorkingSession("turn");
 		this.workingSessionGate.onIdle = () => {
+			this._flushBackgroundRuns();
 			if (this.isIdle && !this.isSettling) void this._grantWorkingSession("settled");
 		};
 		this.agent.onIdle = this.workingSessionGate.onIdle;
@@ -688,6 +727,15 @@ export class AgentSession {
 			if (this._workingSessionHost) {
 				const result = await this._workingSessionHost.readiness(event);
 				blockers.push(...(result?.blockers ?? []));
+			}
+			// Neither live background work nor a settled result awaiting delivery is in the snapshot;
+			// keep it instead of cancelling accepted work, and let the caller decide whether to sleep.
+			for (const run of this._backgroundRuns.values()) {
+				blockers.push(
+					run.state.status === "running"
+						? `Background run ${run.runId} is active`
+						: `Background run ${run.runId} is awaiting delivery`,
+				);
 			}
 			preparing = false;
 			if (this._extensionRunner.hasPendingUI) blockers.push("Unresolved extension UI");
@@ -930,13 +978,14 @@ export class AgentSession {
 	 * happens here instead of in wrappers.
 	 */
 	private _installAgentToolHooks(): void {
-		this.agent.beforeToolCall = (context) => this._beforeToolCall(context);
-		this.agent.afterToolCall = (context) => this._afterToolCall(context);
+		this.agent.beforeToolCall = (context, signal) => this._beforeToolCall(context, signal);
+		this.agent.afterToolCall = (context, signal) => this._afterToolCall(context, signal);
 	}
 
 	/** `tool_call` handlers. `parentToolCallId` is set for calls another tool made. */
 	private async _beforeToolCall(
 		{ toolCall, args }: BeforeToolCallContext,
+		signal?: AbortSignal,
 		parentToolCallId?: string,
 	): Promise<BeforeToolCallResult | undefined> {
 		const runner = this._extensionRunner;
@@ -945,13 +994,16 @@ export class AgentSession {
 		}
 
 		try {
-			return await runner.emitToolCall({
-				type: "tool_call",
-				toolName: toolCall.name,
-				toolCallId: toolCall.id,
-				...(parentToolCallId ? { parentToolCallId } : {}),
-				input: args as Record<string, unknown>,
-			});
+			return await runner.emitToolCall(
+				{
+					type: "tool_call",
+					toolName: toolCall.name,
+					toolCallId: toolCall.id,
+					...(parentToolCallId ? { parentToolCallId } : {}),
+					input: args as Record<string, unknown>,
+				},
+				signal,
+			);
 		} catch (err) {
 			if (err instanceof Error) {
 				throw err;
@@ -963,31 +1015,31 @@ export class AgentSession {
 	/** `tool_result` handlers and image normalization. `parentToolCallId` is set for calls another tool made. */
 	private async _afterToolCall(
 		{ toolCall, args, result, isError }: AfterToolCallContext,
+		signal?: AbortSignal,
 		parentToolCallId?: string,
 	): Promise<AfterToolCallResult | undefined> {
 		const runner = this._extensionRunner;
 		const hookResult = runner.hasHandlers("tool_result")
-			? await runner.emitToolResult({
-					type: "tool_result",
-					toolName: toolCall.name,
-					toolCallId: toolCall.id,
-					...(parentToolCallId ? { parentToolCallId } : {}),
-					input: args as Record<string, unknown>,
-					content: result.content,
-					details: result.details,
-					...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
-					isError,
-					usage: result.usage,
-				})
+			? await runner.emitToolResult(
+					{
+						type: "tool_result",
+						toolName: toolCall.name,
+						toolCallId: toolCall.id,
+						...(parentToolCallId ? { parentToolCallId } : {}),
+						input: args as Record<string, unknown>,
+						content: result.content,
+						details: result.details,
+						...(result.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+						isError,
+						usage: result.usage,
+					},
+					signal,
+				)
 			: undefined;
 
 		const content = hookResult?.content ?? result.content ?? [];
 		// Runs after the extension hook so images injected or replaced by extensions are normalized too.
-		const resizeOptions = this._limitsModel()?.inputLimits?.images?.resize;
-		const normalizedContent = await normalizeToolResultImages(content, {
-			autoResizeImages: this.settingsManager.getImageAutoResize(),
-			...(resizeOptions ? { resizeOptions } : {}),
-		});
+		const normalizedContent = await this._normalizeImages(content);
 
 		if (!hookResult && normalizedContent === content) {
 			return undefined;
@@ -1013,39 +1065,292 @@ export class AgentSession {
 		args: unknown,
 		options: ExecuteToolOptions,
 	): Promise<AgentToolCallOutcome> {
+		// A background run's calls can arrive while a save holds the session. Wait for the hold to end
+		// instead of invalidating it; the run's signal must still break the wait.
+		if (this._nestedToolCalls?.isDetached(parentToolCallId)) {
+			await this._waitForWorkingSessionRelease(options.signal);
+		}
 		return this.workingSessionGate.run(async () => {
-			this._nestedToolCalls ??= new NestedToolCallRunner({
-				getTools: () => this._getCallableTools(),
-				isSequential: () => this.agent.toolExecution === "sequential",
-				runToolCall: (toolCall, parentId, signal, onUpdate) => {
-					const assistantMessage = this._findLastAssistantMessage();
-					if (!assistantMessage) {
-						return Promise.resolve({
-							toolCall,
-							result: {
-								content: [{ type: "text", text: "No assistant message issued this call" }],
-								details: {},
-							},
-							isError: true,
-						});
-					}
-					return runToolCall(toolCall, {
-						tools: this._getCallableTools(),
-						assistantMessage,
-						context: { messages: this.agent.state.messages, tools: this.agent.state.tools },
-						beforeToolCall: (context) => this._beforeToolCall(context, parentId),
-						afterToolCall: (context) => this._afterToolCall(context, parentId),
-						signal,
-						onUpdate,
-					});
-				},
-				emit: async (event) => {
-					await this._extensionRunner.emit(event);
-					this._emit(event);
-				},
-			});
+			this._nestedToolCalls ??= this._createNestedToolCallRunner();
 			return this._nestedToolCalls.execute(parentToolCallId, name, args, options);
 		});
+	}
+
+	private _createNestedToolCallRunner(): NestedToolCallRunner {
+		return new NestedToolCallRunner({
+			getTools: () => this._getCallableTools(),
+			isSequential: () => this.agent.toolExecution === "sequential",
+			runToolCall: (toolCall, parentId, signal, onUpdate) => {
+				// A background run keeps the assistant message that issued its launching call.
+				const assistantMessage = this._backgroundOriginAssistant(parentId) ?? this._findLastAssistantMessage();
+				if (!assistantMessage) {
+					return Promise.resolve({
+						toolCall,
+						result: {
+							content: [{ type: "text", text: "No assistant message issued this call" }],
+							details: {},
+						},
+						isError: true,
+					});
+				}
+				return runToolCall(toolCall, {
+					tools: this._getCallableTools(),
+					assistantMessage,
+					context: { messages: this.agent.state.messages, tools: this.agent.state.tools },
+					beforeToolCall: (context, callSignal) => this._beforeToolCall(context, callSignal, parentId),
+					afterToolCall: (context, callSignal) => this._afterToolCall(context, callSignal, parentId),
+					signal,
+					onUpdate,
+				});
+			},
+			emit: async (event) => {
+				await this._extensionRunner.emit(event);
+				this._emit(event);
+			},
+		});
+	}
+
+	/** The image normalization every tool result gets, with the model's resize policy and the image setting. */
+	private async _normalizeImages(content: (TextContent | ImageContent)[]): Promise<(TextContent | ImageContent)[]> {
+		const resizeOptions = this._limitsModel()?.inputLimits?.images?.resize;
+		return normalizeToolResultImages(content, {
+			autoResizeImages: this.settingsManager.getImageAutoResize(),
+			...(resizeOptions ? { resizeOptions } : {}),
+		});
+	}
+
+	/** Wait out a save hold without invalidating it; the call's own abort ends the wait. */
+	private async _waitForWorkingSessionRelease(signal: AbortSignal | undefined): Promise<void> {
+		while (this.workingSessionGate.reserved) {
+			await new Promise<void>((resolve, reject) => {
+				if (signal?.aborted) {
+					reject(signal.reason);
+					return;
+				}
+				const onAbort = () => reject(signal?.reason ?? new Error("Nested call aborted"));
+				signal?.addEventListener("abort", onAbort, { once: true });
+				void this.workingSessionGate.waitForRelease().then(() => {
+					signal?.removeEventListener("abort", onAbort);
+					resolve();
+				});
+			});
+		}
+	}
+
+	private _startBackgroundToolRun(
+		callerId: string,
+		customType: string,
+		work: (signal: AbortSignal) => Promise<BackgroundToolResult<unknown>>,
+	): string {
+		const originAssistant = this._findAssistantForToolCall(callerId);
+		// The call must still be running: a context retained after it returned would start a run whose
+		// receipt can never arrive, and that run would hold back every later completion.
+		if (!this.agent.state.pendingToolCalls.has(callerId) || !originAssistant) {
+			throw new Error(
+				"runInBackground() is only available to the model-issued tool call that is running; nested tool calls cannot start a background run",
+			);
+		}
+		if (this._backgroundRuns.has(callerId)) throw new Error(`Background run ${callerId} is already active`);
+		const settled = Promise.withResolvers<void>();
+		const run: BackgroundToolRun = {
+			runId: callerId,
+			customType,
+			controller: new AbortController(),
+			originAssistant,
+			receiptReady: false,
+			settled: settled.promise,
+			state: { status: "running" },
+		};
+		this._backgroundRuns.set(callerId, run);
+		// Take the record before the work starts, so the launching tool result never takes a partial one.
+		this._nestedToolCalls ??= this._createNestedToolCallRunner();
+		this._nestedToolCalls.detach(callerId);
+		void (async () => {
+			try {
+				await this._settleBackgroundRun(run, work);
+			} catch (error) {
+				this._reportBackgroundRunError(run, error);
+			} finally {
+				settled.resolve();
+			}
+		})();
+		return callerId;
+	}
+
+	private async _settleBackgroundRun(
+		run: BackgroundToolRun,
+		work: (signal: AbortSignal) => Promise<BackgroundToolResult<unknown>>,
+	): Promise<void> {
+		let result: BackgroundToolResult<unknown>;
+		try {
+			result = await work(run.controller.signal);
+		} catch (error) {
+			result = {
+				content: [
+					{
+						type: "text",
+						text: `Background run failed: ${error instanceof Error ? error.message : String(error)}`,
+					},
+				],
+				details: undefined,
+				isError: true,
+			};
+		}
+		// Taken once: a nested call that ignores the abort cannot change the record afterwards.
+		const nested = this._nestedToolCalls?.takeDetached(run.runId);
+		const content = await this._normalizeImages(result.content);
+		// The run's controller is aborted exactly when the session stopped wanting its result.
+		const deliver = !run.controller.signal.aborted;
+		run.state = {
+			status: "settled",
+			result: { ...result, content },
+			nested,
+			deliver,
+			step: deliver ? "commit" : "usage",
+		};
+		this._flushBackgroundRuns();
+	}
+
+	/** The assistant message whose tool call has `toolCallId`, which rejects nested callers. */
+	private _findAssistantForToolCall(toolCallId: string): AssistantMessage | undefined {
+		const messages = this.agent.state.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role !== "assistant") continue;
+			if (message.content.some((block) => block.type === "toolCall" && block.id === toolCallId)) return message;
+		}
+		return undefined;
+	}
+
+	private _backgroundOriginAssistant(callerId: string): AssistantMessage | undefined {
+		const owner = this._nestedToolCalls?.backgroundOwner(callerId);
+		return owner === undefined ? undefined : this._backgroundRuns.get(owner)?.originAssistant;
+	}
+
+	private async _cancelBackgroundRuns(reason: string): Promise<void> {
+		if (this._backgroundRuns.size === 0) return;
+		const runs = [...this._backgroundRuns.values()];
+		this._abortBackgroundRuns(reason);
+		await Promise.all(runs.map((run) => run.settled));
+		// Usage already known is still owed to the session; nothing is committed or delivered. A save
+		// hold parks the write instead of being invalidated, and its release runs the same accounting.
+		this._flushBackgroundRuns();
+		while (this._backgroundDelivery) await this._backgroundDelivery;
+	}
+
+	private _abortBackgroundRuns(reason: string): void {
+		for (const run of this._backgroundRuns.values()) {
+			run.controller.abort(new Error(reason));
+			const state = run.state;
+			if (state.status !== "settled" || !state.deliver) continue;
+			// A cancelled run keeps its usage; its store write and message are dropped.
+			state.deliver = false;
+			state.step = "usage";
+		}
+	}
+
+	private _flushBackgroundRuns(): void {
+		if (this._backgroundDelivery) {
+			this._backgroundDeliveryRequested = true;
+			return;
+		}
+		this._backgroundDelivery = (async () => {
+			try {
+				do {
+					this._backgroundDeliveryRequested = false;
+				} while (await this._advanceNextBackgroundRun());
+			} finally {
+				this._backgroundDelivery = undefined;
+				if (this._backgroundDeliveryRequested) this._flushBackgroundRuns();
+			}
+		})();
+	}
+
+	/**
+	 * Account one settled run, then commit and deliver it unless it was cancelled or the session is
+	 * gone; false when nothing can advance right now.
+	 */
+	private async _advanceNextBackgroundRun(): Promise<boolean> {
+		if (this.workingSessionGate.reserved || this.isCompacting) return false;
+		const run = [...this._backgroundRuns.values()].find(
+			(candidate) => candidate.state.status === "settled" && (!candidate.state.deliver || candidate.receiptReady),
+		);
+		if (!run || run.state.status !== "settled") return false;
+		const state = run.state;
+		try {
+			if (state.deliver && !this._disposed && state.step === "commit") {
+				state.result.commit?.();
+				state.step = "usage";
+			}
+			if (state.step === "usage") this._recordBackgroundRunUsage(run);
+			if (!state.deliver || this._disposed) {
+				this._finishBackgroundRun(run);
+				return true;
+			}
+			await this.sendCustomMessage(
+				{
+					customType: run.customType,
+					content: [
+						{
+							type: "text",
+							text: `Background run ${run.runId} ${state.result.isError ? "failed" : "completed"}.\n`,
+						},
+						...state.result.content,
+					],
+					display: true,
+					details: {
+						runId: run.runId,
+						isError: state.result.isError === true,
+						...(state.nested?.calls ? { nestedCalls: state.nested.calls } : {}),
+						...(state.result.details === undefined ? {} : { resultDetails: state.result.details }),
+					} satisfies BackgroundToolMessageDetails,
+				},
+				{ deliverAs: "steer", triggerTurn: true },
+			);
+			this._finishBackgroundRun(run);
+			return true;
+		} catch (error) {
+			// A hold that started after the checks leaves the remaining steps for a later pass.
+			if (this.workingSessionGate.reserved) return false;
+			this._reportBackgroundRunError(run, error);
+			this._finishBackgroundRun(run);
+			return false;
+		}
+	}
+
+	/** Record a settled run's descendant and model usage once; the step advances only after the write. */
+	private _recordBackgroundRunUsage(run: BackgroundToolRun): void {
+		const state = run.state;
+		if (state.status !== "settled" || state.step !== "usage") return;
+		const nestedUsage = state.nested?.usage;
+		const modelUsage = state.result.usage;
+		const usage = nestedUsage && modelUsage ? combineUsage(nestedUsage, modelUsage) : (nestedUsage ?? modelUsage);
+		if (usage) {
+			const entry = this.sessionManager.appendUsage(run.customType, "", "", usage, `background ${run.runId}`);
+			this._emit({ type: "entry_appended", entry });
+		}
+		state.step = "message";
+	}
+
+	private _finishBackgroundRun(run: BackgroundToolRun): void {
+		run.state = { status: "done" };
+		this._backgroundRuns.delete(run.runId);
+	}
+
+	private _reportBackgroundRunError(run: BackgroundToolRun, error: unknown): void {
+		this._extensionRunner.emitError({
+			extensionPath: "<runtime>",
+			event: "background_run",
+			error: `Background run ${run.runId} failed: ${error instanceof Error ? error.message : String(error)}`,
+			stack: error instanceof Error ? error.stack : undefined,
+		});
+	}
+
+	private _resolveBackgroundReceipt(toolCallId: string): void {
+		const run = this._backgroundRuns.get(toolCallId);
+		if (!run) return;
+		run.receiptReady = true;
+		this._flushBackgroundRuns();
 	}
 
 	/** Whether `projection`, the current session projection, exceeds the compaction threshold of `model`. */
@@ -1466,6 +1771,8 @@ export class AgentSession {
 				entryId = this.sessionManager.appendMessage(event.message);
 			}
 			if (entryId) this._entryIdsByMessage.set(event.message, entryId);
+			// The receipt is persisted, so a settled background run may now deliver its completion.
+			if (event.message.role === "toolResult") this._resolveBackgroundReceipt(event.message.toolCallId);
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
 			if (event.message.role === "assistant") {
@@ -1695,8 +2002,13 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._disposed = true;
 		this.workingSessionGate.invalidate("Native session disposed");
+		// Dispose is synchronous, so abort as a backstop. Releasing the hold below lets the usage of a
+		// run that already settled still be written; delivery is skipped once disposed.
+		this._abortBackgroundRuns("Native session disposed");
 		if (this._workingSessionRelease) void this._workingSessionRelease();
+		this._flushBackgroundRuns();
 		this._workingSessionRequest?.reject(new Error("Native session disposed"));
 		this._workingSessionRequest = undefined;
 		try {
@@ -2850,6 +3162,7 @@ export class AgentSession {
 		this.abortCompaction();
 		this.abortBranchSummary();
 		this.agent.abort();
+		await this._cancelBackgroundRuns("Session aborted");
 		await this.waitForIdle();
 	}
 
@@ -3900,6 +4213,7 @@ export class AgentSession {
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
 				executeTool: (callerId, name, args, options) => this._executeNestedToolCall(callerId, name, args, options),
 				getCallableTools: () => this._getCallableTools(),
+				runInBackground: (callerId, customType, work) => this._startBackgroundToolRun(callerId, customType, work),
 			},
 			{
 				registerProvider: (name, config) => {
@@ -4100,6 +4414,8 @@ export class AgentSession {
 	}
 
 	private async _reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
+		// Reload replaces the extension runner the work depends on, so stop it before ownership changes.
+		await this._cancelBackgroundRuns("Extensions reloaded");
 		const oldRunner = this._extensionRunner;
 		const wasManaged = this.getActiveToolNames().includes("discover_tools");
 		const previousFlagValues = oldRunner.getFlagValues();
@@ -4567,6 +4883,10 @@ export class AgentSession {
 				// Non-user message: leaf = selected node
 				newLeafId = targetId;
 			}
+
+			// The run's captured context and store writes belong to the branch being left. Cancelling only
+			// here keeps accepted work alive when navigation is rejected or vetoed.
+			await this._cancelBackgroundRuns("Session tree navigated");
 
 			// Switch leaf (with or without summary)
 			// Summary is attached at the navigation target position (newLeafId), not the old branch

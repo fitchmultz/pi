@@ -75,4 +75,34 @@ describe("parseCodemodeSource", () => {
 			expect(() => parseCodemodeSource(input), input).toThrow(message);
 		}
 	});
+
+	it("rejects `background` unless the caller can report a result later", () => {
+		const source = '// @options: {"background": true}\ntext(1)';
+		// Default consumers, including the Durable package, must not accept work they cannot report on.
+		expect(() => parseCodemodeSource(source)).toThrow(CodemodeSourceError);
+		expect(() => parseCodemodeSource(source)).toThrow(
+			"@options only supports `max_output_tokens` and `timeout_ms`; got `background`",
+		);
+		expect(parseCodemodeSource(source, { background: true })).toEqual({
+			code: "\ntext(1)",
+			options: { background: true },
+		});
+		expect(
+			parseCodemodeSource('// @options: {"background": false, "timeout_ms": 10}\ntext(1)', { background: true }),
+		).toEqual({ code: "\ntext(1)", options: { background: false, timeoutMs: 10 } });
+		// The accepted-field list names the capability's field.
+		expect(() => parseCodemodeSource('// @options: {"yield": 1}\ntext(1)', { background: true })).toThrow(
+			"@options only supports `max_output_tokens`, `timeout_ms` and `background`; got `yield`",
+		);
+	});
+
+	it("rejects a background option that is not a boolean", () => {
+		for (const value of ['"yes"', "1", "null", "[]"]) {
+			const input = `// @options: {"background": ${value}}\ntext(1)`;
+			expect(() => parseCodemodeSource(input, { background: true }), input).toThrow(CodemodeSourceError);
+			expect(() => parseCodemodeSource(input, { background: true }), input).toThrow(
+				"@options field `background` must be a boolean",
+			);
+		}
+	});
 });

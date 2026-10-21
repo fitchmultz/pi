@@ -105,6 +105,14 @@ text(JSON.parse(source).name);
 
 Supported fields are `max_output_tokens`, a token budget for the output, and `timeout_ms`, a hard deadline. The sandbox does not act on them; the caller decides. The options line is replaced by an empty line, so line numbers in stack traces still match the input. Empty input, invalid JSON, unknown fields, an options line without code, or an options line on any line but the first throw `CodemodeSourceError`. `CODEMODE_SOURCE_GRAMMAR` is a Lark grammar for providers that support grammar-constrained tool input. Both are also available from the lightweight `@earendil-works/pi-codemode/source` entry.
 
+A caller that can report a result after the tool call returns also accepts `background`, which asks it to run the script detached:
+
+```js
+// @options: {"background": true, "timeout_ms": 600000}
+```
+
+Pass the capability explicitly, `parseCodemodeSource(input, { background: true })`; every other caller keeps rejecting the field with the same error text, so no script silently loses its result.
+
 ## Bundled Node and Bun hosts
 
 By default `CodemodeSandbox` loads `quickjs-wasi/quickjs.wasm` from the installed package and starts the worker file that sits next to this package's module. Neither exists on disk when the host is bundled, so pass both:

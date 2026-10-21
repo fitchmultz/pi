@@ -313,6 +313,14 @@
         return '';
       }
 
+      function renderMessageImages(content) {
+        const images = Array.isArray(content) ? content.filter(c => c.type === 'image') : [];
+        if (images.length === 0) return '';
+        return '<div class="message-images">' +
+          images.map(img => `<img src="data:${escapeHtml(img.mimeType || 'image/png')};base64,${escapeHtml(img.data || '')}" class="message-image" />`).join('') +
+          '</div>';
+      }
+
       /**
        * Parse a skill block from message text.
        * Returns null if the text doesn't contain a skill block.
@@ -915,6 +923,29 @@
         return out;
       }
 
+      /** The nested calls recorded on a tool result or on a background run's completion message. */
+      function renderNestedCallsHtml(nested) {
+        // Custom-message details are extension-supplied JSON, so skip elements that are not native
+        // records: every field interpolated below throws when it is an object with a broken toString.
+        if (!nested || !Array.isArray(nested.calls)) return '';
+        const icons = { ok: '✓', error: '✗', unfinished: '…' };
+        const calls = nested.calls.filter(c => typeof c === 'object' && c !== null
+          && typeof c.name === 'string'
+          && typeof c.status === 'string' && Object.hasOwn(icons, c.status)
+          && (c.error === undefined || typeof c.error === 'string')
+          && (c.durationMs === undefined || typeof c.durationMs === 'number')
+          && (c.argumentsBytes === undefined || typeof c.argumentsBytes === 'number'));
+        if (calls.length === 0) return '';
+        const lines = calls.map(c => {
+          const args = c.arguments ? JSON.stringify(c.arguments) : `[arguments omitted, ${c.argumentsBytes} bytes]`;
+          const duration = c.durationMs !== undefined ? ` ${c.durationMs}ms` : '';
+          const error = c.error ? `\n    ${c.error.split('\n').join('\n    ')}` : '';
+          return `${icons[c.status] || '?'} ${c.name} ${args}${duration}${error}`;
+        });
+        const title = `Nested calls: ${calls.length}${nested.complete ? '' : ' (incomplete record)'}`;
+        return formatExpandableOutput([title, ...lines].join('\n'), 1);
+      }
+
       function renderToolCall(call) {
         const result = findToolResult(call.id);
         const isError = result?.isError || false;
@@ -937,21 +968,6 @@
           return '<div class="tool-images">' +
             images.map(img => `<img src="data:${escapeHtml(img.mimeType || 'image/png')};base64,${escapeHtml(img.data || '')}" class="tool-image" />`).join('') +
             '</div>';
-        };
-
-        // Calls this tool made to other tools (for example from a codemode script), recorded without results.
-        const renderNestedCalls = () => {
-          const nested = result?.nestedCalls;
-          if (!nested || !Array.isArray(nested.calls) || nested.calls.length === 0) return '';
-          const icons = { ok: '✓', error: '✗', unfinished: '…' };
-          const lines = nested.calls.map(c => {
-            const args = c.arguments ? JSON.stringify(c.arguments) : `[arguments omitted, ${c.argumentsBytes} bytes]`;
-            const duration = c.durationMs !== undefined ? ` ${c.durationMs}ms` : '';
-            const error = c.error ? `\n    ${c.error.split('\n').join('\n    ')}` : '';
-            return `${icons[c.status] || '?'} ${c.name} ${args}${duration}${error}`;
-          });
-          const title = `Nested calls: ${nested.calls.length}${nested.complete ? '' : ' (incomplete record)'}`;
-          return formatExpandableOutput([title, ...lines].join('\n'), 1);
         };
 
         const toolDomId = `tool-call-${escapeHtml(call.id)}`;
@@ -1083,7 +1099,7 @@
           }
         }
 
-        html += renderNestedCalls();
+        html += renderNestedCallsHtml(result?.nestedCalls);
         html += '</div>';
         return html;
       }
@@ -1228,13 +1244,7 @@
               // User message (separate block if present)
               if (hasUserContent) {
                 html += '<div class="user-message">';
-                if (images.length > 0) {
-                  html += '<div class="message-images">';
-                  for (const img of images) {
-                    html += `<img src="data:${escapeHtml(img.mimeType || 'image/png')};base64,${escapeHtml(img.data || '')}" class="message-image" />`;
-                  }
-                  html += '</div>';
-                }
+                html += renderMessageImages(images);
                 if (skillBlock.userMessage) {
                   html += `<div class="markdown-content">${safeMarkedParse(skillBlock.userMessage)}</div>`;
                 }
@@ -1248,16 +1258,7 @@
             // No skill block - normal user message
             let html = `<div class="user-message" id="${entryDomId}">${copyBtnHtml}${tsHtml}`;
 
-            if (Array.isArray(content)) {
-              const images = content.filter(c => c.type === 'image');
-              if (images.length > 0) {
-                html += '<div class="message-images">';
-                for (const img of images) {
-                  html += `<img src="data:${escapeHtml(img.mimeType || 'image/png')};base64,${escapeHtml(img.data || '')}" class="message-image" />`;
-                }
-                html += '</div>';
-              }
-            }
+            html += renderMessageImages(content);
 
             if (text.trim()) {
               html += `<div class="markdown-content">${safeMarkedParse(text)}</div>`;
@@ -1336,7 +1337,9 @@
           const hidden = entry.display === false;
           return `<div class="hook-message${hidden ? ' hook-message-hidden' : ''}" id="${entryDomId}">${tsHtml}
             <div class="hook-type">[${escapeHtml(entry.customType)}]${hidden ? ' · Hidden in terminal' : ''}</div>
-            <div class="markdown-content">${safeMarkedParse(typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content))}</div>
+            <div class="markdown-content">${safeMarkedParse(extractContent(entry.content))}</div>
+            ${renderMessageImages(entry.content)}
+            ${renderNestedCallsHtml(entry.details?.nestedCalls)}
           </div>`;
         }
 

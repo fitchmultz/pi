@@ -35,6 +35,7 @@ export {
 export {
 	CODEMODE_OPTIONS_PREFIX,
 	CODEMODE_SOURCE_GRAMMAR,
+	type CodemodeSourceCapabilities,
 	CodemodeSourceError,
 	type CodemodeSourceOptions,
 	type ParsedCodemodeSource,

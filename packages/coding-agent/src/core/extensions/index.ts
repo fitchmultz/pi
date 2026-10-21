@@ -34,6 +34,8 @@ export type {
 	// App keybindings (for custom editors)
 	AppKeybinding,
 	AutocompleteProviderFactory,
+	BackgroundToolMessageDetails,
+	BackgroundToolResult,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
 	BashToolResultEvent,
