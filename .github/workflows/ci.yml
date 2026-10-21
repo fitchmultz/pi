@@ -94,7 +94,8 @@ jobs:
 
       - name: Restart and background_command tests
         working-directory: packages/coding-agent
-        run: node ../../node_modules/vitest/dist/cli.js --run restart background-command
+        # Avoid CPU/I/O contention between the large-journal and launcher subprocess tests.
+        run: node ../../node_modules/vitest/dist/cli.js --run --no-file-parallelism restart background-command
 
       - name: Case-insensitive workspace build
         run: node --test scripts/workspace-build.test.mjs
