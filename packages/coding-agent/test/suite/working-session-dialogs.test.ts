@@ -1,4 +1,4 @@
-import { type Component, Text, type TUI } from "@earendil-works/pi-tui";
+import { CancellableLoader, type Component, Text, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
@@ -54,6 +54,111 @@ describe("Working-session admission with stacked extension dialogs", () => {
 		await view.rebindCurrentSession();
 		return { h, ctx, view, status };
 	}
+
+	it.each(["synchronous", "cache-promise"])("disposes early-completed %s components", async (completion) => {
+		const { ctx, view } = await setup();
+		const dispose = vi.fn();
+		let loader: CancellableLoader | undefined;
+		try {
+			await expect(
+				ctx.ui.custom<string>((tui, _theme, _keys, done) => {
+					loader = new CancellableLoader(
+						tui,
+						(text) => text,
+						(text) => text,
+						"Unneeded loader",
+					);
+					const original = loader.dispose.bind(loader);
+					loader.dispose = () => {
+						dispose();
+						original();
+					};
+					if (completion === "synchronous") done("cached");
+					else void Promise.resolve().then(() => done("cached"));
+					return loader;
+				}),
+			).resolves.toBe("cached");
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(dispose).toHaveBeenCalledTimes(1);
+			expect(view.editorContainer.children[0]).toBe(view.defaultEditor);
+		} finally {
+			loader?.dispose();
+		}
+	});
+
+	it.each(["success", "rejection"])("retains the editor while an asynchronous factory awaits %s", async (outcome) => {
+		const { ctx, view } = await setup();
+		const factory = Promise.withResolvers<void>();
+		let close!: (value: string) => void;
+		view.defaultEditor.setText("original ");
+		const opening = ctx.ui.custom<string>(async (_ui, _theme, _keys, done) => {
+			close = done;
+			await factory.promise;
+			return new Text("ASYNC PREVIEW");
+		});
+		const settled = opening.catch((error: Error) => error.message);
+		view.ui.setFocus(view.defaultEditor);
+		view.ui.dispatchInput("new typed draft");
+		expect(view.defaultEditor.getText()).toBe("original new typed draft");
+		if (outcome === "success") {
+			factory.resolve();
+			await vi.waitFor(() => expect(view.editorContainer.children[0]).not.toBe(view.defaultEditor));
+			close("closed");
+			expect(await settled).toBe("closed");
+		} else {
+			factory.reject(new Error("unavailable"));
+			expect(await settled).toBe("unavailable");
+		}
+		expect(view.defaultEditor.getText()).toBe("original new typed draft");
+		expect(view.editorContainer.children[0]).toBe(view.defaultEditor);
+	});
+
+	it("counts an early-closed asynchronous factory until its component is disposed", async () => {
+		const { h, ctx } = await setup();
+		const factory = Promise.withResolvers<void>();
+		const dispose = vi.fn();
+		await ctx.ui.custom<string>(async (_ui, _theme, _keys, done) => {
+			done("early");
+			await factory.promise;
+			return Object.assign(new Text("unused"), { dispose });
+		});
+		let acquired = false;
+		const acquiring = h.session.acquireWorkingSession().then((hold) => {
+			acquired = true;
+			return hold;
+		});
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(acquired).toBe(false);
+		factory.resolve();
+		const hold = await acquiring;
+		try {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(dispose).toHaveBeenCalledTimes(1);
+			expect(hold.sleepReady).toBe(true);
+		} finally {
+			await hold.release();
+		}
+	});
+
+	it("keeps an inline custom component behind a confirm and returns to the same editor draft", async () => {
+		const { ctx, view } = await setup();
+		view.defaultEditor.setText("retained draft");
+		let close!: (value: string) => void;
+		const component = new Text("custom form");
+		const custom = ctx.ui.custom<string>((_ui, _theme, _keys, done) => {
+			close = done;
+			return component;
+		});
+		await vi.waitFor(() => expect(view.editorContainer.children[0]).toBe(component));
+		const confirm = ctx.ui.confirm("Discard?", "discard changes");
+		view.ui.dispatchInput("\x1b");
+		await expect(confirm).resolves.toBe(false);
+		expect(view.editorContainer.children[0]).toBe(component);
+		close("kept");
+		await custom;
+		expect(view.editorContainer.children[0]).toBe(view.defaultEditor);
+		expect(view.defaultEditor.getText()).toBe("retained draft");
+	});
 
 	// #11166: use the public extension UI wrapper, real TUI focus dispatch, and native save admission together.
 	it("keeps acquisition pending after a hidden abort until every remaining dialog is answered", async () => {

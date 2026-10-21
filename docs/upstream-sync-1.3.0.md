@@ -1,5 +1,11 @@
 # Upstream 1.3.0 integration — 2026-10-15
 
+This is the historical 1.3.0 integration record. The subsequent
+[2026-10-21 consolidation](upstream-consolidation-2026-10-21.md) records the newer
+pinned upstream target, native retry/dialog/worker/identity decisions, consumer
+inspection and PR-only delivery scope. Results below remain specific to this
+older integration; they are not evidence for the newer candidate.
+
 ## Scope and measured baseline
 
 Integrates eight upstream commits through `4954d760504c11df9b2cbdc040346107b6a8153d`

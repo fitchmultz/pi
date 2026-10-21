@@ -66,7 +66,8 @@ const BUDGETS = {
 			// (index, noop, metrics, memory) for its NOOP telemetry default; harness/telemetry.ts is Durable's schema.
 			// The fork's target-model estimates replay signatures through ai/utils/transform-messages.ts.
 			// The Harness's request identity reaches pi-ai's utils/identity.ts and its version constant.
-			maxFiles: 74,
+			// Shared retry backoff reaches the lean ai/utils/sleep.ts and abort.ts helpers, not the AI barrel.
+			maxFiles: 76,
 			forbid: [
 				"packages/ai/src/index.ts",
 				"packages/ai/src/utils/typebox-helpers.ts",

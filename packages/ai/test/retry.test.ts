@@ -322,6 +322,113 @@ describe("retryAssistantCall", () => {
 		]);
 	});
 
+	it.each([
+		{ name: "Error", reason: new Error("custom cancellation") },
+		{ name: "string", reason: "custom cancellation" },
+		{ name: "null", reason: null },
+	])("normalizes a custom $name abort reason before and during native backoff", async ({ reason }) => {
+		for (const preAborted of [true, false]) {
+			const controller = new AbortController();
+			if (preAborted) controller.abort(reason);
+			const events: string[] = [];
+			const response = fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "terminated" });
+			const produce = vi.fn(async () => {
+				events.push("produce");
+				return response;
+			});
+			const onRetryFinished = vi.fn(async () => {
+				events.push("finished");
+				await Promise.resolve();
+				events.push("finished-awaited");
+			});
+			const pending = retryAssistantCall(produce, { ...enabled, baseDelayMs: 10_000 }, controller.signal, {
+				onRetryScheduled: () => {
+					events.push("scheduled");
+				},
+				onRetryAttemptStart: () => {
+					events.push("attempt-start");
+				},
+				onRetryFinished,
+			});
+			if (!preAborted) {
+				await vi.waitFor(() => expect(getEventListeners(controller.signal, "abort")).toHaveLength(1));
+				controller.abort(reason);
+			}
+			const result = await pending;
+			events.push("returned");
+			expect(result).toEqual({ ...response, stopReason: "aborted", errorMessage: undefined });
+			expect(result).not.toHaveProperty("errorMessage");
+			expect(response.stopReason).toBe("error");
+			expect(produce).toHaveBeenCalledTimes(1);
+			expect(onRetryFinished).toHaveBeenCalledExactlyOnceWith(false, 1, "terminated");
+			expect(events).toEqual(["produce", "scheduled", "finished", "finished-awaited", "returned"]);
+			expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+		}
+	});
+
+	it.each(["scheduled", "attempt-start", "finished"] as const)(
+		"preserves callback failure and ordering at %s",
+		async (failureAt) => {
+			const failure = new Error(`${failureAt} failed`);
+			const controller = new AbortController();
+			const events: string[] = [];
+			let attempts = 0;
+			const produce = vi.fn(async () => {
+				events.push("produce");
+				return attempts++ === 0
+					? fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" })
+					: fauxAssistantMessage("recovered");
+			});
+			const callback = async (event: typeof failureAt) => {
+				events.push(event);
+				await Promise.resolve();
+				if (event === failureAt) {
+					controller.abort("callback cancellation");
+					throw failure;
+				}
+			};
+			await expect(
+				retryAssistantCall(produce, enabled, controller.signal, {
+					onRetryScheduled: () => callback("scheduled"),
+					onRetryAttemptStart: () => callback("attempt-start"),
+					onRetryFinished: () => callback("finished"),
+				}),
+			).rejects.toBe(failure);
+			const expected = ["produce", "scheduled", "attempt-start", "produce", "finished"];
+			expect(events).toEqual(expected.slice(0, expected.indexOf(failureAt) + 1));
+			expect(produce).toHaveBeenCalledTimes(failureAt === "finished" ? 2 : 1);
+			expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+		},
+	);
+
+	it("propagates a failing completion callback instead of normalizing its error as cancellation", async () => {
+		const controller = new AbortController();
+		const failure = new Error("completion callback failed");
+		const events: string[] = [];
+		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }));
+		const onRetryFinished = vi.fn(async () => {
+			events.push("finished");
+			await Promise.resolve();
+			throw failure;
+		});
+		await expect(
+			retryAssistantCall(produce, enabled, controller.signal, {
+				onRetryScheduled: () => {
+					events.push("scheduled");
+					controller.abort("cancel before backoff");
+				},
+				onRetryAttemptStart: () => {
+					events.push("attempt-start");
+				},
+				onRetryFinished,
+			}),
+		).rejects.toBe(failure);
+		expect(events).toEqual(["scheduled", "finished"]);
+		expect(produce).toHaveBeenCalledTimes(1);
+		expect(onRetryFinished).toHaveBeenCalledExactlyOnceWith(false, 1, "terminated");
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+	});
+
 	// https://github.com/earendil-works/pi/issues/10506
 	it("aborts backoff sleep via signal, returns an aborted message, and emits onRetryFinished(false)", async () => {
 		const controller = new AbortController();
