@@ -3074,6 +3074,7 @@ export class InteractiveMode {
 			onHandle?: (handle: OverlayHandle) => void;
 		},
 	): Promise<T> {
+		let savedText: string | undefined;
 		const isOverlay = options?.overlay ?? false;
 
 		return new Promise((resolve, reject) => {
@@ -3088,12 +3089,19 @@ export class InteractiveMode {
 				}
 			};
 
+			const restoreEditor = () => {
+				if (savedText === undefined) return;
+				if (component) this.removeExtensionDialog(component);
+				this.editor.setText(savedText);
+				this.ui.requestRender();
+			};
+
 			const close = (result: T) => {
 				if (closed) return;
 				closed = true;
 				// Remove this overlay, not the topmost one: another overlay may have opened above it.
 				if (isOverlay) overlayHandle?.hide();
-				else if (component) this.removeExtensionDialog(component);
+				else restoreEditor();
 				// Note: both branches above already call requestRender
 				resolve(result);
 				disposeComponent();
@@ -3125,11 +3133,13 @@ export class InteractiveMode {
 						// Expose handle to caller for visibility control
 						options?.onHandle?.(overlayHandle);
 					} else {
+						savedText = this.editor.getText();
 						this.pushExtensionDialog(c);
 					}
 				})
 				.catch((err) => {
 					if (closed) return;
+					if (!isOverlay) restoreEditor();
 					reject(err);
 				});
 		});

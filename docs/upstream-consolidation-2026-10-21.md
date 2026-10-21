@@ -47,14 +47,13 @@ The final categorized comparison is recorded with the PR's exact head.
 | Old path or mechanism | Native owner now used | Verification and preserved boundary |
 | --- | --- | --- |
 | Retry-private `sleep` timer/listener and `RetrySleepAbortError` | `pi-ai/src/utils/sleep.ts` and `operationSignal()` | `retry.test.ts` runs real timers and the actual helper: completed/aborted listener cleanup, custom Error/string/null reasons, pre-abort, optional signal, fractional/zero delays, callback order and callback failures. Retry still returns its normalized aborted assistant message without leaking a custom cancellation reason. |
-| Custom UI's saved draft and restoration helper | Native dialog stack retaining the same editor object | `suite/working-session-dialogs.test.ts` exercises actual extension UI, TUI/editor dispatch and save holds: early/cached completion, async success/rejection, nested confirm, focus and draft preservation. Late-returned component disposal and factory admission remain. |
 | Immediate codemode capacity rejection | Upstream FIFO reservation/admission in the common script start path | `codemode-worker-admission.test.ts` plus `suite/agent-session-codemode-background.test.ts`: actual worker ownership, abort/timeout, foreground/background queue sharing, prompt launching receipts and deferred store/usage delivery. |
 | One-slot selector/input/editor fields and inline hide/show ownership | Upstream dialog stack | `interactive-mode-extension-dialogs.test.ts` and `interactive-mode-status.test.ts`: concurrent/hidden dialogs, nested custom prompts, component disposal before mount, editor drafts and focus. Working-session factory admission remains. |
 | Coding-agent provider attribution module | Native pi-ai `ClientIdentity`, default identity and `withClientIdentity()` | Native identity/provider tests, SDK client-identity tests and availability regression; custom-provider dispatch retains the exact post-hook headers object. Google adapters keep one shared streaming engine. |
 | Missing `pi-ai/models` extension alias/virtual export | Upstream loader aliases and virtual module mapping | `suite/regressions/11156-pi-ai-models-virtual-module.test.ts`; packaged/standalone extension boundaries remain separately tested. |
 | Unused Chord SQLite replication scaffold | Upstream removal | No production caller outside the removed scaffold was found. Chord SQLite tests remain; native Durable IndexedDB storage is additive, not a substitute for memory/SQLite storage. |
 
-The first two rows retire **fork-patched retry timer and draft-restoration machinery**.
+Only the first row retires a **fork-patched duplicate retry helper**.
 The worker/dialog-stack fixes themselves improve inherited upstream mechanisms. The attribution module
 had no fork delta before this pass; its removal is an upstream API migration, not
 an invented fork-specific deletion. Existing shared edit policy, Chord JSON/output
@@ -64,11 +63,12 @@ had native owners and were not recreated.
 The retry tests were first run against the old implementation, then unchanged
 against the native-helper replacement: 45 tests passed on the original fork in
 both configurations. On the integrated tree, upstream's additional cases bring
-that to **48 passing before and after**. The same three dialog suites pass **53
-before and after** snapshot removal, including the new public-boundary cases.
+that to **48 passing before and after**. An attempted dialog snapshot removal also
+passed 53 cases, but review identified a missing public-API case; that attempted
+consolidation is withdrawn as described below.
 
 This is behavior comparison, not a speed benchmark. The retry production file
-changes by +5/-26 lines; the custom-dialog change is +1/-11. Tests add coverage;
+changes by +5/-26 lines. Tests add coverage;
 no deletion quota is used. Sharing the helpers adds two small modules to Durable's
 static source graph; identity adds two more. The measured root graph is baseline
 72 → synchronized 74 → consolidated 76; AI `./models` remains 20 and the shared
@@ -82,9 +82,9 @@ forbidden, rather than relaxing those boundaries.
   limit defaults to two and can be configured with `PI_CODEMODE_MAX_WORKERS`.
   Background calls still publish their launching receipt without waiting for a slot.
 - Concurrent dialogs return to the underlying dialog rather than orphaning its
-  promise. The native stack retains the editor and its current draft without a
-  snapshot/restore layer. Fork asynchronous-factory disposal, overlay ownership
-  and save admission remain in force.
+  promise. Native custom-dialog draft restoration remains. The fork captures the
+  draft at mount, not factory entry, and retains asynchronous-factory disposal,
+  overlay ownership and save admission.
 - Native identity changes default User-Agent/attribution and when attribution
   becomes visible to header hooks, as documented by upstream. Cache tracing and
   retention preparation are not replaced or silently disabled.
@@ -93,11 +93,25 @@ forbidden, rather than relaxing those boundaries.
   boundaries, retry error matching, summary output limits and split-turn compaction
   instructions. Retired model fixtures follow upstream's supported catalog IDs.
 
-The dialog consolidation removes redundant state management, not a demonstrated
-nesting bug in the fork's mount-time snapshot. Native public-UI probes showed the
-unadapted upstream entry-time snapshot/disposal path fails five retained lifecycle
-cases; the stack with no snapshots and the two retained cleanup/admission seams
-passes all six cases, including nested confirm restoration.
+### Withdrawn candidate: custom-dialog draft restoration
+
+The stack retains the same editor object, but that alone does not replace draft
+restoration. A supported extension can open inline `ctx.ui.custom()`, call
+`ctx.ui.setEditorText("preview")`, then close the component. Existing behavior
+restores the pre-dialog draft; removing the snapshot retains `"preview"` instead.
+A new public-API regression failed against the attempted removal (expected
+`"original draft"`, received `"preview"`) and passes against the retained sync
+implementation. The entire nine-case working-session/dialog file passes with
+restoration retained.
+
+Upstream `cae9fd28` also retains the snapshot; deleting it would add divergence
+and change behavior, not adopt an equivalent upstream implementation. The removal
+in intermediate commit `d12aa565` is withdrawn rather than silently accepting that
+change. The fork still needs mount-time capture to preserve typing during async
+factory initialization, late-component disposal after early completion, and
+working-session factory admission. Those retained lifecycle cases fail against an
+unadapted upstream transplant. The stack adoption and these small fork adaptations
+are distinct from retirement of a redundant mechanism.
 
 No legacy ABI, new framework, generalized buffer abstraction or speculative hook
 was added. No latency or end-to-end speed improvement is claimed.
@@ -115,6 +129,7 @@ was added. No latency or end-to-end speed improvement is claimed.
 | Cache trace/warming, usage and replay estimates | Public hooks do not observe final serialization/consumed attempts. Warming depends on prepared auth/retention, and cross-model budgeting must count only native replay. Tool-only persisted usage and detached nested records remain owned by the fork. |
 | Atomic private rewrites and streaming snapshot I/O | Upstream private creation is not alias-safe locked replacement with fsync/mode preservation. Whole-document JSON strings do not preserve bounded I/O buffering for large snapshots. The parsed tree remains resident; this is not constant-memory snapshot processing. |
 | Native tool spill, edit and shell cancellation | Backpressure/complete close, untouched byte preservation and stop-before-kill process groups are separate contracts. Shared Durable edit policy and native private creation already serve the callers. |
+| Custom-dialog draft and factory lifecycle | The native stack owns visibility/focus, but upstream still restores the draft. Public `setEditorText()` during a dialog demonstrates that restoration is observable. Keep the fork's mount-time capture, late disposal and working-session admission rather than removing the snapshot or reverting to upstream's entry-time capture. |
 | TUI input/layout and ANSI wrapping | Existing native decoding, segmentation and tracking are already reused. Replacing the retained adaptations loses UTF-16 cursor positions, paste-marker atomicity, draft layout reuse or byte-identical OSC payloads. |
 | Chord/Durable/Env/MCP/evals | Public protocols, document/task schemas, retention, framing and platform I/O differ. IndexedDB does not replace memory/SQLite optimizations; line accumulators have different boundaries. |
 | Immutable fork install, package exports and build tools | Official version updates do not provide exact source/catalog identity, selector ownership and validation/rollback. Chord and Durable exports/dependencies must remain paired with their real consumers. |

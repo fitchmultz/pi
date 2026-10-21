@@ -113,6 +113,24 @@ describe("Working-session admission with stacked extension dialogs", () => {
 		expect(view.editorContainer.children[0]).toBe(view.defaultEditor);
 	});
 
+	it("restores the original draft after public editor updates while inline custom UI is open", async () => {
+		const { ctx, view } = await setup();
+		ctx.ui.setEditorText("original draft");
+		let close!: (value: string) => void;
+		const component = new Text("custom preview");
+		const custom = ctx.ui.custom<string>((_ui, _theme, _keys, done) => {
+			close = done;
+			return component;
+		});
+		await vi.waitFor(() => expect(view.editorContainer.children[0]).toBe(component));
+		ctx.ui.setEditorText("preview");
+		expect(ctx.ui.getEditorText()).toBe("preview");
+		close("closed");
+		await expect(custom).resolves.toBe("closed");
+		expect(view.editorContainer.children[0]).toBe(view.defaultEditor);
+		expect(ctx.ui.getEditorText()).toBe("original draft");
+	});
+
 	it("counts an early-closed asynchronous factory until its component is disposed", async () => {
 		const { h, ctx } = await setup();
 		const factory = Promise.withResolvers<void>();

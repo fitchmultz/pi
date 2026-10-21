@@ -99,7 +99,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Cache overlap estimates must follow native ancestry, identify expected model/provider transitions and distinguish current, prior observed, catalog and unknown read prices without changing real usage totals | `core/cache-stats.ts`, `modes/interactive/interactive-mode.ts` | `cache-stats.test.ts`, `interactive-mode-assistant-diagnostics.test.ts`, `suite/prompt-cache-prefix.test.ts` |
 | Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
 | Reload must preserve deselected default-active tools while adopting newly configured defaults, including saved `--tools +name/-name` modifiers | `core/agent-session.ts` | `default-tools-setting.test.ts` |
-| Custom UI must dispose components completed during factory initialization and preserve drafts typed before an asynchronous factory mounts | `modes/interactive/interactive-mode.ts` | `interactive-mode-status.test.ts` |
+| Custom UI must dispose components completed during factory initialization and capture drafts at mount rather than factory entry. Native inline-dialog draft restoration remains observable through public `setEditorText()` and is retained, not replaced by stack visibility/focus ownership | `modes/interactive/interactive-mode.ts` | `interactive-mode-status.test.ts`, `suite/working-session-dialogs.test.ts` |
 | Extension cancellation must remain observable through run setup, post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal; upstream's `agent_settled.aborted` is captured before clearing that signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
 | Repeated context-usage reads must reuse the last scalar without rescanning archived ancestry; native leaf identity and effective model limits preserve compaction, edits, branches and reload/restore behavior | `core/agent-session.ts` | `suite/agent-session-context-usage.test.ts` |
 | Session hot paths incrementally retain active ancestry, compaction-aware raw context entries and model/thinking settings; projected messages and returned arrays remain fresh. Entry-list and leaf identity invalidate reuse on reload or navigation. The latest name stays indexed; branch-summary admission stays linear, file forks reuse a private exclusive descriptor, and custom-flat listings reject unrelated cwd headers before reading bodies | `core/session-manager.ts`, `core/compaction/branch-summarization.ts` | `session-manager/*.test.ts`, `session-context-edit.test.ts`, `branch-summarization.test.ts`, `file-safety.test.ts` |
@@ -187,9 +187,11 @@ cancellation and FIFO worker admission (two live workers by default, configurabl
 `PI_CODEMODE_MAX_WORKERS`). Foreground and background scripts share that queue; a
 background receipt does not wait for admission. The fork retains safe arbitrary store keys,
 exactly-once deferred completion/usage, cancellation and working-session save barriers.
-Concurrent extension dialogs use upstream's stack and retain the same editor object, so
-the fork's separate draft snapshot/restoration is removed. Factory admission and late-component
-disposal after early completion remain; native-boundary tests cover draft preservation.
+Concurrent extension dialogs use upstream's stack for visibility and focus. Upstream also
+retains custom-dialog draft restoration; the fork keeps it with capture at mount rather than
+factory entry. Removing it changes supported `ctx.ui.setEditorText()` behavior while a dialog
+is open, so the attempted removal is withdrawn. Factory admission and late-component disposal
+after early completion remain; native-boundary tests cover these retained adaptations.
 
 Client identity and attribution now follow pi-ai's native `ClientIdentity` and
 `withClientIdentity`, including the mutable wrapper's fork `getAvailability()` diagnostics.
