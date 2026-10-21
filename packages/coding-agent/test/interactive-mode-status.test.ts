@@ -236,6 +236,11 @@ describe("InteractiveMode.showExtensionCustom", () => {
 	beforeAll(() => initTheme("dark"));
 
 	function createCustomUIFixture() {
+		const prototype = InteractiveMode.prototype as unknown as {
+			pushExtensionDialog(component: Component): void;
+			removeExtensionDialog(component: Component): void;
+			showTopExtensionDialog(): void;
+		};
 		const terminal = new VirtualTerminal(80, 24);
 		const ui: TUI = new TuiMainScreen(terminal);
 		const editorContainer = new Container();
@@ -247,6 +252,11 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			keybindings: {},
 			ui,
 			disposeActiveSelector: vi.fn(),
+			extensionDialogs: [],
+			programStatus: { setBlocked: vi.fn() },
+			pushExtensionDialog: prototype.pushExtensionDialog,
+			removeExtensionDialog: prototype.removeExtensionDialog,
+			showTopExtensionDialog: prototype.showTopExtensionDialog,
 		};
 		const custom = (
 			InteractiveMode as unknown as { prototype: { showExtensionCustom: ExtensionUIContext["custom"] } }
