@@ -145,6 +145,30 @@ For full on-demand owner instructions, add the exported `instructionGroupsExtens
 
 See the focused examples for [models](../examples/sdk/02-custom-model.ts), [tools](../examples/sdk/05-tools.ts), [extensions](../examples/sdk/06-extensions.ts), and [full control](../examples/sdk/12-full-control.ts).
 
+### Resolve a model reference without creating a runtime
+
+`resolveModelReference(request, models, usable)` is exported from the package root.
+Extensions can pass `ctx.modelRegistry.getAll()` instead of constructing another
+`ModelRuntime` or parsing `provider/model:thinking` themselves:
+
+```typescript
+import { resolveModelReference } from "@earendil-works/pi-coding-agent";
+
+const models = ctx.modelRegistry.getAll();
+const result = resolveModelReference(
+  { text: "anthropic/claude-sonnet-4-5:high", thinkingSuffix: "strict", fuzzy: false },
+  models,
+  (provider) => models.some((model) => model.provider === provider && ctx.modelRegistry.hasConfiguredAuth(model)),
+);
+```
+
+The result is `resolved`, `ambiguous`, or `not-found`. A resolved result contains
+`model` and, when explicitly supplied, `thinkingLevel`; the caller applies them.
+Literal model IDs containing colons are matched before thinking suffixes. An
+optional `request.provider` constrains selection to that provider. `usable` only
+breaks provider ties; this function does not authenticate, refresh catalogs, change
+session settings, or synthesize fallback models.
+
 ### JSON selection with read
 
 `read` accepts `json: { path?, fields? }` to select part of a JSON file before paging and truncation:
