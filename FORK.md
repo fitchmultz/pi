@@ -1,12 +1,14 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `396ecd7b8f3a146b8af98206d18df1bcc2c08f4e`
-(2026-10-20), including v1.3.0 and its follow-up fixes. It is upstream plus the features
+v1.0.0 and synchronized through upstream `cae9fd28a2d3d515c83ea495093e3768cc8efab6`
+(2026-10-21), including v1.3.0 and its follow-up fixes. It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
-The [v1.3.0 integration record](docs/upstream-sync-1.3.0.md) documents the current
-baseline, preserved callers, new regressions and verification commands. The
+The [2026-10-21 consolidation record](docs/upstream-consolidation-2026-10-21.md)
+documents the current baseline, native replacements, retained differences, consumer
+inspection and verification. The [v1.3.0 integration record](docs/upstream-sync-1.3.0.md)
+records the previous integration's callers, regressions and commands. The
 [earlier 2026-10-15 integration record](docs/upstream-sync-2026-10-15.md) documents the
 measured divergence, preserved callers, new regressions and verification commands.
 
@@ -34,7 +36,7 @@ all-platform qualification.
 | Opt-in slow diagnostics: native synchronous handlers and footer frames need dispatch attribution | `core/extensions/{runner,wrapper}.ts`; `PI_EXTENSION_PERFORMANCE=1` | `extensions-performance.test.ts` | [Extensions](packages/coding-agent/docs/extensions.md#opt-in-performance-warnings) |
 | Temporary passive tracing: public hooks do not yet cover final serialization/consumed attempts | `packages/ai/src/utils/cache-trace.ts`, native adapter hooks, `core/cache-trace-context.ts`, `scripts/cache-trace-report.mjs` | `packages/ai/test/cache-trace.test.ts`, `sdk-stream-options.test.ts`, `scripts/cache-trace-report.test.mjs` | [Fidelity and retirement](packages/coding-agent/docs/cache-tracing.md) |
 | Cloudflare catalogs: canonical Claude IDs, qualified Opus 5.5 positional controls/cache lifetimes, and direct-OpenAI positional defaults for `/openai` Responses models | `packages/ai/src/api/cloudflare.ts`, generator/provider, `packages/ai/scripts/hydrate-model-catalog.ts` and `core/remote-catalog-provider.ts` | `packages/ai/test/{model-data-validation,cloudflare-openai-positional}.test.ts`, `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Providers](packages/coding-agent/docs/providers.md), [Cache lifetimes](packages/coding-agent/docs/models.md#prompt-cache-lifetimes) |
-| Path hyperlinks: Markdown paths stay clickable after wrapping; terminals only regex-match one row and the source-transform seam cannot see codespans or code blocks | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` | [Terminal setup](packages/coding-agent/docs/terminal-setup.md#override-detected-capabilities) |
+| Path hyperlinks: prose paths and inline-code paths/URLs stay clickable after wrapping; terminals only regex-match one row and the source-transform seam cannot preserve literal codespan rendering | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` | [Terminal setup](packages/coding-agent/docs/terminal-setup.md#override-detected-capabilities) |
 | Source-conditioned resolution: the telemetry root export names only `dist`, so Chord/Durable source tests fail on a checkout without a prior build (upstream's `./render` export already carries `source`) | `packages/telemetry/package.json` | `packages/chord/test/context.test.ts`, `packages/durable/test/harness-telemetry.test.ts` | - |
 
 Complete working state also depends on the queue/admission APIs in
@@ -80,7 +82,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Anthropic strict limits apply across initial and inline definitions, including required schemas. Upstream's one-time fallback after a rejected request stays for limits a count cannot predict, such as compiled grammar size; alone it would spend a rejected request on every over-limit turn and drop strict mode for all preferred tools | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/anthropic-strict-tool-{schema,fallback}.test.ts` |
 | Optional nulls inside schema unions must not be coerced into fabricated values | `packages/ai/src/utils/validation.ts` | `packages/ai/test/validation.test.ts` |
 | DNS root dots must not bypass `NO_PROXY` | `packages/ai/src/utils/node-http-proxy.ts` | `packages/ai/test/node-http-proxy.test.ts` |
-| Fractional/overflowed zero retry delays must not become a minute; completed backoffs must release abort listeners ([#10506](https://github.com/earendil-works/pi/issues/10506)) | `packages/ai/src/utils/retry.ts` | `packages/ai/test/retry.test.ts` |
+| Fractional/overflowed zero retry delays must not become a minute; retry cancellation keeps its normalized assistant-result shape. Timer cancellation/listener cleanup now reuse native `utils/sleep.ts` rather than a private retry timer ([#10506](https://github.com/earendil-works/pi/issues/10506)) | `packages/ai/src/utils/retry.ts` | `packages/ai/test/retry.test.ts` |
 | Radius gateway pricing must have finite rates and tiers before cost estimation ([#10507](https://github.com/earendil-works/pi/issues/10507)) | `packages/ai/src/providers/radius-config.ts` | `packages/ai/test/radius-provider.test.ts` |
 | Abort tests must check the terminal result and follow-up rather than pass early ([#10508](https://github.com/earendil-works/pi/issues/10508)); this is test-only, not a provider cancellation fix | `packages/ai/test/abort.test.ts` | Offline faux-provider case in the same file |
 | Codemode string store keys must round-trip as own data properties, including `__proto__`, on every sandbox backend ([#10510](https://github.com/earendil-works/pi/issues/10510)) | `packages/codemode/src/runtime/execution.ts` | `packages/codemode/test/sandbox.test.ts` |
@@ -97,7 +99,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Cache overlap estimates must follow native ancestry, identify expected model/provider transitions and distinguish current, prior observed, catalog and unknown read prices without changing real usage totals | `core/cache-stats.ts`, `modes/interactive/interactive-mode.ts` | `cache-stats.test.ts`, `interactive-mode-assistant-diagnostics.test.ts`, `suite/prompt-cache-prefix.test.ts` |
 | Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
 | Reload must preserve deselected default-active tools while adopting newly configured defaults, including saved `--tools +name/-name` modifiers | `core/agent-session.ts` | `default-tools-setting.test.ts` |
-| Custom UI must dispose components completed during factory initialization and preserve drafts typed before an asynchronous factory mounts | `modes/interactive/interactive-mode.ts` | `interactive-mode-status.test.ts` |
+| Custom UI must dispose components completed during factory initialization and capture drafts at mount rather than factory entry. Native inline-dialog draft restoration remains observable through public `setEditorText()` and is retained, not replaced by stack visibility/focus ownership | `modes/interactive/interactive-mode.ts` | `interactive-mode-status.test.ts`, `suite/working-session-dialogs.test.ts` |
 | Extension cancellation must remain observable through run setup, post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal; upstream's `agent_settled.aborted` is captured before clearing that signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
 | Repeated context-usage reads must reuse the last scalar without rescanning archived ancestry; native leaf identity and effective model limits preserve compaction, edits, branches and reload/restore behavior | `core/agent-session.ts` | `suite/agent-session-context-usage.test.ts` |
 | Session hot paths incrementally retain active ancestry, compaction-aware raw context entries and model/thinking settings; projected messages and returned arrays remain fresh. Entry-list and leaf identity invalidate reuse on reload or navigation. The latest name stays indexed; branch-summary admission stays linear, file forks reuse a private exclusive descriptor, and custom-flat listings reject unrelated cwd headers before reading bodies | `core/session-manager.ts`, `core/compaction/branch-summarization.ts` | `session-manager/*.test.ts`, `session-context-edit.test.ts`, `branch-summarization.test.ts`, `file-safety.test.ts` |
@@ -181,7 +183,24 @@ establishes no current TUI or tool-performance improvement from those transport 
 Model references follow upstream's shared provider-selection policy, including gateway IDs,
 thinking suffixes, authenticated-provider tie breaking and explicit-key ambiguity. The fork retains
 saved/scoped selections when a provider's auth check fails. Codemode follows upstream's prompt
-cancellation and two-live-worker admission limit, with the fork's safe arbitrary store keys retained.
+cancellation and FIFO worker admission (two live workers by default, configurable through
+`PI_CODEMODE_MAX_WORKERS`). Foreground and background scripts share that queue; a
+background receipt does not wait for admission. The fork retains safe arbitrary store keys,
+exactly-once deferred completion/usage, cancellation and working-session save barriers.
+Concurrent extension dialogs use upstream's stack for visibility and focus. Upstream also
+retains custom-dialog draft restoration; the fork keeps it with capture at mount rather than
+factory entry. Removing it changes supported `ctx.ui.setEditorText()` behavior while a dialog
+is open, so the attempted removal is withdrawn. Factory admission and late-component disposal
+after early completion remain; native-boundary tests cover these retained adaptations.
+
+Client identity and attribution now follow pi-ai's native `ClientIdentity` and
+`withClientIdentity`, including the mutable wrapper's fork `getAvailability()` diagnostics.
+This is an upstream API migration, not retirement of a fork-only attribution engine.
+Headers returned by `before_provider_headers` retain object identity through custom-provider
+dispatch (required by Cursor); cache-trace provenance and prepared-retention warming remain.
+Google adapters apply identity during client/header setup while sharing the existing stream engine.
+Upstream's unused SQLite replication scaffold is removed; Durable's IndexedDB storage is additive,
+not a replacement for the fork's memory/SQLite storage or scheduler semantics.
 
 Streaming tool-call JSON now follows upstream's invalid `\u` repair without losing later fields,
 while retaining span-based repair and the original partial-parser fallback order. Anthropic and

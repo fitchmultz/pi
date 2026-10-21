@@ -226,11 +226,13 @@ describe("codemode background runs", () => {
 	async function setup(
 		tools: AgentTool[] = [],
 		extensionFactories: NonNullable<HarnessOptions["extensionFactories"]> = [],
+		provider?: string,
 	) {
 		const registerTools = (pi: ExtensionAPI) => {
 			for (const tool of tools) pi.registerTool(createToolDefinitionFromAgentTool(tool));
 		};
 		const harness = await createHarness({
+			provider,
 			initialActiveToolNames: ["codemode"],
 			extensionFactories: [createCodemodeExtension(), registerTools, ...extensionFactories],
 		});
@@ -257,6 +259,195 @@ describe("codemode background runs", () => {
 		]);
 		await harness.session.prompt("go");
 	}
+
+	// #11184: the process-wide native admission queue also owns detached scripts. These tests use
+	// real sandbox workers and real session tool calls; only the nested tools wait for test input.
+	it("queues background and foreground scripts across sessions in one FIFO, retaining receipts and save blockers", async () => {
+		vi.stubEnv("PI_CODEMODE_MAX_WORKERS", "1");
+		const first = createGatedTool("first");
+		const second = createGatedTool("second", usage(23, 0.23));
+		const third = createGatedTool("third");
+		const resident = await setup([first.tool], [], "codemode-resident");
+		const background = await setup([second.tool], [], "codemode-background");
+		const foreground = await setup([third.tool], [], "codemode-foreground");
+		let foregroundRun: Promise<void> | undefined;
+		try {
+			await launch(resident, `${BACKGROUND}await tools.first({}); return "first";`);
+			await first.started;
+			await launch(
+				background,
+				`${BACKGROUND}await tools.second({}); store("step", load("queued")); return load("queued");`,
+			);
+			const receipt = codemodeResult(background);
+			expect(receipt.details).toEqual({ calls: [], background: { runId: receipt.toolCallId } });
+			expect(background.session.getLastAssistantText()).toBe("foreground done");
+			expect(second.starts()).toBe(0);
+			expect(completions(background)).toHaveLength(0);
+			// The store belongs to the script's actual execution, not its earlier queue admission.
+			background.sessionManager.appendCustomEntry(CODEMODE_STORE_ENTRY_TYPE, { set: { queued: 99 }, delete: [] });
+
+			const queuedForeground = Promise.withResolvers<void>();
+			const unsubscribe = foreground.session.subscribe((event) => {
+				if (event.type === "tool_execution_update" && event.toolName === "codemode") queuedForeground.resolve();
+			});
+			foregroundRun = launch(foreground, 'await tools.third({}); return "third";', ["foreground finished"]);
+			await queuedForeground.promise;
+			unsubscribe();
+			await flush();
+			expect(third.starts()).toBe(0);
+
+			const hold = await background.session.acquireWorkingSession();
+			// Observe the native hold barrier without replacing its implementation or worker scheduling.
+			const waitingForRelease = vi.spyOn(background.session.workingSessionGate, "waitForRelease");
+			try {
+				expect(hold.sleepReady).toBe(false);
+				expect(hold.blockers).toContain(`Background run ${receipt.toolCallId} is active`);
+				first.release();
+				await waitForCompletion(resident);
+				// Completion can precede actual worker exit. Wait until the next real worker has started
+				// its nested call and reached this session's hold barrier before checking parked state.
+				await vi.waitFor(() => expect(waitingForRelease).toHaveBeenCalledTimes(1));
+				expect(hold.invalidated.aborted).toBe(false);
+				expect(second.starts()).toBe(0);
+				expect(third.starts()).toBe(0);
+				expect(storeEntries(background)).toEqual([{ set: { queued: 99 }, delete: [] }]);
+				expect(usageEntries(background)).toHaveLength(0);
+				expect(completions(background)).toHaveLength(0);
+			} finally {
+				waitingForRelease.mockRestore();
+				await hold.release();
+			}
+			await second.started;
+			expect(third.starts()).toBe(0);
+			second.release();
+			const completion = await waitForCompletion(background);
+			expect(completionText(completion)).toMatch(/Output:\n99$/);
+			expect(completion.details?.nestedCalls?.calls.map((call) => [call.name, call.status])).toEqual([
+				["second", "ok"],
+			]);
+			expect(usageEntries(background)).toHaveLength(1);
+			expect(storeEntries(background)).toEqual([
+				{ set: { queued: 99 }, delete: [] },
+				{ set: { step: 99 }, delete: [] },
+			]);
+			await third.started;
+			third.release();
+			await foregroundRun;
+			expect(resultText(codemodeResult(foreground))).toMatch(/Output:\n\nthird$/);
+			await background.session.waitForIdle();
+			expect(completions(background)).toHaveLength(1);
+			const entries = background.sessionManager.getEntries();
+			expect(
+				entries.findIndex(
+					(entry) => entry.type === "custom_message" && entry.customType === CODEMODE_BACKGROUND_COMPLETION_TYPE,
+				),
+			).toBeGreaterThan(
+				entries.findIndex(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolCallId === receipt.toolCallId,
+				),
+			);
+		} finally {
+			first.release();
+			second.release();
+			third.release();
+			await Promise.all([resident.session.abort(), background.session.abort(), foreground.session.abort()]);
+			await foregroundRun;
+			vi.unstubAllEnvs();
+		}
+	});
+
+	it("aborts a queued background script without starting tools or committing, and admits later work", async () => {
+		vi.stubEnv("PI_CODEMODE_MAX_WORKERS", "1");
+		const first = createGatedTool("first");
+		const queued = createGatedTool("queued");
+		const resident = await setup([first.tool], [], "codemode-abort-resident");
+		const background = await setup([queued.tool], [], "codemode-abort-waiter");
+		try {
+			await launch(resident, `${BACKGROUND}await tools.first({});`);
+			await first.started;
+			await launch(background, `${BACKGROUND}await tools.queued({}); store("step", 1);`);
+			expect(codemodeResult(background).details).toMatchObject({ background: { runId: expect.any(String) } });
+			await background.session.abort();
+			expect(queued.starts()).toBe(0);
+			expect(completions(background)).toHaveLength(0);
+			expect(storeEntries(background)).toHaveLength(0);
+			expect(usageEntries(background)).toHaveLength(0);
+			const hold = await background.session.acquireWorkingSession();
+			try {
+				expect(hold.sleepReady).toBe(true);
+			} finally {
+				await hold.release();
+			}
+			first.release();
+			await waitForCompletion(resident);
+			expect(queued.starts()).toBe(0);
+			queued.release();
+			await launch(background, `${BACKGROUND}await tools.queued({}); store("step", 2);`);
+			await waitForCompletion(background);
+			expect(queued.starts()).toBe(1);
+			expect(storeEntries(background)).toEqual([{ set: { step: 2 }, delete: [] }]);
+		} finally {
+			first.release();
+			queued.release();
+			await Promise.all([resident.session.abort(), background.session.abort()]);
+			vi.unstubAllEnvs();
+		}
+	});
+
+	it("delivers one queued background timeout after its receipt without store writes or nested calls", async () => {
+		vi.stubEnv("PI_CODEMODE_MAX_WORKERS", "1");
+		const first = createGatedTool("first");
+		const queued = createGatedTool("queued");
+		const resident = await setup([first.tool], [], "codemode-timeout-resident");
+		const background = await setup([queued.tool], [], "codemode-timeout-waiter");
+		try {
+			await launch(resident, `${BACKGROUND}await tools.first({});`);
+			await first.started;
+			await launch(
+				background,
+				'// @options: {"background": true, "timeout_ms": 50}\nawait tools.queued({}); store("step", 1);',
+			);
+			const receipt = codemodeResult(background);
+			expect(receipt.isError).toBe(false);
+			const completion = await waitForCompletion(background);
+			expect(completion.details?.runId).toBe(receipt.toolCallId);
+			expect(completion.details?.isError).toBe(true);
+			expect(completionText(completion)).toContain(
+				"Execution timed out after 50 ms while waiting for a free codemode worker",
+			);
+			expect(completionText(completion)).toContain("The script did not start.");
+			expect(queued.starts()).toBe(0);
+			expect(storeEntries(background)).toHaveLength(0);
+			expect(usageEntries(background)).toHaveLength(0);
+			expect(completion.details?.resultDetails?.calls).toEqual([]);
+			first.release();
+			await waitForCompletion(resident);
+			await background.session.waitForIdle();
+			expect(queued.starts()).toBe(0);
+			expect(completions(background)).toHaveLength(1);
+			const entries = background.sessionManager.getEntries();
+			expect(
+				entries.findIndex(
+					(entry) => entry.type === "custom_message" && entry.customType === CODEMODE_BACKGROUND_COMPLETION_TYPE,
+				),
+			).toBeGreaterThan(
+				entries.findIndex(
+					(entry) =>
+						entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolCallId === receipt.toolCallId,
+				),
+			);
+		} finally {
+			first.release();
+			queued.release();
+			await Promise.all([resident.session.abort(), background.session.abort()]);
+			vi.unstubAllEnvs();
+		}
+	});
 
 	it("returns a receipt, keeps the foreground turn going, and delivers the result once with its usage", async () => {
 		const gate = createGatedTool("gated", usage(100, 0.25));

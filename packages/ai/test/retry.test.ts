@@ -127,6 +127,12 @@ describe("provider retry classification", () => {
 		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
 	});
 
+	it("keeps the ChatGPT Business workspace usage limit non-retryable", () => {
+		const errorMessage =
+			'OpenAI API error (429): {"code":"subscription_sharing_workplace_individual_usage_limit_exceeded","message":"Usage limit reached."}';
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+
 	it.each([
 		"subscription_sharing_usage_unavailable: Usage cannot be checked.",
 		"subscription_sharing_user_unavailable: User cannot be loaded.",
@@ -150,6 +156,14 @@ describe("provider retry classification", () => {
 			),
 		).toBe(true);
 		expect(isRetryableAssistantError(fauxAssistantMessage("not an error"))).toBe(false);
+	});
+
+	it.each([
+		// Regression for #11057: status codes inside ids or other numbers are not status codes.
+		'401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"},"request_id":"req_011CU503xyz"}',
+		"400 image exceeds 5 MB maximum: 5316784 bytes > 5242880 bytes",
+	])("does not match status codes inside ids or longer numbers: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
 	});
 });
 
@@ -306,6 +320,113 @@ describe("retryAssistantCall", () => {
 			"attempt-start",
 			"produce:2",
 		]);
+	});
+
+	it.each([
+		{ name: "Error", reason: new Error("custom cancellation") },
+		{ name: "string", reason: "custom cancellation" },
+		{ name: "null", reason: null },
+	])("normalizes a custom $name abort reason before and during native backoff", async ({ reason }) => {
+		for (const preAborted of [true, false]) {
+			const controller = new AbortController();
+			if (preAborted) controller.abort(reason);
+			const events: string[] = [];
+			const response = fauxAssistantMessage("partial", { stopReason: "error", errorMessage: "terminated" });
+			const produce = vi.fn(async () => {
+				events.push("produce");
+				return response;
+			});
+			const onRetryFinished = vi.fn(async () => {
+				events.push("finished");
+				await Promise.resolve();
+				events.push("finished-awaited");
+			});
+			const pending = retryAssistantCall(produce, { ...enabled, baseDelayMs: 10_000 }, controller.signal, {
+				onRetryScheduled: () => {
+					events.push("scheduled");
+				},
+				onRetryAttemptStart: () => {
+					events.push("attempt-start");
+				},
+				onRetryFinished,
+			});
+			if (!preAborted) {
+				await vi.waitFor(() => expect(getEventListeners(controller.signal, "abort")).toHaveLength(1));
+				controller.abort(reason);
+			}
+			const result = await pending;
+			events.push("returned");
+			expect(result).toEqual({ ...response, stopReason: "aborted", errorMessage: undefined });
+			expect(result).not.toHaveProperty("errorMessage");
+			expect(response.stopReason).toBe("error");
+			expect(produce).toHaveBeenCalledTimes(1);
+			expect(onRetryFinished).toHaveBeenCalledExactlyOnceWith(false, 1, "terminated");
+			expect(events).toEqual(["produce", "scheduled", "finished", "finished-awaited", "returned"]);
+			expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+		}
+	});
+
+	it.each(["scheduled", "attempt-start", "finished"] as const)(
+		"preserves callback failure and ordering at %s",
+		async (failureAt) => {
+			const failure = new Error(`${failureAt} failed`);
+			const controller = new AbortController();
+			const events: string[] = [];
+			let attempts = 0;
+			const produce = vi.fn(async () => {
+				events.push("produce");
+				return attempts++ === 0
+					? fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" })
+					: fauxAssistantMessage("recovered");
+			});
+			const callback = async (event: typeof failureAt) => {
+				events.push(event);
+				await Promise.resolve();
+				if (event === failureAt) {
+					controller.abort("callback cancellation");
+					throw failure;
+				}
+			};
+			await expect(
+				retryAssistantCall(produce, enabled, controller.signal, {
+					onRetryScheduled: () => callback("scheduled"),
+					onRetryAttemptStart: () => callback("attempt-start"),
+					onRetryFinished: () => callback("finished"),
+				}),
+			).rejects.toBe(failure);
+			const expected = ["produce", "scheduled", "attempt-start", "produce", "finished"];
+			expect(events).toEqual(expected.slice(0, expected.indexOf(failureAt) + 1));
+			expect(produce).toHaveBeenCalledTimes(failureAt === "finished" ? 2 : 1);
+			expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+		},
+	);
+
+	it("propagates a failing completion callback instead of normalizing its error as cancellation", async () => {
+		const controller = new AbortController();
+		const failure = new Error("completion callback failed");
+		const events: string[] = [];
+		const produce = vi.fn(async () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" }));
+		const onRetryFinished = vi.fn(async () => {
+			events.push("finished");
+			await Promise.resolve();
+			throw failure;
+		});
+		await expect(
+			retryAssistantCall(produce, enabled, controller.signal, {
+				onRetryScheduled: () => {
+					events.push("scheduled");
+					controller.abort("cancel before backoff");
+				},
+				onRetryAttemptStart: () => {
+					events.push("attempt-start");
+				},
+				onRetryFinished,
+			}),
+		).rejects.toBe(failure);
+		expect(events).toEqual(["scheduled", "finished"]);
+		expect(produce).toHaveBeenCalledTimes(1);
+		expect(onRetryFinished).toHaveBeenCalledExactlyOnceWith(false, 1, "terminated");
+		expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
 	});
 
 	// https://github.com/earendil-works/pi/issues/10506

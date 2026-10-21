@@ -37,7 +37,8 @@ const BUDGETS = {
 	"packages/ai": {
 		"./models": {
 			// Request telemetry reaches pi-ai's telemetry.ts and pi-telemetry's root (index, noop, metrics, memory).
-			maxFiles: 18,
+			// Request identity reaches utils/identity.ts and its version constant.
+			maxFiles: 20,
 			forbid: ["providers/", "models.generated.ts", "index.ts", "utils/validation.ts", "utils/typebox-helpers.ts"],
 			allow: ["packages/telemetry/src/index.ts"],
 		},
@@ -64,7 +65,9 @@ const BUDGETS = {
 			// replicatedState) reach its host runtime through the root barrel. Chord's context reaches pi-telemetry's root
 			// (index, noop, metrics, memory) for its NOOP telemetry default; harness/telemetry.ts is Durable's schema.
 			// The fork's target-model estimates replay signatures through ai/utils/transform-messages.ts.
-			maxFiles: 72,
+			// The Harness's request identity reaches pi-ai's utils/identity.ts and its version constant.
+			// Shared retry backoff reaches the lean ai/utils/sleep.ts and abort.ts helpers, not the AI barrel.
+			maxFiles: 76,
 			forbid: [
 				"packages/ai/src/index.ts",
 				"packages/ai/src/utils/typebox-helpers.ts",
