@@ -15,6 +15,7 @@
 
 ### Changed
 
+- Added lossless request-body compression for direct Anthropic Messages (gzip) and public OpenAI Responses (zstd), with runtime/size guards and explicit encoding opt-out. Restricted existing Codex SSE zstd to its canonical endpoint rather than arbitrary custom URLs. See [support boundaries and measurement](../../docs/compression.md).
 - Grok 4.3 and Grok 4.5 on the `xai` provider now offer the `xhigh` thinking level, matching the reasoning efforts xAI supports for these models.
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
 - Extended temporary opt-in Anthropic cache tracing with payload-pass and attempt identities, validated `request-id` headers and exact-session filtering. Native stream behavior is unchanged.
