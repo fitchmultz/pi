@@ -223,10 +223,14 @@ export type { RegisteredMcpServer } from "./core/mcp-servers.ts";
 export { convertToLlm } from "./core/messages.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
 export {
+	type ModelReferenceRequest,
+	type ModelReferenceResult,
+	type ModelReferenceTarget,
 	type ModelScopeDiagnostic,
 	type ResolveCliModelResult,
 	type ResolveModelScopeResult,
 	resolveCliModel,
+	resolveModelReference,
 	resolveModelScopeWithDiagnostics,
 	type ScopedModel,
 } from "./core/model-resolver.ts";
