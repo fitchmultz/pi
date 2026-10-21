@@ -273,7 +273,7 @@ describe("gzip eligibility and runtime fallbacks", () => {
 	it.each(["unavailable", "failed", "larger"])("falls back to original JSON when %s", async (mode) => {
 		const zlib = process.getBuiltinModule("node:zlib") as typeof NodeZlib;
 		if (mode === "unavailable") {
-			vi.stubGlobal("process", undefined);
+			vi.spyOn(process, "getBuiltinModule").mockReturnValue(undefined);
 			vi.stubGlobal("CompressionStream", undefined);
 		} else if (mode === "failed")
 			vi.spyOn(zlib, "gzip").mockImplementation(() => {
@@ -290,7 +290,7 @@ describe("gzip eligibility and runtime fallbacks", () => {
 	});
 
 	it("uses native Web CompressionStream when Node builtins are unavailable", async () => {
-		vi.stubGlobal("process", undefined);
+		vi.spyOn(process, "getBuiltinModule").mockReturnValue(undefined);
 		const init = request();
 		const fetch = vi.fn<typeof globalThis.fetch>(async () => response());
 		await createRequestCompressionFetch("anthropic-messages", fetch)(endpoint, init);
@@ -321,7 +321,7 @@ describe("gzip eligibility and runtime fallbacks", () => {
 	}, 1500);
 
 	it("stops waiting for Web CompressionStream on abort", async () => {
-		vi.stubGlobal("process", undefined);
+		vi.spyOn(process, "getBuiltinModule").mockReturnValue(undefined);
 		const entered = Promise.withResolvers<void>();
 		const finish = Promise.withResolvers<void>();
 		vi.stubGlobal(
