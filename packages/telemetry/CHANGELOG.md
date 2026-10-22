@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-21
+
 ### Breaking Changes
 
 - Adapters trust typed instrumentation inputs; behavior for malformed values is unspecified. Carrier extraction checks required string identities, without validating their format.
@@ -18,6 +20,7 @@
 - Metric schema definitions and `createTypedMetrics()` with exact instrument names, kinds, and required/optional low-cardinality attributes.
 - In-memory propagation across processes, link and measurement snapshots, and adapter conformance cases for propagation, links, and optional metrics.
 - `StoredSpan`, `StoredTrace`, and `TelemetryStore` define backend-independent trace discovery, trace retrieval, and metric queries. `@earendil-works/pi-telemetry/render` exports `renderTrace()` for plain-text span trees with attributes, durations, errors, events, and cross-trace links; merged spans are deduplicated by ID and links are never followed.
+
 ## [1.3.0] - 2026-10-15
 
 ## [1.2.0] - 2026-10-12

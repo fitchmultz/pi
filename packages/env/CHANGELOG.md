@@ -12,6 +12,8 @@
 - Fixed concurrent `acceptHostKey`/`forgetHostKey` calls through equivalent known-hosts path spellings losing updates, which could restore a removed host key ([#10517](https://github.com/earendil-works/pi/issues/10517)).
 - Fixed cancelled or timed-out daemon shell commands on macOS sometimes running later steps after the current step was killed; cancellation and timeouts now stop the whole command.
 
+## [1.4.0] - 2026-10-21
+
 ## [1.3.0] - 2026-10-15
 
 ## [1.2.0] - 2026-10-12

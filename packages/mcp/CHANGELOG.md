@@ -6,6 +6,8 @@
 
 - Reduced repeated copying when assembling stdio messages, SSE events and bounded HTTP error prefixes.
 
+## [1.4.0] - 2026-10-21
+
 ## [1.3.0] - 2026-10-15
 
 ## [1.2.0] - 2026-10-12

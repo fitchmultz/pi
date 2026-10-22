@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Compile fixed frame validation once and drain publication queues without repeated array copies.
+
+### Fixed
+
+- Releasing the last state-view reference before its initial snapshots arrive no longer leaves a shared method-only reference loading forever.
+- Reject object-transport packing markers in WebSocket text frames so clients cannot bypass packed-payload restrictions.
+
+## [1.4.0] - 2026-10-21
+
 ### Breaking Changes
 
 - Custom `Context` implementations must provide `telemetry: TelemetrySpan`; use the no-op span `NOOP_TELEMETRY_CONTEXT` when disabled. `withTelemetry()` accepts spans, not adapters.
@@ -12,14 +23,6 @@
 - `Context.telemetry` is an explicit, non-optional telemetry parent (no-op by default). `withTelemetry(telemetry, context)` derives it without changing values or cancellation; `traceIn(context, options, fn)` starts a child span and passes its derived context to the callback.
 - `@earendil-works/chord/sqlite`: portable SQLite interfaces, atomic migration runner, and schema-prefix validation, with Node (`/sqlite/node`) and Cloudflare Durable Object (`/sqlite/cloudflare`) drivers. Moved from Durable, which keeps its storage implementations and re-exports the moved public names.
 - `@earendil-works/chord/output`: `Progress` takes an optional `ProgressClock` (`now`, `setTimer`) to pace commits on, by default `Date.now` and `setTimeout`.
-### Changed
-
-- Compile fixed frame validation once and drain publication queues without repeated array copies.
-
-### Fixed
-
-- Releasing the last state-view reference before its initial snapshots arrive no longer leaves a shared method-only reference loading forever.
-- Reject object-transport packing markers in WebSocket text frames so clients cannot bypass packed-payload restrictions.
 
 ## [1.3.0] - 2026-10-15
 
