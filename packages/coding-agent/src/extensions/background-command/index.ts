@@ -1,5 +1,6 @@
 import { createReadStream, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import lockfile from "proper-lockfile";
 import type {
 	BoundaryState,
@@ -9,6 +10,7 @@ import type {
 } from "../../core/extensions/types.ts";
 import { type FileEntry, parseSessionEntries } from "../../core/session-manager.ts";
 import {
+	type BackgroundCommandJob,
 	backgroundCommandDirectory,
 	backgroundCommandFinished,
 	backgroundCommandOutputTail,
@@ -19,6 +21,12 @@ import { createBackgroundCommandTool } from "./tool.ts";
 
 export const BACKGROUND_COMMAND_NOTICE = "background-command-complete";
 const RUN_STATE = "background-command-run-state";
+
+interface BackgroundCommandNoticeDetails {
+	jobIds: string[];
+	/** Absent from notices recorded before compact rows. */
+	jobs?: Pick<BackgroundCommandJob, "id" | "status">[];
+}
 
 export function createBackgroundCommandExtension(): ExtensionFactory {
 	return (pi) => {
@@ -150,7 +158,10 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 				type: "custom_message",
 				customType: BACKGROUND_COMMAND_NOTICE,
 				display: true,
-				details: { jobIds: completed.map((job) => job.id) },
+				details: {
+					jobIds: completed.map((job) => job.id),
+					jobs: completed.map(({ id, status }) => ({ id, status })),
+				} satisfies BackgroundCommandNoticeDetails,
 				content: `Background commands finished:\n${completed
 					.map((job) => {
 						const { id, status, exitCode, commandPreview, logFile, error } = summarizeBackgroundCommand(job);
@@ -202,6 +213,29 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 				};
 		}
 		pi.registerTool(createBackgroundCommandTool(pi, start));
+		pi.registerMessageRenderer<BackgroundCommandNoticeDetails>(
+			BACKGROUND_COMMAND_NOTICE,
+			(message, options, theme) => {
+				if (!options.compactView || options.expanded) return;
+				const jobs = message.details?.jobs;
+				const count = jobs?.length ?? message.details?.jobIds.length ?? 0;
+				const unsuccessful = new Map<BackgroundCommandJob["status"], number>();
+				for (const { status } of jobs ?? []) {
+					if (status !== "succeeded") unsuccessful.set(status, (unsuccessful.get(status) ?? 0) + 1);
+				}
+				const summary = [
+					theme.fg("muted", `${count} background ${count === 1 ? "command" : "commands"} finished`),
+					...[...unsuccessful].map(([status, n]) =>
+						theme.fg(
+							status === "failed" || status === "timed_out" ? "error" : "warning",
+							`${n} ${status.replace("_", " ")}`,
+						),
+					),
+				].join(theme.fg("muted", ", "));
+				const line = " ".repeat(options.outputPad) + summary;
+				return { render: (width: number) => [truncateToWidth(line, width)], invalidate() {} };
+			},
+		);
 		pi.on("session_start", (_event, ctx) => {
 			start(ctx);
 			const state = ctx.sessionManager
