@@ -127,16 +127,21 @@ it.each([
 		});
 		try {
 			await h.session.bindExtensions({});
+			const discovery = (args: { enable?: string[] }) =>
+				fauxAssistantMessage(
+					scriptOnly
+						? fauxToolCall("codemode", { code: `return await tools.discover_tools(${JSON.stringify(args)});` })
+						: fauxToolCall("discover_tools", args),
+					{ stopReason: "toolUse" },
+				);
 			h.setResponses([
 				async (context) => {
 					await capture(context);
-					return fauxAssistantMessage(fauxToolCall("discover_tools", {}), { stopReason: "toolUse" });
+					return discovery({});
 				},
 				async (context) => {
 					await capture(context);
-					return fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser"] }), {
-						stopReason: "toolUse",
-					});
+					return discovery({ enable: ["browser"] });
 				},
 				async (context) => {
 					await capture(context);
@@ -199,8 +204,10 @@ it.each([
 					expect(JSON.stringify(payload.tools)).toBe(JSON.stringify(enabled.tools));
 			}
 			expect(JSON.stringify(before)).toContain("- browser: Browser");
-			expect(JSON.stringify(before)).toContain("discover_tools: ");
+			expect(JSON.stringify(before)).toContain(scriptOnly ? "codemode: " : "discover_tools: ");
+			if (scriptOnly) expect(JSON.stringify(before)).not.toContain("discover_tools: ");
 			expect(JSON.stringify(before)).not.toContain("Inspect before acting.");
+			expect(JSON.stringify(enabled)).toContain("Inspect before acting.");
 			expect(JSON.stringify(before)).not.toContain('"name":"browse"');
 			expect(JSON.stringify(listed)).not.toContain('"name":"browse"');
 			expect(JSON.stringify(continued)).not.toContain("- later: Late connection");

@@ -1,6 +1,6 @@
 # Codemode
 
-The `codemode` tool lets the model write a JavaScript script that calls pi's other tools and runs non-LLM models, such as classifiers and image models. Only the script's output reaches the model, so a script can run calls in parallel and filter large results before the model sees them. To turn it on, see [Enable codemode](cli.md#enable-codemode).
+The `codemode` tool lets the model write a JavaScript script that calls pi's other tools and runs non-LLM models, such as classifiers and image models. By default, only the script's output reaches the model, so a script can run calls in parallel and filter large results before the model sees them. To turn it on, see [Enable codemode](cli.md#enable-codemode).
 
 ## Scripts
 
@@ -62,7 +62,7 @@ Calls a script makes share one nested-call queue with other scripts. A tool that
 
 ## Call tools
 
-Every tool the session can call is a method of `tools`, named by its identifier: characters that are not valid in a JavaScript identifier become `_`, so the MCP tool `mcp__dev-radius__search` is `tools.mcp__dev_radius__search`. Each method takes one object with the tool's arguments.
+Every callable tool is a method of `tools`, named by its identifier: characters that are not valid in a JavaScript identifier become `_`, so the MCP tool `mcp__dev-radius__search` is `tools.mcp__dev_radius__search`. Each method takes one object with the tool's arguments. Tools with `model-only` or `hidden` exposure are excluded.
 
 What a call resolves to depends on the tool:
 
@@ -76,6 +76,20 @@ A call that fails, is blocked, or gets invalid arguments rejects with an `Error`
 The `codemode` description lists tools with their TypeScript declarations, grouped by namespace (for example one MCP server). Tools with `deferred` exposure, which includes MCP tools with the default `codemode` exposure, are not listed, so the description stays the same while MCP servers connect. Listed declarations share a budget of 3000 estimated tokens (`codemode.inlineBudget` in [settings](settings.md#tools)). Scripts find the other tools with `searchTools()`, `describeTool()`, `describeNamespace()`, or by filtering `ALL_TOOLS`.
 
 While `codemode` is active, `codemode.mode` in [settings](settings.md#tools) decides how the other tools are presented. With `on` (default) declared tools stay declared, and their descriptions say how to call them from scripts. With `only` they are hidden from the model and listed in the `codemode` description instead, so the model calls them through scripts. Tool declarations in the `codemode` description, `describeTool()`, and `ALL_TOOLS` carry the tools' prompt guidelines, since the system prompt rules only cover declared tools.
+
+### Discover instruction groups
+
+Load an instruction group from a script:
+
+```js
+await tools.discover_tools({ enable: ["browser"] });
+```
+
+The call returns a short receipt. Discovery delivers the full instructions separately
+to the model before its next request, even if the script omits the result from its
+output. The model can then use the group's tools in a later script. Discovery and
+first use remain separate model turns; the instruction message adds no model turn.
+See [Instruction groups](instruction-groups.md).
 
 ## Store values
 

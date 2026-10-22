@@ -2,7 +2,7 @@
 
 The replaceable `builtin:instruction-groups` extension adds `discover_tools`.
 Calling it without arguments lists available instruction groups. Calling it with
-`{ "enable": ["browser"] }` returns the group's **full** owner-provided instructions.
+`{ "enable": ["browser"] }` loads the group's **full** owner-provided instructions.
 Listing alone does not enable a group. Only subsequent model turns can use its tools.
 
 Initial prompts include a sorted index of permitted available group names and capability
@@ -32,7 +32,16 @@ is not portable to official 1.0 without an equivalent declaration-refresh seam.
 
 Suppression runs at prompt starts; another extension can add a tool mid-batch, which
 is a positional declaration change and does not rewrite the earlier cache prefix.
-`discover_tools` is model-only, so codemode cannot call it internally.
+
+`discover_tools` supports direct calls and calls from codemode. When a nested call
+enables groups, the script receives a short receipt. The full instructions arrive
+in a separate hidden context message after the turn's tool results, before the next
+model request. They reach the model even if the script discards its output,
+truncates it, or fails after discovery succeeds.
+
+The instruction message does not start a model turn. The model reads the instructions
+before using the group's tools in a later turn. Listing alone returns ordinary tool
+output and adds no instruction message.
 
 The CLI loads this builtin by default. Disable it with `--exclude-tools discover_tools`,
 `--no-extensions`, or `"extensions": ["-builtin:instruction-groups"]` in settings.
@@ -108,7 +117,8 @@ otherwise owners remain eager.
 
 Enabled names and the temporarily inactive selected tools are stored in custom
 `pi:instruction-groups` session entries.
-Full text is returned by discovery and appended to the system prompt on subsequent
+Direct discovery returns full text; nested discovery stores it in a hidden context
+message. Both paths append full instructions to the system prompt on subsequent
 runs. Startup, resume, reload, and tree navigation replay the selected raw branch,
 not compacted context or abandoned branches. Requests consume only newly appended
 entries through public session APIs, without a full-history walk on every request.
@@ -117,13 +127,15 @@ Replaying this state restores the same selection without activating optional too
 After compaction, a request-local hidden custom message is inserted immediately
 after the latest compaction summary. It restores full instructions for groups enabled
 **at that boundary**, in name order, with the compaction timestamp. Later discoveries
-keep their later tool-result anchor. The system message and tool state are untouched.
+keep their later tool-result or instruction-message anchor. The system message and
+tool state are untouched.
 This also repairs automatic compaction following discovery in the same run.
 
 Readiness clears at each turn and requires the full current instruction section in
-the request's effective system prompt, a successful discovery result, or the repair
-message. Same-assistant discovery and action calls are blocked, even in sequential
-execution. If an owner's text changes and no current instruction anchor survives,
+the request's effective system prompt, a successful discovery result, a nested discovery
+instruction message, or the repair message. Same-assistant discovery and action calls
+are blocked, even in sequential execution. If an owner's text changes and no current
+instruction anchor survives,
 rediscover it. Later `context_with_system` handlers must preserve these instructions;
 the builtin cannot validate transformations made after its own handler.
 

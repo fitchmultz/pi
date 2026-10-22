@@ -18,6 +18,8 @@ export interface InstructionGroupCollector {
 
 const stateType = "pi:instruction-groups";
 const repairType = "pi:instruction-groups:compaction";
+const deliveryType = "pi:instruction-groups:instructions";
+const instructionTypes = new Set([repairType, deliveryType]);
 
 export default function instructionGroups(pi: ExtensionAPI): void {
 	const groups = new Map<string, InstructionGroup>();
@@ -78,10 +80,9 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 		name: "discover_tools",
 		label: "Discover instructions",
 		description:
-			"List available instruction groups, or enable groups to read their FULL instructions and restore their previously selected tools for the next request. Read the result before calling a group's tools in a later turn.",
+			"List available instruction groups, or enable groups to receive their FULL instructions and restore their previously selected tools for the next request. Read the full instructions before calling a group's tools in a later turn.",
 		promptSnippet:
 			"List available capabilities; enable instruction groups and read their full instructions before use",
-		exposure: "model-only",
 		parameters: Type.Object({ enable: Type.Optional(Type.Array(Type.String(), { uniqueItems: true })) }),
 		prepareLoadout(loadout) {
 			const registered = new Set(loadout.registered.map((tool) => tool.name));
@@ -147,6 +148,21 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 		restore(ctx);
 	});
 	pi.on("session_tree", (_event, ctx) => restore(ctx));
+	// Script output can be discarded, truncated, or lost to a rejection, so nested enables deliver
+	// the full instructions as their own message and hand the script a receipt.
+	pi.on("tool_result", (event) => {
+		const names = (event.input.enable as string[] | undefined) ?? [];
+		if (event.toolName !== "discover_tools" || !event.parentToolCallId || event.isError || !names.length) return;
+		pi.sendMessage({ customType: deliveryType, content: event.content, display: false }, { triggerTurn: false });
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Enabled ${names.join(", ")}. Full instructions arrive as a separate message before the next model request.`,
+				},
+			],
+		};
+	});
 	pi.on("turn_start", () => ready.clear());
 	pi.on("before_agent_start", (event, ctx) => {
 		// ponytail: prompt-start suppression only; use a loadout-selection hook if mid-batch suppression is needed.
@@ -206,7 +222,7 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 			.flatMap((message) => {
 				if (
 					!(message.role === "toolResult" && message.toolName === "discover_tools" && !message.isError) &&
-					!(message.role === "custom" && message.customType === repairType)
+					!(message.role === "custom" && instructionTypes.has(message.customType))
 				)
 					return [];
 				return [
