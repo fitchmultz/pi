@@ -141,9 +141,15 @@ describe("stored and fetched models of unknown types", () => {
 describe("dynamic model overlays", () => {
 	it("replaces the first baseline match by type, keeps order and applies the last overlay definition", async () => {
 		const classifier: ClassifierModel<"test-classify"> = {
-			...chatModel("dyn", "shared"),
 			type: "classifier",
+			id: "shared",
+			name: "shared",
 			api: "test-classify",
+			provider: "dyn",
+			baseUrl: "https://example.test/v1",
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1000,
 		};
 		const baseline = [
 			{ ...chatModel("dyn", "shared"), name: "first chat" },

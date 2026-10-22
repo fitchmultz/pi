@@ -6,6 +6,7 @@ import {
 	fauxProvider,
 	fauxToolCall,
 	getCurrentSystemMessage,
+	getCurrentSystemPrompt,
 	getCurrentTools,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
@@ -111,10 +112,13 @@ describe("on-demand instruction groups", () => {
 	];
 	async function suppressed() {
 		const original = await setup({ initialActiveToolNames: undefined, extensionFactories: selectedOwners });
-		original.session.setActiveToolsByName(
-			original.session.getActiveToolNames().filter((name) => name !== "deselected"),
-		);
-		original.setResponses([done()]);
+		// Restore activates extension tools the branch never declared, so declare "deselected" before
+		// removing it. "browse" stays undeclared and is deferred as before.
+		const initial = original.session.getActiveToolNames();
+		original.session.setActiveToolsByName(initial.filter((name) => name !== "discover_tools" && name !== "browse"));
+		original.setResponses([done(), done()]);
+		await original.session.prompt("declare the deselected tool");
+		original.session.setActiveToolsByName(initial.filter((name) => name !== "deselected"));
 		await original.session.prompt("unrelated work");
 		expect(original.sessionManager.getBranch().findLast((entry) => entry.type === "custom")).toMatchObject({
 			data: { enabled: [], inactive: ["browse"] },
@@ -204,7 +208,7 @@ describe("on-demand instruction groups", () => {
 			...(managed && testCase.selection?.includes("browse") ? [discover()] : []),
 			(context) => {
 				expect(context.messages[0]).toEqual(original.session.messages[0]);
-				if (!managed) expect(JSON.stringify(context.messages)).toContain(full);
+				if (!managed) expect(getCurrentSystemPrompt(context.messages)).toContain(full);
 				expect.soft(getCurrentTools(context.messages).some((tool) => tool.name === "browse")).toBe(testCase.active);
 				return fauxAssistantMessage(
 					[
@@ -470,6 +474,13 @@ describe("on-demand instruction groups", () => {
 				allowedToolNames: allowlist,
 				extensionFactories: [instructionGroupsExtension, (pi) => pi.registerTool(late)],
 			});
+			if (boundary === "session_tree" && !allowlist) {
+				// Tree navigation activates extension tools the branch never declared, so declare
+				// discover_tools before the selection removes it.
+				original.session.setActiveToolsByName([...selection, "discover_tools"]);
+				original.setResponses([done()]);
+				await original.session.prompt("declare discovery");
+			}
 			original.session.setActiveToolsByName(selection);
 			original.setResponses([done(), done()]);
 			await original.session.prompt("first branch point");
@@ -743,6 +754,7 @@ describe("on-demand instruction groups", () => {
 		await harness.session.prompt("enable");
 		const after = harness.sessionManager.getLeafId()!;
 		await harness.session.navigateTree(before);
+		expect(harness.session.getActiveToolNames()).not.toContain("browse");
 		harness.setResponses([
 			(context) => {
 				expect(getCurrentTools(context.messages).map((tool) => tool.name)).not.toContain("browse");

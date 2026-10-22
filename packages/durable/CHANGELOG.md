@@ -5,12 +5,27 @@
 ### Breaking Changes
 
 - The env conformance suite now checks that aborting POSIX shell commands stops all process-group descendants without letting waiting shells run later steps. Custom environments may need changes to pass.
+
+### Changed
+
+- Reduced retained-context scheduling and historical-read work, skipped redundant SQLite writes and avoided repeated copying of partial lines.
+
+### Fixed
+
+- Fuzzy edits preserve untouched text on the same line, Unicode boundaries and literal carriage returns. Editing invalid UTF-8 now fails without rewriting the file ([#10655](https://github.com/earendil-works/pi/issues/10655)).
+- An aborted or timed-out `NodeExecutionEnv.exec()` shell command on macOS no longer runs its later steps after the current step is killed.
+
+## [1.4.0] - 2026-10-21
+
+### Breaking Changes
+
 - `TaskRuntime.sleep()` is removed: it waited inside a phase, which holds an invocation and, after a restart, reruns the phase and restarts the wait. A task now ends its phase asleep with `runtime.sleepUntil(until, checkpoint, context)` or by returning `{ status: "sleeping", until, checkpoint }` from `runtime.commit()`; move the work after the wait into the next phase and carry what it needs in the checkpoint. `TaskRuntime.setTimer()` paces work inside a phase without waiting for it.
 - Tasks have a `sleeping` status, so code that handles every `TaskState`, `TaskGraphState`, or `TaskInspection` state needs a case for it.
 - Opening a SQLite storage migrates it to schema version 2 automatically, rebuilding its task table. A migrated database cannot be opened by 1.3.0 or earlier, so a deployment cannot roll back past this release. JSONL storage needs no migration, but 1.3.0 or earlier never resumes a sleeping task it finds (a run's conversation stays busy).
 - `TaskRuntime` has `sleepUntil()` and `setTimer()`, and `ToolExecutionApi` has `now()`: code that builds either object by hand, such as a test fake or a tool wrapper that does not spread the original, must add them.
 - A task cut off by a crash 5 times in a row without committing a new state is parked instead of run again (see the crash-loop guard under Added); set `settings.restartLimit` to `Infinity` to keep the old behavior. `TaskInspection`'s blocked reasons include `restart_limit`.
 - `defineDoc()` and `defineDocFamily()` require an explicit `checkpointWhen` predicate on every definition; there is no default. Use `() => false` to keep ordinary changes as deltas, or supply a policy that periodically writes a base.
+
 ### Added
 
 - Added `IndexedDbStorage` (`@earendil-works/pi-durable/storage/indexeddb`), a browser storage backed by IndexedDB.
@@ -33,16 +48,13 @@
 - Generation retry backoffs, deferred-response polls, and compaction retry backoffs sleep instead of waiting in a running phase, so a process can stop or hibernate during them. A record an earlier version stored mid-backoff sleeps again when it resumes before its time. A deferred poll whose model is gone after a reopen now fails `no_model` once the poll is due, not at once.
 - Code mode measures script deadlines and wall time on the Harness clock (`HarnessOptions.now`) instead of `Date.now()`.
 - SQLite drivers, portable interfaces, and the generic migration runner now come from `@earendil-works/chord/sqlite`. Existing Durable SQLite entry points keep re-exporting their public names; storage helpers and Durable schema migrations stay here.
-
 - `ToolControl.terminate` is now typed `boolean` instead of `true`, matching `pi-agent-core` and `pi-coding-agent`; `false` does not end the run ([#10858](https://github.com/earendil-works/pi/issues/10858)).
-- Reduced retained-context scheduling and historical-read work, skipped redundant SQLite writes and avoided repeated copying of partial lines.
 
 ### Fixed
 
 - In Cloudflare Workers with `nodejs_compat`, the timers that evict idle documents and contexts were armed, since timers there have an `unref()`; a pending one kept a Durable Object from hibernating and blocked its eviction. They are now declined in Workers, and memory is freed at later commits.
 - The README's Errors section now limits the `StorageRequestError` exemption to reads: a `StorageRequestError` thrown by `commit()` or `mintId()` fails the Harness like any other storage error ([#11014](https://github.com/earendil-works/pi/issues/11014)).
-- Fuzzy edits preserve untouched text on the same line, Unicode boundaries and literal carriage returns. Editing invalid UTF-8 now fails without rewriting the file ([#10655](https://github.com/earendil-works/pi/issues/10655)).
-- An aborted or timed-out `NodeExecutionEnv.exec()` shell command on macOS no longer runs its later steps after the current step is killed.
+- The Node environment now detects the legacy WSL `bash.exe` launcher from `%SystemRoot%` instead of assuming `C:\Windows` ([#9501](https://github.com/earendil-works/pi/pull/9501) by [@petrroll](https://github.com/petrroll)).
 
 ## [1.3.0] - 2026-10-15
 
