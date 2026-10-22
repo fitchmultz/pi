@@ -11,7 +11,7 @@ import {
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { openWorkingSession } from "../../src/core/working-session.ts";
@@ -23,11 +23,11 @@ import {
 	instructionGroupsExtension,
 	SettingsManager,
 } from "../../src/index.ts";
-import { createHarness, getToolResult, type Harness } from "./harness.ts";
+import { createHarness, getMessageText, getToolResult, type Harness } from "./harness.ts";
 
 const full = "Full browser safety instructions: inspect before acting. Preserve all owner guidance.";
 const later = "Full later instructions";
-function owner(pi: ExtensionAPI) {
+function owner(pi: ExtensionAPI, browseExposure: "direct" | "codemode" = "direct") {
 	let managed = () => false;
 	pi.events.on("pi:instruction-groups", (data) => {
 		const collector = data as InstructionGroupCollector;
@@ -46,7 +46,7 @@ function owner(pi: ExtensionAPI) {
 			description: name,
 			parameters: Type.Object({}),
 			defaultActive: name === "browse",
-			exposure: name === "hidden" ? "hidden" : "direct",
+			exposure: name === "hidden" ? "hidden" : name === "browse" ? browseExposure : "direct",
 			execute: async () => ({ content: [{ type: "text", text: "acted" }], details: undefined }),
 		});
 	pi.registerTool({
@@ -70,6 +70,9 @@ function owner(pi: ExtensionAPI) {
 }
 const discover = (enable = ["browser"]) =>
 	fauxAssistantMessage([fauxToolCall("discover_tools", { enable })], { stopReason: "toolUse" });
+const script = (code: string) => fauxAssistantMessage([fauxToolCall("codemode", { code })], { stopReason: "toolUse" });
+const discoverVia = (path: "direct" | "codemode", enable = ["browser"]) =>
+	path === "direct" ? discover(enable) : script(`return await tools.discover_tools(${JSON.stringify({ enable })});`);
 const done = () => fauxAssistantMessage("done");
 
 // These exercise the real request, nested-call, branch, and compaction boundaries with no provider traffic.
@@ -395,14 +398,19 @@ describe("on-demand instruction groups", () => {
 				],
 			});
 			const requests: TranscriptContext[] = [];
+			const reachable = mode === "direct" ? "discover_tools" : "codemode";
+			const call = (args: { enable?: string[] }) =>
+				mode === "direct"
+					? fauxAssistantMessage([fauxToolCall("discover_tools", args)], { stopReason: "toolUse" })
+					: script(`return await tools.discover_tools(${JSON.stringify(args)});`);
 			harness.setResponses([
 				(context) => {
 					requests.push(structuredClone(context));
-					return fauxAssistantMessage([fauxToolCall("discover_tools", {})], { stopReason: "toolUse" });
+					return call({});
 				},
 				(context) => {
 					requests.push(structuredClone(context));
-					return discover();
+					return call({ enable: ["browser"] });
 				},
 				(context) => {
 					requests.push(structuredClone(context));
@@ -426,23 +434,29 @@ describe("on-demand instruction groups", () => {
 				"- browser: Browser actions",
 				"- zeta: Unrelated actions",
 			]);
-			expect(sections?.tools).toMatch(/discover_tools: .+/);
+			expect(sections?.tools).toMatch(new RegExp(`${reachable}: .+`));
 			const tools = getCurrentTools(requests[0].messages);
-			const declaration = JSON.stringify(tools.find((tool) => tool.name === "discover_tools"));
-			expect(tools.map((tool) => tool.name)).toContain("discover_tools");
+			const declaration = JSON.stringify(tools.find((tool) => tool.name === reachable));
+			expect(tools.map((tool) => tool.name)).toContain(reachable);
+			expect(declaration).toContain("discover_tools");
 			expect(tools.map((tool) => tool.name)).not.toContain("browse");
-			if (mode === "codemode-only") expect(tools.map((tool) => tool.name)).not.toContain("plain");
+			if (mode === "codemode-only") {
+				expect(tools.map((tool) => tool.name)).not.toContain("plain");
+				expect(tools.map((tool) => tool.name)).not.toContain("discover_tools");
+			}
 			for (const request of requests) {
 				expect(getCurrentSystemMessage(request.messages)?.sections?.instruction_groups).toBe(index);
-				expect(
-					JSON.stringify(getCurrentTools(request.messages).find((tool) => tool.name === "discover_tools")),
-				).toBe(declaration);
 				expect(JSON.stringify(request.messages)).not.toContain("Hidden capability");
 				expect(JSON.stringify(request.messages)).not.toContain(later);
 			}
+			// Codemode-only lists browse in the codemode declaration once enabling makes it callable.
+			for (const request of mode === "direct" ? requests : requests.slice(0, 2))
+				expect(JSON.stringify(getCurrentTools(request.messages).find((tool) => tool.name === reachable))).toBe(
+					declaration,
+				);
 			for (const request of requests.slice(0, 2)) expect(JSON.stringify(request.messages)).not.toContain(full);
 			expect(JSON.stringify(requests[3].messages)).toContain(full);
-			expect(harness.session.getCallableToolNames()).not.toContain("discover_tools");
+			expect(harness.session.getCallableToolNames()).toContain("discover_tools");
 			expect(harness.session.getActiveToolNames()).toContain("browse");
 			expect(harness.session.getActiveToolNames()).not.toContain("optional");
 			expect(harness.session.getCallableToolNames()).not.toContain("hidden");
@@ -597,9 +611,182 @@ describe("on-demand instruction groups", () => {
 			expect(harness.session.getCallableToolNames()).toEqual(callable);
 			expect(active).not.toContain("optional");
 			expect(callable).not.toContain("hidden");
-			expect(callable).not.toContain("discover_tools");
+			expect(callable).toContain("discover_tools");
 		},
 	);
+
+	const blockedBrowse = "await tools.browse({}).catch(() => {});";
+	it.each([
+		{
+			outcome: "discards its output",
+			mode: "on",
+			code: `await tools.discover_tools({ enable: ["browser"] });\n${blockedBrowse}\nreturn "finished";`,
+		},
+		{
+			outcome: "rejects after enabling",
+			mode: "on",
+			code: `await tools.discover_tools({ enable: ["browser"] });\n${blockedBrowse}\nthrow new Error("after enabling");`,
+		},
+		{
+			outcome: "truncates its output",
+			mode: "on",
+			code: `// @options: {"max_output_tokens": 20}\nconst receipt = await tools.discover_tools({ enable: ["browser"] });\n${blockedBrowse}\nreturn "filler ".repeat(400) + receipt;`,
+		},
+		{
+			outcome: "runs in codemode-only mode",
+			mode: "only",
+			code: `await tools.discover_tools({ enable: ["browser"] });\n${blockedBrowse}\nreturn "finished";`,
+		},
+	] as const)(
+		"delivers full instructions once before the next request when a codemode script $outcome",
+		async ({ mode, code }) => {
+			const harness = await setup({
+				initialActiveToolNames: ["codemode"],
+				extensionFactories: [
+					instructionGroupsExtension,
+					(pi: ExtensionAPI) => owner(pi, "codemode"),
+					createCodemodeExtension({ mode }),
+				],
+			});
+			const requests: TranscriptContext[] = [];
+			harness.setResponses([
+				(context) => {
+					requests.push(structuredClone(context));
+					return script(code);
+				},
+				(context) => {
+					requests.push(structuredClone(context));
+					return script("return await tools.browse({});");
+				},
+				done(),
+			]);
+			await harness.session.prompt("discover inside a script");
+			const delivered = harness.sessionManager.getBranch().filter((entry) => entry.type === "custom_message");
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toMatchObject({ customType: "pi:instruction-groups:instructions", display: false });
+			expect(getMessageText(delivered[0])).toBe(`## browser\n\n${full}`);
+			const [before, after] = requests;
+			expect(getCurrentTools(before.messages).some((tool) => tool.name === "discover_tools")).toBe(mode === "on");
+			expect(JSON.stringify(before.messages)).not.toContain(full);
+			expect(after.messages.slice(0, before.messages.length)).toEqual(before.messages);
+			expect(JSON.stringify(after.messages).split(full)).toHaveLength(2);
+			for (const message of harness.session.messages)
+				if (message.role === "toolResult" && message.toolName === "codemode")
+					expect(getMessageText(message)).not.toContain(full);
+			const [sameScript] = harness
+				.eventsOfType("tool_execution_end")
+				.filter((event) => event.toolName === "browse" && event.parentToolCallId);
+			expect(sameScript).toMatchObject({ isError: true });
+			expect(JSON.stringify(sameScript.result)).toContain("prior turn");
+			const action = getToolResult(harness, "codemode");
+			expect(action.isError).toBe(false);
+			expect(getMessageText(action)).toContain("acted");
+		},
+	);
+
+	const codemodeOptions = {
+		initialActiveToolNames: ["codemode"],
+		extensionFactories: [instructionGroupsExtension, owner, createCodemodeExtension()],
+	};
+	it.each([
+		{
+			name: "direct discovery",
+			options: {},
+			step: discover(),
+			check: (harness: Harness) =>
+				expect(getToolResult(harness, "discover_tools")).toMatchObject({
+					isError: false,
+					content: [{ type: "text", text: `## browser\n\n${full}` }],
+				}),
+			instructions: 1,
+		},
+		{
+			name: "listing from a script",
+			options: codemodeOptions,
+			step: script("return await tools.discover_tools({});"),
+			check: (harness: Harness) => {
+				expect(getToolResult(harness, "codemode").isError).toBe(false);
+				expect(getMessageText(getToolResult(harness, "codemode"))).toContain("browser: Browser actions");
+			},
+			instructions: 0,
+		},
+		{
+			name: "a failed script enable",
+			options: { ...codemodeOptions, excludedToolNames: ["browse", "optional", "hidden"] },
+			step: discoverVia("codemode"),
+			check: (harness: Harness) => {
+				expect(getToolResult(harness, "codemode").isError).toBe(true);
+				expect(getMessageText(getToolResult(harness, "codemode"))).toContain(
+					"Unavailable instruction group: browser",
+				);
+			},
+			instructions: 0,
+		},
+	])("adds no separate instruction message for $name", async ({ options, step, check, instructions }) => {
+		const harness = await setup(options);
+		let next: TranscriptContext | undefined;
+		harness.setResponses([
+			step,
+			(context) => {
+				next = structuredClone(context);
+				return done();
+			},
+		]);
+		await harness.session.prompt("discover");
+		check(harness);
+		expect(JSON.stringify(next?.messages).split(full)).toHaveLength(instructions + 1);
+	});
+
+	it("enables groups from a background script and delivers full instructions before its completion turn", async () => {
+		const release = Promise.withResolvers<void>();
+		const harness = await setup({
+			initialActiveToolNames: ["codemode"],
+			extensionFactories: [
+				instructionGroupsExtension,
+				owner,
+				createCodemodeExtension(),
+				(pi) =>
+					pi.registerTool({
+						name: "wait",
+						label: "wait",
+						description: "Waits for the test",
+						exposure: "codemode",
+						parameters: Type.Object({}),
+						execute: async () => {
+							await release.promise;
+							return { content: [{ type: "text", text: "released" }], details: undefined };
+						},
+					}),
+			],
+		});
+		let completionRequest: TranscriptContext | undefined;
+		harness.setResponses([
+			script(
+				'// @options: {"background": true}\nawait tools.wait({});\nreturn await tools.discover_tools({ enable: ["browser"] });',
+			),
+			done(),
+			(context) => {
+				completionRequest = structuredClone(context);
+				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
+			},
+			done(),
+		]);
+		await harness.session.prompt("discover in the background");
+		expect(harness.session.getActiveToolNames()).not.toContain("browse");
+		release.resolve();
+		await vi.waitFor(() => expect(harness.getPendingResponseCount()).toBe(0));
+		await harness.session.waitForIdle();
+		expect(JSON.stringify(completionRequest?.messages)).toContain(full);
+		const completion = harness.session.messages.findLast(
+			(message) => message.role === "custom" && message.customType === "codemode-background",
+		);
+		expect(getMessageText(completion)).toContain("completed");
+		expect(getMessageText(completion)).not.toContain(full);
+		expect(getToolResult(harness, "browse")).toMatchObject({
+			isError: false,
+			content: [{ type: "text", text: "acted" }],
+		});
+	});
 
 	it("lists without enabling and rejects unavailable or duplicate enables without changing state", async () => {
 		const harness = await setup();
@@ -799,126 +986,141 @@ describe("on-demand instruction groups", () => {
 		expect(restored.session.getActiveToolNames()).not.toContain("optional");
 	});
 
-	it("repairs only groups enabled at each compaction boundary, including after resume", async () => {
-		const repairs: unknown[] = [];
-		const extra = (pi: ExtensionAPI) => {
-			pi.events.on("pi:instruction-groups", (data) =>
-				(data as InstructionGroupCollector).register({
-					name: "later",
-					description: "Later",
-					tools: ["nested"],
-					instructions: () => later,
-				}),
-			);
-			pi.on("session_before_compact", (event) => ({
-				compaction: {
-					summary: "compacted",
-					firstKeptEntryId: event.preparation.firstKeptEntryId,
-					tokensBefore: event.preparation.tokensBefore,
-				},
-			}));
-			pi.on("context_with_system", (event) => {
-				const index = event.messages.findLastIndex((message) => message.role === "compactionSummary");
-				if (index >= 0) repairs.push(event.messages[index + 1]);
-			});
-		};
-		const options = {
-			settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
-			extensionFactories: [instructionGroupsExtension, owner, extra],
-		};
-		const harness = await setup(options);
-		harness.setResponses([discover(), done()]);
-		await harness.session.prompt("enable browser");
-		await harness.session.compact();
-		expect(
-			harness.session.messages.some(
-				(message) => message.role === "toolResult" && message.toolName === "discover_tools",
-			),
-		).toBe(false);
-		const boundary = harness.sessionManager.getBranch().findLast((entry) => entry.type === "compaction")!;
-		harness.setResponses([discover(["later"]), done()]);
-		await harness.session.prompt("enable later");
-		expect(repairs).toHaveLength(2);
-		expect(repairs[0]).toEqual(repairs[1]);
-		expect(repairs[0]).toMatchObject({
-			role: "custom",
-			display: false,
-			content: `## browser\n\n${full}`,
-			timestamp: Date.parse(boundary.timestamp),
-		});
-		const resumed = await setup({
-			...options,
-			sessionManager: SessionManager.inMemory(harness.tempDir, undefined, [
-				harness.sessionManager.getHeader()!,
-				...harness.sessionManager.getBranch(),
-			]),
-		});
-		resumed.setResponses([done()]);
-		await resumed.session.prompt("resume after compaction");
-		expect(repairs.at(-1)).toEqual(repairs[0]);
-		await resumed.session.compact();
-		resumed.setResponses([done()]);
-		await resumed.session.prompt("after second compaction");
-		expect(repairs.at(-1)).toMatchObject({ content: `## browser\n\n${full}\n\n## later\n\n${later}` });
-	});
-
-	it("repairs discovery immediately when automatic compaction removes its result mid-run", async () => {
-		const large = full + " guidance".repeat(1800);
-		const repairs: { headRole: string; message: unknown }[] = [];
-		const harness = await setup({
-			models: [{ id: "faux-1", contextWindow: 12000, maxTokens: 100 }],
-			settings: { compaction: { enabled: true, reserveTokens: 6000, keepRecentTokens: 1 } },
-			extensionFactories: [
-				instructionGroupsExtension,
-				(pi) => {
-					pi.events.on("pi:instruction-groups", (data) =>
-						(data as InstructionGroupCollector).register({
-							name: "browser",
-							description: "Browser",
-							tools: ["browse"],
-							instructions: () => large,
-						}),
-					);
-					pi.registerTool({
-						name: "browse",
-						label: "browse",
-						description: "browse",
-						parameters: Type.Object({}),
-						execute: async () => ({ content: [{ type: "text", text: "acted" }], details: undefined }),
-					});
-					pi.on("session_before_compact", (event) => ({
-						compaction: {
-							summary: "summary without instructions",
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-						},
-					}));
-					pi.on("context_with_system", (event) => {
-						const index = event.messages.findLastIndex((message) => message.role === "compactionSummary");
-						if (index < 0) return;
-						repairs.push({ headRole: event.messages[0].role, message: event.messages[index + 1] });
-					});
-				},
-			],
-		});
-		harness.setResponses([done()]);
-		await harness.session.prompt("Earlier context ".repeat(800));
-		harness.setResponses([
-			discover(),
-			fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" }),
-			done(),
-		]);
-		await harness.session.prompt("discover then act");
-		expect(harness.eventsOfType("compaction_end").length).toBeGreaterThan(0);
-		expect(repairs.length).toBeGreaterThan(0);
-		for (const repair of repairs) {
-			expect(repair.headRole).toBe("system");
-			expect(repair.message).toMatchObject({
+	it.each(["direct", "codemode"] as const)(
+		"repairs only groups enabled at each compaction boundary, including after resume, with %s discovery",
+		async (path) => {
+			const repairs: unknown[] = [];
+			const extra = (pi: ExtensionAPI) => {
+				pi.events.on("pi:instruction-groups", (data) =>
+					(data as InstructionGroupCollector).register({
+						name: "later",
+						description: "Later",
+						tools: ["nested"],
+						instructions: () => later,
+					}),
+				);
+				pi.on("session_before_compact", (event) => ({
+					compaction: {
+						summary: "compacted",
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+					},
+				}));
+				pi.on("context_with_system", (event) => {
+					const index = event.messages.findLastIndex((message) => message.role === "compactionSummary");
+					if (index >= 0) repairs.push(event.messages[index + 1]);
+				});
+			};
+			const options = {
+				settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+				...(path === "codemode" ? { initialActiveToolNames: ["codemode"] } : {}),
+				extensionFactories: [
+					instructionGroupsExtension,
+					owner,
+					extra,
+					...(path === "codemode" ? [createCodemodeExtension()] : []),
+				],
+			};
+			const harness = await setup(options);
+			harness.setResponses([discoverVia(path), done()]);
+			await harness.session.prompt("enable browser");
+			const discoveryAnchor = (message: (typeof harness.session.messages)[number]) =>
+				path === "direct"
+					? message.role === "toolResult" && message.toolName === "discover_tools"
+					: message.role === "custom" && message.customType === "pi:instruction-groups:instructions";
+			expect(harness.session.messages.some(discoveryAnchor)).toBe(true);
+			await harness.session.compact();
+			expect(harness.session.messages.some(discoveryAnchor)).toBe(false);
+			const boundary = harness.sessionManager.getBranch().findLast((entry) => entry.type === "compaction")!;
+			harness.setResponses([discoverVia(path, ["later"]), done()]);
+			await harness.session.prompt("enable later");
+			expect(repairs).toHaveLength(2);
+			expect(repairs[0]).toEqual(repairs[1]);
+			expect(repairs[0]).toMatchObject({
 				role: "custom",
 				display: false,
-				content: `## browser\n\n${large}`,
+				content: `## browser\n\n${full}`,
+				timestamp: Date.parse(boundary.timestamp),
 			});
-		}
-		expect(getToolResult(harness, "browse").isError).toBe(false);
-	});
+			const resumed = await setup({
+				...options,
+				sessionManager: SessionManager.inMemory(harness.tempDir, undefined, [
+					harness.sessionManager.getHeader()!,
+					...harness.sessionManager.getBranch(),
+				]),
+			});
+			resumed.setResponses([done()]);
+			await resumed.session.prompt("resume after compaction");
+			expect(repairs.at(-1)).toEqual(repairs[0]);
+			await resumed.session.compact();
+			resumed.setResponses([done()]);
+			await resumed.session.prompt("after second compaction");
+			expect(repairs.at(-1)).toMatchObject({ content: `## browser\n\n${full}\n\n## later\n\n${later}` });
+		},
+	);
+
+	it.each(["direct", "codemode"] as const)(
+		"repairs %s discovery immediately when automatic compaction removes its instructions mid-run",
+		async (path) => {
+			const large = full + " guidance".repeat(1800);
+			const repairs: { headRole: string; message: unknown }[] = [];
+			const harness = await setup({
+				models: [{ id: "faux-1", contextWindow: 12000, maxTokens: 100 }],
+				settings: { compaction: { enabled: true, reserveTokens: 6000, keepRecentTokens: 1 } },
+				...(path === "codemode" ? { initialActiveToolNames: ["codemode"] } : {}),
+				extensionFactories: [
+					instructionGroupsExtension,
+					...(path === "codemode" ? [createCodemodeExtension()] : []),
+					(pi) => {
+						pi.events.on("pi:instruction-groups", (data) =>
+							(data as InstructionGroupCollector).register({
+								name: "browser",
+								description: "Browser",
+								tools: ["browse"],
+								instructions: () => large,
+							}),
+						);
+						pi.registerTool({
+							name: "browse",
+							label: "browse",
+							description: "browse",
+							parameters: Type.Object({}),
+							execute: async () => ({ content: [{ type: "text", text: "acted" }], details: undefined }),
+						});
+						pi.on("session_before_compact", (event) => ({
+							compaction: {
+								summary: "summary without instructions",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						}));
+						pi.on("context_with_system", (event) => {
+							const index = event.messages.findLastIndex((message) => message.role === "compactionSummary");
+							if (index < 0) return;
+							repairs.push({ headRole: event.messages[0].role, message: event.messages[index + 1] });
+						});
+					},
+				],
+			});
+			harness.setResponses([done()]);
+			await harness.session.prompt("Earlier context ".repeat(800));
+			harness.setResponses([
+				discoverVia(path),
+				fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" }),
+				done(),
+			]);
+			await harness.session.prompt("discover then act");
+			expect(harness.eventsOfType("compaction_end").length).toBeGreaterThan(0);
+			expect(repairs.length).toBeGreaterThan(0);
+			for (const repair of repairs) {
+				expect(repair.headRole).toBe("system");
+				expect(repair.message).toMatchObject({
+					role: "custom",
+					display: false,
+					content: `## browser\n\n${large}`,
+				});
+			}
+			expect(getToolResult(harness, "browse").isError).toBe(false);
+		},
+	);
 });
