@@ -1,13 +1,15 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream `cae9fd28a2d3d515c83ea495093e3768cc8efab6`
-(2026-10-21), including v1.3.0 and its follow-up fixes. It is upstream plus the features
+v1.0.0 and synchronized through official v1.4.0 at
+`4a080252f06caf63a525d7873c5d94d3c23887e0` (2026-10-21).
+It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
-The [2026-10-21 consolidation record](docs/upstream-consolidation-2026-10-21.md)
-documents the current baseline, native replacements, retained differences, consumer
-inspection and verification. The [v1.3.0 integration record](docs/upstream-sync-1.3.0.md)
+The [v1.4.0 integration record](docs/upstream-sync-1.4.0.md) documents the current
+baseline and release-specific verification. The
+[2026-10-21 consolidation record](docs/upstream-consolidation-2026-10-21.md)
+records the previous native replacements, retained differences and consumer inspection. The [v1.3.0 integration record](docs/upstream-sync-1.3.0.md)
 records the previous integration's callers, regressions and commands. The
 [earlier 2026-10-15 integration record](docs/upstream-sync-2026-10-15.md) documents the
 measured divergence, preserved callers, new regressions and verification commands.
@@ -51,7 +53,7 @@ Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
 Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
 Empty quoted prompt-template arguments now follow upstream's token parser and positional-default regression coverage ([#10867](https://github.com/earendil-works/pi/issues/10867)); the equivalent fork implementation and tests are retired.
-Transcript resume uses upstream's recorded active-tool loadout and `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785)). The fork reconciles temporarily deferred discovery tools when discovery is disabled or absent; explicit selections, exclusions and later deselection remain authoritative across subsequent resumes. Native complete working-session restore retains its exact saved current loadout and modifier policy.
+Transcript resume uses upstream's branch-wide recorded active-tool loadout, activates eligible never-mentioned extension tools, and applies `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785), [#11062](https://github.com/earendil-works/pi/issues/11062)). The fork counts historical instruction-group deferrals as mentioned, so internal deferral does not make a tool newly registered. Other selections follow upstream's recorded additions and removals, without a separate selection protocol or legacy-session policy. The fork reconciles temporarily deferred discovery tools when discovery is disabled or absent; explicit selections, exclusions and later deselection remain authoritative across subsequent resumes. Native complete working-session restore retains its exact saved current loadout and modifier policy.
 Claude 5.5 catalog entries now use upstream's models.dev metadata rather than the removed fallback definitions.
 OpenCode Go's Google adapter and inference endpoints now follow upstream; `packages/ai/test/opencode-provider-headers.test.ts` retains the Gemini routing regression guard.
 The Chord service-hydration array check ([#10509](https://github.com/earendil-works/pi/issues/10509)) was retired with upstream's Chord 2 runtime: the service runtime is gone, and every link, including the in-memory one, JSON-round-trips frames.
@@ -180,6 +182,12 @@ large-payload deflation, acknowledgement-based state flow control, and optional 
 retains one compiled frame validator, the cursor-based publication drain, strict-JSON container hooks
 and public exports. Coding-agent uses Chord's JSON helpers, not its host/link transport; this sync
 establishes no current TUI or tool-performance improvement from those transport features.
+
+System One classifier images follow upstream's TypeSafe assets, Cloudflare images/assets
+and OpenRouter state-image serialization, including native limits and opt-in headers.
+Grep uses upstream's `rg --no-config`. Truncated-response recovery uses upstream's
+projected-context scan to omit the failed assistant and its matching tool results together.
+These are release integrations, not additional fork mechanisms.
 
 Model references follow upstream's shared provider-selection policy, including gateway IDs,
 thinking suffixes, authenticated-provider tie breaking and explicit-key ambiguity. The fork retains
