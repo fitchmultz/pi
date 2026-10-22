@@ -1836,7 +1836,8 @@ export class DefaultPackageManager implements PackageManager {
 					"--config.strict-dep-builds=false",
 				];
 			case "npm":
-				return ["install", "--omit=dev", "--legacy-peer-deps"];
+				// Automatic audit requests can stall installs before lifecycle scripts run.
+				return ["install", "--omit=dev", "--legacy-peer-deps", "--no-audit"];
 			default:
 				return ["install"];
 		}
@@ -1867,7 +1868,8 @@ export class DefaultPackageManager implements PackageManager {
 				"--config.strict-dep-builds=false",
 			];
 		}
-		return ["install", ...specs, "--prefix", installRoot, "--legacy-peer-deps"];
+		// Keep managed installs independent of the audit endpoint; explicit npm audit is unchanged.
+		return ["install", ...specs, "--prefix", installRoot, "--legacy-peer-deps", "--no-audit"];
 	}
 
 	private async installNpm(source: NpmSource, scope: SourceScope, temporary: boolean): Promise<void> {

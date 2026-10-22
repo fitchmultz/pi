@@ -733,7 +733,7 @@ Content`,
 	});
 
 	describe("npmCommand", () => {
-		it("should use npmCommand argv for npm installs", async () => {
+		it("should use npmCommand argv for npm installs without automatic audit", async () => {
 			settingsManager = SettingsManager.inMemory({
 				npmCommand: ["mise", "exec", "node@20", "--", "npm"],
 			});
@@ -759,6 +759,7 @@ Content`,
 					"--prefix",
 					join(agentDir, "npm"),
 					"--legacy-peer-deps",
+					"--no-audit",
 				],
 				undefined,
 			);
@@ -798,7 +799,7 @@ Content`,
 			);
 		});
 
-		it("should install git package dependencies without auto-installing peers", async () => {
+		it("should install git package dependencies without auto-installing peers or auditing", async () => {
 			const source = "git:github.com/user/repo";
 			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
 			const runCommandSpy = vi
@@ -813,9 +814,13 @@ Content`,
 
 			await packageManager.install(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
-				cwd: targetDir,
-			});
+			expect(runCommandSpy).toHaveBeenCalledWith(
+				"npm",
+				["install", "--omit=dev", "--legacy-peer-deps", "--no-audit"],
+				{
+					cwd: targetDir,
+				},
+			);
 		});
 
 		it("should remove a newly created checkout when git clone fails", async () => {
@@ -879,9 +884,13 @@ Content`,
 				cwd: targetDir,
 			});
 			expect(runCommandSpy).toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
-				cwd: targetDir,
-			});
+			expect(runCommandSpy).toHaveBeenCalledWith(
+				"npm",
+				["install", "--omit=dev", "--legacy-peer-deps", "--no-audit"],
+				{
+					cwd: targetDir,
+				},
+			);
 		});
 
 		it("should reconcile an existing git checkout to its update target when installing without a ref", async () => {
@@ -1006,7 +1015,7 @@ Content`,
 			});
 		});
 
-		it("should update git package dependencies without auto-installing peers", async () => {
+		it("should update git package dependencies without auto-installing peers or auditing", async () => {
 			const source = "git:github.com/user/repo";
 			const targetDir = join(tempDir, ".pi", "git", "github.com", "user", "repo");
 			mkdirSync(targetDir, { recursive: true });
@@ -1030,38 +1039,59 @@ Content`,
 
 			await packageManager.update(source);
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
-				cwd: targetDir,
-			});
-		});
-
-		it("should repair missing git package dependencies when the checkout is already current", async () => {
-			const source = "git:github.com/user/repo";
-			const targetDir = join(agentDir, "git", "github.com", "user", "repo");
-			const fetchArgs = ["fetch", "--prune", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"];
-			mkdirSync(targetDir, { recursive: true });
-			writeFileSync(
-				join(targetDir, "package.json"),
-				JSON.stringify({ name: "repo", version: "1.0.0", dependencies: { dependency: "1.0.0" } }),
+			expect(runCommandSpy).toHaveBeenCalledWith(
+				"npm",
+				["install", "--omit=dev", "--legacy-peer-deps", "--no-audit"],
+				{
+					cwd: targetDir,
+				},
 			);
-			settingsManager.setPackages([source]);
-
-			const managerWithInternals = packageManager as unknown as PackageManagerInternals;
-			vi.spyOn(managerWithInternals, "getLocalGitUpdateTarget").mockResolvedValue({
-				ref: "@{upstream}",
-				head: "current-head",
-				fetchArgs,
-			});
-			vi.spyOn(managerWithInternals, "runCommandCapture").mockResolvedValue("current-head");
-			const runCommandSpy = vi.spyOn(managerWithInternals, "runCommand").mockResolvedValue(undefined);
-
-			await packageManager.update(source);
-
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
-				cwd: targetDir,
-			});
-			expect(runCommandSpy).not.toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
 		});
+
+		it.each(["missing dependencies", "incomplete install"])(
+			"should repair %s when the git checkout is already current",
+			async (reason) => {
+				const source = "git:github.com/user/repo";
+				const targetDir = join(agentDir, "git", "github.com", "user", "repo");
+				const fetchArgs = ["fetch", "--prune", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"];
+				mkdirSync(targetDir, { recursive: true });
+				writeFileSync(
+					join(targetDir, "package.json"),
+					JSON.stringify({ name: "repo", version: "1.0.0", dependencies: { dependency: "1.0.0" } }),
+				);
+				settingsManager.setPackages([source]);
+
+				const managerWithInternals = packageManager as unknown as PackageManagerInternals;
+				vi.spyOn(managerWithInternals, "getLocalGitUpdateTarget").mockResolvedValue({
+					ref: "@{upstream}",
+					head: "current-head",
+					fetchArgs,
+				});
+				vi.spyOn(managerWithInternals, "runCommandCapture").mockResolvedValue("current-head");
+				const runCommandSpy = vi.spyOn(managerWithInternals, "runCommand").mockResolvedValue(undefined);
+				const markerPath = join(agentDir, "git", "github.com", "user", ".repo.pi-update-incomplete");
+				if (reason === "incomplete install") {
+					mkdirSync(join(targetDir, "node_modules", "dependency"), { recursive: true });
+					writeFileSync(markerPath, "");
+				}
+
+				await packageManager.update(source);
+
+				expect(runCommandSpy).toHaveBeenCalledWith(
+					"npm",
+					["install", "--omit=dev", "--legacy-peer-deps", "--no-audit"],
+					{
+						cwd: targetDir,
+					},
+				);
+				if (reason === "incomplete install") {
+					expect(runCommandSpy).toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
+				} else {
+					expect(runCommandSpy).not.toHaveBeenCalledWith("git", ["clean", "-fdx"], { cwd: targetDir });
+				}
+				expect(existsSync(markerPath)).toBe(false);
+			},
+		);
 
 		it("should repair deleted git package dependencies when cleaning fails", async () => {
 			const source = "git:github.com/user/repo";
@@ -1091,9 +1121,13 @@ Content`,
 
 			await expect(packageManager.update(source)).rejects.toThrow("simulated clean failure");
 
-			expect(runCommandSpy).toHaveBeenCalledWith("npm", ["install", "--omit=dev", "--legacy-peer-deps"], {
-				cwd: targetDir,
-			});
+			expect(runCommandSpy).toHaveBeenCalledWith(
+				"npm",
+				["install", "--omit=dev", "--legacy-peer-deps", "--no-audit"],
+				{
+					cwd: targetDir,
+				},
+			);
 		});
 
 		it("should disable peer installation through wrapped pnpm when updating git dependencies", async () => {
@@ -2430,7 +2464,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			);
 			expect(runCommandSpy).toHaveBeenCalledWith(
 				"npm",
-				["install", "example@^1.0.0", "--prefix", join(tempDir, ".pi", "npm"), "--legacy-peer-deps"],
+				["install", "example@^1.0.0", "--prefix", join(tempDir, ".pi", "npm"), "--legacy-peer-deps", "--no-audit"],
 				undefined,
 			);
 		});
@@ -2496,6 +2530,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 						"--prefix",
 						join(agentDir, "npm"),
 						"--legacy-peer-deps",
+						"--no-audit",
 					]);
 					mkdirSync(managedPath, { recursive: true });
 					writeFileSync(
@@ -2613,6 +2648,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 					"--prefix",
 					join(agentDir, "npm"),
 					"--legacy-peer-deps",
+					"--no-audit",
 				],
 				undefined,
 			);
@@ -2626,6 +2662,7 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 					"--prefix",
 					join(tempDir, ".pi", "npm"),
 					"--legacy-peer-deps",
+					"--no-audit",
 				],
 				undefined,
 			);

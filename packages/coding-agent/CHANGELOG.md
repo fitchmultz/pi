@@ -81,6 +81,7 @@
 - Fixed queued managed restarts to wait until admitted native work, including extension commands and handlers, completes.
 - Fixed custom extension UI leaking components that finish during factory initialization and losing editor text typed while an asynchronous factory is pending.
 - Fixed model-catalog compatibility checks crashing on npm 12's keyed `npm pack --json` metadata; release checks and workspace packing share the existing validation.
+- Fixed managed npm extension installs and updates waiting on automatic audit requests before lifecycle scripts run; explicit `npm audit` remains available.
 
 ## [1.4.0] - 2026-10-21
 
