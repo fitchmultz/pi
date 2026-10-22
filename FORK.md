@@ -65,6 +65,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
+| Managed npm extension installs must not wait on unsolicited audit requests before lifecycle scripts can run; explicit audits and CI security checks remain separate | `core/package-manager.ts` | `package-manager.test.ts` |
 | Legacy published Kimi Coding catalogs must not break offline builds or revert the native OpenAI protocol on fetched/cached overlays; preserve effort/tool constraints and K3 cache-write pricing | `packages/ai/src/api/kimi.ts`, `packages/ai/scripts/{generate-models,hydrate-model-catalog}.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts` |
 | Git footers must catch branch changes missed while native watchers and polling baselines start | `core/footer-data-provider.ts` | `footer-data-provider.test.ts` |
 | Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates | `core/{cache-warmer,model-runtime,sdk}.ts`, `modes/interactive/interactive-mode.ts` | `cache-warmer.test.ts` |
