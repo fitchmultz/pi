@@ -1,18 +1,21 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { type AutocompleteProvider, type Container, Text } from "@earendil-works/pi-tui";
+import { type AutocompleteProvider, type Container, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { describe, expect, onTestFinished, test, vi } from "vitest";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
-import { convertToLlm } from "../../../src/core/messages.ts";
+import { type CustomMessage, convertToLlm } from "../../../src/core/messages.ts";
+import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
+import backgroundCommand, { BACKGROUND_COMMAND_NOTICE } from "../../../src/extensions/background-command/index.ts";
+import { backgroundCommandDirectory, listBackgroundCommands } from "../../../src/extensions/background-command/jobs.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import type { SettingsSelectorComponent } from "../../../src/modes/interactive/components/settings-selector.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
+import { initTheme, theme } from "../../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -283,5 +286,102 @@ describe("compact view settings and native event lifecycle", () => {
 		expect(text()).toContain("agent detail");
 		expect(text()).toContain("entry detail");
 		expect(harness.faux.state.callCount).toBe(3);
+	});
+
+	test("background completion notices use one compact row and keep the full notice on expansion", async () => {
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-compact-background-")));
+		const harness = await createHarness({
+			sessionManager: SessionManager.create(root, join(root, "sessions")),
+			settings: { compactView: "hybrid", compaction: { enabled: false }, retry: { enabled: false } },
+			extensionFactories: [backgroundCommand],
+		});
+		onTestFinished(async () => {
+			await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			harness.cleanup();
+			rmSync(root, { recursive: true, force: true });
+		});
+		const { view, text, submit, rebind } = await createView(harness);
+		const jobs = backgroundCommandDirectory(harness.sessionManager);
+		harness.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("background_command", {
+					action: "start",
+					command: "printf 'compact-view-boundary-sentinel\\n'",
+				}),
+				{ stopReason: "toolUse" },
+			),
+			async () => {
+				const statuses = () => listBackgroundCommands(jobs).map((job) => job.status);
+				await vi.waitFor(() => expect(statuses()).toEqual(["succeeded"]), { timeout: 6000, interval: 25 });
+				return fauxAssistantMessage("Launched");
+			},
+			fauxAssistantMessage("Completion received"),
+		]);
+		await harness.session.prompt("Run background reproduction");
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(text()).toContain("▾ Activity");
+		expect(text()).not.toContain('"commandPreview"');
+		const [job] = listBackgroundCommands(jobs);
+		const notice = harness.session.messages.find(
+			(message): message is CustomMessage =>
+				message.role === "custom" && message.customType === BACKGROUND_COMMAND_NOTICE,
+		);
+		expect(notice?.details).toEqual({ jobIds: [job.id], jobs: [{ id: job.id, status: "succeeded" }] });
+		expect(notice?.content).toMatch(/^Background commands finished:\n/);
+		expect(notice?.content).toContain(job.logFile);
+		const saved = structuredClone(harness.session.messages);
+		const llm = convertToLlm(harness.session.messages);
+
+		const renderer = harness.session.extensionRunner.getMessageRenderer(BACKGROUND_COMMAND_NOTICE);
+		expect(renderer, "background notices have a compact renderer").toBeTypeOf("function");
+		const compactRow = (message: CustomMessage, width: number) => {
+			const lines = renderer!(message, { compactView: true, expanded: false, outputPad: 1 }, theme)!.render(width);
+			expect(lines).toHaveLength(1);
+			expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
+			return stripAnsi(lines[0]).trim();
+		};
+		const row = compactRow(notice!, 80);
+		expect(row).toContain("1");
+		await rebind();
+		expect(text()).toContain("▾ Activity");
+		expect(text()).toContain(row);
+		expect(text()).not.toContain('"commandPreview"');
+		view.setToolsExpanded(true);
+		expect(text()).toContain("Background commands finished:");
+		expect(text()).toContain('"commandPreview"');
+		view.setToolsExpanded(false);
+		expect(text()).not.toContain('"commandPreview"');
+		await submit("/cv off");
+		expect(text()).not.toContain("Activity");
+		expect(text()).toContain('"commandPreview"');
+		await submit("/cv hybrid");
+		expect(text()).toContain(row);
+		expect(text()).not.toContain('"commandPreview"');
+		expect(harness.session.messages).toEqual(saved);
+		expect(convertToLlm(harness.session.messages)).toEqual(llm);
+
+		const recorded = (details: unknown): CustomMessage => ({
+			role: "custom",
+			customType: BACKGROUND_COMMAND_NOTICE,
+			content: 'Background commands finished:\n{"id":"a","status":"succeeded"}\n\n{"id":"b","status":"failed"}',
+			display: true,
+			details,
+			timestamp: 1,
+		});
+		const legacy = compactRow(recorded({ jobIds: ["a", "b"] }), 24);
+		expect(legacy).toContain("2");
+		expect(legacy).not.toMatch(/succeeded|failed/);
+		const mixed = compactRow(
+			recorded({
+				jobIds: ["a", "b"],
+				jobs: [
+					{ id: "a", status: "succeeded" },
+					{ id: "b", status: "failed" },
+				],
+			}),
+			80,
+		);
+		expect(mixed).toContain("2");
+		expect(mixed).toContain("failed");
 	});
 });
