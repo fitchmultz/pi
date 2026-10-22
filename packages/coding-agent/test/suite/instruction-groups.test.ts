@@ -6,6 +6,7 @@ import {
 	fauxProvider,
 	fauxToolCall,
 	getCurrentSystemMessage,
+	getCurrentSystemPrompt,
 	getCurrentTools,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
@@ -207,7 +208,7 @@ describe("on-demand instruction groups", () => {
 			...(managed && testCase.selection?.includes("browse") ? [discover()] : []),
 			(context) => {
 				expect(context.messages[0]).toEqual(original.session.messages[0]);
-				if (!managed) expect(JSON.stringify(context.messages)).toContain(full);
+				if (!managed) expect(getCurrentSystemPrompt(context.messages)).toContain(full);
 				expect.soft(getCurrentTools(context.messages).some((tool) => tool.name === "browse")).toBe(testCase.active);
 				return fauxAssistantMessage(
 					[
