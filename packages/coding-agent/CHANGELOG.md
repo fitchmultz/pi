@@ -34,6 +34,7 @@
 - Skip disk reads for acknowledged terminal background jobs during monitoring; explicit status tools still read fresh state.
 - Batch workspace builds and npm/Nix packing, and retain PID-unique CPU profiles from every launcher and worker.
 - Skip unnecessary full archived-history indexing for recent context-usage estimates, preserving context-edit and compaction invalidation.
+- Clarified the codemode store limits in the tool description and docs: each value has a 256 KiB cap, keys and values together a 1 MiB per-branch cap, and background codemode scripts are not a durable monitoring mechanism ([#235](https://github.com/fitchmultz/pi/issues/235)).
 
 ### Fixed
 

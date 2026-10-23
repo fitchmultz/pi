@@ -95,7 +95,7 @@ See [Instruction groups](instruction-groups.md).
 
 `store(key, value)` keeps a JSON value under a string key for later `codemode` calls; storing `undefined` deletes the key. `load(key)` returns the value, or `undefined`. Writes are kept only when the script succeeds: each successful script that stores values appends a `codemode-store` custom entry to the session, so resumed sessions keep the values and each branch sees only the values written on its path.
 
-The store is for small state such as IDs, cursors, or summaries. One value may have at most 262144 characters of JSON and all values together at most 1048576. Do not store image data; show images with `image()`, which also saves them to a temp file.
+The store is for small state such as IDs, cursors, or summaries. One value may have at most 262144 characters of JSON, and all keys and values together at most 1048576. It is scoped to the current session branch. Do not store image data; show images with `image()`, which also saves them to a temp file. For monitoring that must survive the session, use a durable job or external scheduler rather than a background codemode script.
 
 ## Models
 
