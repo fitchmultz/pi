@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
 	Box,
 	type Component,
@@ -6,6 +6,7 @@ import {
 	Image,
 	MouseRegion,
 	resetCapabilitiesCache,
+	Spacer,
 	setCapabilities,
 	Text,
 	type TUI,
@@ -13,7 +14,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { afterEach, beforeAll, describe, expect, test } from "vitest";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { MessageRenderOptions } from "../src/core/extensions/types.ts";
 import { createAllToolRenderers } from "../src/core/tools/renderers/index.ts";
@@ -316,6 +317,158 @@ describe("compact tool cards", () => {
 });
 
 describe("compact Activity and messages", () => {
+	// #237: count work at the native fullscreen caller, including offscreen assistants.
+	test.each([false, true, "hybrid"] as const)(
+		"one assistant render per fullscreen frame (compact=%s)",
+		async (mode) => {
+			const terminal = new VirtualTerminal(80, 16);
+			const renderer = createInteractiveTui({
+				tuiMode: "fullscreen",
+				terminal,
+				showHardwareCursor: false,
+				logDirectory: "/tmp",
+			});
+			const chat = new ChatContainer();
+			chat.setCompactView(mode);
+			const assistants = Array.from(
+				{ length: 128 },
+				(_, i) =>
+					new AssistantMessageComponent(
+						fauxAssistantMessage(`Answer ${i}: [link](https://example.com) ${"wide 界 text ".repeat(8)}`),
+						false,
+						undefined,
+						undefined,
+						1,
+						[],
+						!!mode,
+					),
+			);
+			for (const assistant of assistants) chat.addChild(assistant);
+			const calls = assistants.map((assistant) => vi.spyOn(assistant, "render"));
+			const documents = vi.spyOn(chat, "render");
+			const frame = async () => {
+				await terminal.waitForRender();
+				expect(documents).toHaveBeenCalledTimes(1);
+				for (const call of calls) expect(call).toHaveBeenCalledTimes(1);
+				const lines = documents.mock.results[0].value as string[];
+				expect(lines.join("\n").match(/\x1b\]133;A\x07/g)).toHaveLength(128);
+				expect(lines.join("\n").match(/\x1b\]133;B\x07\x1b\]133;C\x07/g)).toHaveLength(128);
+				documents.mockClear();
+				for (const call of calls) call.mockClear();
+				return lines;
+			};
+			renderer.addChild(chat);
+			renderer.start();
+			try {
+				const initial = await frame();
+				renderer.requestRender();
+				expect(await frame()).toEqual(initial);
+				assistants[127].updateContent(fauxAssistantMessage("Streaming update"), true);
+				renderer.requestRender();
+				const updated = await frame();
+				expect(updated.join("\n")).toContain("Streaming update");
+				expect(terminal.getViewport().join("\n")).toContain("Streaming update");
+				terminal.resize(40, 16);
+				const resized = await frame();
+				expect(resized).not.toEqual(updated);
+				initTheme("light", false);
+				chat.invalidate();
+				renderer.requestRender();
+				const light = await frame();
+				expect(light).not.toEqual(resized);
+				expect(light.map(stripAnsi)).toEqual(resized.map(stripAnsi));
+			} finally {
+				renderer.stop();
+				documents.mockRestore();
+				for (const call of calls) call.mockRestore();
+			}
+		},
+	);
+
+	// #237: emptiness follows display structure, including notices and the spacer before transformed-away text.
+	test.each([true, "hybrid"] as const)(
+		"assistant grouping retains empty and transformed cases (compact=%s)",
+		(mode) => {
+			const tool = fauxToolCall("read", { path: "file" });
+			const cases = [
+				{ message: undefined, empty: true },
+				{ message: fauxAssistantMessage([]), empty: true },
+				{ message: fauxAssistantMessage(" \n\t "), empty: true },
+				{ message: fauxAssistantMessage(tool, { stopReason: "toolUse" }), empty: true },
+				{ message: fauxAssistantMessage([{ type: "thinking", thinking: "private" }]), empty: true },
+				{ message: fauxAssistantMessage([{ type: "thinking", thinking: " \n " }]), empty: true },
+				{ message: fauxAssistantMessage([], { stopReason: "error" }), empty: false },
+				{ message: fauxAssistantMessage([], { stopReason: "aborted" }), empty: false },
+				{ message: fauxAssistantMessage(tool, { stopReason: "length" }), empty: false },
+				{ message: fauxAssistantMessage(tool, { stopReason: "error" }), empty: true },
+				{ message: fauxAssistantMessage(tool, { stopReason: "aborted" }), empty: true },
+				{ message: fauxAssistantMessage("visible text"), empty: false },
+				{ message: fauxAssistantMessage("transformed away"), empty: false },
+			];
+			for (const { message, empty } of cases) {
+				const chat = new ChatContainer();
+				chat.setCompactView(mode);
+				chat.addActivity(new Text("before", 0, 0));
+				chat.addChild(new Spacer(1));
+				const assistant = new AssistantMessageComponent(
+					message,
+					true,
+					undefined,
+					undefined,
+					0,
+					[(markdown) => (markdown === "transformed away" ? "" : markdown)],
+					true,
+				);
+				chat.addChild(assistant);
+				chat.addChild(new Spacer(1));
+				chat.addActivity(new Text("after", 0, 0));
+				const children = [...chat.children];
+				const render = vi.spyOn(assistant, "render");
+				for (const width of [1, 40, 80]) {
+					render.mockClear();
+					const lines = chat.render(width);
+					expect(render).toHaveBeenCalledTimes(empty ? 0 : 1);
+					expect(assistant.render(width).length === 0).toBe(empty);
+					if (width > 1) {
+						expect(stripAnsi(lines.join("\n")).match(/Activity/g)).toHaveLength(empty ? 1 : 2);
+					}
+					expect(chat.children).toEqual(children);
+				}
+				render.mockRestore();
+			}
+		},
+	);
+
+	// #237: the one presentation render still establishes native mouse layouts.
+	test.each([true, "hybrid"] as const)("thinking clicks refresh assistant grouping (compact=%s)", (mode) => {
+		const chat = new ChatContainer();
+		chat.setCompactView(mode);
+		chat.addActivity(new Text("before", 0, 0));
+		const assistant = new AssistantMessageComponent(
+			fauxAssistantMessage([{ type: "thinking", thinking: "visible reasoning" }]),
+			false,
+			undefined,
+			undefined,
+			0,
+			[],
+			true,
+		);
+		chat.addChild(assistant);
+		chat.addActivity(new Text("after", 0, 0));
+		const lines = chat.render(80);
+		expect(stripAnsi(lines.join("\n")).match(/Activity/g)).toHaveLength(2);
+		click(
+			chat,
+			lines.findIndex((line) => stripAnsi(line).includes("visible reasoning")),
+			80,
+		);
+		const hidden = stripAnsi(chat.render(80).join("\n"));
+		expect(hidden.match(/Activity/g)).toHaveLength(1);
+		expect(hidden).not.toContain("visible reasoning");
+		assistant.setHideThinkingBlock(false);
+		expect(stripAnsi(chat.render(80).join("\n"))).toContain("visible reasoning");
+	});
+
 	test("hybrid opens groups with compact cards; heading clicks and global collapse retain mode defaults", () => {
 		const chat = new ChatContainer();
 		chat.setCompactView("hybrid");
