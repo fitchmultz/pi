@@ -1,3 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resetCapabilitiesCache, setCapabilities, Text, TuiAltScreen } from "@earendil-works/pi-tui";
 import type { Terminal as XtermTerminal } from "@xterm/headless";
 import { afterEach, beforeAll, describe, expect, test } from "vitest";
@@ -176,5 +181,48 @@ describe.each([false, "hybrid"] as const)("chat gutter protocol compatibility (c
 		} finally {
 			renderer.stop();
 		}
+	});
+});
+
+// #243: exercise differential rendering; the overflow throws from the real render timer.
+describe.each(["regular", "fullscreen"] as const)("%s narrow chat renderer", (tuiMode) => {
+	describe.each([
+		[3, "Z"],
+		[4, "界"],
+	] as const)("width=%s item=%s", (width, item) => {
+		test.each(["update", "append"] as const)("settles after %s without a fatal timer error", (operation) => {
+			const logDirectory = mkdtempSync(join(tmpdir(), "pi-narrow-renderer-"));
+			try {
+				const result = spawnSync(
+					process.execPath,
+					[
+						"--import",
+						fileURLToPath(new URL("../src/experimental/source-resolver.ts", import.meta.url)),
+						fileURLToPath(new URL("./fixtures/terminal-card-narrow-renderer.mjs", import.meta.url)),
+						String(width),
+						item,
+						operation,
+						tuiMode,
+						logDirectory,
+					],
+					{ encoding: "utf8", timeout: 10_000 },
+				);
+				let crashLog = "";
+				try {
+					crashLog = readFileSync(join(logDirectory, "pi-tui-crash.log"), "utf8");
+				} catch {}
+				const diagnostics = [result.error?.stack, result.stdout, result.stderr, crashLog]
+					.filter(Boolean)
+					.join("\n");
+				expect(result.error, diagnostics).toBeUndefined();
+				expect(result.signal, diagnostics).toBeNull();
+				expect(result.status, diagnostics).toBe(0);
+				expect(crashLog, diagnostics).toBe("");
+				expect(result.stdout, diagnostics).toContain("initial frame settled");
+				expect(result.stdout, diagnostics).toContain("narrow renderer lifecycle completed");
+			} finally {
+				rmSync(logDirectory, { recursive: true, force: true });
+			}
+		});
 	});
 });
