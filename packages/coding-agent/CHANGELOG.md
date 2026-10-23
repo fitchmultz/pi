@@ -84,6 +84,7 @@
 - Fixed model-catalog compatibility checks crashing on npm 12's keyed `npm pack --json` metadata; release checks and workspace packing share the existing validation.
 - Fixed managed npm extension installs and updates waiting on automatic audit requests before lifecycle scripts run; explicit `npm audit` remains available.
 - Fixed background command completion notices ignoring compact and hybrid views. Collapsed notices show one row with the finished count and any unsuccessful statuses; expanding shows the original notice.
+- Fixed managed restarts deleting the complete private session state when both the replacement and its one-shot recovery fail before readiness. The launcher now keeps the file and prints its path for `pi --working-session` recovery, and removes only its own native artifacts, never a user-supplied path ([#236](https://github.com/fitchmultz/pi/issues/236)).
 - Fixed compact and hybrid views rendering nonempty assistants twice per frame to check emptiness ([#237](https://github.com/fitchmultz/pi/issues/237)).
 
 ## [1.4.0] - 2026-10-21

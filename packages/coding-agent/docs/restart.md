@@ -46,13 +46,21 @@ Without a pin, each restart re-resolves the original invocation path, including 
 
 Readiness is signalled only after TUI initialization. If the selected worker cannot start, exits before readiness (even with exit 0), or is not ready within 60 seconds, the launcher starts the **exact previous worker and arguments once**, resuming the same saved session with the previous explicit extensions and pin policy. The startup failure is shown as a warning; when a message was supplied, the labelled continuation also includes it. Without a message, no model turn starts. If recovery also fails, Pi stops; it never loops.
 
+When recovery also fails before readiness, the launcher keeps the complete private state file and prints its exact path. It does not pick another model, relax validation, or fall back to journal-only resume. Fix the cause, then resume the exact state:
+
+```bash
+pi --working-session "/tmp/pi-restart-state-XXXXXX/working-session.json"
+```
+
+That launch treats the file as user-supplied and leaves it in place; delete the file and its directory after recovery. Stopping Pi with a signal during startup removes the file as usual. The launcher only removes its own native `pi-restart-state-*` artifact; a path supplied by the user is never removed.
+
 Readiness is not proof that every provider or tool works. Validate candidates first. Failures after readiness are not automatically rolled back or replayed, because work may already have had side effects.
 
 ## Complete native state
 
 Session history remains the authority. Every restart requires an existing private artifact in the complete [native working-session format](working-session.md) to preserve the selected leaf, all branches, effective settings and current loadout. Journal entries of types the native format does not model, such as legacy fork `context_window` boundaries, are carried as opaque records. If the final capture fails after shutdown, Pi prints the failure and the resume command and exits with status 1. Missing, journal-only or incompatible handoffs are refused; there is no journal-resume fallback. Original CLI options are retained except session-selection flags, consumed startup prompts/attachments, and `--model`/`--provider`/`--thinking`. With `--api-key`, the launch model is kept because the key applies to it; the key is never serialized. Extensions persist their own state with ordinary session entries and shutdown handlers. Restart still waits for runnable queues to drain and refuses pending next-turn context. It does not transfer arbitrary callback memory, migrate the runtime or replay completed effects.
 
-The captured settings are restored before discovery and extension factories. To adopt settings-file edits, use `/reload`. Each restart creates a private state file in its own temporary directory, independently of journal-directory permissions. It remains available through startup rollback; the launcher removes the file and empty directory after a replacement becomes ready or the launch ends. A user-supplied `--working-session` file remains untouched.
+The captured settings are restored before discovery and extension factories. To adopt settings-file edits, use `/reload`. Each restart creates a private state file in its own temporary directory, independently of journal-directory permissions. It remains available through startup rollback; the launcher removes the file and empty directory after a replacement becomes ready or the launch ends, except when both the replacement and its recovery fail before readiness (see [Startup recovery](#startup-recovery)). A user-supplied `--working-session` file remains untouched.
 
 ## Scope and development
 
