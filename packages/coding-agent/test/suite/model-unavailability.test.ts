@@ -91,12 +91,18 @@ describe("model unavailability diagnostics", () => {
 	});
 
 	it("reports missing credentials, extension model replacement and unidentified causes", async () => {
-		// models.json supplies a model that the harness's extension registration then replaces.
+		// models.json supplies a model that the harness's extension registration then replaces. Its
+		// hidden flag never sees the model, so the extension is the excluding layer.
 		const h = await createHarness({
 			provider: "override",
 			modelsJson: {
 				providers: {
-					override: { api: "openai-completions", baseUrl: "http://localhost:1", models: [{ id: "json-model" }] },
+					override: {
+						api: "openai-completions",
+						baseUrl: "http://localhost:1",
+						models: [{ id: "json-model" }],
+						modelOverrides: { "json-model": { hidden: true } },
+					},
 				},
 			},
 		});
@@ -116,6 +122,20 @@ describe("model unavailability diagnostics", () => {
 		});
 		// A model no layer ever supplied is not attributed to the extension.
 		expect(runtime.explainModelUnavailability("override", "never-listed").cause).toEqual({ kind: "unknown" });
+		// A failed credential check keeps scope candidates, so enabledModels is the reported exclusion.
+		const [scoped] = runtime.getModels("anthropic");
+		expect(scoped).toBeDefined();
+		const allowlist = { source: "enabledModels", patterns: [`anthropic/${scoped!.id}`], models: [scoped!] };
+		const failedCheck = Object.assign(Object.create(runtime), {
+			getAuthCheckError: () => new Error("token expired"),
+		}) as typeof runtime;
+		expect(failedCheck.explainModelUnavailability("anthropic", SCOPED, allowlist).cause).toMatchObject({
+			kind: "allowlist",
+		});
+		expect(failedCheck.explainModelUnavailability("anthropic", SCOPED).cause).toEqual({
+			kind: "provider-unavailable",
+			detail: 'credential check for provider "anthropic" failed: token expired',
+		});
 		expect(runtime.explainModelUnavailability("anthropic", "no-such-model").explanation).toBe(
 			"built-in catalog: absent; effective registry: absent; cause: unknown; the responsible configuration layer could not be identified",
 		);

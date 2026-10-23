@@ -555,9 +555,7 @@ export class ModelRuntime implements Models {
 			if (!this.models.getProvider(providerId))
 				return { kind: "provider-unavailable", detail: `provider ${quoted} is not registered` };
 			// Composition order: base catalog, models.json models, extension models, OAuth modifyModels,
-			// then models.json modelOverrides. Only the layers checked here can remove a model.
-			if (this.config.getProvider(providerId)?.modelOverrides?.[modelId]?.hidden === true)
-				return { kind: "models-json-hidden", modelsPath: this.modelsPath };
+			// then models.json modelOverrides. A layer only explains the absence of a model it received.
 			const listsModel = (models: readonly { id: string }[] | undefined) =>
 				models?.some((m) => m.id === modelId) ?? false;
 			const native = this.nativeExtensionProviders.get(providerId);
@@ -566,34 +564,34 @@ export class ModelRuntime implements Models {
 					kind: "model-override",
 					detail: `an extension provider replaced provider ${quoted} without this model`,
 				};
-			// Extension layers only explain the absence of a model the layers beneath them supplied.
 			const supplied =
 				listsModel((native ?? this.builtins.get(providerId))?.getModels()) ||
 				listsModel(this.config.getProvider(providerId)?.models);
 			const extension = this.extensionProviders.get(providerId);
-			if (supplied && extension?.models && !listsModel(extension.models))
+			// refreshModels and credential-gated modifyModels change the list at runtime, so only a
+			// static registration is evidence of what reached the later layers.
+			const dynamic = extension?.refreshModels !== undefined || extension?.oauth?.modifyModels !== undefined;
+			if (!dynamic && supplied && extension?.models && !listsModel(extension.models))
 				return {
 					kind: "model-override",
 					detail: `an extension registration for provider ${quoted} replaced its models without this model`,
 				};
-			if (extension?.oauth?.modifyModels && (extension.models ? listsModel(extension.models) : supplied))
-				return {
-					kind: "model-override",
-					detail: `extension OAuth modifyModels for provider ${quoted} removed it`,
-				};
+			const reachesOverrides = !dynamic && (extension?.models ? listsModel(extension.models) : supplied);
+			if (reachesOverrides && this.config.getProvider(providerId)?.modelOverrides?.[modelId]?.hidden === true)
+				return { kind: "models-json-hidden", modelsPath: this.modelsPath };
 			return { kind: "unknown" };
 		}
-		if (!this.hasConfiguredAuth(providerId)) {
-			const error = this.getAuthCheckError(providerId);
-			return {
-				kind: "provider-unavailable",
-				detail: error
-					? `credential check for provider ${quoted} failed: ${error.message}`
-					: `provider ${quoted} has no configured credentials`,
-			};
-		}
+		// A failed credential check keeps scope candidates, so it is reported after the allowlist.
+		const authError = this.getAuthCheckError(providerId);
+		if (!this.hasConfiguredAuth(providerId) && !authError)
+			return { kind: "provider-unavailable", detail: `provider ${quoted} has no configured credentials` };
 		if (allowlist && !allowlist.models.some((m) => m.provider === providerId && m.id === modelId))
 			return { kind: "allowlist", source: allowlist.source, patterns: allowlist.patterns };
+		if (!this.hasConfiguredAuth(providerId) && authError)
+			return {
+				kind: "provider-unavailable",
+				detail: `credential check for provider ${quoted} failed: ${authError.message}`,
+			};
 		return { kind: "unknown" };
 	}
 
