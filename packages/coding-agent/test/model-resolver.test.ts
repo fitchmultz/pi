@@ -485,6 +485,7 @@ describe("resolveCliModel", () => {
 		({
 			...overrides,
 			getModels: () => models,
+			getProviders: () => [...new Set(models.map((model) => model.provider))].map((id) => ({ id })),
 			explainModelUnavailability: (provider: string, modelId: string) =>
 				createModelUnavailability({
 					provider,
@@ -524,9 +525,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("returns a clear error when there are no models", () => {
-		const registry = {
-			getModels: () => [],
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRuntime"];
+		const registry = customIdRuntime([]);
 
 		const result = resolveCliModel({
 			cliProvider: "openai",

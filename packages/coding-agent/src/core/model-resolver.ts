@@ -126,7 +126,7 @@ function splitThinkingSuffix(text: string): { base: string; thinkingLevel: Think
 
 function splitProviderPrefix(
 	text: string,
-	models: readonly Model<Api>[],
+	models: readonly { provider: string }[],
 ): { provider: string; modelText: string } | undefined {
 	const slashIndex = text.indexOf("/");
 	if (slashIndex === -1) return undefined;
@@ -461,23 +461,29 @@ export function resolveCliModel(options: {
 	// Important: use *all* models here, not just models with pre-configured auth.
 	// This allows "--api-key" to be used for first-time setup.
 	const models = [...modelRuntime.getModels()];
-	if (models.length === 0) {
-		return {
-			model: undefined,
-			warning: undefined,
-			error: "No models available. Check your installation or add models to models.json.",
-		};
-	}
+	const trimmed = cliModel.trim();
+	const unthought = splitThinkingSuffix(trimmed)?.base ?? trimmed;
+	const registered = cliProvider
+		? modelRuntime.getProviders().find((entry) => entry.id.toLowerCase() === cliProvider.toLowerCase())?.id
+		: undefined;
+	const refusal = (message: string) => {
+		// An unregistered --provider names nothing to explain.
+		const reason =
+			cliProvider && !registered ? undefined : explainNamedModel(modelRuntime, models, registered, unthought);
+		return { model: undefined, warning: undefined, error: reason ? `${message} Unavailable: ${reason}.` : message };
+	};
+	if (models.length === 0)
+		return refusal("No models available. Check your installation or add models to models.json.");
 
 	const provider = cliProvider
 		? models.find((m) => m.provider.toLowerCase() === cliProvider.toLowerCase())?.provider
 		: undefined;
 	if (cliProvider && !provider) {
-		return {
-			model: undefined,
-			warning: undefined,
-			error: `Unknown provider "${cliProvider}". Use --list-models to see available providers/models.`,
-		};
+		return refusal(
+			registered
+				? `Provider "${registered}" has no models in the effective registry.`
+				: `Unknown provider "${cliProvider}". Use --list-models to see available providers/models.`,
+		);
 	}
 
 	const result = resolveModelReference(
@@ -493,7 +499,7 @@ export function resolveCliModel(options: {
 	if (result.status === "resolved") {
 		// Fuzzy or cross-provider matching may select a sibling of an excluded model; say why.
 		const resolvedId = result.model.id.toLowerCase();
-		const substituted = !nameModels(modelRuntime, provider, requested, models).some(
+		const substituted = !nameModels(modelRuntime, provider, requested).some(
 			(named) => named.provider === result.model.provider && named.modelId.toLowerCase() === resolvedId,
 		);
 		const reason = substituted ? explainNamedModel(modelRuntime, models, provider, requested) : undefined;
@@ -569,9 +575,12 @@ function nameModels(
 	modelRuntime: ModelRuntime,
 	provider: string | undefined,
 	text: string,
-	models: readonly Model<Api>[],
 ): { provider: string; modelId: string; literal?: true }[] {
-	const prefixed = splitProviderPrefix(text, models);
+	// Registered providers, not only those with models, so a provider whose models are all hidden is named.
+	const prefixed = splitProviderPrefix(
+		text,
+		modelRuntime.getProviders().map((entry) => ({ provider: entry.id })),
+	);
 	if (prefixed && (!provider || prefixed.provider === provider))
 		return [
 			{ provider: prefixed.provider, modelId: prefixed.modelText },
@@ -588,7 +597,7 @@ function explainNamedModel(
 	provider: string | undefined,
 	text: string,
 ): string | undefined {
-	const named = nameModels(modelRuntime, provider, text, models);
+	const named = nameModels(modelRuntime, provider, text);
 	// The literal `p/rest` id is only the fallback reading when `rest` is not registered.
 	const candidates = named.filter(
 		(candidate) =>

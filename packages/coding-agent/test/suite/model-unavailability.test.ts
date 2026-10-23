@@ -248,6 +248,40 @@ describe("model unavailability diagnostics", () => {
 		expect(bare.error).toContain(`Unavailable: ${reason(SCOPED)}.`);
 	});
 
+	it("explains named models when every model of a configured provider is hidden", async () => {
+		const ids = getBuiltinModels("anthropic").map((model) => model.id);
+		const h = await createHarness({
+			modelsJson: {
+				providers: {
+					anthropic: { modelOverrides: Object.fromEntries(ids.map((id) => [id, { hidden: true }])) },
+				},
+			},
+		});
+		harnesses.push(h);
+		const runtime = h.session.modelRuntime;
+		expect(runtime.getModels("anthropic")).toEqual([]);
+		const reason = `anthropic/${HIDDEN}: built-in catalog: present; effective registry: absent; cause: models.json (${join(h.tempDir, "models.json")}) sets providers["anthropic"].modelOverrides["${HIDDEN}"].hidden to true`;
+
+		for (const cli of [
+			{ cliProvider: "anthropic", cliModel: HIDDEN },
+			{ cliProvider: "anthropic", cliModel: `anthropic/${HIDDEN}:high` },
+		]) {
+			expect(resolveCliModel({ ...cli, modelRuntime: runtime })).toEqual({
+				model: undefined,
+				warning: undefined,
+				error: `Provider "anthropic" has no models in the effective registry. Unavailable: ${reason}.`,
+			});
+		}
+		// Without --provider, the prefix names the hidden model while the run still refuses it.
+		const prefixed = resolveCliModel({ cliModel: `anthropic/${HIDDEN}`, modelRuntime: runtime });
+		expect(prefixed.model).toBeUndefined();
+		expect(prefixed.error).toContain(`(${reason})`);
+		// An unregistered provider stays unknown.
+		expect(resolveCliModel({ cliProvider: "nope", cliModel: HIDDEN, modelRuntime: runtime }).error).toBe(
+			'Unknown provider "nope". Use --list-models to see available providers/models.',
+		);
+	});
+
 	it("treats a provider-prefixed literal id as the named model", async () => {
 		// Like OpenRouter's `openrouter/auto`, the literal id repeats the provider prefix.
 		const h = await createHarness({

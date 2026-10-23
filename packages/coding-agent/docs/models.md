@@ -259,9 +259,9 @@ Saved model anthropic/claude-sonnet-4-5 is not registered (built-in catalog: pre
   - an extension that replaced the provider or its static model list;
   - an unregistered provider, missing credentials, credentials that do not include the model, or a failed credential check;
   - `enabledModels`, when it excludes the saved default at startup;
-  - `unknown`, when no configuration layer can be identified. Pi does not guess.
+  - `unknown`, when no configuration layer can be identified, including extension model lists that change at runtime (`refreshModels` or OAuth `modifyModels`). Pi does not guess.
 
-The diagnostic does not change behavior. A managed restart still refuses the saved model and uses its one-shot rollback, and the saved state is left unchanged. Startup and `--model` choose models exactly as before; when they fall back or match a sibling ID, the warning says why the named model was skipped.
+The diagnostic does not change behavior. A managed restart still refuses the saved model and uses its one-shot rollback, and the saved state is left unchanged. Startup and `--model` choose models exactly as before; when they fall back or match a sibling ID, the warning says why the named model was skipped. If every model of a registered provider is excluded, `--provider` reports that the provider has no models in the effective registry instead of calling it unknown.
 
 ### Authentication works in one shell only
 
