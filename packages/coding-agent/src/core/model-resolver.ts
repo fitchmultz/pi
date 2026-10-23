@@ -570,12 +570,12 @@ function nameModels(
 	provider: string | undefined,
 	text: string,
 	models: readonly Model<Api>[],
-): { provider: string; modelId: string }[] {
+): { provider: string; modelId: string; literal?: true }[] {
 	const prefixed = splitProviderPrefix(text, models);
 	if (prefixed && (!provider || prefixed.provider === provider))
 		return [
 			{ provider: prefixed.provider, modelId: prefixed.modelText },
-			{ provider: prefixed.provider, modelId: text },
+			{ provider: prefixed.provider, modelId: text, literal: true },
 		];
 	const providers = provider ? [provider] : modelRuntime.getProviders().map((entry) => entry.id);
 	return providers.map((id) => ({ provider: id, modelId: text }));
@@ -588,8 +588,17 @@ function explainNamedModel(
 	provider: string | undefined,
 	text: string,
 ): string | undefined {
-	const reasons = nameModels(modelRuntime, provider, text, models)
-		.map((named) => explainExcludedModel(modelRuntime, named.provider, named.modelId))
+	const named = nameModels(modelRuntime, provider, text, models);
+	// The literal `p/rest` id is only the fallback reading when `rest` is not registered.
+	const candidates = named.filter(
+		(candidate) =>
+			!candidate.literal ||
+			!named.some(
+				(other) => !other.literal && models.some((m) => m.provider === other.provider && m.id === other.modelId),
+			),
+	);
+	const reasons = candidates
+		.map((candidate) => explainExcludedModel(modelRuntime, candidate.provider, candidate.modelId))
 		.filter((reason) => reason !== undefined);
 	return reasons.length > 0 ? reasons.join("; ") : undefined;
 }

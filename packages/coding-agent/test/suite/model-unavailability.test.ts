@@ -272,4 +272,30 @@ describe("model unavailability diagnostics", () => {
 		expect(resolved.model).toMatchObject({ provider: "gw", id: "gw/auto" });
 		expect(resolved.warning).toBeUndefined();
 	});
+
+	it("does not blame a hidden literal id when its registered suffix loses to a gateway match", async () => {
+		// `gw/auto` reads as `auto` first; a sole authenticated gateway id beats it, as before.
+		const h = await createHarness({
+			modelsJson: {
+				providers: {
+					gw: {
+						api: "openai-completions",
+						baseUrl: "http://localhost:1",
+						models: [{ id: "auto" }, { id: "gw/auto" }],
+						modelOverrides: { "gw/auto": { hidden: true } },
+					},
+					relay: {
+						api: "openai-completions",
+						baseUrl: "http://localhost:1",
+						apiKey: "test",
+						models: [{ id: "gw/auto" }],
+					},
+				},
+			},
+		});
+		harnesses.push(h);
+		const resolved = resolveCliModel({ cliModel: "gw/auto", modelRuntime: h.session.modelRuntime });
+		expect(resolved.model).toMatchObject({ provider: "relay", id: "gw/auto" });
+		expect(resolved.warning).toBeUndefined();
+	});
 });
