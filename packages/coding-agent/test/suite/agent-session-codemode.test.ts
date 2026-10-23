@@ -807,6 +807,9 @@ describe("codemode models", () => {
 		// The description names the models globals and points to the docs for the API.
 		expect(codemode?.description).toContain("`models`: classifiers and image generation");
 		expect(codemode?.description).toContain(CODEMODE_DOCS_PATH);
+		expect(codemode?.description).toContain("256 KiB");
+		expect(codemode?.description).toContain("1 MiB per session branch");
+		expect(codemode?.description).toContain("store(key, undefined)");
 
 		const overridden = await createHarness({ tools: [createCodemodeTool() as AgentTool] });
 		harnesses.push(overridden);
