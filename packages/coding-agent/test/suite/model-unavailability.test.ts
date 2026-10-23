@@ -189,6 +189,23 @@ describe("model unavailability diagnostics", () => {
 		);
 		// --models is an explicit per-run scope, so the same selection is silent.
 		expect(select()).toEqual({ scopedModel: scopedModels[0] });
+
+		// A credential entitlement filter, not enabledModels, excludes a model the patterns name.
+		const builtin = runtime.getProvider("anthropic")!;
+		runtime.registerNativeProvider({
+			...builtin,
+			filterModels: (models, credential) => (credential ? models.filter((model) => model.id !== HIDDEN) : models),
+		});
+		await runtime.refresh({ allowNetwork: false });
+		const both = [`anthropic/${SCOPED}`, `anthropic/${HIDDEN}`];
+		const filtered = selectScopedInitialModel({
+			scopedModels: await resolveModelScope(both, runtime),
+			defaultProvider: "anthropic",
+			defaultModelId: HIDDEN,
+			savedScope: { source: "enabledModels", patterns: both },
+			modelRuntime: runtime,
+		});
+		expect(filtered.warning).toContain('cause: the credentials for provider "anthropic" do not include this model');
 	});
 
 	it("explains explicitly selected hidden models while keeping existing CLI resolution", async () => {
@@ -215,6 +232,15 @@ describe("model unavailability diagnostics", () => {
 		expect(custom.warning).toBe(
 			`Model "${SCOPED}" not found for provider "anthropic" (${reason(SCOPED)}). Using custom model id.`,
 		);
+
+		// A redundant --provider with the same prefix names the same model.
+		const redundant = resolveCliModel({
+			cliProvider: "anthropic",
+			cliModel: `anthropic/${HIDDEN}`,
+			modelRuntime: runtime,
+		});
+		expect(redundant.model).toMatchObject({ provider: "anthropic", id: `${HIDDEN}-20250929` });
+		expect(redundant.warning).toContain(`(${reason(HIDDEN)})`);
 
 		const bare = resolveCliModel({ cliModel: SCOPED, modelRuntime: runtime });
 		expect(bare.model).toBeUndefined();

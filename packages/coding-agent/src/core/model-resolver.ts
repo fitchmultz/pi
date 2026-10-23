@@ -492,7 +492,7 @@ export function resolveCliModel(options: {
 			: cliModel.trim();
 	if (result.status === "resolved") {
 		// Fuzzy or cross-provider matching may select a sibling of an excluded model; say why.
-		const named = provider ? { provider, modelText: requested } : splitProviderPrefix(requested, models);
+		const named = nameModel(provider, requested, models);
 		const substituted =
 			(named !== undefined && named.provider !== result.model.provider) ||
 			(named?.modelText ?? requested).toLowerCase() !== result.model.id.toLowerCase();
@@ -561,6 +561,17 @@ function explainExcludedModel(modelRuntime: ModelRuntime, provider: string, mode
 	return `${provider}/${modelId}: ${unavailable.explanation}`;
 }
 
+/** The provider and id `text` names; an explicit provider also accepts its own `provider/` prefix. */
+function nameModel(
+	provider: string | undefined,
+	text: string,
+	models: readonly Model<Api>[],
+): { provider: string; modelText: string } | undefined {
+	const prefixed = splitProviderPrefix(text, models);
+	if (!provider) return prefixed;
+	return { provider, modelText: prefixed?.provider === provider ? prefixed.modelText : text };
+}
+
 /** Explanations for the excluded model `text` names: on its provider prefix, or on every provider for a bare id. */
 function explainNamedModel(
 	modelRuntime: ModelRuntime,
@@ -568,7 +579,7 @@ function explainNamedModel(
 	provider: string | undefined,
 	text: string,
 ): string | undefined {
-	const named = provider ? { provider, modelText: text } : splitProviderPrefix(text, models);
+	const named = nameModel(provider, text, models);
 	const providers = named ? [named.provider] : modelRuntime.getProviders().map((entry) => entry.id);
 	const reasons = providers
 		.map((id) => explainExcludedModel(modelRuntime, id, named?.modelText ?? text))

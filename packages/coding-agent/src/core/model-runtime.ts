@@ -589,6 +589,12 @@ export class ModelRuntime implements Models {
 		const authError = this.getAuthCheckError(providerId);
 		if (!this.hasConfiguredAuth(providerId) && !authError)
 			return { kind: "provider-unavailable", detail: `provider ${quoted} has no configured credentials` };
+		const available = this.snapshot.available.some((m) => m.provider === providerId && m.id === modelId);
+		if (!authError && !available)
+			return {
+				kind: "provider-unavailable",
+				detail: `the credentials for provider ${quoted} do not include this model`,
+			};
 		if (allowlist && !allowlist.models.some((m) => m.provider === providerId && m.id === modelId))
 			return { kind: "allowlist", source: allowlist.source, patterns: allowlist.patterns };
 		if (!this.hasConfiguredAuth(providerId) && authError)
