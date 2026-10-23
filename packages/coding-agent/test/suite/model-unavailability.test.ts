@@ -247,4 +247,29 @@ describe("model unavailability diagnostics", () => {
 		expect(bare.error).toContain(`is ambiguous across providers`);
 		expect(bare.error).toContain(`Unavailable: ${reason(SCOPED)}.`);
 	});
+
+	it("treats a provider-prefixed literal id as the named model", async () => {
+		// Like OpenRouter's `openrouter/auto`, the literal id repeats the provider prefix.
+		const h = await createHarness({
+			modelsJson: {
+				providers: {
+					gw: {
+						api: "openai-completions",
+						baseUrl: "http://localhost:1",
+						apiKey: "test",
+						models: [{ id: "auto" }, { id: "gw/auto" }],
+						modelOverrides: { auto: { hidden: true } },
+					},
+				},
+			},
+		});
+		harnesses.push(h);
+		const resolved = resolveCliModel({
+			cliProvider: "gw",
+			cliModel: "gw/auto",
+			modelRuntime: h.session.modelRuntime,
+		});
+		expect(resolved.model).toMatchObject({ provider: "gw", id: "gw/auto" });
+		expect(resolved.warning).toBeUndefined();
+	});
 });
