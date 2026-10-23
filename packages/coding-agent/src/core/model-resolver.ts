@@ -466,10 +466,14 @@ export function resolveCliModel(options: {
 	const registered = cliProvider
 		? modelRuntime.getProviders().find((entry) => entry.id.toLowerCase() === cliProvider.toLowerCase())?.id
 		: undefined;
+	// Refusals select nothing, so a registered provider whose models are all excluded can be named.
+	const registeredPrefixes = () => modelRuntime.getProviders().map((entry) => ({ provider: entry.id }));
 	const refusal = (message: string) => {
 		// An unregistered --provider names nothing to explain.
 		const reason =
-			cliProvider && !registered ? undefined : explainNamedModel(modelRuntime, models, registered, unthought);
+			cliProvider && !registered
+				? undefined
+				: explainNamedModel(modelRuntime, models, registered, unthought, registeredPrefixes());
 		return { model: undefined, warning: undefined, error: reason ? `${message} Unavailable: ${reason}.` : message };
 	};
 	if (models.length === 0)
@@ -499,7 +503,7 @@ export function resolveCliModel(options: {
 	if (result.status === "resolved") {
 		// Fuzzy or cross-provider matching may select a sibling of an excluded model; say why.
 		const resolvedId = result.model.id.toLowerCase();
-		const substituted = !nameModels(modelRuntime, provider, requested).some(
+		const substituted = !nameModels(modelRuntime, provider, requested, models).some(
 			(named) => named.provider === result.model.provider && named.modelId.toLowerCase() === resolvedId,
 		);
 		const reason = substituted ? explainNamedModel(modelRuntime, models, provider, requested) : undefined;
@@ -533,7 +537,7 @@ export function resolveCliModel(options: {
 
 	const { target } = result;
 	if (!target) {
-		const reason = explainNamedModel(modelRuntime, models, undefined, requested);
+		const reason = explainNamedModel(modelRuntime, models, undefined, requested, registeredPrefixes());
 		return {
 			model: undefined,
 			warning: undefined,
@@ -575,12 +579,9 @@ function nameModels(
 	modelRuntime: ModelRuntime,
 	provider: string | undefined,
 	text: string,
+	prefixes: readonly { provider: string }[],
 ): { provider: string; modelId: string; literal?: true }[] {
-	// Registered providers, not only those with models, so a provider whose models are all hidden is named.
-	const prefixed = splitProviderPrefix(
-		text,
-		modelRuntime.getProviders().map((entry) => ({ provider: entry.id })),
-	);
+	const prefixed = splitProviderPrefix(text, prefixes);
 	if (prefixed && (!provider || prefixed.provider === provider))
 		return [
 			{ provider: prefixed.provider, modelId: prefixed.modelText },
@@ -596,14 +597,17 @@ function explainNamedModel(
 	models: readonly Model<Api>[],
 	provider: string | undefined,
 	text: string,
+	prefixes: readonly { provider: string }[] = models,
 ): string | undefined {
-	const named = nameModels(modelRuntime, provider, text);
+	const named = nameModels(modelRuntime, provider, text, prefixes);
 	// The literal `p/rest` id is only the fallback reading when `rest` is not registered.
 	const candidates = named.filter(
 		(candidate) =>
 			!candidate.literal ||
 			!named.some(
-				(other) => !other.literal && models.some((m) => m.provider === other.provider && m.id === other.modelId),
+				(other) =>
+					!other.literal &&
+					models.some((m) => m.provider === other.provider && m.id.toLowerCase() === other.modelId.toLowerCase()),
 			),
 	);
 	const reasons = candidates
