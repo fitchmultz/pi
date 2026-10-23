@@ -71,6 +71,12 @@ import { getAgentDir } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
 import { ModelConfig } from "./model-config.ts";
+import {
+	createModelUnavailability,
+	type ModelAllowlist,
+	type ModelUnavailability,
+	type ModelUnavailableCause,
+} from "./model-unavailability.ts";
 import { FileModelsStore, InMemoryCodingAgentModelsStore } from "./models-store.ts";
 import {
 	type AuthStatus,
@@ -519,6 +525,76 @@ export class ModelRuntime implements Models {
 
 	getModel(providerId: string, modelId: string): Model<Api> | undefined {
 		return this.models.getModel(providerId, modelId);
+	}
+
+	/**
+	 * Explain why `providerId/modelId` cannot be selected: whether Pi's built-in catalog and the
+	 * effective registry list it, and the first identifiable layer that excludes it. Read-only.
+	 */
+	explainModelUnavailability(providerId: string, modelId: string, allowlist?: ModelAllowlist): ModelUnavailability {
+		const builtin = builtinProviderCatalog.getBuiltinProviders().find((id) => id === providerId);
+		const inRegistry = this.models.getModel(providerId, modelId) !== undefined;
+		return createModelUnavailability({
+			provider: providerId,
+			modelId,
+			inCatalog:
+				builtin !== undefined && builtinProviderCatalog.getBuiltinModels(builtin).some((m) => m.id === modelId),
+			inRegistry,
+			cause: this.findUnavailableCause(providerId, modelId, inRegistry, allowlist),
+		});
+	}
+
+	private findUnavailableCause(
+		providerId: string,
+		modelId: string,
+		inRegistry: boolean,
+		allowlist: ModelAllowlist | undefined,
+	): ModelUnavailableCause {
+		const quoted = JSON.stringify(providerId);
+		if (!inRegistry) {
+			if (!this.models.getProvider(providerId))
+				return { kind: "provider-unavailable", detail: `provider ${quoted} is not registered` };
+			// Composition order: base catalog, models.json models, extension models, OAuth modifyModels,
+			// then models.json modelOverrides. Only the layers checked here can remove a model.
+			if (this.config.getProvider(providerId)?.modelOverrides?.[modelId]?.hidden === true)
+				return { kind: "models-json-hidden", modelsPath: this.modelsPath };
+			const listsModel = (models: readonly { id: string }[] | undefined) =>
+				models?.some((m) => m.id === modelId) ?? false;
+			const native = this.nativeExtensionProviders.get(providerId);
+			if (native && listsModel(this.builtins.get(providerId)?.getModels()) && !listsModel(native.getModels()))
+				return {
+					kind: "model-override",
+					detail: `an extension provider replaced provider ${quoted} without this model`,
+				};
+			// Extension layers only explain the absence of a model the layers beneath them supplied.
+			const supplied =
+				listsModel((native ?? this.builtins.get(providerId))?.getModels()) ||
+				listsModel(this.config.getProvider(providerId)?.models);
+			const extension = this.extensionProviders.get(providerId);
+			if (supplied && extension?.models && !listsModel(extension.models))
+				return {
+					kind: "model-override",
+					detail: `an extension registration for provider ${quoted} replaced its models without this model`,
+				};
+			if (extension?.oauth?.modifyModels && (extension.models ? listsModel(extension.models) : supplied))
+				return {
+					kind: "model-override",
+					detail: `extension OAuth modifyModels for provider ${quoted} removed it`,
+				};
+			return { kind: "unknown" };
+		}
+		if (!this.hasConfiguredAuth(providerId)) {
+			const error = this.getAuthCheckError(providerId);
+			return {
+				kind: "provider-unavailable",
+				detail: error
+					? `credential check for provider ${quoted} failed: ${error.message}`
+					: `provider ${quoted} has no configured credentials`,
+			};
+		}
+		if (allowlist && !allowlist.models.some((m) => m.provider === providerId && m.id === modelId))
+			return { kind: "allowlist", source: allowlist.source, patterns: allowlist.patterns };
+		return { kind: "unknown" };
 	}
 
 	getModelsOfType<TType extends ModelType>(type: TType, providerId?: string): readonly ModelTypeMap[TType][] {

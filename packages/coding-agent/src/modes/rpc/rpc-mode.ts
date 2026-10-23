@@ -488,7 +488,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				const models = session.modelRuntime.getAvailableSnapshot();
 				const model = models.find((m) => m.provider === command.provider && m.id === command.modelId);
 				if (!model) {
-					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
+					const { explanation } = session.modelRuntime.explainModelUnavailability(
+						command.provider,
+						command.modelId,
+					);
+					return error(
+						id,
+						"set_model",
+						`Model not found: ${command.provider}/${command.modelId} (${explanation})`,
+					);
 				}
 				await session.setModel(model);
 				return success(id, "set_model", model);

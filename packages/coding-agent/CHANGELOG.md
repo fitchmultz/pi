@@ -25,6 +25,7 @@
 - Added `pi update --fork` for validated immutable fork releases on macOS, Linux, and Termux, with pinned-main builds and safe selector activation. Activation accepts upstream catalog removals and prints every removed model ID instead of blocking the update; direct installer runs still require explicit `--accept-model-removals`, while explicit rollback remains available. Restored Termux compiler preparation and isolated shell/exec environments.
 - Added frozen performance results and offline reproduction fixtures covering native tools, rendering, sessions, transports, storage and packaging. See [performance results and reproduction](../../docs/performance.md).
 - Added `hidden: true` to `models.json` `modelOverrides` to remove individual built-in, extension or custom models from a provider, for example superseded versions in `/model` and `--list-models`. See [Choose a Model](docs/models.md).
+- Added diagnostics when a saved or explicitly selected model is unavailable. Refusals and fallback warnings report whether the built-in catalog and effective registry list the model and name the excluding layer: a `models.json` `hidden` override, an extension model override, an unavailable provider or missing credentials, `enabledModels`, or an explicit unknown. Selection and validation are unchanged ([#241](https://github.com/fitchmultz/pi/issues/241)). See [Choose a Model](docs/models.md#a-saved-or-selected-model-is-unavailable).
 
 ### Changed
 

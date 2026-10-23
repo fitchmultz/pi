@@ -307,10 +307,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const hasExistingSession = existingSession.messages.length > 0;
 	const hasThinkingEntry = sessionManager.getBranch().some((entry) => entry.type === "thinking_level_change");
 
+	const explainUnavailable = (provider: string, modelId: string) =>
+		modelRuntime.explainModelUnavailability(provider, modelId).explanation;
 	if (saved) {
 		model = saved.model ? modelRuntime.getModel(saved.model.provider, saved.model.id) : undefined;
 		if (saved.model && !model)
-			throw new Error(`Saved model ${saved.model.provider}/${saved.model.id} is not registered`);
+			throw new Error(
+				`Saved model ${saved.model.provider}/${saved.model.id} is not registered (${explainUnavailable(saved.model.provider, saved.model.id)})`,
+			);
 	}
 	let modelFallbackMessage: string | undefined;
 
@@ -332,17 +336,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			model = restoredModel;
 		}
 		if (!model) {
-			modelFallbackMessage = `Could not restore model ${sessionModel.provider}/${sessionModel.modelId}`;
+			modelFallbackMessage = `Could not restore model ${sessionModel.provider}/${sessionModel.modelId} (${explainUnavailable(sessionModel.provider, sessionModel.modelId)})`;
 		}
 	}
 
 	// If still no model, use findInitialModel (checks settings default, then provider defaults)
 	if (!saved && !model) {
+		const defaultProvider = settingsManager.getDefaultProvider();
+		const defaultModelId = settingsManager.getDefaultModel();
 		const result = await findInitialModel({
 			scopedModels: [],
 			isContinuing: hasExistingSession,
-			defaultProvider: settingsManager.getDefaultProvider(),
-			defaultModelId: settingsManager.getDefaultModel(),
+			defaultProvider,
+			defaultModelId,
 			defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
 			modelThinkingLevels: settingsManager.getAllModelThinkingLevels(),
 			modelRuntime,
@@ -350,8 +356,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		model = result.model;
 		if (!model) {
 			modelFallbackMessage = formatNoModelsAvailableMessage();
-		} else if (modelFallbackMessage) {
-			modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
+		} else {
+			// findInitialModel selects a usable saved default, so another selection means it was refused.
+			if (
+				!modelFallbackMessage &&
+				defaultProvider &&
+				defaultModelId &&
+				(model.provider !== defaultProvider || model.id !== defaultModelId)
+			) {
+				modelFallbackMessage = `Could not use saved default model ${defaultProvider}/${defaultModelId} (${explainUnavailable(defaultProvider, defaultModelId)})`;
+			}
+			if (modelFallbackMessage) modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
 		}
 	}
 
@@ -387,7 +402,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const scopedModels = saved
 		? saved.scopedModels.map((scope) => {
 				const model = modelRuntime.getModel(scope.provider, scope.id);
-				if (!model) throw new Error(`Saved scoped model ${scope.provider}/${scope.id} is not registered`);
+				if (!model)
+					throw new Error(
+						`Saved scoped model ${scope.provider}/${scope.id} is not registered (${explainUnavailable(scope.provider, scope.id)})`,
+					);
 				return { model, thinkingLevel: scope.thinkingLevel };
 			})
 		: options.scopedModels;

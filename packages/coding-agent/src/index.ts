@@ -241,6 +241,7 @@ export {
 	ModelRuntime,
 	type ModelRuntimeAuthOverrides,
 } from "./core/model-runtime.ts";
+export type { ModelAllowlist, ModelUnavailability, ModelUnavailableCause } from "./core/model-unavailability.ts";
 export type {
 	PackageManager,
 	PathMetadata,
