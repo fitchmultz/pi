@@ -145,9 +145,16 @@ export class Box implements Component {
 			result.push(this.applyBg("", width));
 		}
 
-		// Content
-		for (const line of childLines) {
-			result.push(this.applyBg(leftPad + line, width));
+		// A styled callback can change content despite an unchanged sample. Keep its full-frame behavior.
+		const cache =
+			!this.bgFn && this.cache?.width === width && this.cache.bgSample === bgSample ? this.cache : undefined;
+
+		// Content: unchanged rows at the same index already have the correct padding.
+		for (let i = 0; i < childLines.length; i++) {
+			const line = childLines[i]!;
+			result.push(
+				cache && cache.childLines[i] === line ? cache.lines[result.length]! : this.applyBg(leftPad + line, width),
+			);
 		}
 
 		// Bottom padding

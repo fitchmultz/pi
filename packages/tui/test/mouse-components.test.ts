@@ -1,9 +1,12 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
+import { Box } from "../src/components/box.ts";
 import { Editor, type EditorTheme } from "../src/components/editor.ts";
 import { Input } from "../src/components/input.ts";
+import { MouseRegion } from "../src/components/mouse-region.ts";
 import { SelectList, type SelectListTheme } from "../src/components/select-list.ts";
 import { SettingsList, type SettingsListTheme } from "../src/components/settings-list.ts";
+import { Text } from "../src/components/text.ts";
 import { Container, type TuiMouseEvent, type TuiMouseEventType } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { stripTerminalSequences } from "../src/utils.ts";
@@ -84,6 +87,41 @@ class SubmenuHost extends Container {
 }
 
 describe("mouse-aware components", () => {
+	// #243: cached Box output must not retain stale child identity or row geometry.
+	it("routes unchanged and partially changed Box rows to the current children", () => {
+		const first = new Text("a\nb", 0, 0);
+		const second = new Text("", 0, 0);
+		const hits: Array<Array<string | number>> = [];
+		const region = (id: string, child: Text) =>
+			new MouseRegion(child, (event) => {
+				hits.push([id, event.x, event.y, event.width, event.height]);
+				return { handled: true };
+			});
+		const firstRegion = region("first", first);
+		const box = new Box(1, 1);
+		box.addChild(firstRegion);
+		box.addChild(region("second", second));
+		const unchanged = ["     ", " a   ", " b   ", "     "];
+		assert.deepStrictEqual(box.render(5), unchanged);
+		box.handleMouse(mouse("press", 1, 2, 5, 4));
+		first.setText("a");
+		second.setText("b");
+		assert.deepStrictEqual(box.render(5), unchanged);
+		box.handleMouse(mouse("press", 1, 2, 5, 4));
+		box.children = [firstRegion, region("replacement", new Text("b", 0, 0))];
+		assert.deepStrictEqual(box.render(5), unchanged);
+		box.handleMouse(mouse("press", 1, 2, 5, 4));
+		first.setText("a\nc");
+		assert.deepStrictEqual(box.render(5), ["     ", " a   ", " c   ", " b   ", "     "]);
+		box.handleMouse(mouse("press", 1, 3, 5, 5));
+		assert.deepStrictEqual(hits, [
+			["first", 0, 1, 3, 2],
+			["second", 0, 0, 3, 1],
+			["replacement", 0, 0, 3, 1],
+			["replacement", 0, 0, 3, 1],
+		]);
+	});
+
 	it("positions the input cursor using the visible prompt width", () => {
 		for (const { prompt, x, expected } of [
 			{ prompt: undefined, x: 4, expected: "heXllo" },
