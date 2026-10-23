@@ -109,6 +109,11 @@ export class AssistantMessageComponent extends Container {
 		if (this.lastMessage) this.updateContent(this.lastMessage);
 	}
 
+	isEmpty(): boolean {
+		// Every displayed run or notice has a spacer, even when Markdown transforms to empty text.
+		return this.contentContainer.children.length === 0;
+	}
+
 	override render(width: number): string[] {
 		const lines = super.render(width);
 		if (this.hasToolCalls || lines.length === 0) {

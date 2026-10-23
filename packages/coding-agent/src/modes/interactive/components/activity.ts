@@ -106,7 +106,7 @@ export class ChatContainer extends Container {
 				spacers.push(child);
 				continue;
 			}
-			if (child instanceof AssistantMessageComponent && child.render(width).length === 0) continue;
+			if (child instanceof AssistantMessageComponent && child.isEmpty()) continue;
 			if (
 				this.activity.has(child) ||
 				child instanceof ToolExecutionComponent ||
