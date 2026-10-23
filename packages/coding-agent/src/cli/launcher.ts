@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { constants } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
@@ -24,6 +24,10 @@ interface Launch {
 	worker: string;
 	args: string[];
 	pinnedWorker?: string;
+}
+
+function isLauncherRestartArtifact(path: string): boolean {
+	return basename(path) === "working-session.json" && basename(dirname(path)).startsWith("pi-restart-state-");
 }
 
 function removeRestartArtifact(path: string): void {
@@ -227,7 +231,9 @@ export async function superviseCli(
 			const exitCode = result.signal ? 128 + constants.signals[result.signal] : timedOut ? 1 : (result.code ?? 1);
 			if (stopping) return exitCode;
 			if (restart && result.code === 0 && !result.signal) {
-				restartArtifacts.add(restart.session.workingSession);
+				// A worker can report a user-supplied path; only launcher-created native artifacts are ours to delete.
+				if (isLauncherRestartArtifact(restart.session.workingSession))
+					restartArtifacts.add(restart.session.workingSession);
 				const selection = ["--working-session", restart.session.workingSession];
 				const previous: Launch = {
 					...launch,
@@ -266,6 +272,16 @@ export async function superviseCli(
 				fallback = undefined;
 				handoff = { ...handoff, failure, extensions: undefined };
 				continue;
+			}
+			if (!ready && restartArtifacts.size > 0) {
+				// No worker consumed the handoff and no recovery remains; keep it for explicit recovery.
+				for (const path of restartArtifacts) {
+					if (!existsSync(path)) continue;
+					console.error(
+						`Restart recovery failed before Pi became ready. The complete private session state was kept at:\n${path}\nAfter fixing the startup failure, resume it with: pi --working-session "${path}"\nDelete that file and its directory after recovery.`,
+					);
+				}
+				restartArtifacts.clear();
 			}
 			if (ready && completed && result.code === 0 && !result.signal && exitPath) {
 				assertPrivateFilePath(completed.path);

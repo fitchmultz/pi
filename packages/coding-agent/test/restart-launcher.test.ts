@@ -12,16 +12,25 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { getRestartArgs, getRestartRuntimeWorker, runCliLauncher, superviseCli } from "../src/cli/launcher.ts";
 import { parseRestartCommand, parseRestartRequest } from "../src/cli/restart-protocol.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { resolveWorkingSession } from "../src/core/working-session.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const roots: string[] = [];
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+const RETAINED = "The complete private session state was kept at:";
+
+function captureStderr(): () => string {
+	const error = vi.spyOn(console, "error").mockImplementation(() => {});
+	return () => error.mock.calls.map((call) => call.join(" ")).join("\n");
+}
 
 interface Receipt {
 	runtime: string;
@@ -158,7 +167,7 @@ ${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario
 		[true, false],
 		[true, true],
 	])(
-		"retires only received restart state after successful readiness; rollback=%s, nativeDirectory=%s",
+		"retires only launcher-owned native restart state after successful readiness; rollback=%s, nativeDirectory=%s",
 		async (rollback, nativeDirectory) => {
 			const f = await fixture();
 			const directory = nativeDirectory ? mkdtempSync(join(f.root, "pi-restart-state-")) : f.root;
@@ -170,10 +179,12 @@ ${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario
 			const a = f.release("A", `if (!handoff) { select('B'); restart(); } else { ${record} ready(); }`);
 			f.release("B", rollback ? "process.exit(17);" : `${record} ready();`);
 			f.select(a);
+			const stderr = captureStderr();
 			expect(await f.run(a)).toBe(0);
 			expect(readFileSync(observed, "utf8")).toBe("true");
-			expect(existsSync(artifact)).toBe(false);
+			expect(existsSync(artifact)).toBe(!nativeDirectory);
 			expect(existsSync(directory)).toBe(!nativeDirectory);
+			expect(stderr()).not.toContain(RETAINED);
 			const direct = join(f.root, "user-supplied.json");
 			writeFileSync(direct, "user restore authority", { mode: 0o600 });
 			const runtime = f.release("direct", "ready();");
@@ -183,6 +194,16 @@ ${scenario === "replaced" ? "select('B'); restart();" : `process.exit(${scenario
 			expect(readFileSync(direct, "utf8")).toBe("user restore authority");
 		},
 	);
+
+	it("never deletes a private user-supplied working-session path sent by a restart", async () => {
+		const f = await fixture();
+		const artifact = join(f.root, "user-supplied-private.json");
+		writeFileSync(artifact, f.state, { mode: 0o600 });
+		f.session.workingSession = artifact;
+		const runtime = f.release("A", "if (!handoff) restart({}); else ready();");
+		expect(await superviseCli(getRestartRuntimeWorker(runtime), [], { execArgv: [] })).toBe(0);
+		expect(readFileSync(artifact, "utf8")).toBe(f.state);
+	});
 
 	it
 		.skipIf(process.platform === "win32")
@@ -372,14 +393,67 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 		});
 		if (body.includes("setInterval")) expect(receipts[2].handoff?.failure).toContain("within 0.2 seconds");
 	});
-	it("stops if the exact previous worker also fails", async () => {
+	// fitchmultz/pi#236
+	it("stops if the exact previous worker also fails and keeps the complete handoff for recovery", async () => {
 		const f = await fixture();
+		const directory = mkdtempSync(join(f.root, "pi-restart-state-"));
+		const artifact = join(directory, "working-session.json");
+		writeFileSync(artifact, f.state, { mode: 0o600 });
+		f.session.workingSession = artifact;
 		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else process.exit(23);');
 		f.release("B", "process.exit(17);");
 		f.select(a);
+		const stderr = captureStderr();
 		expect(await f.run(a)).toBe(23);
 		expect(f.read().map((r) => r.runtime)).toEqual(["A", "B", "A"]);
+		expect(readFileSync(artifact, "utf8")).toBe(f.state);
+		expect(stderr()).toContain(`${RETAINED}\n${artifact}\n`);
+		expect(stderr()).toContain(`pi --working-session "${artifact}"`);
+		expect(resolveWorkingSession(artifact)?.header.id).toBe(f.session.sessionId);
+
+		// After the cause is fixed, an explicit launch consumes the exact retained state and leaves it untouched.
+		const repaired = f.release("repaired", "ready();");
+		expect(
+			await superviseCli(getRestartRuntimeWorker(repaired), ["--working-session", artifact], { execArgv: [] }),
+		).toBe(0);
+		expect(f.read().at(-1)).toMatchObject({ runtime: "repaired", args: ["--working-session", artifact] });
+		expect(readFileSync(artifact, "utf8")).toBe(f.state);
 	});
+	it.skipIf(process.platform === "win32")(
+		"does not keep the handoff when the user stops a failing restart",
+		async () => {
+			const f = await fixture();
+			const directory = mkdtempSync(join(f.root, "pi-restart-state-"));
+			const artifact = join(directory, "working-session.json");
+			writeFileSync(artifact, f.state, { mode: 0o600 });
+			f.session.workingSession = artifact;
+			const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else process.exit(23);');
+			f.release("B", "process.kill(process.ppid, 'SIGTERM'); setInterval(() => {}, 1000);");
+			f.select(a);
+			const parent = join(f.root, "parent.mjs");
+			writeFileSync(
+				parent,
+				`
+import { superviseCli } from ${JSON.stringify(new URL("../src/cli/launcher.ts", import.meta.url).href)};
+process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(a))}, [], {invocationPath:${JSON.stringify(f.selector)}, execArgv:[]});
+`,
+			);
+			const child = spawn(process.execPath, [parent], { stdio: ["ignore", "pipe", "pipe"] });
+			let output = "";
+			child.stderr.on("data", (chunk: Buffer) => {
+				output += chunk.toString();
+			});
+			const code = await new Promise<number | null>((resolve, reject) => {
+				child.once("error", reject);
+				child.once("close", resolve);
+			});
+			expect(code).toBe(143);
+			expect(f.read().map((r) => r.runtime)).toEqual(["A", "B"]);
+			expect(existsSync(artifact)).toBe(false);
+			expect(existsSync(directory)).toBe(false);
+			expect(output).not.toContain(RETAINED);
+		},
+	);
 	it("does not roll back or replay after readiness", async () => {
 		const f = await fixture();
 		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else ready();');
