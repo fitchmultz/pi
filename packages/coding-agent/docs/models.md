@@ -257,7 +257,7 @@ Saved model anthropic/claude-sonnet-4-5 is not registered (built-in catalog: pre
 - **cause** names the first layer that excludes it:
   - a `models.json` `hidden: true` override, with the file path;
   - an extension that replaced the provider or its static model list;
-  - an unregistered provider, missing credentials or a failed credential check;
+  - an unregistered provider, missing credentials, credentials that do not include the model, or a failed credential check;
   - `enabledModels`, when it excludes the saved default at startup;
   - `unknown`, when no configuration layer can be identified. Pi does not guess.
 
