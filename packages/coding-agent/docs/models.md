@@ -244,6 +244,25 @@ Use an extension when the provider needs custom streaming, model discovery, or a
 
 Confirm that its provider has usable authentication. Custom models can load from `models.json` but remain unavailable in `/model` until Pi can resolve credentials. For llama.cpp, only models currently loaded by the router appear.
 
+### A saved or selected model is unavailable
+
+When Pi refuses a saved model (a session, managed restart or saved default) or an explicitly selected one (`--model`, RPC `set_model`), the message names the model and explains why:
+
+```text
+Saved model anthropic/claude-sonnet-4-5 is not registered (built-in catalog: present; effective registry: absent; cause: models.json (~/.pi/agent/models.json) sets providers["anthropic"].modelOverrides["claude-sonnet-4-5"].hidden to true)
+```
+
+- **built-in catalog** says whether Pi's shipped model catalog lists the ID.
+- **effective registry** says whether it remains after `models.json` and extension layers.
+- **cause** names the first layer that excludes it:
+  - a `models.json` `hidden: true` override, with the file path;
+  - an extension that replaced the provider or its static model list;
+  - an unregistered provider, missing credentials, credentials that do not include the model, or a failed credential check;
+  - `enabledModels`, when it excludes the saved default at startup;
+  - `unknown`, when no configuration layer can be identified, including extension model lists that change at runtime (`refreshModels` or OAuth `modifyModels`). Pi does not guess.
+
+The diagnostic does not change behavior. A managed restart still refuses the saved model and uses its one-shot rollback, and the saved state is left unchanged. Startup and `--model` choose models exactly as before; when they fall back or match a sibling ID, the warning says why the named model was skipped. If every model of a registered provider is excluded, `--provider` reports that the provider has no models in the effective registry instead of calling it unknown.
+
 ### Authentication works in one shell only
 
 Check whether the key came from an environment variable rather than `auth.json`. Environment variables must be present in the process that starts Pi.
