@@ -1,4 +1,5 @@
 import {
+	Box,
 	type Component,
 	Container,
 	MouseRegion,
@@ -72,7 +73,8 @@ export class ChatContainer extends Container {
 	private expanded = false;
 	private readonly activity = new WeakSet<Component>();
 	private groups = new Map<Component, Activity>();
-	private readonly presentation = new Container();
+	// iTerm extends colored edge cells into terminal margins and window chrome.
+	private readonly presentation = new Box(1, 0);
 
 	addActivity(component: Component): void {
 		this.activity.add(component);
@@ -96,8 +98,12 @@ export class ChatContainer extends Container {
 	}
 
 	override render(width: number): string[] {
-		if (!this.compactView) return super.render(width);
 		this.presentation.clear();
+		this.presentation.setPaddingX(width > 2 ? 1 : 0);
+		if (!this.compactView) {
+			this.presentation.children.push(...this.children);
+			return this.renderPresentation(width);
+		}
 		const groups = new Map<Component, Activity>();
 		let group: Activity | undefined;
 		let spacers: Component[] = [];
@@ -131,10 +137,19 @@ export class ChatContainer extends Container {
 		}
 		this.presentation.children.push(...spacers);
 		this.groups = groups;
-		return this.presentation.render(width);
+		return this.renderPresentation(width);
+	}
+
+	private renderPresentation(width: number): string[] {
+		return this.presentation.render(width).map((line) => {
+			// Image continuation rows must stay empty for offscreen anchor recovery.
+			if (/^ *$/.test(line)) return "";
+			// Prompt navigation and fullscreen filtering require semantic markers at byte zero.
+			return width > 2 ? line.replace(/^ ((?:\x1b\]133;[ABC](?:\x07|\x1b\\))+)/, "$1 ") : line;
+		});
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
-		return this.compactView ? this.presentation.handleMouse(event) : super.handleMouse(event);
+		return this.presentation.handleMouse(event);
 	}
 }

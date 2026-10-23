@@ -524,11 +524,11 @@ describe("compact Activity and messages", () => {
 		const shell = new BashExecutionComponent("echo shell", ui, false, 1, true);
 		try {
 			chat.children = [tool, assistant, shell];
-			expect(chat.render(80).map((line) => stripAnsi(line).trimEnd())).toEqual(["▸ Activity · 2 calls · 2 running"]);
+			expect(chat.render(80).map((line) => stripAnsi(line).trim())).toEqual(["▸ Activity · 2 calls · 2 running"]);
 			tool.updateResult({ content: [{ type: "text", text: "error detail" }], isError: true });
 			shell.appendOutput("shell output\nlast line");
 			shell.setComplete(undefined, true);
-			expect(chat.render(80).map((line) => stripAnsi(line).trimEnd())).toEqual([
+			expect(chat.render(80).map((line) => stripAnsi(line).trim())).toEqual([
 				"▸ Activity · 2 calls · 1 failed · 1 cancelled",
 			]);
 			click(chat, 0, 80);
@@ -540,9 +540,9 @@ describe("compact Activity and messages", () => {
 			expect(text.indexOf("visible text")).toBeLessThan(text.lastIndexOf("Activity"));
 			expect(chat.children).toEqual([tool, assistant, shell]);
 			chat.setCompactView(false);
-			const ordinary = new Container();
+			const ordinary = new Box(1, 0);
 			ordinary.children = chat.children;
-			expect(chat.render(80)).toEqual(ordinary.render(80));
+			expect(chat.render(80).map(stripAnsi)).toEqual(ordinary.render(80).map(stripAnsi));
 		} finally {
 			shell.setComplete(undefined, true);
 		}
