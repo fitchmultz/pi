@@ -145,7 +145,9 @@ export class ChatContainer extends Container {
 			// Image continuation rows must stay empty for offscreen anchor recovery.
 			if (/^ *$/.test(line)) return "";
 			// Prompt navigation and fullscreen filtering require semantic markers at byte zero.
-			return width > 2 ? line.replace(/^ ((?:\x1b\]133;[ABC](?:\x07|\x1b\\))+)/, "$1 ") : line;
+			const padded = width > 2 ? line.replace(/^ ((?:\x1b\]133;[ABC](?:\x07|\x1b\\))+)/, "$1 ") : line;
+			// Printing padding after image placement can wrap or overwrite the image's cells.
+			return /\x1b(?:_G|\]1337;File=)/.test(padded) ? padded.replace(/ +$/, "") : padded;
 		});
 	}
 

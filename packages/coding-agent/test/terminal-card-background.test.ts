@@ -163,6 +163,9 @@ describe.each([false, "hybrid"] as const)("chat gutter protocol compatibility (c
 		const lines = chat.render(100);
 		const anchor = lines.findIndex((line) => line.includes("\x1b_G"));
 		expect(anchor).toBeGreaterThanOrEqual(0);
+		const nativeAnchor = tool.render(98).find((line) => line.includes("\x1b_G"));
+		expect(nativeAnchor).toBeDefined();
+		expect(lines[anchor].endsWith(nativeAnchor!)).toBe(true);
 		expect(lines.slice(anchor + 1, anchor + 4)).toEqual(["", "", ""]);
 		renderer.addChild(chat);
 		renderer.start();

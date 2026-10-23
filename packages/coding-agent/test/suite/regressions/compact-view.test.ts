@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { type AutocompleteProvider, type Container, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -290,6 +290,8 @@ describe("compact view settings and native event lifecycle", () => {
 
 	test("background completion notices use one compact row and keep the full notice on expansion", async () => {
 		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-compact-background-")));
+		const release = join(root, "release");
+		const quotedRelease = `'${release.split(sep).join("/").replaceAll("'", "'\\''")}'`;
 		const harness = await createHarness({
 			sessionManager: SessionManager.create(root, join(root, "sessions")),
 			settings: { compactView: "hybrid", compaction: { enabled: false }, retry: { enabled: false } },
@@ -306,11 +308,13 @@ describe("compact view settings and native event lifecycle", () => {
 			fauxAssistantMessage(
 				fauxToolCall("background_command", {
 					action: "start",
-					command: "printf 'compact-view-boundary-sentinel\\n'",
+					command: `while [ ! -f ${quotedRelease} ]; do sleep 0.01; done; printf 'compact-view-boundary-sentinel\\n'`,
 				}),
 				{ stopReason: "toolUse" },
 			),
 			async () => {
+				// Finish after the first tool boundary: an inline completion legitimately takes only two turns.
+				writeFileSync(release, "");
 				const statuses = () => listBackgroundCommands(jobs).map((job) => job.status);
 				await vi.waitFor(() => expect(statuses()).toEqual(["succeeded"]), { timeout: 6000, interval: 25 });
 				return fauxAssistantMessage("Launched");
@@ -318,6 +322,9 @@ describe("compact view settings and native event lifecycle", () => {
 			fauxAssistantMessage("Completion received"),
 		]);
 		await harness.session.prompt("Run background reproduction");
+		expect(harness.session.messages.find((message) => message.role === "toolResult")).toMatchObject({
+			details: { status: "running" },
+		});
 		expect(harness.faux.state.callCount).toBe(3);
 		expect(text()).toContain("▾ Activity");
 		expect(text()).not.toContain('"commandPreview"');
