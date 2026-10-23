@@ -559,14 +559,18 @@ export class ModelRuntime implements Models {
 			const listsModel = (models: readonly { id: string }[] | undefined) =>
 				models?.some((m) => m.id === modelId) ?? false;
 			const native = this.nativeExtensionProviders.get(providerId);
-			if (native && listsModel(this.builtins.get(providerId)?.getModels()) && !listsModel(native.getModels()))
+			const jsonModels = this.config.getProvider(providerId)?.models;
+			if (
+				native &&
+				listsModel(this.builtins.get(providerId)?.getModels()) &&
+				!listsModel(native.getModels()) &&
+				!listsModel(jsonModels)
+			)
 				return {
 					kind: "model-override",
 					detail: `an extension provider replaced provider ${quoted} without this model`,
 				};
-			const supplied =
-				listsModel((native ?? this.builtins.get(providerId))?.getModels()) ||
-				listsModel(this.config.getProvider(providerId)?.models);
+			const supplied = listsModel((native ?? this.builtins.get(providerId))?.getModels()) || listsModel(jsonModels);
 			const extension = this.extensionProviders.get(providerId);
 			// refreshModels and credential-gated modifyModels change the list at runtime, so only a
 			// static registration is evidence of what reached the later layers.

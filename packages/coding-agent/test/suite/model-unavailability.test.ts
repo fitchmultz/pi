@@ -90,6 +90,31 @@ describe("model unavailability diagnostics", () => {
 		expect(readFileSync(saved.path, "utf8")).toBe(saved.contents);
 	});
 
+	it("names the hidden override when models.json re-adds a model a native provider omits", async () => {
+		const h = await createHarness({
+			modelsJson: {
+				providers: {
+					anthropic: {
+						baseUrl: "https://api.anthropic.com",
+						models: [{ id: HIDDEN }],
+						modelOverrides: { [HIDDEN]: { hidden: true } },
+					},
+				},
+			},
+		});
+		harnesses.push(h);
+		const runtime = h.session.modelRuntime;
+		const builtin = runtime.getProvider("anthropic")!;
+		runtime.registerNativeProvider({
+			...builtin,
+			getModels: () => builtin.getModels().filter((model) => model.id !== HIDDEN),
+		});
+		expect(runtime.explainModelUnavailability("anthropic", HIDDEN).cause).toEqual({
+			kind: "models-json-hidden",
+			modelsPath: join(h.tempDir, "models.json"),
+		});
+	});
+
 	it("reports missing credentials, extension model replacement and unidentified causes", async () => {
 		// models.json supplies a model that the harness's extension registration then replaces. Its
 		// hidden flag never sees the model, so the extension is the excluding layer.
