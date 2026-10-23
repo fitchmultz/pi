@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
+import { Box } from "../src/components/box.ts";
 import { HStack } from "../src/components/h-stack.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
 import { Text } from "../src/components/text.ts";
@@ -11,6 +12,99 @@ import { stripTerminalSequences } from "../src/utils.ts";
 function visibleLines(lines: string[]): string[] {
 	return lines.map((line) => stripTerminalSequences(line).trimEnd());
 }
+
+// #243: retaining padded Box rows must not change the public rendering contract.
+describe("Box output", () => {
+	for (const { paddingY, padding } of [
+		{ paddingY: 0, padding: [] },
+		{ paddingY: 1, padding: ["     "] },
+		{ paddingY: 2, padding: ["     ", "     "] },
+	]) {
+		it(`preserves changed, grown, shrunk and reordered rows with vertical padding ${paddingY}`, () => {
+			let lines: string[] = [];
+			const box = new Box(1, paddingY);
+			box.addChild({ render: () => lines, invalidate: () => {} });
+			for (const { input, output } of [
+				{ input: ["a", "b"], output: [" a   ", " b   "] },
+				{ input: ["a", "c"], output: [" a   ", " c   "] },
+				{ input: ["a", "c", "d"], output: [" a   ", " c   ", " d   "] },
+				{ input: ["a"], output: [" a   "] },
+				{ input: ["c", "a"], output: [" c   ", " a   "] },
+				{ input: ["a", "a"], output: [" a   ", " a   "] },
+			]) {
+				lines = input;
+				assert.deepStrictEqual(box.render(5), [...padding, ...output, ...padding]);
+			}
+			lines = [];
+			assert.deepStrictEqual(box.render(5), []);
+			lines = ["a", "c"];
+			assert.deepStrictEqual(box.render(5), [...padding, " a   ", " c   ", ...padding]);
+		});
+	}
+
+	it("preserves exact rows after width, padding and sampled background changes", () => {
+		let lines = ["a", "b"];
+		const box = new Box(1, 1);
+		box.addChild({ render: () => lines, invalidate: () => {} });
+		assert.deepStrictEqual(box.render(5), ["     ", " a   ", " b   ", "     "]);
+		lines = ["a", "c"];
+		assert.deepStrictEqual(box.render(6), ["      ", " a    ", " c    ", "      "]);
+		box.setPaddingX(2);
+		assert.deepStrictEqual(box.render(6), ["      ", "  a   ", "  c   ", "      "]);
+		box.setPaddingX(2);
+		box.invalidate();
+		assert.deepStrictEqual(box.render(6), ["      ", "  a   ", "  c   ", "      "]);
+		let background = "\x1b[44m";
+		box.setBgFn((text) => `${background}${text}\x1b[49m`);
+		assert.deepStrictEqual(box.render(5), [
+			"\x1b[44m     \x1b[49m",
+			"\x1b[44m  a  \x1b[49m",
+			"\x1b[44m  c  \x1b[49m",
+			"\x1b[44m     \x1b[49m",
+		]);
+		background = "\x1b[41m";
+		lines = ["a", "d"];
+		assert.deepStrictEqual(box.render(5), [
+			"\x1b[41m     \x1b[49m",
+			"\x1b[41m  a  \x1b[49m",
+			"\x1b[41m  d  \x1b[49m",
+			"\x1b[41m     \x1b[49m",
+		]);
+		box.setBgFn(undefined);
+		assert.deepStrictEqual(box.render(5), ["     ", "  a  ", "  d  ", "     "]);
+	});
+
+	it("keeps styled full-frame rendering when callbacks alias the same sample", () => {
+		let lines = ["a", "b"];
+		const box = new Box(0, 0, (text) => (text === "a" ? "\x1b[44ma\x1b[49m" : text));
+		box.addChild({ render: () => lines, invalidate: () => {} });
+		assert.deepStrictEqual(box.render(1), ["\x1b[44ma\x1b[49m", "b"]);
+		box.setBgFn((text) => (text === "a" ? "\x1b[41ma\x1b[49m" : text));
+		lines = ["a", "c"];
+		assert.deepStrictEqual(box.render(1), ["\x1b[41ma\x1b[49m", "c"]);
+	});
+
+	it("preserves membership changes, empty children, clear and direct replacement", () => {
+		const box = new Box(1, 1);
+		const first = new Text("a", 0, 0);
+		const second = new Text("b", 0, 0);
+		const empty = new Text("", 0, 0);
+		box.addChild(first);
+		assert.deepStrictEqual(box.render(5), ["     ", " a   ", "     "]);
+		box.addChild(second);
+		assert.deepStrictEqual(box.render(5), ["     ", " a   ", " b   ", "     "]);
+		box.addChild(empty);
+		box.removeChild(empty);
+		box.removeChild(first);
+		assert.deepStrictEqual(box.render(5), ["     ", " b   ", "     "]);
+		box.clear();
+		assert.deepStrictEqual(box.render(5), []);
+		box.children = [first, second];
+		assert.deepStrictEqual(box.render(5), ["     ", " a   ", " b   ", "     "]);
+		box.children = [second, first];
+		assert.deepStrictEqual(box.render(5), ["     ", " b   ", " a   ", "     "]);
+	});
+});
 
 describe("viewport layout", () => {
 	it("allocates vertical grow space deterministically", () => {

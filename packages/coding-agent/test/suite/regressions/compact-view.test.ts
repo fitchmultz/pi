@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { type AutocompleteProvider, type Container, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -11,7 +11,12 @@ import { type CustomMessage, convertToLlm } from "../../../src/core/messages.ts"
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import backgroundCommand, { BACKGROUND_COMMAND_NOTICE } from "../../../src/extensions/background-command/index.ts";
-import { backgroundCommandDirectory, listBackgroundCommands } from "../../../src/extensions/background-command/jobs.ts";
+import {
+	backgroundCommandDirectory,
+	backgroundCommandFinished,
+	cancelBackgroundCommand,
+	listBackgroundCommands,
+} from "../../../src/extensions/background-command/jobs.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import type { SettingsSelectorComponent } from "../../../src/modes/interactive/components/settings-selector.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
@@ -290,27 +295,34 @@ describe("compact view settings and native event lifecycle", () => {
 
 	test("background completion notices use one compact row and keep the full notice on expansion", async () => {
 		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-compact-background-")));
+		const release = join(root, "release");
+		const quotedRelease = `'${release.split(sep).join("/").replaceAll("'", "'\\''")}'`;
 		const harness = await createHarness({
 			sessionManager: SessionManager.create(root, join(root, "sessions")),
 			settings: { compactView: "hybrid", compaction: { enabled: false }, retry: { enabled: false } },
 			extensionFactories: [backgroundCommand],
 		});
+		const jobs = backgroundCommandDirectory(harness.sessionManager);
 		onTestFinished(async () => {
 			await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			for (const job of listBackgroundCommands(jobs)) {
+				if (!backgroundCommandFinished(job)) await cancelBackgroundCommand(jobs, job.id);
+			}
 			harness.cleanup();
 			rmSync(root, { recursive: true, force: true });
 		});
 		const { view, text, submit, rebind } = await createView(harness);
-		const jobs = backgroundCommandDirectory(harness.sessionManager);
 		harness.setResponses([
 			fauxAssistantMessage(
 				fauxToolCall("background_command", {
 					action: "start",
-					command: "printf 'compact-view-boundary-sentinel\\n'",
+					command: `while [ ! -f ${quotedRelease} ]; do sleep 0.01; done; printf 'compact-view-boundary-sentinel\\n'`,
 				}),
 				{ stopReason: "toolUse" },
 			),
 			async () => {
+				// Finish after the first tool boundary: an inline completion legitimately takes only two turns.
+				writeFileSync(release, "");
 				const statuses = () => listBackgroundCommands(jobs).map((job) => job.status);
 				await vi.waitFor(() => expect(statuses()).toEqual(["succeeded"]), { timeout: 6000, interval: 25 });
 				return fauxAssistantMessage("Launched");
@@ -318,6 +330,9 @@ describe("compact view settings and native event lifecycle", () => {
 			fauxAssistantMessage("Completion received"),
 		]);
 		await harness.session.prompt("Run background reproduction");
+		expect(harness.session.messages.find((message) => message.role === "toolResult")).toMatchObject({
+			details: { status: "running" },
+		});
 		expect(harness.faux.state.callCount).toBe(3);
 		expect(text()).toContain("▾ Activity");
 		expect(text()).not.toContain('"commandPreview"');

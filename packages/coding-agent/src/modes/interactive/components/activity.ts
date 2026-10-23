@@ -1,4 +1,5 @@
 import {
+	Box,
 	type Component,
 	Container,
 	MouseRegion,
@@ -72,7 +73,9 @@ export class ChatContainer extends Container {
 	private expanded = false;
 	private readonly activity = new WeakSet<Component>();
 	private groups = new Map<Component, Activity>();
-	private readonly presentation = new Container();
+	// iTerm extends colored edge cells into terminal margins and window chrome.
+	private readonly presentation = new Box(1, 0);
+	private presentationPadding = 1;
 
 	addActivity(component: Component): void {
 		this.activity.add(component);
@@ -96,8 +99,17 @@ export class ChatContainer extends Container {
 	}
 
 	override render(width: number): string[] {
-		if (!this.compactView) return super.render(width);
-		this.presentation.clear();
+		// Leave Markdown its minimum usable width instead of adding over-wide gutters.
+		const padding = width > 4 ? 1 : 0;
+		if (padding !== this.presentationPadding) {
+			this.presentation.setPaddingX(padding);
+			this.presentationPadding = padding;
+		}
+		if (!this.compactView) {
+			this.presentation.children = this.children;
+			return this.renderPresentation(width);
+		}
+		const children: Component[] = [];
 		const groups = new Map<Component, Activity>();
 		let group: Activity | undefined;
 		let spacers: Component[] = [];
@@ -120,21 +132,36 @@ export class ChatContainer extends Container {
 					group = this.groups.get(child) ?? new Activity(this.expanded || this.compactView === "hybrid");
 					group.content.clear();
 					groups.set(child, group);
-					this.presentation.addChild(group);
+					children.push(group);
 				}
 				group.content.children.push(...spacers, child);
 			} else {
 				group = undefined;
-				this.presentation.children.push(...spacers, child);
+				children.push(...spacers, child);
 			}
 			spacers = [];
 		}
-		this.presentation.children.push(...spacers);
+		children.push(...spacers);
+		// Box checks rendered child lines itself; clear/addChild would defeat its cache.
+		this.presentation.children = children;
 		this.groups = groups;
-		return this.presentation.render(width);
+		return this.renderPresentation(width);
+	}
+
+	private renderPresentation(width: number): string[] {
+		return this.presentation.render(width).map((line) => {
+			// Image continuation rows must stay empty for offscreen anchor recovery.
+			if (/^ *$/.test(line)) return "";
+			// Prompt navigation and fullscreen filtering require semantic markers at byte zero.
+			const padded = this.presentationPadding
+				? line.replace(/^ ((?:\x1b\]133;[ABC](?:\x07|\x1b\\))+)/, "$1 ")
+				: line;
+			// Printing padding after image placement can wrap or overwrite the image's cells.
+			return /\x1b(?:_G|\]1337;File=)/.test(padded) ? padded.replace(/ +$/, "") : padded;
+		});
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
-		return this.compactView ? this.presentation.handleMouse(event) : super.handleMouse(event);
+		return this.presentation.handleMouse(event);
 	}
 }
