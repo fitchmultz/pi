@@ -46,7 +46,7 @@ Without a pin, each restart re-resolves the original invocation path, including 
 
 Readiness is signalled only after TUI initialization. If the selected worker cannot start, exits before readiness (even with exit 0), or is not ready within 60 seconds, the launcher starts the **exact previous worker and arguments once**, resuming the same saved session with the previous explicit extensions and pin policy. The startup failure is shown as a warning; when a message was supplied, the labelled continuation also includes it. Without a message, no model turn starts. If recovery also fails, Pi stops; it never loops.
 
-When recovery also fails before readiness, the launcher keeps the complete private state file and prints its exact path. It does not pick another model, relax validation, or fall back to journal-only resume. Fix the cause, then resume the exact state:
+When recovery also fails before readiness, the launcher keeps the complete private state file and prints its exact path. It does not pick another model, relax validation, or fall back to journal-only resume. If the saved model is no longer registered, the startup error names the configuration layer that excludes it; see [Unavailable model diagnostics](models.md#a-saved-or-selected-model-is-unavailable). Fix the cause, then resume the exact state:
 
 ```bash
 pi --working-session "/tmp/pi-restart-state-XXXXXX/working-session.json"

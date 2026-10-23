@@ -126,7 +126,7 @@ function splitThinkingSuffix(text: string): { base: string; thinkingLevel: Think
 
 function splitProviderPrefix(
 	text: string,
-	models: readonly Model<Api>[],
+	models: readonly { provider: string }[],
 ): { provider: string; modelText: string } | undefined {
 	const slashIndex = text.indexOf("/");
 	if (slashIndex === -1) return undefined;
@@ -461,23 +461,33 @@ export function resolveCliModel(options: {
 	// Important: use *all* models here, not just models with pre-configured auth.
 	// This allows "--api-key" to be used for first-time setup.
 	const models = [...modelRuntime.getModels()];
-	if (models.length === 0) {
-		return {
-			model: undefined,
-			warning: undefined,
-			error: "No models available. Check your installation or add models to models.json.",
-		};
-	}
+	const trimmed = cliModel.trim();
+	const unthought = splitThinkingSuffix(trimmed)?.base ?? trimmed;
+	const registered = cliProvider
+		? modelRuntime.getProviders().find((entry) => entry.id.toLowerCase() === cliProvider.toLowerCase())?.id
+		: undefined;
+	// Refusals select nothing, so a registered provider whose models are all excluded can be named.
+	const registeredPrefixes = () => modelRuntime.getProviders().map((entry) => ({ provider: entry.id }));
+	const refusal = (message: string) => {
+		// An unregistered --provider names nothing to explain.
+		const reason =
+			cliProvider && !registered
+				? undefined
+				: explainNamedModel(modelRuntime, models, registered, unthought, registeredPrefixes());
+		return { model: undefined, warning: undefined, error: reason ? `${message} Unavailable: ${reason}.` : message };
+	};
+	if (models.length === 0)
+		return refusal("No models available. Check your installation or add models to models.json.");
 
 	const provider = cliProvider
 		? models.find((m) => m.provider.toLowerCase() === cliProvider.toLowerCase())?.provider
 		: undefined;
 	if (cliProvider && !provider) {
-		return {
-			model: undefined,
-			warning: undefined,
-			error: `Unknown provider "${cliProvider}". Use --list-models to see available providers/models.`,
-		};
+		return refusal(
+			registered
+				? `Provider "${registered}" has no models in the effective registry.`
+				: `Unknown provider "${cliProvider}". Use --list-models to see available providers/models.`,
+		);
 	}
 
 	const result = resolveModelReference(
@@ -486,8 +496,26 @@ export function resolveCliModel(options: {
 		// An inline key goes to whichever provider is selected, so stored credentials must not choose it
 		inlineApiKey ? () => false : (providerId) => modelRuntime.hasConfiguredAuth(providerId),
 	);
+	const requested =
+		result.status !== "not-found" && result.thinkingLevel
+			? (splitThinkingSuffix(cliModel.trim())?.base ?? cliModel.trim())
+			: cliModel.trim();
 	if (result.status === "resolved") {
-		return { model: result.model, thinkingLevel: result.thinkingLevel, warning: result.warning, error: undefined };
+		// Fuzzy or cross-provider matching may select a sibling of an excluded model; say why.
+		const resolvedId = result.model.id.toLowerCase();
+		const substituted = !nameModels(modelRuntime, provider, requested, models).some(
+			(named) => named.provider === result.model.provider && named.modelId.toLowerCase() === resolvedId,
+		);
+		const reason = substituted ? explainNamedModel(modelRuntime, models, provider, requested) : undefined;
+		const substitution =
+			reason &&
+			`Using ${result.model.provider}/${result.model.id} for "${cliModel}" because the named model is unavailable (${reason}).`;
+		return {
+			model: result.model,
+			thinkingLevel: result.thinkingLevel,
+			warning: [result.warning, substitution].filter(Boolean).join(" ") || undefined,
+			error: undefined,
+		};
 	}
 	if (result.status === "ambiguous") {
 		const matches = result.candidates
@@ -499,19 +527,21 @@ export function resolveCliModel(options: {
 			: result.usableCount === 0
 				? "No matching provider is authenticated."
 				: "More than one matching provider is authenticated.";
+		const reason = explainNamedModel(modelRuntime, models, provider, requested);
 		return {
 			model: undefined,
 			warning: undefined,
-			error: `Model "${cliModel}" is ambiguous across providers: ${matches}. ${authHint} Use --provider or provider/model.`,
+			error: `Model "${cliModel}" is ambiguous across providers: ${matches}. ${authHint} Use --provider or provider/model.${reason ? ` Unavailable: ${reason}.` : ""}`,
 		};
 	}
 
 	const { target } = result;
 	if (!target) {
+		const reason = explainNamedModel(modelRuntime, models, undefined, requested, registeredPrefixes());
 		return {
 			model: undefined,
 			warning: undefined,
-			error: `Model "${cliModel}" not found. Use --list-models to see available models.`,
+			error: `Model "${cliModel}" not found${reason ? ` (${reason})` : ""}. Use --list-models to see available models.`,
 		};
 	}
 
@@ -522,11 +552,98 @@ export function resolveCliModel(options: {
 	const fallbackThinking = cliThinking ? undefined : target.thinkingLevel;
 	const fallbackModel = buildFallbackModel(target.providerModels, modelId);
 	const requestedThinking = cliThinking ?? fallbackThinking;
+	const reason = explainExcludedModel(modelRuntime, target.provider, modelId);
 	return {
 		model: requestedThinking && requestedThinking !== "off" ? { ...fallbackModel, reasoning: true } : fallbackModel,
 		thinkingLevel: fallbackThinking,
-		warning: `Model "${modelId}" not found for provider "${target.provider}". Using custom model id.`,
+		warning: `Model "${modelId}" not found for provider "${target.provider}"${reason ? ` (${reason})` : ""}. Using custom model id.`,
 		error: undefined,
+	};
+}
+
+/**
+ * Explanation for an id the registry lacks, only when the catalog lists it or a layer excludes it.
+ * Ordinary custom ids are expected to be absent and get none.
+ */
+function explainExcludedModel(modelRuntime: ModelRuntime, provider: string, modelId: string): string | undefined {
+	const unavailable = modelRuntime.explainModelUnavailability(provider, modelId);
+	if (unavailable.inRegistry || (!unavailable.inCatalog && unavailable.cause.kind === "unknown")) return undefined;
+	return `${provider}/${modelId}: ${unavailable.explanation}`;
+}
+
+/**
+ * The provider/id pairs `text` can name. `p/rest` names `rest` or the literal id `p/rest` on
+ * provider `p` (OpenRouter's `openrouter/auto`); a bare id may name any provider.
+ */
+function nameModels(
+	modelRuntime: ModelRuntime,
+	provider: string | undefined,
+	text: string,
+	prefixes: readonly { provider: string }[],
+): { provider: string; modelId: string; literal?: true }[] {
+	const prefixed = splitProviderPrefix(text, prefixes);
+	if (prefixed && (!provider || prefixed.provider === provider))
+		return [
+			{ provider: prefixed.provider, modelId: prefixed.modelText },
+			{ provider: prefixed.provider, modelId: text, literal: true },
+		];
+	const providers = provider ? [provider] : modelRuntime.getProviders().map((entry) => entry.id);
+	return providers.map((id) => ({ provider: id, modelId: text }));
+}
+
+/** Explanations for each excluded model `text` can name. */
+function explainNamedModel(
+	modelRuntime: ModelRuntime,
+	models: readonly Model<Api>[],
+	provider: string | undefined,
+	text: string,
+	prefixes: readonly { provider: string }[] = models,
+): string | undefined {
+	const named = nameModels(modelRuntime, provider, text, prefixes);
+	// The literal `p/rest` id is only the fallback reading when `rest` is not registered.
+	const candidates = named.filter(
+		(candidate) =>
+			!candidate.literal ||
+			!named.some(
+				(other) =>
+					!other.literal &&
+					models.some((m) => m.provider === other.provider && m.id.toLowerCase() === other.modelId.toLowerCase()),
+			),
+	);
+	const reasons = candidates
+		.map((candidate) => explainExcludedModel(modelRuntime, candidate.provider, candidate.modelId))
+		.filter((reason) => reason !== undefined);
+	return reasons.length > 0 ? reasons.join("; ") : undefined;
+}
+
+/**
+ * Select the startup model from a non-empty scope: the saved default when the scope includes it,
+ * otherwise the first scoped model. When saved configuration produced the scope, the result
+ * explains why the saved default was not used.
+ */
+export function selectScopedInitialModel(options: {
+	scopedModels: readonly ScopedModel[];
+	defaultProvider: string | undefined;
+	defaultModelId: string | undefined;
+	/** Saved patterns that produced the scope, such as the `enabledModels` setting. */
+	savedScope?: { source: string; patterns: readonly string[] };
+	modelRuntime: ModelRuntime;
+}): { scopedModel: ScopedModel; warning?: string } {
+	const { scopedModels, defaultProvider, defaultModelId, savedScope, modelRuntime } = options;
+	const savedModel =
+		defaultProvider && defaultModelId ? modelRuntime.getModel(defaultProvider, defaultModelId) : undefined;
+	const savedInScope = savedModel && scopedModels.find((scoped) => modelsAreEqual(scoped.model, savedModel));
+	if (savedInScope) return { scopedModel: savedInScope };
+	const scopedModel = scopedModels[0];
+	if (!scopedModel) throw new Error("selectScopedInitialModel requires at least one scoped model");
+	if (!savedScope || !defaultProvider || !defaultModelId) return { scopedModel };
+	const { explanation } = modelRuntime.explainModelUnavailability(defaultProvider, defaultModelId, {
+		...savedScope,
+		models: scopedModels.map((scoped) => scoped.model),
+	});
+	return {
+		scopedModel,
+		warning: `Could not use saved default model ${defaultProvider}/${defaultModelId} (${explanation}). Using ${scopedModel.model.provider}/${scopedModel.model.id}.`,
 	};
 }
 

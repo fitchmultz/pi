@@ -75,7 +75,7 @@ Subscribe before sending a prompt to avoid missing a fast completion. `RpcClient
 A failed command returns one response with `success: false`:
 
 ```json
-{"id":"req-3","type":"response","command":"set_model","success":false,"error":"Model not found: invalid/model"}
+{"id":"req-3","type":"response","command":"set_model","success":false,"error":"Model not found: invalid/model (built-in catalog: absent; effective registry: absent; cause: provider \"invalid\" is not registered)"}
 ```
 
 Malformed JSON produces a parse response without a request ID:

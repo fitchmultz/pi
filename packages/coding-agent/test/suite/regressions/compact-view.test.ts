@@ -11,7 +11,12 @@ import { type CustomMessage, convertToLlm } from "../../../src/core/messages.ts"
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import backgroundCommand, { BACKGROUND_COMMAND_NOTICE } from "../../../src/extensions/background-command/index.ts";
-import { backgroundCommandDirectory, listBackgroundCommands } from "../../../src/extensions/background-command/jobs.ts";
+import {
+	backgroundCommandDirectory,
+	backgroundCommandFinished,
+	cancelBackgroundCommand,
+	listBackgroundCommands,
+} from "../../../src/extensions/background-command/jobs.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import type { SettingsSelectorComponent } from "../../../src/modes/interactive/components/settings-selector.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
@@ -297,13 +302,16 @@ describe("compact view settings and native event lifecycle", () => {
 			settings: { compactView: "hybrid", compaction: { enabled: false }, retry: { enabled: false } },
 			extensionFactories: [backgroundCommand],
 		});
+		const jobs = backgroundCommandDirectory(harness.sessionManager);
 		onTestFinished(async () => {
 			await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+			for (const job of listBackgroundCommands(jobs)) {
+				if (!backgroundCommandFinished(job)) await cancelBackgroundCommand(jobs, job.id);
+			}
 			harness.cleanup();
 			rmSync(root, { recursive: true, force: true });
 		});
 		const { view, text, submit, rebind } = await createView(harness);
-		const jobs = backgroundCommandDirectory(harness.sessionManager);
 		harness.setResponses([
 			fauxAssistantMessage(
 				fauxToolCall("background_command", {

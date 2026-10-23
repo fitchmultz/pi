@@ -225,6 +225,8 @@ Response contains the full [Model](#model-object) object:
 }
 ```
 
+The model must be available: listed in the registry with usable provider authentication. Otherwise the error explains why, as described in [Unavailable model diagnostics](models.md#a-saved-or-selected-model-is-unavailable).
+
 ### cycle_model
 
 Cycle to the next available model. Returns `null` data if only one model available.
