@@ -29,7 +29,7 @@ all-platform qualification.
 | `discover_tools`: initial capability summaries, full prior-turn instructions and stable positional declarations | `extensions/instruction-groups/`, native deferred-tool restore in `core/agent-session.ts`, narrow `refreshTools()` seam in `core/{agent-session,extensions/loader,extensions/types}.ts` | `suite/instruction-groups.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Instruction groups](packages/coding-agent/docs/instruction-groups.md) |
 | JSON `read`: selection before paging/truncation, inherited by native factory consumers | `core/tools/{read,read-json}.ts` | `read-json.test.ts` | [SDK](packages/coding-agent/docs/sdk.md#json-selection-with-read) |
 | Compact activity: regroup native cards without replacing the whole TUI | `modes/interactive/{interactive-mode,components/activity}.ts`, card renderers, `core/settings-manager.ts` | `compact-view.test.ts`, `suite/regressions/compact-view.test.ts` | [Settings](packages/coding-agent/docs/settings.md) |
-| Immutable fork update: exact source/catalog, frozen install and guarded selection | `utils/{fork-update,fork-release-store}.ts`, `scripts/install-fork.mjs` | `fork-update.test.ts`, `scripts/install-fork.test.mjs` | [Install and activate](#install-and-activate) |
+| Immutable fork update: exact source/catalog, frozen install, guarded selection and automatic pruning with active-runtime receipts | `config.ts`, `utils/{fork-update,fork-release-store}.ts`, `scripts/install-fork.mjs` | `fork-update.test.ts`, `scripts/{install-fork,fork-release-liveness}.test.mjs` | [Install and activate](#install-and-activate) |
 | Termux: compiler/environment handling and short control-socket paths | `scripts/install-fork.mjs`, `test.sh`, `cli/restart-protocol.ts` | `scripts/install-fork.test.mjs`, `restart-control.test.ts`; device activation is separate | [Termux](packages/coding-agent/docs/termux.md) |
 | Complete working state: native admission, all branches/queues/mode buffers and completed-exit attestation; strict plain-JSON snapshots use Chord's checker with a container hook, so coding-agent keeps its `@earendil-works/chord` dependency after upstream dropped it | `core/{working-session,agent-session,sdk,agent-session-services}.ts`, `cli/working-session-control.ts`, native mode/builtin bindings, `packages/chord/src/json.ts` (`CheckJsonOptions`) | `suite/working-session.test.ts`, `suite/working-session-cli.test.ts`, `packages/chord/test/json.test.ts` | [Working sessions](packages/coding-agent/docs/working-session.md) |
 | Credential isolation: routing providers must not read unrelated stored credentials | `core/model-runtime.ts`, provider registration types/adapter | `provider-credential-isolation.test.ts` | [Custom providers](packages/coding-agent/docs/custom-provider.md) |
@@ -367,6 +367,13 @@ owner-authorized updater accepts routine catalog removals and prints every remov
 malformed or empty catalogs still fail closed. Its selector is
 `$(npm root -g)/@earendil-works/pi-coding-agent`; on Termux it is
 `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` with `~/.local/bin/pi`.
+After a successful activation, including a same-commit reuse, it runs the pinned installer's
+`--prune --keep 5` with the same `--selector` and `--releases`. The installer's ownership,
+selected, `.previous` and `lsof`/`ps` checks still apply; legacy releases count toward the five
+but are never removed. Fork CLI and SDK processes keep their release receipt open so `lsof`
+can detect JavaScript-only runtimes. Restart workers from older releases to gain this protection.
+Missing or failed process-inspection tools skip cleanup with a warning, not a failed update.
+A direct launch of an old release during pruning is not coordinated with the process snapshot.
 
 After activation, immediately restart running workers and verify their actual runtime, not only
 the selector. Launcher changes require a full CLI relaunch; worker restart leaves the launcher

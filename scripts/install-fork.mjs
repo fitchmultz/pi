@@ -282,8 +282,8 @@ function activateLockedRelease(releases, identity, selector, { rollback = false,
 }
 
 // lsof sees open files, mapped native modules and working directories; ps sees concrete command paths.
-// ponytail: a worker that loaded only JavaScript through the selector holds nothing open in its
-// release, so neither sees it and --keep is the guard. Exact protection needs a live-worker registry.
+// config.ts keeps the fork receipt open for CLI/SDK hosts, even when their argv hides the release.
+// ponytail: pre-pin runtimes can still be invisible; restart them before relying on pruning.
 function liveProcessPaths() {
 	const capture = (command, args) => run(command, args, { stdio: "pipe", maxBuffer: Infinity });
 	// Without -ww, procps truncates command lines to COLUMNS even when piped.
