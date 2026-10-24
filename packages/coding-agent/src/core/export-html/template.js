@@ -184,27 +184,15 @@
         const result = [];
         const multipleRoots = roots.length > 1;
 
-        // Process children before parents without recursing through deep sessions.
-        const containsActive = new Map();
-        const nodes = [...roots];
-        for (let i = 0; i < nodes.length; i++) {
-          for (const child of nodes[i].children) {
-            nodes.push(child);
-          }
-        }
-        for (let i = nodes.length - 1; i >= 0; i--) {
-          const node = nodes[i];
-          containsActive.set(node, activePathIds.has(node.entry.id) ||
-            node.children.some(child => containsActive.get(child)));
-        }
+        // A subtree contains the active leaf exactly when its root is on the active path.
+        const activeFirst = (a, b) =>
+          Number(activePathIds.has(b.entry.id)) - Number(activePathIds.has(a.entry.id));
 
         // Stack: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
         const stack = [];
 
         // Add roots (prioritize branch containing active leaf)
-        const orderedRoots = [...roots].sort((a, b) =>
-          Number(containsActive.get(b)) - Number(containsActive.get(a))
-        );
+        const orderedRoots = [...roots].sort(activeFirst);
         for (let i = orderedRoots.length - 1; i >= 0; i--) {
           const isLast = i === orderedRoots.length - 1;
           stack.push([orderedRoots[i], multipleRoots ? 1 : 0, multipleRoots, multipleRoots, isLast, [], multipleRoots]);
@@ -219,9 +207,7 @@
           const multipleChildren = children.length > 1;
 
           // Order children (active branch first)
-          const orderedChildren = [...children].sort((a, b) =>
-            Number(containsActive.get(b)) - Number(containsActive.get(a))
-          );
+          const orderedChildren = [...children].sort(activeFirst);
 
           // Calculate child indent (matches tree-selector.ts)
           let childIndent;
