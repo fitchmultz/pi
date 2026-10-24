@@ -81,6 +81,8 @@ describe("session listing cache", () => {
 			),
 		) as {
 			sessions: {
+				path: string;
+				parentSessionPath?: string;
 				name?: string;
 				created: string;
 				modified: string;
@@ -94,10 +96,13 @@ describe("session listing cache", () => {
 
 	it("reuses exact results across processes without reading journal bodies", () => {
 		const manager = create();
+		const parent = manager.getSessionFile()!;
+		const fork = SessionManager.forkFrom(parent, cwd, dir, { id: "listing-fork" }).getSessionFile()!;
 		const cold = fromProcess();
 		const warm = fromProcess();
-		expect(cold.journalReads).toBe(1);
-		expect(cold.journalBytes).toBe(statSync(manager.getSessionFile()!).size);
+		expect(cold.sessions.find((session) => session.path === fork)?.parentSessionPath).toBe(parent);
+		expect(cold.journalReads).toBe(2);
+		expect(cold.journalBytes).toBe(statSync(parent).size + statSync(fork).size);
 		expect(warm.sessions).toEqual(cold.sessions);
 		expect(warm.journalReads).toBe(0);
 		expect(warm.journalBytes).toBe(0);
@@ -119,17 +124,42 @@ describe("session listing cache", () => {
 		expect(fromProcess().journalReads).toBe(0);
 	});
 
-	it("falls back to the source when date context is unavailable", async () => {
-		create();
-		const expected = await SessionManager.listAll(dir);
-		const context = vi.spyOn(Intl, "DateTimeFormat").mockImplementation(() => {
-			throw new Error("unavailable date context");
-		});
-		try {
-			expect(await SessionManager.listAll(dir)).toEqual(expected);
-		} finally {
-			context.mockRestore();
+	it("falls back to the source when date context is unavailable", () => {
+		const manager = create();
+		const expected = fromProcess();
+		const fallback = fromProcess("unavailable-date-context");
+		expect(fallback.sessions).toEqual(expected.sessions);
+		expect(fallback.journalReads).toBe(1);
+		expect(fallback.journalBytes).toBe(statSync(manager.getSessionFile()!).size);
+	});
+
+	it("revalidates date context when timezone changes during a listing", () => {
+		for (const id of ["a", "b"]) {
+			writeFileSync(
+				join(dir, `${id}.jsonl`),
+				`${JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-10-24T12:00:00", cwd })}\n`,
+			);
 		}
+		vi.stubEnv("TZ", "UTC");
+		fromProcess();
+		const changed = fromProcess("timezone-during-list");
+		expect(changed.sessions.find((session) => session.path === join(dir, "b.jsonl"))?.created).toBe(
+			"2026-10-24T12:00:00.000Z",
+		);
+		expect(changed.sessions.find((session) => session.path === join(dir, "a.jsonl"))?.created).toBe(
+			"2026-10-24T19:00:00.000Z",
+		);
+		expect(changed.journalReads).toBe(1);
+		expect(changed.journalBytes).toBe(statSync(join(dir, "a.jsonl")).size);
+		vi.stubEnv("TZ", "America/Los_Angeles");
+		const local = fromProcess();
+		expect(local.journalReads).toBe(1);
+		expect(local.journalBytes).toBe(statSync(join(dir, "b.jsonl")).size);
+		expect(local.sessions.every((session) => session.created === "2026-10-24T19:00:00.000Z")).toBe(true);
+		const warm = fromProcess();
+		expect(warm.sessions).toEqual(local.sessions);
+		expect(warm.journalReads).toBe(0);
+		expect(warm.journalBytes).toBe(0);
 	});
 
 	it("keeps all branches, exact counts, names, dates and search text on cold and warm paths", async () => {
@@ -259,6 +289,43 @@ describe("session listing cache", () => {
 		expect(readdirSync(cache)).toEqual([]);
 	});
 
+	it.each(["empty", "non-session", "directory"])(
+		"removes cached transcripts when the source becomes %s",
+		async (kind) => {
+			const manager = create();
+			await SessionManager.listAll(dir);
+			const cache = join(dir, ".session-list-cache-v1");
+			const record = join(cache, readdirSync(cache)[0]);
+			const transcript = readFileSync(record, "utf8");
+			expect(transcript).toContain("off branch searchable");
+			writeFileSync(`${record}.00000000-0000-4000-8000-000000000000.tmp`, transcript, { mode: 0o600 });
+			const path = manager.getSessionFile()!;
+			if (kind === "directory") {
+				unlinkSync(path);
+				mkdirSync(path);
+			} else {
+				writeFileSync(path, kind === "empty" ? "" : '{"type":"not-session"}\n');
+			}
+			expect(await SessionManager.listAll(dir)).toEqual([]);
+			expect(readdirSync(cache)).toEqual([]);
+		},
+	);
+
+	it("discards superseded text when the replacement journal cannot be cached", async () => {
+		const manager = create();
+		await SessionManager.listAll(dir);
+		const cache = join(dir, ".session-list-cache-v1");
+		writeFileSync(
+			manager.getSessionFile()!,
+			`${JSON.stringify({ ...manager.getHeader(), timestamp: "not-a-date" })}\n`,
+		);
+		const sessions = await SessionManager.listAll(dir);
+		expect(sessions).toHaveLength(1);
+		expect(sessions[0].allMessagesText).toBe("");
+		expect(Number.isNaN(sessions[0].created.getTime())).toBe(true);
+		expect(readdirSync(cache)).toEqual([]);
+	});
+
 	it("removes cached search text through the picker deletion boundary", async () => {
 		const manager = create();
 		const sessions = await SessionManager.listAll(dir);
@@ -335,7 +402,7 @@ describe("session listing cache", () => {
 		expect(readdirSync(target)).toEqual([]);
 	});
 
-	it("allows concurrent listings and independent cache writers", async () => {
+	it("allows concurrent in-process listings and cache writers", async () => {
 		create();
 		const results = await Promise.all(Array.from({ length: 8 }, () => SessionManager.listAll(dir)));
 		for (const result of results) expect(result).toEqual(results[0]);

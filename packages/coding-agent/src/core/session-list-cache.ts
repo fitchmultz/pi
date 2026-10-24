@@ -21,6 +21,24 @@ export function getSessionListCacheContext(): string | undefined {
 	}
 }
 
+export function createSessionListCacheContext(): () => string | undefined {
+	let timezone: string | undefined;
+	let formatter: typeof Intl.DateTimeFormat | undefined;
+	let context: string | undefined;
+	return () => {
+		try {
+			if (timezone !== process.env.TZ || formatter !== Intl.DateTimeFormat) {
+				timezone = process.env.TZ;
+				formatter = Intl.DateTimeFormat;
+				context = getSessionListCacheContext();
+			}
+			return context;
+		} catch {
+			return undefined;
+		}
+	};
+}
+
 function cachePath(filePath: string): string {
 	return join(dirname(resolvePath(filePath)), CACHE_DIRECTORY, `${basename(filePath).slice(0, -6)}.json`);
 }
@@ -40,6 +58,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export async function readSessionListCache(
 	filePath: string,
 	revision: string | undefined,
+	getContext: () => string | undefined,
 	signal?: AbortSignal,
 ): Promise<SessionInfo | undefined> {
 	if (!revision) return undefined;
@@ -47,12 +66,15 @@ export async function readSessionListCache(
 		const path = cachePath(filePath);
 		if (!(await isPrivateDirectory(dirname(path)))) return undefined;
 		const record: unknown = JSON.parse(await readFile(path, { encoding: "utf8", signal }));
+		if (isRecord(record) && record.revision !== revision) {
+			await unlink(path).catch(() => {});
+			return undefined;
+		}
 		if (
 			!isRecord(record) ||
 			record.version !== 1 ||
-			record.revision !== revision ||
 			typeof record.context !== "string" ||
-			record.context !== getSessionListCacheContext() ||
+			record.context !== getContext() ||
 			!isRecord(record.info)
 		)
 			return undefined;
@@ -108,7 +130,7 @@ export async function removeSessionListCache(filePath: string): Promise<void> {
 			}
 		}
 	} catch {
-		// Cache cleanup cannot change the outcome of a journal deletion.
+		// Cache cleanup cannot change listing or journal-deletion outcomes.
 	}
 }
 
@@ -127,7 +149,7 @@ export async function pruneSessionListCache(
 			const record = cacheRecordName(entry.name);
 			if (!record) continue;
 			const source = `${record.slice(0, -5)}.jsonl`;
-			if (!sources.has(source) || getFileRevision(join(directory, source)) === undefined) {
+			if (!sources.has(source)) {
 				await unlink(join(cache, entry.name)).catch(() => {});
 			}
 		}

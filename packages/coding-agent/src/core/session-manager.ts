@@ -41,9 +41,10 @@ import {
 	createCustomMessage,
 } from "./messages.ts";
 import {
-	getSessionListCacheContext,
+	createSessionListCacheContext,
 	pruneSessionListCache,
 	readSessionListCache,
+	removeSessionListCache,
 	writeSessionListCache,
 } from "./session-list-cache.ts";
 export const CURRENT_SESSION_VERSION = 3;
@@ -819,18 +820,19 @@ function getMessageActivityTime(entry: SessionMessageEntry): number | undefined 
 
 async function buildSessionInfo(
 	filePath: string,
+	getContext: () => string | undefined,
 	signal?: AbortSignal,
 	resolvedCwd?: string,
 ): Promise<SessionInfo | null> {
 	try {
 		signal?.throwIfAborted();
 		const revision = getFileRevision(filePath);
-		const cached = await readSessionListCache(filePath, revision, signal);
+		const cached = await readSessionListCache(filePath, revision, getContext, signal);
 		signal?.throwIfAborted();
 		if (cached && revision === getFileRevision(filePath)) {
 			return resolvedCwd === undefined || sessionCwdMatches(cached.cwd, resolvedCwd) ? cached : null;
 		}
-		const context = getSessionListCacheContext();
+		const context = getContext();
 		const stats = await stat(filePath);
 		let header: SessionHeader | null = null;
 		let messageCount = 0;
@@ -851,7 +853,10 @@ async function buildSessionInfo(
 				if (!entry) continue;
 
 				if (!header) {
-					if (entry.type !== "session") return null;
+					if (entry.type !== "session") {
+						await removeSessionListCache(filePath);
+						return null;
+					}
 					header = entry;
 					if (resolvedCwd !== undefined && !sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd)) {
 						return null;
@@ -889,7 +894,10 @@ async function buildSessionInfo(
 			input.destroy();
 		}
 
-		if (!header) return null;
+		if (!header) {
+			await removeSessionListCache(filePath);
+			return null;
+		}
 
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
@@ -914,12 +922,12 @@ async function buildSessionInfo(
 			allMessagesText: allMessages.join(" "),
 		};
 		signal?.throwIfAborted();
-		if (revision && revision === getFileRevision(filePath))
-			await writeSessionListCache(info, revision, context, signal);
+		if (revision) await writeSessionListCache(info, revision, context, signal);
 		signal?.throwIfAborted();
 		return info;
 	} catch {
 		signal?.throwIfAborted();
+		await removeSessionListCache(filePath);
 		return null;
 	}
 }
@@ -966,6 +974,7 @@ function sortSessionInfos(sessions: SessionInfo[]): SessionInfo[] {
 
 function buildSessionInfosWithConcurrency(
 	files: SessionFileCandidate[],
+	getContext: () => string | undefined,
 	onLoaded: (info: SessionInfo | null, index: number) => void,
 	signal?: AbortSignal,
 	resolvedCwd?: string,
@@ -974,7 +983,7 @@ function buildSessionInfosWithConcurrency(
 		files,
 		MAX_CONCURRENT_SESSION_INFO_LOADS,
 		async (file, index) => {
-			const info = await buildSessionInfo(file.path, signal, resolvedCwd);
+			const info = await buildSessionInfo(file.path, getContext, signal, resolvedCwd);
 			signal?.throwIfAborted();
 			onLoaded(info, index);
 			return info;
@@ -985,6 +994,7 @@ function buildSessionInfosWithConcurrency(
 
 async function listSessionsFromDir(
 	dir: string,
+	getContext: () => string | undefined,
 	onProgress?: SessionListProgress,
 	signal?: AbortSignal,
 	resolvedCwd?: string,
@@ -1004,6 +1014,7 @@ async function listSessionsFromDir(
 		let loaded = 0;
 		const results = await buildSessionInfosWithConcurrency(
 			files,
+			getContext,
 			(info) => {
 				loaded++;
 				if (info) partialSessions.push(info);
@@ -2047,7 +2058,13 @@ export class SessionManager {
 	): Promise<SessionInfo[]> {
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
-		const sessions = await listSessionsFromDir(dir, onProgress, signal, filterCwd ? resolvePath(cwd) : undefined);
+		const sessions = await listSessionsFromDir(
+			dir,
+			createSessionListCacheContext(),
+			onProgress,
+			signal,
+			filterCwd ? resolvePath(cwd) : undefined,
+		);
 		return sortSessionInfos(sessions);
 	}
 
@@ -2079,8 +2096,9 @@ export class SessionManager {
 				? signal
 				: (onProgressOrSignal ?? signal);
 		abortSignal?.throwIfAborted();
+		const getContext = createSessionListCacheContext();
 		if (customSessionDir) {
-			return sortSessionInfos(await listSessionsFromDir(customSessionDir, progress, abortSignal));
+			return sortSessionInfos(await listSessionsFromDir(customSessionDir, getContext, progress, abortSignal));
 		}
 
 		const sessionsDir = getSessionsDir();
@@ -2131,6 +2149,7 @@ export class SessionManager {
 			const partialSessions: SessionInfo[] = [];
 			const results = await buildSessionInfosWithConcurrency(
 				candidates,
+				getContext,
 				(info, index) => {
 					loaded++;
 					if (index === 0) firstCandidateLoaded = true;
