@@ -54,7 +54,19 @@ pi --working-session "/tmp/pi-restart-state-XXXXXX/working-session.json"
 
 That launch treats the file as user-supplied and leaves it in place; delete the file and its directory after recovery. Stopping Pi with a signal during startup removes the file as usual. The launcher only removes its own native `pi-restart-state-*` artifact; a path supplied by the user is never removed.
 
+Quitting an unready replacement with Ctrl+D, `/quit` or `ctx.shutdown()` is an intentional exit: the launcher exits instead of rolling back, even if shutdown handlers are still running when the startup deadline passes.
+
 Readiness is not proof that every provider or tool works. Validate candidates first. Failures after readiness are not automatically rolled back or replayed, because work may already have had side effects.
+
+## Work that outlives a worker
+
+Extensions that own processes beyond one worker, such as background agents, can use `ctx.managedHost` (present only under a launcher that supports it):
+
+- `ctx.managedHost.owner.pid` is the launcher, which survives restart and rollback. Use it as the liveness owner instead of `process.pid`.
+- `ctx.managedHost.ready` resolves `true` once the launcher accepts readiness and retires rollback, or `false` if this worker shuts down first. Adopt inherited work and publish results only after it resolves `true`. Do not await it in `session_start`; readiness follows that handler.
+- `session_shutdown` with reason `quit` carries `disposition`: `handoff` (a ready worker committed a restart), `provisional` (an unready replacement is retiring and rollback may follow) or `release` (the parent is exiting). Keep owned work for `handoff` and `provisional`; stop it for `release`.
+
+`managedHost` and `disposition` are absent in SDK, print and RPC modes and under older launchers; keep process-lifetime behavior there.
 
 ## Complete native state
 

@@ -630,6 +630,7 @@ export class WorkingSessionGate {
 		release: () => void;
 	};
 	private preparationMutation = false;
+	private exiting = false;
 	onIdle?: () => void;
 
 	get inActivity(): boolean {
@@ -647,6 +648,11 @@ export class WorkingSessionGate {
 		this.invalidate("Native input or mutation during save");
 		throw new Error("Native working session is reserved for saving; retry after release");
 	};
+
+	/** Final exit still admits shutdown persistence, but no new turn and no steer into a current one. */
+	admitTurn(): void {
+		if (this.exiting) throw new Error("Native runtime is exiting; new turns are not admitted");
+	}
 
 	invalidate(reason: string): void {
 		if (!this.held || this.held.invalidated.signal.aborted) return;
@@ -725,8 +731,12 @@ export class WorkingSessionGate {
 		};
 	}
 
-	/** Quit joins the run and excludes only its own caller, never independently admitted work. */
+	/**
+	 * Quit joins the run and excludes only its own caller, never independently admitted work.
+	 * It closes turn admission for good, so shutdown handlers cannot start work that capture must refuse.
+	 */
 	async finalExit<T>(action: () => Promise<T>): Promise<T> {
+		this.exiting = true;
 		const restore = this.foreground();
 		try {
 			return await this.context.exit(action);

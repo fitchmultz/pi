@@ -8,18 +8,21 @@ import chalk from "chalk";
 import { getRestartRuntimeWorker } from "../../cli/launcher.ts";
 import {
 	MANAGED_CLI_ENV,
+	MANAGED_PROTOCOL_ENV,
+	MANAGED_PROTOCOL_VERSION,
 	MAX_RESTART_BYTES,
 	parseRestartHandoff,
 	parseRestartRequest,
 	RESTART_HANDOFF_ENV,
 	RESTART_SOCKET_ENV,
 	type RestartHandoff,
+	type RestartLauncherMessage,
 	type RestartRequest,
 	type RestartSession,
 	type RestartWorkerMessage,
 } from "../../cli/restart-protocol.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
-import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
+import type { ExtensionAPI, ExtensionContext, ManagedHost, ShutdownDisposition } from "../../core/extensions/types.ts";
 import { writeWorkingSession } from "../../core/working-session.ts";
 
 const guidance =
@@ -30,12 +33,25 @@ export interface RestartInputState {
 	pendingInput: boolean;
 }
 
+type WorkerPhase =
+	| { kind: "starting"; inherited: boolean }
+	| { kind: "accepted" }
+	| { kind: "committed"; request: RestartRequest; session: Omit<RestartSession, "workingSession"> };
+
 export interface ManagedRestart {
+	/** Present only under a launcher that acknowledges readiness. */
+	readonly host: ManagedHost | undefined;
 	bindInput(check: () => RestartInputState): void;
 	ready(): Promise<void>;
 	start(): void;
 	interrupt(reason?: string): void;
+	/** An unready replacement declares a user or extension exit here, before drain and shutdown hooks can outlast its deadline. */
 	beginShutdown(source: "user" | "extension" | "signal"): boolean;
+	/**
+	 * Derived when the quit event is built, so a signal or cancel after commit releases instead.
+	 * Undefined without {@link host}: older launchers neither acknowledge readiness nor honor exit intent.
+	 */
+	disposition(): ShutdownDisposition | undefined;
 	completeShutdown(): Promise<void>;
 	captureFinal(session: AgentSession): Promise<boolean>;
 }
@@ -71,7 +87,9 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	delete process.env[RESTART_HANDOFF_ENV];
 	delete process.env[RESTART_SOCKET_ENV];
 	const managed = process.env[MANAGED_CLI_ENV] === "1";
+	const acknowledged = process.env[MANAGED_PROTOCOL_ENV] === MANAGED_PROTOCOL_VERSION;
 	delete process.env[MANAGED_CLI_ENV];
+	delete process.env[MANAGED_PROTOCOL_ENV];
 	if (!managed || !process.send || !process.connected) return undefined;
 	let handoff: RestartHandoff | undefined;
 	try {
@@ -81,6 +99,26 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
 		process.exit(1);
 	}
+	let phase: WorkerPhase = { kind: "starting", inherited: handoff !== undefined };
+	let shutdownSource: "user" | "extension" | "signal" | undefined;
+	let exitNotice: Promise<void> | undefined;
+	let settleReady: (accepted: boolean) => void = () => {};
+	let host: ManagedHost | undefined;
+	if (acknowledged) {
+		// Only the IPC parent that advertised the protocol owns this worker; capture it while connected.
+		const ready = new Promise<boolean>((resolve) => {
+			settleReady = (accepted) => {
+				settleReady = () => {};
+				resolve(accepted);
+			};
+		});
+		host = Object.freeze({ owner: Object.freeze({ pid: process.ppid }), ready });
+		process.on("message", (value: RestartLauncherMessage) => {
+			if (value?.type !== "pi:accepted" || phase.kind !== "starting") return;
+			phase = { kind: "accepted" };
+			settleReady(!closing);
+		});
+	}
 	process.once("disconnect", () => process.kill(process.pid, "SIGTERM"));
 	process.channel?.unref();
 	let input = (): RestartInputState => ({ busy: true, pendingInput: false });
@@ -89,7 +127,6 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	let started = false;
 	let closing = false;
 	let pending: RestartRequest | undefined;
-	let committed: { request: RestartRequest; session: Omit<RestartSession, "workingSession"> } | undefined;
 	let workingSession: string | undefined;
 	let timer: NodeJS.Timeout | undefined;
 	let server: Server | undefined;
@@ -100,9 +137,9 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	const sockets = new Set<Socket>();
 
 	const cancel = (reason?: string) => {
-		const requested = pending !== undefined || committed !== undefined;
+		const requested = pending !== undefined || phase.kind === "committed";
 		pending = undefined;
-		committed = undefined;
+		if (phase.kind === "committed") phase = { kind: "accepted" };
 		workingSession = undefined;
 		clearTimeout(timer);
 		if (artifactDirectory) rmSync(artifactDirectory, { recursive: true, force: true });
@@ -136,7 +173,8 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			cancel("the session is not saved.");
 			return;
 		}
-		committed = {
+		phase = {
+			kind: "committed",
 			request: pending,
 			session: { sessionFile, sessionId: ctx.sessionManager.getSessionId() },
 		};
@@ -147,7 +185,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	const queue = (value: unknown): string => {
 		const request = parseRestartRequest(value);
 		if (!ctx || closing) throw new Error("Restart control is unavailable in this session");
-		if (pending || committed) throw new Error("A restart is already queued");
+		if (pending || phase.kind === "committed") throw new Error("A restart is already queued");
 		if (request.sessionId && request.sessionId !== ctx.sessionManager.getSessionId())
 			throw new Error("Restart request belongs to a different session");
 		const sessionFile = ctx.sessionManager.getSessionFile();
@@ -279,6 +317,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		});
 	};
 	return {
+		host,
 		bindInput(check) {
 			input = check;
 		},
@@ -287,6 +326,13 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			if (handoff && ctx?.sessionManager.getSessionId() !== handoff.sessionId)
 				throw new Error("Restart session identity mismatch");
 			await send({ type: "pi:ready" });
+			if (!host) {
+				phase = { kind: "accepted" };
+				return;
+			}
+			// The send callback only proves the bytes left; the launcher may already be timing out.
+			// Without acceptance this worker is shutting down, so never start its continuation.
+			if (!(await host.ready)) await new Promise<never>(() => {});
 		},
 		start() {
 			if (started) return;
@@ -307,16 +353,30 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		beginShutdown(source) {
 			if (source !== "extension") cancel();
 			closing = true;
-			return committed !== undefined;
+			shutdownSource ??= source;
+			settleReady(false);
+			// A disconnected launcher cannot roll back, so the exit stands without the notice.
+			if (host && !exitNotice && phase.kind === "starting" && phase.inherited && shutdownSource !== "signal")
+				exitNotice = send({ type: "pi:exit" }).catch(() => {});
+			return phase.kind === "committed";
+		},
+		disposition() {
+			if (!host) return undefined;
+			if (phase.kind === "committed") return "handoff";
+			if (phase.kind === "starting" && phase.inherited && shutdownSource === "signal") return "provisional";
+			return "release";
 		},
 		async completeShutdown() {
-			if (!committed) return;
+			if (phase.kind !== "committed") {
+				await exitNotice;
+				return;
+			}
 			try {
 				if (!workingSession) throw new Error("Managed restart has no complete native working-session state");
 				await send({
 					type: "pi:restart",
-					request: committed.request,
-					session: { ...committed.session, workingSession },
+					request: phase.request,
+					session: { ...phase.session, workingSession },
 				});
 				artifactDirectory = undefined;
 			} catch (error) {
@@ -325,7 +385,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			}
 		},
 		async captureFinal(session) {
-			if (!committed) return false;
+			if (phase.kind !== "committed") return false;
 			if (!session.workingSessionReady || !session.isIdle || session.isSettling || session.workingSessionGate.busy)
 				throw new Error("Managed restart still has admitted work");
 			const hold = await session.acquireWorkingSession();

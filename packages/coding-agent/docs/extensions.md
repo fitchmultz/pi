@@ -58,6 +58,7 @@ The factory can be synchronous or asynchronous. Pi waits for an asynchronous fac
 Do not start processes, sockets, watchers, or timers in the factory because some invocations load extensions without starting a session.
 Start long-lived resources from `session_start` or from the command or tool that needs them.
 Close session-scoped resources from an idempotent `session_shutdown` handler.
+To keep processes across managed restarts, see [Work that outlives a worker](restart.md#work-that-outlives-a-worker).
 
 A normal prompt starts a run. The run repeats turns, then checks whether more work starts another low-level agent run:
 
@@ -399,6 +400,7 @@ Pi reports handler errors and continues where possible. A `tool_call` handler fa
 
 Release resources in `session_shutdown` even when normal operation attempted cleanup.
 Keep cleanup idempotent because cancellation, reload, session replacement, and process exit can converge on the same path.
+Once quit begins, Pi persists `pi.appendEntry()` and `pi.sendMessage(..., { triggerTurn: false })` but rejects any message that would start a turn or steer the current one. The rejection is reported as an extension error, and nothing is appended.
 Use `ctx.shutdown()` to request an orderly process shutdown.
 
 ### Opt-in performance warnings

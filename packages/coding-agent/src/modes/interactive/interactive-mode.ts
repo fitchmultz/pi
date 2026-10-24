@@ -2047,6 +2047,7 @@ export class InteractiveMode {
 		await this.session.bindExtensions({
 			uiContext,
 			mode: "tui",
+			managedHost: this.options?.managedRestart?.host,
 			abortHandler: () => {
 				this.restoreQueuedMessagesToEditor({ abort: true });
 			},
@@ -2383,6 +2384,7 @@ export class InteractiveMode {
 		const createContext = (): ExtensionContext => ({
 			ui: this.createExtensionUIContext(),
 			mode: "tui",
+			managedHost: this.options?.managedRestart?.host,
 			hasUI: true,
 			cwd: this.sessionManager.getCwd(),
 			sessionManager: this.sessionManager,
@@ -4464,7 +4466,7 @@ export class InteractiveMode {
 			// terminal. If the terminal is gone, the restore writes below emit EIO,
 			// which the stdout/stderr error handler turns into emergencyTerminalExit;
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
-			await this.runtimeHost.dispose();
+			await this.runtimeHost.dispose({ disposition: () => this.options?.managedRestart?.disposition() });
 			this.themeController.disableAutoSync();
 			await this.ui.terminal.drainInput(1000);
 			this.stop();
@@ -4483,7 +4485,7 @@ export class InteractiveMode {
 		this.stop();
 		let restartFailure: string | undefined;
 		try {
-			await this.runtimeHost.dispose();
+			await this.runtimeHost.dispose({ disposition: () => this.options?.managedRestart?.disposition() });
 			await this.options?.managedRestart?.completeShutdown();
 		} catch (error) {
 			if (!restarting) throw error;

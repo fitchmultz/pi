@@ -65,6 +65,7 @@ import type {
 	InputEventResult,
 	InputSource,
 	LoadExtensionsResult,
+	ManagedHost,
 	MarkdownTransformer,
 	MessageEndEvent,
 	MessageEndEventResult,
@@ -414,6 +415,7 @@ export class ExtensionRunner {
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
 	private mode: ExtensionMode = "print";
+	private managedHost: ManagedHost | undefined;
 	private cwd: string;
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
@@ -620,6 +622,10 @@ export class ExtensionRunner {
 		this.navigateTreeHandler = async () => ({ cancelled: false });
 		this.switchSessionHandler = async () => ({ cancelled: false });
 		this.reloadHandler = async () => {};
+	}
+
+	setManagedHost(host: ManagedHost | undefined): void {
+		this.managedHost = host;
 	}
 
 	setUIContext(uiContext?: ExtensionUIContext, mode: ExtensionMode = "print"): void {
@@ -1090,6 +1096,10 @@ export class ExtensionRunner {
 			get mode() {
 				runner.assertActive();
 				return runner.mode;
+			},
+			get managedHost() {
+				runner.assertActive();
+				return runner.managedHost;
 			},
 			get hasUI() {
 				runner.assertActive();

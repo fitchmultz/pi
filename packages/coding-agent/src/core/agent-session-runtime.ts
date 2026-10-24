@@ -8,6 +8,7 @@ import type {
 	ReplacedSessionContext,
 	SessionShutdownEvent,
 	SessionStartEvent,
+	ShutdownDisposition,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
@@ -419,11 +420,17 @@ export class AgentSessionRuntime {
 		});
 	}
 
-	async dispose(): Promise<void> {
+	/** `disposition` is read when the quit event is built; see {@link SessionShutdownEvent.disposition}. */
+	async dispose(options: { disposition?: () => ShutdownDisposition | undefined } = {}): Promise<void> {
 		const session = this.session;
 		await session.workingSessionGate.finalExit(async () => {
 			await session.cancelWorkingSession("Native runtime is exiting");
-			const event: SessionShutdownEvent = { type: "session_shutdown", reason: "quit" };
+			const disposition = options.disposition?.();
+			const event: SessionShutdownEvent = {
+				type: "session_shutdown",
+				reason: "quit",
+				...(disposition ? { disposition } : {}),
+			};
 			if (this.strictFinalization) {
 				await session.abort();
 				await session.extensionRunner.emitShutdownStrict(event);

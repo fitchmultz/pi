@@ -327,6 +327,129 @@ describe("AgentSessionRuntime characterization", () => {
 		await promptPromise;
 	});
 
+	it("keeps shutdown persistence but admits no new turn while finally exiting", async () => {
+		// A child completion published from a held shutdown hook used to start a turn here. Restart
+		// capture then failed with admitted work, and the launcher stopped unfinished children.
+		const outcomes: string[] = [];
+		let decided!: () => void;
+		const bothDecided = new Promise<void>((resolve) => {
+			decided = resolve;
+		});
+		const record = (outcome: string) => {
+			outcomes.push(outcome);
+			if (outcomes.length === 2) decided();
+		};
+		const { runtime, faux } = await createRuntimeForTest((pi) => {
+			pi.on("session_shutdown", async () => {
+				pi.appendEntry("shutdown-state", { saved: true });
+				pi.sendMessage(
+					{ customType: "shutdown-note", content: "recorded", display: false },
+					{ triggerTurn: false },
+				);
+				pi.sendMessage(
+					{ customType: "late-completion", content: "child finished", display: true },
+					{ triggerTurn: true, deliverAs: "steer" },
+				);
+				pi.sendUserMessage("late follow-up");
+				// Join each late admission's actual outcome: a rejection report or a model request.
+				await bothDecided;
+			});
+		});
+		runtime.session.extensionRunner.onError((error) => record(`${error.event}: ${error.error}`));
+		faux.setResponses([
+			() => {
+				record("model request");
+				return fauxAssistantMessage("late turn");
+			},
+			() => {
+				record("model request");
+				return fauxAssistantMessage("late turn");
+			},
+		]);
+		let capture: Record<string, boolean> | undefined;
+		// Same preconditions as managed restart capture.
+		runtime.setFinalization(async (session) => {
+			capture = { idle: session.isIdle, settling: session.isSettling, busy: session.workingSessionGate.busy };
+		});
+
+		await runtime.dispose();
+
+		expect(outcomes.sort()).toEqual([
+			"send_message: Native runtime is exiting; new turns are not admitted",
+			"send_user_message: Native runtime is exiting; new turns are not admitted",
+		]);
+		expect(faux.state.callCount).toBe(0);
+		expect(capture).toEqual({ idle: true, settling: false, busy: false });
+		const entries = runtime.session.sessionManager.getEntries();
+		expect(entries).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ type: "custom", customType: "shutdown-state", data: { saved: true } }),
+				expect.objectContaining({ type: "custom_message", customType: "shutdown-note" }),
+			]),
+		);
+		expect(entries.some((entry) => entry.type === "custom_message" && entry.customType === "late-completion")).toBe(
+			false,
+		);
+		expect(entries.some((entry) => entry.type === "message")).toBe(false);
+	});
+
+	it("refuses late steering into a run that ordinary quit has not stopped yet", async () => {
+		const outcomes: string[] = [];
+		let decided!: () => void;
+		const decision = new Promise<void>((resolve) => {
+			decided = resolve;
+		});
+		// Both rejections, or any late admission reaching the model, decide the outcome.
+		const record = (outcome: string) => {
+			outcomes.push(outcome);
+			if (outcomes.length === 2 || outcome.includes("reached the model")) decided();
+		};
+		let releaseTool!: () => void;
+		let toolStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			toolStarted = resolve;
+		});
+		const { runtime, faux } = await createRuntimeForTest((pi) => {
+			pi.registerTool({
+				name: "slow",
+				label: "Slow",
+				description: "Runs until released",
+				parameters: Type.Object({}),
+				execute: () =>
+					new Promise<AgentToolResult<unknown>>((resolve) => {
+						toolStarted();
+						releaseTool = () => resolve({ content: [{ type: "text", text: "done" }], details: {} });
+					}),
+			});
+			pi.on("session_shutdown", async () => {
+				pi.sendMessage({ customType: "late-completion", content: "child finished", display: true });
+				pi.sendUserMessage("late steer", { deliverAs: "steer" });
+				releaseTool();
+				await decision;
+			});
+		});
+		runtime.session.extensionRunner.onError((error) => record(`${error.event}: ${error.error}`));
+		faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("slow", {}), { stopReason: "toolUse" }),
+			(context) => {
+				const text = JSON.stringify(context.messages);
+				if (text.includes("child finished")) record("late completion reached the model");
+				if (text.includes("late steer")) record("late steer reached the model");
+				return fauxAssistantMessage("tool result answered");
+			},
+		]);
+		const prompt = runtime.session.prompt("run slow tool").catch(() => {});
+		await started;
+
+		await runtime.dispose();
+		await prompt;
+
+		expect(outcomes.sort()).toEqual([
+			"send_message: Native runtime is exiting; new turns are not admitted",
+			"send_user_message: Native runtime is exiting; new turns are not admitted",
+		]);
+	});
+
 	it("does not await readiness or certify an unready final exit", async () => {
 		const { runtime, tempDir } = await createRuntimeForTest(() => {});
 		runtime.session.setWorkingSessionReady(false);

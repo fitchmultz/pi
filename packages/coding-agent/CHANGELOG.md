@@ -10,6 +10,7 @@
 
 ### Added
 
+- Added `ctx.managedHost` and `session_shutdown` `disposition` so extensions can keep owned work across managed restarts and stop it only on exit. See [Work that outlives a worker](docs/restart.md#work-that-outlives-a-worker).
 - Added a sorted, permission-filtered instruction-group capability index to initial prompts and a static `discover_tools` hint. Listing and enabling groups leave the index and discovery declaration unchanged.
 - Added complete native working-session save and restore through the SDK and `--working-session`, with private local control and completed-exit receipts. See [Native working sessions](docs/working-session.md).
 - Added `registerProviderAuthFallback()` for ephemeral provider-scoped authentication with native credential precedence, catalogs and transport. See [Provider authentication fallback](docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider).
@@ -40,6 +41,8 @@
 ### Fixed
 
 - Fixed chat card backgrounds tinting iTerm margins and window chrome in fullscreen mode; terminal-default side gutters preserve card colors, prompt navigation, and image scrolling ([#243](https://github.com/fitchmultz/pi/issues/243)).
+- Fixed quitting an unready restarted worker rolling back to the previous worker instead of exiting, including when its shutdown handlers outlast the startup deadline.
+- Fixed messages sent while Pi quits, such as a child completion arriving during a shutdown hook, starting a new turn. A managed restart then failed its final capture and stopped unfinished children; quit now admits shutdown persistence but no new or steered turn.
 - Fixed non-strict session shutdowns waiting on unresponsive provider aborts, interactive startup prompts bypassing the working-session save gate or losing compact-view expansion on restore, and managed launcher `SIGINT`/`SIGHUP` forwarding when the worker runs outside the terminal process group.
 - Fixed journal resume, tree navigation and builtin-disabling reload losing selected tools deferred by instruction discovery; eager fallback preserves explicit selections, exclusions and later deselection across subsequent resumes without changing historical declarations.
 - Fixed newer fetched or cached legacy Kimi Coding catalogs reverting the native OpenAI protocol and tool/thinking compatibility after offline hydration.

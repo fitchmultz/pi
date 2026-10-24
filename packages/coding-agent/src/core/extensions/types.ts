@@ -325,11 +325,36 @@ export interface CompactOptions {
  */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/**
+ * Lifetime owner of a managed interactive worker. Present only when the launcher that spawned this
+ * worker supports readiness acknowledgment and exit intent; absent in SDK, print, RPC, standalone
+ * and older launchers. The owner outlives worker replacement by `pi restart` and `/restart`.
+ */
+export interface ManagedHost {
+	readonly owner: { readonly pid: number };
+	/**
+	 * Resolves `true` after the launcher accepts this worker's readiness and retires startup rollback,
+	 * or `false` if this worker shuts down first. Never rejects. Do not await it inside `session_start`
+	 * or `resources_discover`: readiness follows those handlers.
+	 */
+	readonly ready: Promise<boolean>;
+}
+
+/**
+ * What a managed worker's `quit` shutdown means for work it owns through {@link ManagedHost}.
+ * - `release`: the parent is exiting (Ctrl+D, `/quit`, `ctx.shutdown()`, or a signal after readiness).
+ * - `handoff`: a ready worker committed a restart; its replacement attaches after readiness.
+ * - `provisional`: an unready replacement is retiring; the launcher may still roll back once.
+ */
+export type ShutdownDisposition = "release" | "handoff" | "provisional";
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use "tui" to guard terminal-only UI such as custom components. */
 	mode: ExtensionMode;
+	/** Managed launcher lifetime, when supported. See {@link ManagedHost}. */
+	managedHost?: ManagedHost;
 	/** Whether dialog-capable UI is available (true in TUI and RPC modes) */
 	hasUI: boolean;
 	/** Current working directory */
@@ -865,6 +890,8 @@ export interface SessionShutdownEvent {
 	reason: "quit" | "reload" | "new" | "resume" | "fork";
 	/** Destination session file when shutting down due to session replacement. */
 	targetSessionFile?: string;
+	/** Set only for `quit` when {@link ExtensionContext.managedHost} exists. */
+	disposition?: ShutdownDisposition;
 }
 
 /** Preparation data for tree navigation */
