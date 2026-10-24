@@ -9,6 +9,7 @@ interface TestState {
 	moduleLoads?: number;
 	factoryRuns?: number;
 	importGate?: Promise<void>;
+	onImportStarted?: () => void;
 }
 
 function state(): TestState {
@@ -88,6 +89,9 @@ describe("extension factory cache", () => {
 		state().importGate = new Promise<void>((resolve) => {
 			releaseImports = resolve;
 		});
+		const importStarted = new Promise<void>((resolve) => {
+			state().onImportStarted = resolve;
+		});
 		const paths = ["first", "second"].map((name) => {
 			const path = join(root, `${name}.ts`);
 			writeFileSync(
@@ -95,6 +99,7 @@ describe("extension factory cache", () => {
 				`
 const state = globalThis.__extensionFactoryCacheTest;
 state.moduleLoads = (state.moduleLoads ?? 0) + 1;
+state.onImportStarted();
 await state.importGate;
 export default function () { state.factoryRuns = (state.factoryRuns ?? 0) + 1; }
 `,
@@ -103,7 +108,7 @@ export default function () { state.factoryRuns = (state.factoryRuns ?? 0) + 1; }
 		});
 		const inFlight = loadExtensionsCached(paths, cwd);
 		try {
-			await expect.poll(() => state().moduleLoads ?? 0).toBeGreaterThan(0);
+			await importStarted;
 			clearExtensionCache();
 		} finally {
 			releaseImports();
