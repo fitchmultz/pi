@@ -30,6 +30,7 @@
 
 ### Changed
 
+- Import extension modules concurrently while keeping factories and registrations in discovery order. Module-level side effects can interleave. Startup timing reports aggregate import wall time ([#250](https://github.com/fitchmultz/pi/issues/250)).
 - Published settings, models, keybindings, and theme schemas using upstream's shared runtime definitions; the fork settings schema retains boolean and `"hybrid"` compact activity preferences.
 - Reduced repeated session-history work, assistant/tree rendering and native read, grep, edit and image processing.
 - Bound native Bash spill queues and wait for complete private spill files before returning. This bounded-memory path is slower on the recorded 64 MiB workload.

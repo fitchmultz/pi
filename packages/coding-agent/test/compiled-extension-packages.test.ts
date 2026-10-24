@@ -145,4 +145,70 @@ export default function(pi) {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	// #250: the embedded jiti/static path must overlap imports without reordering factory registrations.
+	it("loads independent delayed modules concurrently before ordered factories", () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-compiled-imports-"));
+		try {
+			const receipt = join(root, "imports.jsonl");
+			const names = ["beta", "alpha", "gamma"];
+			const paths = names.map((name, index) => {
+				const file = join(root, `${name}.ts`);
+				writeFileSync(
+					file,
+					`import { appendFileSync } from "node:fs";
+const state = globalThis.__compiled250 ??= { active: 0, max: 0, factories: [] };
+state.max = Math.max(state.max, ++state.active);
+await new Promise(resolve => setTimeout(resolve, ${[40, 5, 15][index]}));
+state.active--;
+export default async function(pi) {
+	state.factories.push("${name}");
+	await new Promise(resolve => setTimeout(resolve, 2));
+	pi.registerCommand("${name}", { handler: async () => {} });
+	appendFileSync(${JSON.stringify(receipt)}, JSON.stringify({ max: state.max, active: state.active, factories: state.factories }) + "\\n");
+}`,
+				);
+				return file;
+			});
+			const result = spawnSync(
+				cli,
+				["--offline", "--mode", "rpc", "--no-session", "--no-extensions", ...paths.flatMap((file) => ["-e", file])],
+				{
+					cwd: root,
+					env: {
+						PATH: dirname(process.execPath),
+						HOME: root,
+						USERPROFILE: root,
+						PI_CODING_AGENT_DIR: join(root, "agent"),
+						PI_TELEMETRY: "0",
+						JITI_FS_CACHE: "0",
+						...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+					},
+					input: `${JSON.stringify({ id: "ready", type: "get_commands" })}\n`,
+					encoding: "utf8",
+					timeout: 30_000,
+				},
+			);
+			expect(result.error, result.stderr).toBeUndefined();
+			expect(result.status, result.stderr).toBe(0);
+			const events = readFileSync(receipt, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			expect(events).toEqual(names.map((_, index) => ({ max: 3, active: 0, factories: names.slice(0, index + 1) })));
+			const response = result.stdout
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line))
+				.find((value) => value.id === "ready");
+			expect(response?.success).toBe(true);
+			expect(
+				response.data.commands
+					.filter((command: { name: string }) => names.includes(command.name))
+					.map((command: { name: string }) => command.name),
+			).toEqual(names);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });
