@@ -160,6 +160,47 @@ describe("loadEntriesFromFile", () => {
 		}
 	});
 
+	// #254: preserve complete records and branches when a giant line spans read buffers.
+	it.each(["\n", "\r\n", ""])("opens multi-buffer Unicode records with final separator %j", (separator) => {
+		const source = SessionManager.inMemory(tempDir, { id: "multi-buffer" });
+		const root = source.appendMessage(userMsg("shared root"));
+		source.appendSessionInfo("Unicode λ session");
+		source.appendLabelChange(root, "root label");
+		const side = source.appendMessage(assistantMsg("other branch"));
+		source.branch(root);
+		const message = {
+			role: "toolResult" as const,
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text" as const, text: "" }],
+			details: { path: "λ🌿.txt", nested: [true, null, { value: "preserved" }] },
+			isError: false,
+			timestamp: 1,
+		};
+		const leaf = source.appendMessage(message);
+		const records = [source.getHeader(), ...source.getEntries()];
+		const lines = records.map((entry) => JSON.stringify(entry));
+		const lineSeparator = separator || "\n";
+		const prefix = `${lines.slice(0, -1).join(lineSeparator)}${lineSeparator}`;
+		const textOffset = lines.at(-1)!.indexOf('"text":"') + '"text":"'.length;
+		const padding = 1024 * 1024 - 1 - Buffer.byteLength(prefix) - textOffset;
+		message.content[0].text = `${"x".repeat(padding)}λ🌿\\"\n\r\t${"y".repeat(2 * 1024 * 1024)}`;
+		const content = `${prefix}${JSON.stringify(records.at(-1))}${separator}`;
+		const file = join(tempDir, "multi-buffer.jsonl");
+		writeFileSync(file, content);
+
+		const opened = SessionManager.open(file);
+		expect(opened.getHeader()).toEqual(source.getHeader());
+		expect(opened.getEntries()).toEqual(source.getEntries());
+		expect(opened.getSessionName()).toBe("Unicode λ session");
+		expect(opened.getLabel(root)).toBe("root label");
+		expect(opened.getBranch(side)).toEqual(source.getBranch(side));
+		expect(opened.getBranch(leaf)).toEqual(source.getBranch(leaf));
+		expect(opened.buildSessionContext()).toEqual(source.buildSessionContext());
+		expect(opened.getTree()).toEqual(source.getTree());
+		expect(readFileSync(file, "utf8")).toBe(separator ? content : `${content}\n`);
+	});
+
 	it("opens session files larger than Node's max string length", () => {
 		const file = join(tempDir, "large.jsonl");
 		writeFileSync(
