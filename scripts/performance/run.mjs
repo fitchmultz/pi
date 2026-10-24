@@ -8,11 +8,22 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	readlinkSync,
 	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { cpus, homedir, loadavg, release, tmpdir, totalmem } from "node:os";
+import {
+	availableParallelism,
+	cpus,
+	homedir,
+	hostname,
+	loadavg,
+	networkInterfaces,
+	release,
+	tmpdir,
+	totalmem,
+} from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -39,7 +50,9 @@ node scripts/performance/run.mjs --before ROOT --after ROOT --groups GROUPS --ou
 --list lists cases/inputs without executing. Groups or individual case names are comma-separated.
 Every case runs serially in a fresh process; before/after order alternates between repeats.
 --artifact-repo ROOT fixes one payload for pack/Nix and the scan cwd for Biome comparisons.
-Build, pack, nix-pack, startup, env-daemon, env-scan and biome are explicit opt-in groups.`);
+Build, pack, nix-pack, startup, extension-imports, extension-import-diagnostics, env-daemon, env-scan and biome are explicit opt-in groups.
+Extension cases retain raw JSONL/inputs under OUT/artifacts; embedded cases require the documented task-local binary build.
+Diagnostic cases enable jiti/PI_TIMING and Node CPU profiles; their elapsed times are not comparative evidence.`);
 	process.exit(0);
 }
 const repeats = Number(values.repeat);
@@ -197,6 +210,16 @@ add("startup", "startup", "startup.mjs", [
 	smoke ? "0" : "2",
 	"isolated",
 ]);
+for (const workload of ["esm", "async", "cpu"])
+	for (const mode of ["loader", "unbundled", "bundled", "embedded"])
+		add("extension-imports", `extension-imports-${workload}-${mode}`, "extension-imports.mjs", [workload, mode]);
+for (const workload of ["esm", "async"])
+	for (const mode of ["unbundled", "bundled", "embedded"])
+		add("extension-import-diagnostics", `extension-imports-${workload}-${mode}-diagnostic`, "extension-imports.mjs", [
+			workload,
+			mode,
+			"diagnostic",
+		]);
 add("biome", "biome-native", "biome.mjs", ["native"]);
 add("biome", "biome-fallback", "biome.mjs", ["fallback"]);
 
@@ -316,7 +339,12 @@ const manifest = {
 	repeats,
 	environment: {
 		node: process.version,
+		nodeSha256: hash(readFileSync(process.execPath)),
 		npm: npmVersion,
+		hostname: hostname(),
+		availableParallelism: availableParallelism(),
+		networkInterfaces: Object.keys(networkInterfaces()),
+		networkNamespace: process.platform === "linux" ? readlinkSync("/proc/self/ns/net") : undefined,
 		platform: process.platform,
 		arch: process.arch,
 		osRelease: release(),
@@ -353,6 +381,7 @@ for (const benchmark of chosen)
 				TEMP: join(scratch, "tmp"),
 				PI_CODING_AGENT_DIR: join(scratch, "agent"),
 				PI_PERF_REPO: root,
+				PI_PERF_EVIDENCE_DIR: join(out, "artifacts", `${benchmark.name}-${label}-${trial}`),
 				PI_OFFLINE: "1",
 				PI_SKIP_VERSION_CHECK: "1",
 				PERF_SMOKE: smoke ? "1" : "0",
@@ -392,6 +421,7 @@ for (const benchmark of chosen)
 				trial,
 				load,
 				log,
+				artifacts: relative(out, env.PI_PERF_EVIDENCE_DIR),
 				status: "running",
 				verified: false,
 				command: ["node", ...args.map(redact)],
