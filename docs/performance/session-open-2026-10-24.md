@@ -31,4 +31,4 @@ The baseline repeatedly flattened and searched a growing pending line. Independe
 
 These are synthetic Linux findings, not measurements of the original private macOS corpus or an installed runtime. Complete records still must fit V8's string limit. Unicode-heavy giant strings can require wider retained representations; the ASCII result is not a general memory bound. Windows and Termux-device qualification are not established here.
 
-[Raw commands, all samples, profiles, exact identities, attempts and synthetic journals](issue-254-raw/README.md) are retained separately from this dated summary.
+[Raw commands, all samples, profiles, exact identities, attempts and synthetic journals](https://github.com/fitchmultz/pi/blob/05b7005d7515471725698d2cbb8faac471e101f8/docs/performance/issue-254-raw/README.md) are retained separately from this dated summary.
