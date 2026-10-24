@@ -384,7 +384,7 @@ only complete current native state, with no journal-only or pre-v1 handoff fallb
 ## Testing
 
 - `npm run check` after code changes.
-- `./test.sh` runs all non-e2e tests offline in an isolated home; `./test.sh -- <command>` runs a
+- `./test.sh` (also the default `npm test`) runs all non-e2e tests offline in an isolated home; `./test.sh -- <command>` runs a
   focused command the same way. Node and npm resolve before HOME isolation so version-manager
   shims keep working. The isolated root follows the caller's `TMPDIR`; Chord's upstream lock
   fallback handles Unix socket paths that exceed the native limit.
