@@ -45,6 +45,7 @@ export interface ManagedRestart {
 	ready(): Promise<void>;
 	start(): void;
 	interrupt(reason?: string): void;
+	/** An unready replacement declares a user or extension exit here, before drain and shutdown hooks can outlast its deadline. */
 	beginShutdown(source: "user" | "extension" | "signal"): boolean;
 	/**
 	 * Derived when the quit event is built, so a signal or cancel after commit releases instead.
@@ -100,7 +101,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	}
 	let phase: WorkerPhase = { kind: "starting", inherited: handoff !== undefined };
 	let shutdownSource: "user" | "extension" | "signal" | undefined;
-	let exitIntent = false;
+	let exitNotice: Promise<void> | undefined;
 	let settleReady: (accepted: boolean) => void = () => {};
 	let host: ManagedHost | undefined;
 	if (acknowledged) {
@@ -354,21 +355,20 @@ export function createManagedRestart(): ManagedRestart | undefined {
 			closing = true;
 			shutdownSource ??= source;
 			settleReady(false);
+			// A disconnected launcher cannot roll back, so the exit stands without the notice.
+			if (host && !exitNotice && phase.kind === "starting" && phase.inherited && shutdownSource !== "signal")
+				exitNotice = send({ type: "pi:exit" }).catch(() => {});
 			return phase.kind === "committed";
 		},
 		disposition() {
 			if (!host) return undefined;
 			if (phase.kind === "committed") return "handoff";
-			if (phase.kind === "starting" && phase.inherited) {
-				if (shutdownSource === "signal") return "provisional";
-				exitIntent = true;
-			}
+			if (phase.kind === "starting" && phase.inherited && shutdownSource === "signal") return "provisional";
 			return "release";
 		},
 		async completeShutdown() {
 			if (phase.kind !== "committed") {
-				// A disconnected launcher cannot roll back, so the exit stands without the notice.
-				if (exitIntent) await send({ type: "pi:exit" }).catch(() => {});
+				await exitNotice;
 				return;
 			}
 			try {

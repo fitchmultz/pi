@@ -473,21 +473,31 @@ process.send({ type: 'pi:ready' });`,
 		expect(await superviseCli(getRestartRuntimeWorker(runtime), [], { execArgv: [] })).toBe(0);
 		expect(readFileSync(observed, "utf8")).toBe("1");
 	});
-	it("treats an unready replacement's declared exit as final, not a failed start", async () => {
-		const f = await fixture();
-		const directory = mkdtempSync(join(f.root, "pi-restart-state-"));
-		const artifact = join(directory, "working-session.json");
-		writeFileSync(artifact, f.state, { mode: 0o600 });
-		f.session.workingSession = artifact;
-		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else ready();');
-		f.release("B", "process.send({ type: 'pi:exit' }, () => process.exit(0));");
-		f.select(a);
-		const stderr = captureStderr();
-		expect(await f.run(a)).toBe(0);
-		expect(f.read().map((r) => r.runtime)).toEqual(["A", "B"]);
-		expect(existsSync(directory)).toBe(false);
-		expect(stderr()).not.toContain(RETAINED);
-	});
+	it.each([
+		{ body: "process.send({ type: 'pi:exit' }, () => process.exit(0));", startupTimeoutMs: 3000 },
+		// The SIGTERM proves the startup deadline fired first; the declared exit then outlasts the kill grace.
+		{
+			body: "process.on('SIGTERM', () => process.send({ type: 'pi:exit' }, () => setTimeout(() => process.exit(0), 2500))); setInterval(() => {}, 1000);",
+			startupTimeoutMs: 1000,
+		},
+	])(
+		"treats an unready replacement's declared exit as final, not a failed start: $body",
+		async ({ body, startupTimeoutMs }) => {
+			const f = await fixture();
+			const directory = mkdtempSync(join(f.root, "pi-restart-state-"));
+			const artifact = join(directory, "working-session.json");
+			writeFileSync(artifact, f.state, { mode: 0o600 });
+			f.session.workingSession = artifact;
+			const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else ready();');
+			f.release("B", body);
+			f.select(a);
+			const stderr = captureStderr();
+			expect(await f.run(a, startupTimeoutMs)).toBe(0);
+			expect(f.read().map((r) => r.runtime)).toEqual(["A", "B"]);
+			expect(existsSync(directory)).toBe(false);
+			expect(stderr()).not.toContain(RETAINED);
+		},
+	);
 	it("normal exit never replaces a worker, with or without readiness", async () => {
 		for (const body of ["ready();", "process.exit(0);"]) {
 			const f = await fixture();

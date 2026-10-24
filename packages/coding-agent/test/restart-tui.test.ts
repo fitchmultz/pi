@@ -14,7 +14,7 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { requestRestart } from "../src/cli/restart-protocol.ts";
 import type { TuiMode } from "../src/core/settings-manager.ts";
@@ -43,6 +43,7 @@ interface Receipt {
 	owner?: number | null;
 	accepted?: boolean;
 	disposition?: string | null;
+	at?: number;
 }
 
 function fixture(rootDir = tmpdir()) {
@@ -76,10 +77,11 @@ function fixture(rootDir = tmpdir()) {
 				settledFollowup?: boolean;
 				failSave?: boolean;
 				holdDiscover?: boolean;
+				holdShutdown?: boolean;
 				nested?: { probe: string; command: string; exitPath: string };
 			} = {},
 		) {
-			const { restartCommand, holdWork, settledFollowup, failSave, holdDiscover, nested } = options;
+			const { restartCommand, holdWork, settledFollowup, failSave, holdDiscover, holdShutdown, nested } = options;
 			const path = join(root, `${version}.ts`);
 			writeFileSync(
 				path,
@@ -104,7 +106,7 @@ export default function(pi) {
  } });
  pi.on('session_start', (_event,ctx) => {
   ${nested ? `writeFileSync(${JSON.stringify(nested.exitPath)},'primary-owned-sentinel',{mode:0o600});` : ""}
-  record('start',ctx,{ppid:process.ppid, owner:ctx.managedHost?.owner.pid ?? null});
+  record('start',ctx,{ppid:process.ppid, owner:ctx.managedHost?.owner.pid ?? null, at:Date.now()});
   ctx.managedHost?.ready.then((accepted) => record('host-ready',ctx,{accepted}));
  });
  ${
@@ -140,7 +142,19 @@ export default function(pi) {
   }
   record('settled',ctx,{calls:faux.state.callCount});
  });
- pi.on('session_shutdown', async (event,ctx) => { await new Promise(r=>setTimeout(r,50)); record('shutdown',ctx,{disposition:event.disposition ?? null}); });
+ pi.on('session_shutdown', async (event,ctx) => {
+  ${
+		holdShutdown
+			? `const hold = ${JSON.stringify(join(root, "hold-shutdown"))};
+  if (event.disposition === 'release' && existsSync(hold)) {
+   record('shutdown-held',ctx);
+   while (existsSync(hold)) await new Promise(r=>setTimeout(r,10));
+  }`
+			: ""
+  }
+  await new Promise(r=>setTimeout(r,50));
+  record('shutdown',ctx,{disposition:event.disposition ?? null});
+ });
  ${failSave ? "pi.on('working_session_save', () => { throw new Error('save hook failed'); });" : ""}
 }
 `,
@@ -153,12 +167,24 @@ export default function(pi) {
 				env?: Record<string, string>;
 				invalidHandoff?: unknown;
 				legacyLauncher?: boolean;
+				/** Runs the real launcher with its startup deadline option instead of the bundled entry. */
+				startupTimeoutMs?: number;
 				tuiMode?: TuiMode;
 			} = {},
 		) {
 			if (!existsSync(cli)) throw new Error(`Build the coding-agent package first: missing ${cli}`);
 			const script = join(root, "launch.sh");
 			let entry = cli;
+			if (options.startupTimeoutMs !== undefined) {
+				entry = join(root, "launcher.mjs");
+				writeFileSync(
+					entry,
+					`
+import {superviseCli} from ${JSON.stringify(pathToFileURL(join(dirname(cli), "..", "cli", "launcher.js")).href)};
+process.exitCode = await superviseCli(${JSON.stringify(join(dirname(cli), "cli-worker.js"))}, process.argv.slice(2), {invocationPath:${JSON.stringify(cli)}, startupTimeoutMs:${options.startupTimeoutMs}});
+`,
+				);
+			}
 			if (options.invalidHandoff !== undefined || options.legacyLauncher) {
 				// A launcher that predates readiness acknowledgment: managed, but no protocol advertisement.
 				const handoff =
@@ -512,7 +538,8 @@ export default function(pi) {
 
 	it("tells extensions whether a managed worker hands off, retires unready, or releases on exit", async () => {
 		const f = fixture();
-		f.start(f.extension("v1", { holdDiscover: true }));
+		const startupTimeoutMs = 10_000;
+		f.start(f.extension("v1", { holdDiscover: true, holdShutdown: true }), { startupTimeoutMs });
 		await f.wait((r) => r.some((x) => x.event === "host-ready") && r.some((x) => x.event === "settled"));
 		const first = f.read().find((r) => r.event === "start")!;
 		expect(first.owner).toBe(first.ppid);
@@ -525,10 +552,16 @@ export default function(pi) {
 		expect(candidate).toMatchObject({ owner: first.owner, sessionFile: first.sessionFile });
 		expect(f.read().find((r) => r.event === "shutdown")).toMatchObject({ pid: first.pid, disposition: "handoff" });
 
-		// Quitting a replacement that has not become ready is the user's exit, not a failed start.
+		// Quitting a replacement that has not become ready is the user's exit, not a failed start,
+		// even when its shutdown hooks are still running at the startup deadline.
+		writeFileSync(join(f.root, "hold-shutdown"), "");
 		f.keys("C-d");
+		await f.wait((r) => r.some((x) => x.event === "shutdown-held" && x.pid === candidate.pid));
+		// The launcher armed the deadline when it spawned the candidate, before the candidate's start receipt.
+		await new Promise((r) => setTimeout(r, Math.max(0, candidate.at! + startupTimeoutMs + 500 - Date.now())));
+		rmSync(join(f.root, "hold-shutdown"));
 		await f.wait(() => existsSync(f.status));
-		expect(readFileSync(f.status, "utf8").trim()).toBe("0");
+		expect(readFileSync(f.status, "utf8").trim(), `${f.screen()}\n${readFileSync(f.log, "utf8")}`).toBe("0");
 		const receipts = f.read();
 		expect(receipts.filter((r) => r.event === "start")).toHaveLength(2);
 		expect(receipts.filter((r) => r.event === "shutdown").at(-1)).toMatchObject({
@@ -539,6 +572,38 @@ export default function(pi) {
 			expect.objectContaining({ accepted: false }),
 		]);
 		expect(receipts.filter((r) => r.event === "prompt").map((r) => r.text)).toEqual(["Seed prompt"]);
+	}, 60_000);
+
+	it("rolls a replacement that misses its startup deadline back once, as a provisional retirement", async () => {
+		const f = fixture();
+		f.start(f.extension("v1", { holdDiscover: true }), { startupTimeoutMs: 8_000 });
+		await f.wait((r) => r.some((x) => x.event === "host-ready") && r.some((x) => x.event === "settled"));
+		const first = f.read().find((r) => r.event === "start")!;
+
+		writeFileSync(join(f.root, "hold-discover"), "");
+		f.keys("/restart Continue after rollback", "Enter");
+		await f.wait((r) => r.some((x) => x.event === "discover-held"));
+		const candidate = f.read().filter((r) => r.event === "start")[1]!;
+		await f.wait((r) => r.some((x) => x.event === "shutdown" && x.pid === candidate.pid));
+		expect(f.read().find((r) => r.event === "shutdown" && r.pid === candidate.pid)?.disposition).toBe("provisional");
+		rmSync(join(f.root, "hold-discover"));
+		await f.wait((r) => r.some((x) => x.event === "prompt" && x.text?.startsWith("[Restart continuation]")));
+		const rollback = f.read().filter((r) => r.event === "start")[2]!;
+		expect(rollback).toMatchObject({ owner: first.owner, sessionFile: first.sessionFile });
+		expect(f.read().filter((r) => r.event === "host-ready" && r.pid === rollback.pid)).toEqual([
+			expect.objectContaining({ accepted: true }),
+		]);
+
+		f.keys("/quit", "Enter");
+		await f.wait(() => existsSync(f.status));
+		expect(readFileSync(f.status, "utf8").trim()).toBe("0");
+		const receipts = f.read();
+		expect(receipts.filter((r) => r.event === "start")).toHaveLength(3);
+		const continuations = receipts.filter((r) => r.event === "prompt" && r.pid === rollback.pid);
+		expect(continuations.map((r) => r.text)).toEqual([
+			expect.stringContaining("did not become ready within 8 seconds"),
+		]);
+		expect(continuations[0].text).toContain("Continue after rollback");
 	}, 60_000);
 
 	it("exposes no managed host or disposition under a launcher without readiness acknowledgment", async () => {

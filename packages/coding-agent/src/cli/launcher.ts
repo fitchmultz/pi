@@ -159,7 +159,15 @@ export async function superviseCli(
 			});
 			const current = child;
 			current.on("message", (value: unknown) => {
-				if (!value || typeof value !== "object" || !("type" in value) || stopping || timedOut) return;
+				if (!value || typeof value !== "object" || !("type" in value) || stopping) return;
+				if (value.type === "pi:exit") {
+					// Shutdown hooks may already have released owned work, so a declared exit stands past the deadline.
+					exitIntent = true;
+					clearTimeout(timeout);
+					clearTimeout(killTimeout);
+					return;
+				}
+				if (timedOut) return;
 				if (value.type === "pi:ready") {
 					ready = true;
 					fallback = undefined;
@@ -169,8 +177,6 @@ export async function superviseCli(
 					const accepted: RestartLauncherMessage = { type: "pi:accepted" };
 					// A worker that is already exiting may have closed its channel; readiness stands either way.
 					if (current.connected) current.send(accepted, () => {});
-				} else if (value.type === "pi:exit") {
-					exitIntent = true;
 				} else if (value.type === "pi:completed" && exitPath && "completed" in value) {
 					const receipt = value.completed;
 					if (
@@ -239,7 +245,11 @@ export async function superviseCli(
 			clearTimeout(timeout);
 			clearTimeout(killTimeout);
 			child = undefined;
-			const exitCode = result.signal ? 128 + constants.signals[result.signal] : timedOut ? 1 : (result.code ?? 1);
+			const exitCode = result.signal
+				? 128 + constants.signals[result.signal]
+				: timedOut && !exitIntent
+					? 1
+					: (result.code ?? 1);
 			if (stopping) return exitCode;
 			if (restart && result.code === 0 && !result.signal) {
 				// A worker can report a user-supplied path; only launcher-created native artifacts are ours to delete.

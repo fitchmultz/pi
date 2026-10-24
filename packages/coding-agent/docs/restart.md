@@ -54,7 +54,7 @@ pi --working-session "/tmp/pi-restart-state-XXXXXX/working-session.json"
 
 That launch treats the file as user-supplied and leaves it in place; delete the file and its directory after recovery. Stopping Pi with a signal during startup removes the file as usual. The launcher only removes its own native `pi-restart-state-*` artifact; a path supplied by the user is never removed.
 
-Quitting an unready replacement with Ctrl+D, `/quit` or `ctx.shutdown()` is an intentional exit: the launcher exits instead of rolling back.
+Quitting an unready replacement with Ctrl+D, `/quit` or `ctx.shutdown()` is an intentional exit: the launcher exits instead of rolling back, even if shutdown handlers are still running when the startup deadline passes.
 
 Readiness is not proof that every provider or tool works. Validate candidates first. Failures after readiness are not automatically rolled back or replayed, because work may already have had side effects.
 

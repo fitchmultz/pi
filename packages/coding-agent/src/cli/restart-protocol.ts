@@ -49,7 +49,7 @@ export interface RestartHandoff extends RestartSession {
 
 export type RestartWorkerMessage =
 	| { type: "pi:ready" }
-	// The user chose to exit: an unready replacement's exit is final, not a failed start.
+	// The user chose to exit: an unready replacement's exit is final, not a failed start, even past its deadline.
 	| { type: "pi:exit" }
 	| { type: "pi:completed"; completed: CompletedWorkingSession }
 	| { type: "pi:restart"; request: RestartRequest; session: RestartSession };
