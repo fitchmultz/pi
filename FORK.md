@@ -264,7 +264,7 @@ coverage explicitly; remove it when the investigation ends.
 
 The fork carries the coordinated provider/schema refresh proposed in upstream issue
 [#10909](https://github.com/earendil-works/pi/issues/10909), plus reviewed same-major
-runtime updates for YAML 2.9.1, Chalk 6.0.1, Ignore 7.0.12, Undici 8.11.2 and
+runtime updates for YAML 2.9.1, Chalk 6.0.1, Ignore 7.0.12, Undici 8.12.3 and
 get-east-asian-width 1.7.0 and the fork's streaming-file dependencies stream-chain 4.2.6
 and stream-json 3.7.0.
 Root and generated installer locks stay together.

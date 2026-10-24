@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
 import tls from "node:tls";
@@ -88,6 +89,46 @@ describe("http dispatcher", () => {
 		}
 		globalThis.fetch = originalFetch;
 		vi.restoreAllMocks();
+	});
+
+	// #247: a caught request rejection must not leave a stream error that terminates Node.
+	it("rejects malformed encoded responses without terminating the process", () => {
+		const result = spawnSync(
+			process.execPath,
+			[
+				"--input-type=module",
+				"--eval",
+				`
+import assert from "node:assert/strict";
+import net from "node:net";
+import { getGlobalDispatcher } from "undici";
+import { configureHttpDispatcher } from ${JSON.stringify(new URL("../src/core/http-dispatcher.ts", import.meta.url).href)};
+
+for (const key of ${JSON.stringify(DISPATCHER_PROXY_ENV_KEYS)}) delete process.env[key];
+configureHttpDispatcher();
+const server = net.createServer((socket) => {
+	socket.on("error", () => {});
+	socket.once("data", () => socket.end(
+		"HTTP/1.1 200 OK\\r\\nContent-Encoding: gzip, gzip, gzip, gzip, gzip, gzip\\r\\nContent-Length: 10\\r\\nConnection: close\\r\\n\\r\\n",
+	));
+});
+await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+try {
+	await assert.rejects(async () => {
+		const response = await fetch("http://127.0.0.1:" + server.address().port);
+		await response.arrayBuffer();
+	});
+} finally {
+	await Promise.all([getGlobalDispatcher().close(), new Promise((resolve) => server.close(resolve))]);
+}
+console.log("process survived");
+`,
+			],
+			{ cwd: new URL("..", import.meta.url), encoding: "utf8", timeout: 10_000 },
+		);
+
+		expect(result.status, result.stderr).toBe(0);
+		expect(result.stdout).toContain("process survived");
 	});
 
 	it("tunnels proxied HTTP origins", async () => {
