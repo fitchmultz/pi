@@ -2,7 +2,59 @@
 
 The fork removes repeated work from native file tools, TUI rendering, model metadata, provider stream handling, Chord/MCP transport, sessions, Durable, Env, background jobs, evals and packaging. The recorded fixtures show large reductions on those paths. A matched rerun confirmed the branch-preparation, current-directory listing and long-token wrap/preview gains. AI tool validation (+33%), transform (+5.4%) and prose preview (+6.1%) were slower in all four matched pairs, with overlapping ranges and no isolated source attribution. One deliberate trade-off is slower: the native Bash tool and executor now keep the spill-file write queue at 64 KiB instead of letting it grow to 6.9-10.1 MiB, and writing 64 MiB of command output took about 28% longer. Startup and Biome showed no clear change.
 
-These are source-owner measurements of two measured source trees on one workstation, not of the final runtime: later prompt-cache, model-catalog and upstream v1.2.0 integration changes were not timed. They do not show that every CLI invocation, provider, device or downstream adapter becomes faster. Functional tests remain the authority for behavior, safety, cancellation and mutation isolation.
+The older [recorded results](#recorded-results) are source-owner measurements of two measured source trees on one workstation, not of the final runtime: later prompt-cache, model-catalog and upstream v1.2.0 integration changes were not timed. Dated sections identify their own workloads and measurement status. These results do not show that every CLI invocation, provider, device or downstream adapter becomes faster. Functional tests remain the authority for behavior, safety, cancellation and mutation isolation.
+
+## Session listing (2026-10-24)
+
+`SessionManager.list()` and `listAll()` reuse complete per-journal scan results under unchanged source revisions and date-parser context. Counts, names, activity dates, previews, and full user/assistant search text remain exact; the source scanner is authoritative. See the [cache contract](../packages/coding-agent/docs/session-listing.md) for invalidation, cleanup, permissions, and concurrent-write limits.
+
+On the larger synthetic Linux workload, **warm-cache** picker load/search/render/select fell from **2318.49 to 48.19 ms median**. All 20 fresh processes passed, with matching semantic witnesses. [Results, samples, environment, source/workload hashes, loads, and commands](session-listing-performance-results.json) identify the corrected candidate measured as an uncommitted tree based on `0998f135`; that ancestor's original product tree is not the new candidate. Values below are median (minimum–maximum), milliseconds, five trials per side and size.
+
+| Workload | Operation | Before | Candidate |
+| --- | --- | ---: | ---: |
+| 12 files | Cold list and cache population | 92.33 (87.04–99.19) | 107.23 (95.46–110.86) |
+| 12 files | Warm complete list | 62.96 (56.92–72.37) | 3.18 (2.92–4.02) |
+| 12 files | Warm current-project list | 16.06 (14.14–21.37) | 1.86 (1.81–2.60) |
+| 12 files | Warm picker load/search/render/select | 77.88 (73.86–89.81) | 13.23 (11.99–17.26) |
+| 64 files | Cold list and cache population | 1783.98 (1665.48–2232.17) | 1944.78 (1835.70–2183.97) |
+| 64 files | Warm complete list | 1649.65 (1550.38–1754.97) | 11.98 (11.71–19.98) |
+| 64 files | Warm current-project list | 394.39 (383.48–425.70) | 4.79 (3.96–5.29) |
+| 64 files | Warm picker load/search/render/select | 2318.49 (1644.74–2372.02) | 48.19 (44.65–53.37) |
+
+Cold initialization is not improved: it scans complete journals and adds cache publication work, and both candidate cold medians are higher with overlapping ranges. The cache also duplicates complete searchable text on disk. The historical **2284.40 → 51.91 ms warm-cache** result belongs only to the [original `0998f135` qualification][listing-original], not the changed runtime.
+
+The retained fixture uses 12 files × 128 messages and 64 files × 512 messages across four project directories. Seven of every eight messages contain synthetic tool output; the rest retain complete searchable Unicode text and late-row markers. Each process times these separate operations:
+
+| Operation label | Timed work |
+| --- | --- |
+| Cold list and cache population | First `listAll()` with an empty derived cache |
+| Warm complete list | Second complete `listAll()` |
+| Warm current-project list | `list()` for one of the four projects |
+| Warm picker load, search, render, and selection | Real picker all-project loading through the listing API, full-text query, render, and selection; waits for complete results |
+
+Run five serial fresh-process pairs per size, alternating before/after order. Both roots get freshly written, filesystem-warm synthetic inputs; only the candidate's warm operations use a populated derived cache. Imports, fixture generation, assertions, and result hashing are outside the operation clocks. The fixture checks exact cold/warm metadata, message counts, search and selection, progress, and semantic witnesses. The picker clock excludes application startup and terminal-emulator display.
+
+```sh
+# In each isolated root, before timing; use identical frozen model data.
+npm ci --ignore-scripts
+node packages/ai/scripts/hydrate-model-catalog.ts "$CATALOG"
+
+# From the candidate checkout. RESULTS must not already exist.
+node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" \
+  --groups session-listing-12,session-listing-64 --repeat 5 --out "$RESULTS"
+```
+
+These are synthetic Linux workloads, not measurements of the owner's installed macOS runtime or private corpus. Warm costs still include discovery, source-revision checks, cache decoding, and complete search text; text-heavy journals, other filesystems, and cold caches can behave differently. Session-open parsing and per-keystroke search normalization are not optimized here. Static review against the Node 22.19.0 filesystem API contract is not runtime qualification on every supported platform. Source/log reviews and archived tests do not establish current-head CI, provider, or platform passes; skipped tests remain skips.
+
+The original [measurement manifest][listing-manifest] retains the measured source hashes, commands, samples, loads, and witnesses. Other historical evidence remains at the same immutable ancestor: [model admission][listing-model], [verification and failed-attempt/container notes][listing-verification], [CPU profiles][listing-profiles], [CLI terminal captures and synthetic journals][listing-cli], and [date-context reproducer][listing-dates]. These records describe the original runtime, not the subsequent reductions.
+
+[listing-original]: https://github.com/fitchmultz/pi/blob/0998f135b599be18c07069d9848b5b65012c95ea/docs/performance/issue-251/README.md
+[listing-manifest]: https://github.com/fitchmultz/pi/blob/0998f135b599be18c07069d9848b5b65012c95ea/docs/performance/issue-251/measurements/manifest.json
+[listing-model]: https://github.com/fitchmultz/pi/blob/0998f135b599be18c07069d9848b5b65012c95ea/docs/performance/issue-251/model-evidence.json
+[listing-verification]: https://github.com/fitchmultz/pi/blob/0998f135b599be18c07069d9848b5b65012c95ea/docs/performance/issue-251/verification.md
+[listing-profiles]: https://github.com/fitchmultz/pi/tree/0998f135b599be18c07069d9848b5b65012c95ea/docs/performance/issue-251/profiles
+[listing-cli]: https://github.com/fitchmultz/pi/tree/0998f135b599be18c07069d9848b5b65012c95ea/docs/performance/issue-251/cli
+[listing-dates]: https://github.com/fitchmultz/pi/tree/0998f135b599be18c07069d9848b5b65012c95ea/docs/performance/issue-251/dates
 
 ## Turn-end context reads (2026-10-14)
 

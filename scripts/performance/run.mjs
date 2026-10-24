@@ -140,6 +140,8 @@ for (const mode of ["fork", "list", "working", "split"])
 		SESSION_ENTRIES: smoke ? "20" : "10000",
 		SESSION_ITERATIONS: smoke ? "1" : "7",
 	});
+for (const [files, rows, bytes] of smoke ? [[4, 16, 1024]] : [[12, 128, 16384], [64, 512, 32768]])
+	add("session-listing", `session-listing-${files}`, "session-listing.ts", [String(files), String(rows), String(bytes)]);
 add("durable", "context-retention", "durable-context.ts", [smoke ? "0,3" : "0,100,1000,10000", smoke ? "1" : "120"]);
 add("durable", "history", "durable-history.ts", [smoke ? "32" : "1024,8192,65536", smoke ? "2" : "1000"]);
 add("durable", "node-longline", "durable-lines.ts", [smoke ? "1" : "1024,4096,16384", samples]);
