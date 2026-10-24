@@ -37,9 +37,11 @@
 - Batch workspace builds and npm/Nix packing, and retain PID-unique CPU profiles from every launcher and worker.
 - Skip unnecessary full archived-history indexing for recent context-usage estimates, preserving context-edit and compaction invalidation.
 - Clarified the codemode store limits in the tool description and docs: each value has a 256 KiB cap, keys and values together a 1 MiB per-branch cap, and background codemode scripts are not a durable monitoring mechanism ([#235](https://github.com/fitchmultz/pi/issues/235)).
+- `pi update --fork` now prunes older owned releases after successful activation, keeping the newest five validated releases plus selected, `.previous`, legacy and detected running releases. Fork CLI and SDK hosts keep their receipt open so process inspection detects JavaScript-only runtimes. Restart older workers to gain this protection. Missing inspection tools or cleanup failures warn without failing the update. See [Fork installation](docs/quickstart.md#fork-installation).
 
 ### Fixed
 
+- Fixed forking legacy sessions skipping migration and losing earlier model context, compaction references, and legacy custom-message roles ([#256](https://github.com/fitchmultz/pi/issues/256)).
 - Fixed chat card backgrounds tinting iTerm margins and window chrome in fullscreen mode; terminal-default side gutters preserve card colors, prompt navigation, and image scrolling ([#243](https://github.com/fitchmultz/pi/issues/243)).
 - Fixed quitting an unready restarted worker rolling back to the previous worker instead of exiting, including when its shutdown handlers outlast the startup deadline.
 - Fixed messages sent while Pi quits, such as a child completion arriving during a shutdown hook, starting a new turn. A managed restart then failed its final capture and stopped unfinished children; quit now admits shutdown persistence but no new or steered turn.

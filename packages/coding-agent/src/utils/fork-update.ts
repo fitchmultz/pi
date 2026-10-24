@@ -145,14 +145,13 @@ export async function runForkUpdate(): Promise<void> {
 		// ownership rather than allowing a child to bypass the shared selector lock.
 		await releaseLock();
 		releaseLock = undefined;
+		const installer = join(source, "scripts/install-fork.mjs");
+		const location = ["--selector", selector, "--releases", releases];
 		await run(node, [
-			join(source, "scripts/install-fork.mjs"),
+			installer,
 			"--ref",
 			commit,
-			"--selector",
-			selector,
-			"--releases",
-			releases,
+			...location,
 			// Upstream catalog changes (provider renames, model pruning) are routine.
 			// Never block the update on them; the installer prints every removed ID.
 			// ponytail: no updater-level consent gate by owner decision. Malformed or
@@ -160,6 +159,13 @@ export async function runForkUpdate(): Promise<void> {
 			"--accept-model-removals",
 		]);
 		console.log(`Fork commit ${commit} is active. Rollback selector (when available): ${selector}.previous`);
+		try {
+			await run(node, [installer, "--prune", "--keep", "5", ...location]);
+		} catch (error) {
+			console.warn(
+				`Warning: the update succeeded, but old-release cleanup failed: ${error instanceof Error ? error.message : String(error)}. Rerun pi update --fork to retry cleanup.`,
+			);
+		}
 		console.log(
 			"Running sessions are unchanged. Fully relaunch pi, or use pi restart from a selector-following session and verify the loaded runtime.",
 		);

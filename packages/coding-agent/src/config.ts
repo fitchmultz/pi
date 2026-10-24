@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, readFileSync, realpathSync } from "fs";
+import { accessSync, constants, existsSync, openSync, readFileSync, realpathSync } from "fs";
 import { createRequire } from "module";
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
@@ -402,6 +402,15 @@ export function getPackageDir(): string {
 		return dirname(process.execPath);
 	}
 	return findNodePackageDir(__dirname);
+}
+
+if (!isBunBinary) {
+	const receipt = resolve(realpathSync(findNodePackageDir(__dirname)), "../../../fork-release.json");
+	if (existsSync(receipt)) {
+		// JavaScript-only CLI and SDK hosts may have no visible release path.
+		// Keep the receipt open so pruning sees this runtime until the process exits.
+		openSync(receipt, "r");
+	}
 }
 
 /**

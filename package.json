@@ -37,7 +37,7 @@
 		"check:model-catalog-compat": "node scripts/check-model-catalog-compat.mjs",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
 		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
-		"test": "npm run test:scripts && npm run test --workspaces --if-present",
+		"test": "bash ./test.sh",
 		"test:scripts": "node --test scripts/*.test.mjs scripts/*.test.ts",
 		"test:mcp-conformance": "node packages/coding-agent/test/mcp-conformance/run.ts",
 		"version:patch": "npm version patch --workspaces --no-git-tag-version --no-workspaces-update && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts",

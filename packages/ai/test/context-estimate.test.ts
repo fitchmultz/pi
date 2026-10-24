@@ -2,7 +2,6 @@ import type { ChatCompletionCreateParamsStreaming } from "openai/resources/chat/
 import { describe, expect, it } from "vitest";
 import { streamSimple } from "../src/api/openai-completions.ts";
 import { buildBaseOptions } from "../src/api/simple-options.ts";
-import { getModel } from "../src/compat.ts";
 import type { AssistantMessage, Model, Usage } from "../src/types.ts";
 import { estimateContextTokens } from "../src/utils/estimate.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
@@ -220,8 +219,23 @@ describe("cross-model context estimation", () => {
 
 	// Model switching drops foreign thinking (#10995); its old usage must not consume the new answer budget.
 	it("preserves native output allowance when foreign reasoning is stripped from replay", async () => {
-		const source = getModel("openrouter", "moonshotai/kimi-k3");
-		const target = getModel("openrouter", "openai/gpt-3.5-turbo");
+		const source: Model<"openai-completions"> = {
+			...model,
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			id: "reasoning-source",
+			reasoning: true,
+			contextWindow: 1_048_576,
+			maxTokens: 131_072,
+		};
+		const target: Model<"openai-completions"> = {
+			...source,
+			id: "plain-target",
+			reasoning: false,
+			contextWindow: 16_385,
+			maxTokens: 4_096,
+		};
 		const user = { role: "user" as const, content: "Say done after thinking.", timestamp: 1 };
 		const payloads: ChatCompletionCreateParamsStreaming[] = [];
 
