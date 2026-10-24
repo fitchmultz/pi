@@ -393,6 +393,9 @@ adjacent npm, Git, bash, tar, gzip, tmux, and network access.
 Supports macOS/Linux/Termux arm64/x64, not Windows, ordinary npm directories, or other
 install methods. No existing checkout needed. Does not update extensions/settings
 or restart running sessions. Cannot combine with other targets or --force.
+After activation, removes this updater's older releases beyond the newest 5; selected,
+.previous, legacy and detected running releases are kept. Cleanup needs lsof and ps;
+failures only warn. Relaunch older sessions to enable their release protection.
 Initial setup: https://github.com/fitchmultz/pi/blob/main/packages/coding-agent/docs/quickstart.md#fork-installation
 Exit status: 0 on success/help, 1 on invalid options or failed update.
 `);
