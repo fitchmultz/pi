@@ -8,6 +8,7 @@ import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
 interface TestState {
 	moduleLoads?: number;
 	factoryRuns?: number;
+	importGate?: Promise<void>;
 }
 
 function state(): TestState {
@@ -78,6 +79,39 @@ describe("extension factory cache", () => {
 		expect(state().factoryRuns).toBe(2);
 		expect(first.extensions[0]).not.toBe(second.extensions[0]);
 		expect(first.runtime).not.toBe(second.runtime);
+	});
+
+	// fitchmultz/pi#250: clearing during evaluation must reject stale generation writes from the whole batch.
+	it("does not repopulate a cleared cache from in-flight imports", async () => {
+		const { root, cwd } = fixture("in-flight");
+		let releaseImports!: () => void;
+		state().importGate = new Promise<void>((resolve) => {
+			releaseImports = resolve;
+		});
+		const paths = ["first", "second"].map((name) => {
+			const path = join(root, `${name}.ts`);
+			writeFileSync(
+				path,
+				`
+const state = globalThis.__extensionFactoryCacheTest;
+state.moduleLoads = (state.moduleLoads ?? 0) + 1;
+await state.importGate;
+export default function () { state.factoryRuns = (state.factoryRuns ?? 0) + 1; }
+`,
+			);
+			return path;
+		});
+		const inFlight = loadExtensionsCached(paths, cwd);
+		try {
+			await expect.poll(() => state().moduleLoads ?? 0).toBeGreaterThan(0);
+			clearExtensionCache();
+		} finally {
+			releaseImports();
+		}
+		expect((await inFlight).errors).toEqual([]);
+		expect((await loadExtensionsCached(paths, cwd)).errors).toEqual([]);
+		expect(state().moduleLoads).toBe(4);
+		expect(state().factoryRuns).toBe(4);
 	});
 
 	it("does not cache direct loadExtensions calls", async () => {

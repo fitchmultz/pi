@@ -57,7 +57,9 @@ Pi evaluates extension modules concurrently, then runs their factories one at a 
 
 The factory can be synchronous or asynchronous. Pi waits for an asynchronous factory before calling the next factory or continuing startup, allowing it to fetch configuration or register providers needed during startup.
 
-With `PI_TIMING=1`, `module imports` reports the combined wall time for each batch of module imports. Factory timings remain sequential. Individual import durations overlap, so adding them would overstate startup time.
+With `PI_TIMING=1`, `module imports` reports one wall-time duration for the import batch, replacing the former per-extension import entries. This loses individual import-duration attribution; per-extension factory timings remain sequential. Do not add overlapping import durations to estimate startup wall time.
+
+For a separate diagnostic run, `JITI_DEBUG=1` identifies native imports and transformed modules. It reports transform time when transformation occurs, not per-module import latency: native-import paths have no per-module compile timing. Use the runtime's CPU profiler to investigate synchronous loading work, separately from comparative startup measurements.
 
 Do not start processes, sockets, watchers, or timers in the factory because some invocations load extensions without starting a session.
 Start long-lived resources from `session_start` or from the command or tool that needs them.
