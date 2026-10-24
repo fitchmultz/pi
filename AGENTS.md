@@ -95,6 +95,7 @@ Keep this table aligned with executable enforcement, not aspirational rules. Whe
 | Rule | Enforcement |
 | --- | --- |
 | Default full-suite tests must not inherit caller credentials or user resources | `npm test` and CI use `test.sh`'s empty-environment allowlist and isolated home; `scripts/test-runner.test.mjs` exercises both entrypoints, cleanup and failure propagation |
+| Mocked completions tests use fixed typed models instead of discarded-compat catalog fixtures | `scripts/biome/stable-payload-fixtures.grit`, scoped in `biome.json` to `packages/ai/test/openai-completions-tool-choice.test.ts` and enforced by `npm run check`; native/WASM contract tests in `scripts/biome-check.test.mjs` run through `test.sh` and CI |
 | Direct registry dependencies, including workspace packages, use exact versions | `npm run check:pinned-deps`, included in `npm run check` locally, in pre-commit and in CI |
 | Published sources declare their runtime dependencies and do not import excluded sources | `npm run check:runtime-deps`; isolated public-package consumer installs in CI |
 | Source TypeScript uses erasable syntax and relative `.ts` imports | `erasableSyntaxOnly` in `tsconfig.base.json` and `npm run check:ts-imports`, both enforced by `npm run check` |

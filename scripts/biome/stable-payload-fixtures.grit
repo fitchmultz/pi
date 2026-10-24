@@ -1,0 +1,18 @@
+language js
+
+or {
+	`const $binding = getModel($provider, $id)!`,
+	`const $binding = getModel($provider, $id)`
+} as $fixture where {
+	$binding <: JsObjectBindingPattern(),
+	$binding <: contains JsObjectBindingPatternRest(),
+	$binding <: contains JsObjectBindingPatternProperty() as $property,
+	$property <: contains JsLiteralMemberName() as $member,
+	$member <: "compat",
+	$property <: contains JsIdentifierBinding() as $discard,
+	$discard <: r"_.*",
+	register_diagnostic(
+		span = $fixture,
+		message = "Use a stable typed fixture based on localOpenAICompletionsModel instead of stripping catalog compat."
+	)
+}
