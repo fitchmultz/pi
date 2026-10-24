@@ -40,5 +40,11 @@
 			"!!apps"
 		]
 	},
-	"plugins": ["./scripts/biome/model-type-comparison.grit"]
+	"plugins": ["./scripts/biome/model-type-comparison.grit"],
+	"overrides": [
+		{
+			"includes": ["packages/ai/test/openai-completions-tool-choice.test.ts"],
+			"plugins": ["./scripts/biome/stable-payload-fixtures.grit"]
+		}
+	]
 }
