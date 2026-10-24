@@ -9,11 +9,14 @@ import { parseArgs } from "./args.ts";
 import {
 	type CompletedWorkingSession,
 	MANAGED_CLI_ENV,
+	MANAGED_PROTOCOL_ENV,
+	MANAGED_PROTOCOL_VERSION,
 	parseRestartCommand,
 	parseRestartRequest,
 	RESTART_HANDOFF_ENV,
 	RESTART_SOCKET_ENV,
 	type RestartHandoff,
+	type RestartLauncherMessage,
 	type RestartWorkerMessage,
 	requestRestart,
 	WORKING_SESSION_LAUNCH_ENV,
@@ -110,6 +113,7 @@ export async function superviseCli(
 	delete env[RESTART_SOCKET_ENV];
 	delete env[RESTART_HANDOFF_ENV];
 	delete env[MANAGED_CLI_ENV];
+	delete env[MANAGED_PROTOCOL_ENV];
 	const signals: NodeJS.Signals[] =
 		process.platform === "win32" ? ["SIGINT", "SIGTERM"] : ["SIGINT", "SIGTERM", "SIGHUP"];
 	const removers = signals.map((signal) => {
@@ -135,6 +139,7 @@ export async function superviseCli(
 	try {
 		while (!stopping) {
 			let ready = false;
+			let exitIntent = false;
 			const workerId = randomUUID();
 			let completed: CompletedWorkingSession | undefined;
 			let timedOut = false;
@@ -146,6 +151,7 @@ export async function superviseCli(
 				env: {
 					...env,
 					[MANAGED_CLI_ENV]: "1",
+					[MANAGED_PROTOCOL_ENV]: MANAGED_PROTOCOL_VERSION,
 					[WORKING_SESSION_LAUNCH_ENV]: launchId,
 					[WORKING_SESSION_WORKER_ENV]: workerId,
 					...(handoff ? { [RESTART_HANDOFF_ENV]: JSON.stringify(handoff) } : {}),
@@ -160,6 +166,11 @@ export async function superviseCli(
 					for (const path of restartArtifacts) removeRestartArtifact(path);
 					restartArtifacts.clear();
 					clearTimeout(timeout);
+					const accepted: RestartLauncherMessage = { type: "pi:accepted" };
+					// A worker that is already exiting may have closed its channel; readiness stands either way.
+					if (current.connected) current.send(accepted, () => {});
+				} else if (value.type === "pi:exit") {
+					exitIntent = true;
 				} else if (value.type === "pi:completed" && exitPath && "completed" in value) {
 					const receipt = value.completed;
 					if (
@@ -263,7 +274,7 @@ export async function superviseCli(
 				}
 				continue;
 			}
-			if (!ready && fallback && handoff) {
+			if (!ready && fallback && handoff && !exitIntent) {
 				const failure = timedOut
 					? `Updated Pi did not become ready within ${(options.startupTimeoutMs ?? 60_000) / 1000} seconds.`
 					: "Updated Pi exited before becoming ready.";
@@ -273,7 +284,7 @@ export async function superviseCli(
 				handoff = { ...handoff, failure, extensions: undefined };
 				continue;
 			}
-			if (!ready && restartArtifacts.size > 0) {
+			if (!ready && restartArtifacts.size > 0 && !exitIntent) {
 				// No worker consumed the handoff and no recovery remains; keep it for explicit recovery.
 				for (const path of restartArtifacts) {
 					if (!existsSync(path)) continue;

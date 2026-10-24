@@ -39,6 +39,10 @@ interface Receipt {
 	calls?: number;
 	idle?: boolean;
 	environment?: Record<string, string>;
+	ppid?: number;
+	owner?: number | null;
+	accepted?: boolean;
+	disposition?: string | null;
 }
 
 function fixture(rootDir = tmpdir()) {
@@ -71,10 +75,11 @@ function fixture(rootDir = tmpdir()) {
 				holdWork?: boolean;
 				settledFollowup?: boolean;
 				failSave?: boolean;
+				holdDiscover?: boolean;
 				nested?: { probe: string; command: string; exitPath: string };
 			} = {},
 		) {
-			const { restartCommand, holdWork, settledFollowup, failSave, nested } = options;
+			const { restartCommand, holdWork, settledFollowup, failSave, holdDiscover, nested } = options;
 			const path = join(root, `${version}.ts`);
 			writeFileSync(
 				path,
@@ -97,7 +102,21 @@ export default function(pi) {
   pi.appendEntry('admitted-work',{completed:true});
   record('admitted-complete',ctx);
  } });
- pi.on('session_start', (_event,ctx) => { ${nested ? `writeFileSync(${JSON.stringify(nested.exitPath)},'primary-owned-sentinel',{mode:0o600});` : ""} record('start',ctx); });
+ pi.on('session_start', (_event,ctx) => {
+  ${nested ? `writeFileSync(${JSON.stringify(nested.exitPath)},'primary-owned-sentinel',{mode:0o600});` : ""}
+  record('start',ctx,{ppid:process.ppid, owner:ctx.managedHost?.owner.pid ?? null});
+  ctx.managedHost?.ready.then((accepted) => record('host-ready',ctx,{accepted}));
+ });
+ ${
+		holdDiscover
+			? `pi.on('resources_discover', async () => {
+  const hold = ${JSON.stringify(join(root, "hold-discover"))};
+  if (!existsSync(hold)) return;
+  appendFileSync(${JSON.stringify(log)}, JSON.stringify({event:'discover-held', pid:process.pid}) + '\\n');
+  while (existsSync(hold)) await new Promise(r=>setTimeout(r,10));
+ });`
+			: ""
+ }
  pi.on('before_agent_start', async (event,ctx) => {
   if (${settledFollowup === true} && event.prompt === 'Deferred settled followup') {
    record('deferred-start',ctx);
@@ -121,7 +140,7 @@ export default function(pi) {
   }
   record('settled',ctx,{calls:faux.state.callCount});
  });
- pi.on('session_shutdown', async (_event,ctx) => { await new Promise(r=>setTimeout(r,50)); record('shutdown',ctx); });
+ pi.on('session_shutdown', async (event,ctx) => { await new Promise(r=>setTimeout(r,50)); record('shutdown',ctx,{disposition:event.disposition ?? null}); });
  ${failSave ? "pi.on('working_session_save', () => { throw new Error('save hook failed'); });" : ""}
 }
 `,
@@ -130,12 +149,22 @@ export default function(pi) {
 		},
 		start(
 			extension: string,
-			options: { env?: Record<string, string>; invalidHandoff?: unknown; tuiMode?: TuiMode } = {},
+			options: {
+				env?: Record<string, string>;
+				invalidHandoff?: unknown;
+				legacyLauncher?: boolean;
+				tuiMode?: TuiMode;
+			} = {},
 		) {
 			if (!existsSync(cli)) throw new Error(`Build the coding-agent package first: missing ${cli}`);
 			const script = join(root, "launch.sh");
 			let entry = cli;
-			if (options.invalidHandoff !== undefined) {
+			if (options.invalidHandoff !== undefined || options.legacyLauncher) {
+				// A launcher that predates readiness acknowledgment: managed, but no protocol advertisement.
+				const handoff =
+					options.invalidHandoff === undefined
+						? {}
+						: { PI_RESTART_HANDOFF: JSON.stringify(options.invalidHandoff) };
 				entry = join(root, "invalid-parent.mjs");
 				writeFileSync(
 					entry,
@@ -143,7 +172,7 @@ export default function(pi) {
 import {spawn} from 'node:child_process';
 const child = spawn(process.execPath, [${JSON.stringify(join(dirname(cli), "cli-worker.js"))}, ...process.argv.slice(2)], {
  stdio:['inherit','inherit','inherit','ipc'],
- env:{...process.env, PI_MANAGED_CLI:'1', PI_RESTART_HANDOFF:${JSON.stringify(JSON.stringify(options.invalidHandoff))}}
+ env:{...process.env, PI_MANAGED_CLI:'1', ...${JSON.stringify(handoff)}}
 });
 child.on('exit', code => {process.exitCode = code ?? 1;});
 `,
@@ -479,6 +508,49 @@ export default function(pi) {
 				.at(-1)?.text,
 		).toBe("[Restart continuation]\nSlash continuation");
 		expect(f.read().filter((r) => r.event === "work")).toHaveLength(2);
+	}, 60_000);
+
+	it("tells extensions whether a managed worker hands off, retires unready, or releases on exit", async () => {
+		const f = fixture();
+		f.start(f.extension("v1", { holdDiscover: true }));
+		await f.wait((r) => r.some((x) => x.event === "host-ready") && r.some((x) => x.event === "settled"));
+		const first = f.read().find((r) => r.event === "start")!;
+		expect(first.owner).toBe(first.ppid);
+		expect(f.read().find((r) => r.event === "host-ready")?.accepted).toBe(true);
+
+		writeFileSync(join(f.root, "hold-discover"), "");
+		f.keys("/restart Must not run", "Enter");
+		await f.wait((r) => r.some((x) => x.event === "discover-held"));
+		const candidate = f.read().filter((r) => r.event === "start")[1]!;
+		expect(candidate).toMatchObject({ owner: first.owner, sessionFile: first.sessionFile });
+		expect(f.read().find((r) => r.event === "shutdown")).toMatchObject({ pid: first.pid, disposition: "handoff" });
+
+		// Quitting a replacement that has not become ready is the user's exit, not a failed start.
+		f.keys("C-d");
+		await f.wait(() => existsSync(f.status));
+		expect(readFileSync(f.status, "utf8").trim()).toBe("0");
+		const receipts = f.read();
+		expect(receipts.filter((r) => r.event === "start")).toHaveLength(2);
+		expect(receipts.filter((r) => r.event === "shutdown").at(-1)).toMatchObject({
+			pid: candidate.pid,
+			disposition: "release",
+		});
+		expect(receipts.filter((r) => r.event === "host-ready" && r.pid === candidate.pid)).toEqual([
+			expect.objectContaining({ accepted: false }),
+		]);
+		expect(receipts.filter((r) => r.event === "prompt").map((r) => r.text)).toEqual(["Seed prompt"]);
+	}, 60_000);
+
+	it("exposes no managed host or disposition under a launcher without readiness acknowledgment", async () => {
+		const f = fixture();
+		f.start(f.extension("v1"), { legacyLauncher: true });
+		await f.wait((r) => r.some((x) => x.event === "settled"));
+		f.keys("/quit", "Enter");
+		await f.wait(() => existsSync(f.status));
+		const receipts = f.read();
+		expect(receipts.find((r) => r.event === "start")?.owner).toBeNull();
+		expect(receipts.filter((r) => r.event === "host-ready")).toHaveLength(0);
+		expect(receipts.find((r) => r.event === "shutdown")?.disposition).toBeNull();
 	}, 60_000);
 
 	it("reports a failed restart capture with a resume command instead of crashing", async () => {

@@ -7,6 +7,9 @@ export const MANAGED_CLI_ENV = "PI_MANAGED_CLI";
 export const MAX_RESTART_BYTES = 64 * 1024;
 export const WORKING_SESSION_LAUNCH_ENV = "PI_WORKING_SESSION_LAUNCH";
 export const WORKING_SESSION_WORKER_ENV = "PI_WORKING_SESSION_WORKER";
+/** Launcher-written, bootstrap-consumed: this launcher acknowledges readiness and honors exit intent. */
+export const MANAGED_PROTOCOL_ENV = "PI_MANAGED_PROTOCOL";
+export const MANAGED_PROTOCOL_VERSION = "1";
 
 /** Headless modes become ready only after their native owner and extensions bind. */
 export async function notifyCliReady(): Promise<void> {
@@ -46,8 +49,13 @@ export interface RestartHandoff extends RestartSession {
 
 export type RestartWorkerMessage =
 	| { type: "pi:ready" }
+	// The user chose to exit: an unready replacement's exit is final, not a failed start.
+	| { type: "pi:exit" }
 	| { type: "pi:completed"; completed: CompletedWorkingSession }
 	| { type: "pi:restart"; request: RestartRequest; session: RestartSession };
+
+/** Sent only by a launcher that advertised {@link MANAGED_PROTOCOL_ENV}: readiness was accepted and rollback retired. */
+export type RestartLauncherMessage = { type: "pi:accepted" };
 
 export function parseRestartHandoff(encoded: string): RestartHandoff {
 	const value: unknown = JSON.parse(encoded);
