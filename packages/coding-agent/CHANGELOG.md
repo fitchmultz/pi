@@ -30,6 +30,7 @@
 
 ### Changed
 
+- Cache complete session-list metadata and search text under unchanged file revisions, avoiding repeated journal scans while preserving exact counts, names, previews, activity order, and full-text search ([#251](https://github.com/fitchmultz/pi/issues/251)). See [Session listing cache](docs/session-listing.md) for cold-scan and storage tradeoffs.
 - Published settings, models, keybindings, and theme schemas using upstream's shared runtime definitions; the fork settings schema retains boolean and `"hybrid"` compact activity preferences.
 - Reduced repeated session-history work, assistant/tree rendering and native read, grep, edit and image processing.
 - Bound native Bash spill queues and wait for complete private spill files before returning. This bounded-memory path is slower on the recorded 64 MiB workload.

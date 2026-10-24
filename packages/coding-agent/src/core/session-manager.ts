@@ -32,7 +32,7 @@ import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { atomicWriteFileSync } from "../utils/atomic-file.ts";
-import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { getFileRevision, normalizePath, resolvePath } from "../utils/paths.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -40,6 +40,12 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import {
+	getSessionListCacheContext,
+	pruneSessionListCache,
+	readSessionListCache,
+	writeSessionListCache,
+} from "./session-list-cache.ts";
 export const CURRENT_SESSION_VERSION = 3;
 
 export interface SessionHeader {
@@ -814,11 +820,18 @@ function getMessageActivityTime(entry: SessionMessageEntry): number | undefined 
 async function buildSessionInfo(
 	filePath: string,
 	signal?: AbortSignal,
-	fileStats?: Stats,
 	resolvedCwd?: string,
 ): Promise<SessionInfo | null> {
 	try {
-		const stats = fileStats ?? (await stat(filePath));
+		signal?.throwIfAborted();
+		const revision = getFileRevision(filePath);
+		const cached = await readSessionListCache(filePath, revision, signal);
+		signal?.throwIfAborted();
+		if (cached && revision === getFileRevision(filePath)) {
+			return resolvedCwd === undefined || sessionCwdMatches(cached.cwd, resolvedCwd) ? cached : null;
+		}
+		const context = getSessionListCacheContext();
+		const stats = await stat(filePath);
 		let header: SessionHeader | null = null;
 		let messageCount = 0;
 		let firstMessage = "";
@@ -888,7 +901,7 @@ async function buildSessionInfo(
 					? new Date(headerTime)
 					: stats.mtime;
 
-		return {
+		const info: SessionInfo = {
 			path: filePath,
 			id: header.id,
 			cwd,
@@ -900,6 +913,11 @@ async function buildSessionInfo(
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.join(" "),
 		};
+		signal?.throwIfAborted();
+		if (revision && revision === getFileRevision(filePath))
+			await writeSessionListCache(info, revision, context, signal);
+		signal?.throwIfAborted();
+		return info;
 	} catch {
 		signal?.throwIfAborted();
 		return null;
@@ -956,7 +974,8 @@ function buildSessionInfosWithConcurrency(
 		files,
 		MAX_CONCURRENT_SESSION_INFO_LOADS,
 		async (file, index) => {
-			const info = await buildSessionInfo(file.path, signal, file.stats, resolvedCwd);
+			const info = await buildSessionInfo(file.path, signal, resolvedCwd);
+			signal?.throwIfAborted();
 			onLoaded(info, index);
 			return info;
 		},
@@ -975,6 +994,7 @@ async function listSessionsFromDir(
 
 	try {
 		const dirEntries = await readdir(dir);
+		await pruneSessionListCache(dir, dirEntries, signal);
 		const files = dirEntries
 			.filter((file) => file.endsWith(".jsonl"))
 			.sort((a, b) => b.localeCompare(a))
@@ -2077,7 +2097,9 @@ export class SessionManager {
 				MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
 				async (dir) => {
 					try {
-						return (await readdir(dir)).filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
+						const files = (await readdir(dir)).filter((file) => file.endsWith(".jsonl"));
+						await pruneSessionListCache(dir, files, abortSignal);
+						return files.map((file) => join(dir, file));
 					} catch {
 						return [];
 					}
@@ -2121,6 +2143,7 @@ export class SessionManager {
 				abortSignal,
 			);
 
+			abortSignal?.throwIfAborted();
 			return sortSessionInfos(results.filter((info): info is SessionInfo => info !== null));
 		} catch {
 			abortSignal?.throwIfAborted();

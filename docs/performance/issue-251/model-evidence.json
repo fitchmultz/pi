@@ -1,0 +1,16 @@
+{
+  "source": "Coordinator-supplied supported owner-authenticated read-only canonical AgentDoc chat-configuration GET for this exact active chat",
+  "observedAt": "2026-10-24T13:23:16.345342+00:00",
+  "configuration": {
+    "provider": "openai",
+    "modelId": "gpt-6.1-sol",
+    "thinkingLevel": "xhigh",
+    "contextWindow": 300000,
+    "fastMode": null
+  },
+  "connectionReady": true,
+  "rootRunBusy": true,
+  "configurationVersionSha256": "c52404be6ba45b2e0427d98acc645cf5eeba33d251e1acd2e798807cd4d3d5ea",
+  "originalReceipt": "Coordinator retains actual-model-evidence.json",
+  "scope": "Actual configured model evidence, not a guessed model self-description. No setting, account, connection, provider, or future-chat default was changed."
+}

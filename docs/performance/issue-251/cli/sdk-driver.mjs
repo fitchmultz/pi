@@ -1,0 +1,27 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import { dirname, join } from 'node:path';
+import { syncBuiltinESMExports } from 'node:module';
+const root='/workspace/reference/cli-proof';
+process.env.HOME=join(root,'home');
+process.env.PI_CODING_AGENT_DIR=join(root,'agent');
+process.env.PI_OFFLINE='1';
+process.env.PI_NO_LOCAL_LLM='1';
+const old=JSON.parse(fs.readFileSync(join(root,'sdk-receipt.json'),'utf8'));
+for(const info of old.sessions) { assert.ok(info.path.startsWith(root+'/journals/')); fs.rmSync(join(dirname(info.path),'.session-list-cache-v1'),{recursive:true,force:true}); }
+let journalStreams=0;
+const original=fs.createReadStream;
+fs.createReadStream=(...args)=>{if(String(args[0]).endsWith('.jsonl')) journalStreams++; return original(...args);};
+syncBuiltinESMExports();
+const { SessionManager }=await import('/workspace/pi-251/packages/coding-agent/dist/index.js');
+const cold=await SessionManager.listAll(join(root,'journals'));
+const coldJournalStreams=journalStreams;
+const warm=await SessionManager.listAll(join(root,'journals'));
+const warmJournalStreams=journalStreams-coldJournalStreams;
+assert.deepEqual(cold,warm);
+assert.equal(cold.length,2);
+assert.equal(coldJournalStreams,2);
+assert.equal(warmJournalStreams,0);
+assert.equal(cold.find(s=>s.id==='public-cli-two').allMessagesText.includes('tail unique two'),true);
+fs.writeFileSync(join(root,'sdk-final-receipt.json'),JSON.stringify({cold,warm,coldJournalStreams,warmJournalStreams,errors:0},null,2)+'\n');
+console.log(JSON.stringify({sessions:2,coldJournalStreams,warmJournalStreams,errors:0}));

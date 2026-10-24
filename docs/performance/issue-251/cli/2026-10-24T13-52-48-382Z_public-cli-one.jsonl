@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"public-cli-one","timestamp":"2026-10-24T13:52:48.382Z","cwd":"/workspace/reference/cli-proof/work"}
+{"type":"message","id":"24c84135","parentId":null,"timestamp":"2026-10-24T13:52:48.383Z","message":{"role":"user","content":"public synthetic first one","timestamp":1792800000000}}
+{"type":"message","id":"a782a390","parentId":"24c84135","timestamp":"2026-10-24T13:52:48.383Z","message":{"role":"user","content":"tail unique one","timestamp":1792800000001}}
+{"type":"session_info","id":"df961e79","parentId":"24c84135","timestamp":"2026-10-24T13:52:48.383Z","name":"CLI one"}

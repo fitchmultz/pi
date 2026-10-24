@@ -14,6 +14,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
+import { removeSessionListCache } from "../../../core/session-list-cache.ts";
 import type { SessionInfo, SessionListProgress } from "../../../core/session-manager.ts";
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { theme } from "../theme/theme.ts";
@@ -673,12 +674,14 @@ async function deleteSessionFile(
 
 	// If trash reports success, or the file is gone afterwards, treat it as successful
 	if (trashResult.status === 0 || !existsSync(sessionPath)) {
+		await removeSessionListCache(sessionPath);
 		return { ok: true, method: "trash" };
 	}
 
 	// Fallback to permanent deletion
 	try {
 		await unlink(sessionPath);
+		await removeSessionListCache(sessionPath);
 		return { ok: true, method: "unlink" };
 	} catch (err) {
 		const unlinkError = err instanceof Error ? err.message : String(err);

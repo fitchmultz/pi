@@ -1,0 +1,24 @@
+{
+  "command": [
+    "node",
+    "--import",
+    "/workspace/pi-251/scripts/performance/source-hook.mjs",
+    "/workspace/pi-251/packages/coding-agent/dist/bundle/cli.js",
+    "--offline",
+    "--no-extensions",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "-e",
+    "/workspace/reference/cli-proof/proof-extension.ts",
+    "--resume",
+    "--session-dir",
+    "/workspace/reference/cli-proof/journals"
+  ],
+  "selected": true,
+  "query": "\"tail unique two\"",
+  "exitCode": 0,
+  "failure": null,
+  "outboundNetwork": "Disabled by the existing performance offline hook; no model prompt sent",
+  "claim": "Functional built Linux CLI PTY proof only, not a latency measurement."
+}
