@@ -99,13 +99,11 @@
         }
 
         // Sort children by timestamp
-        function sortChildren(node) {
+        for (const node of nodeMap.values()) {
           node.children.sort((a, b) =>
             new Date(a.entry.timestamp).getTime() - new Date(b.entry.timestamp).getTime()
           );
-          node.children.forEach(sortChildren);
         }
-        roots.forEach(sortChildren);
 
         return roots;
       }
@@ -156,12 +154,14 @@
         // Build tree node map lazily
         if (!treeNodeMap) {
           treeNodeMap = new Map();
-          const tree = buildTree();
-          function mapNodes(node) {
+          const stack = buildTree();
+          while (stack.length > 0) {
+            const node = stack.pop();
             treeNodeMap.set(node.entry.id, node);
-            node.children.forEach(mapNodes);
+            for (const child of node.children) {
+              stack.push(child);
+            }
           }
-          tree.forEach(mapNodes);
         }
 
         const node = treeNodeMap.get(nodeId);
@@ -184,17 +184,19 @@
         const result = [];
         const multipleRoots = roots.length > 1;
 
-        // Mark which subtrees contain the active leaf
+        // Process children before parents without recursing through deep sessions.
         const containsActive = new Map();
-        function markActive(node) {
-          let has = activePathIds.has(node.entry.id);
-          for (const child of node.children) {
-            if (markActive(child)) has = true;
+        const nodes = [...roots];
+        for (let i = 0; i < nodes.length; i++) {
+          for (const child of nodes[i].children) {
+            nodes.push(child);
           }
-          containsActive.set(node, has);
-          return has;
         }
-        roots.forEach(markActive);
+        for (let i = nodes.length - 1; i >= 0; i--) {
+          const node = nodes[i];
+          containsActive.set(node, activePathIds.has(node.entry.id) ||
+            node.children.some(child => containsActive.get(child)));
+        }
 
         // Stack: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
         const stack = [];
