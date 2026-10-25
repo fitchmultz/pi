@@ -39,6 +39,7 @@
 - Skip unnecessary full archived-history indexing for recent context-usage estimates, preserving context-edit and compaction invalidation.
 - Clarified the codemode store limits in the tool description and docs: each value has a 256 KiB cap, keys and values together a 1 MiB per-branch cap, and background codemode scripts are not a durable monitoring mechanism ([#235](https://github.com/fitchmultz/pi/issues/235)).
 - `pi update --fork` now prunes older owned releases after successful activation, keeping the newest five validated releases plus selected, `.previous`, legacy and detected running releases. Fork CLI and SDK hosts keep their receipt open so process inspection detects JavaScript-only runtimes. Restart older workers to gain this protection. Missing inspection tools or cleanup failures warn without failing the update. See [Fork installation](docs/quickstart.md#fork-installation).
+- Reduced session-listing CPU time for `/resume`, `--resume` and `--session` lookups by about 40% by reading journal lines directly instead of through text streams. Listings still re-read every journal. Records containing a raw carriage return now count the same as when the session is opened ([#251](https://github.com/fitchmultz/pi/issues/251)).
 
 ### Fixed
 

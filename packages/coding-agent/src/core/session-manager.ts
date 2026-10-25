@@ -15,7 +15,6 @@ import { randomUUID } from "crypto";
 import {
 	appendFileSync,
 	closeSync,
-	createReadStream,
 	existsSync,
 	fsyncSync,
 	mkdirSync,
@@ -26,9 +25,8 @@ import {
 	statSync,
 	writeFileSync,
 } from "fs";
-import { readdir, stat } from "fs/promises";
+import { open, readdir, stat } from "fs/promises";
 import { basename, join, resolve } from "path";
-import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { atomicWriteFileSync } from "../utils/atomic-file.ts";
@@ -815,6 +813,35 @@ function getMessageActivityTime(entry: SessionMessageEntry): number | undefined 
 	return Number.isNaN(t) ? undefined : t;
 }
 
+/** Yield physical lines split on "\n", matching loadEntriesFromFile(). */
+async function* readSessionLines(filePath: string, signal?: AbortSignal): AsyncGenerator<string> {
+	const file = await open(filePath, "r");
+	try {
+		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
+		const pending: Buffer[] = [];
+		while (true) {
+			signal?.throwIfAborted();
+			const { bytesRead } = await file.read(buffer, 0, buffer.length, null);
+			if (bytesRead === 0) break;
+			const chunk = buffer.subarray(0, bytesRead);
+			let lineStart = 0;
+			let newlineIndex = chunk.indexOf(10);
+			while (newlineIndex !== -1) {
+				const tail = chunk.subarray(lineStart, newlineIndex);
+				yield pending.length === 0
+					? tail.toString("utf8")
+					: Buffer.concat([...pending.splice(0), tail]).toString("utf8");
+				lineStart = newlineIndex + 1;
+				newlineIndex = chunk.indexOf(10, lineStart);
+			}
+			if (lineStart < chunk.length) pending.push(Buffer.from(chunk.subarray(lineStart)));
+		}
+		if (pending.length > 0) yield Buffer.concat(pending).toString("utf8");
+	} finally {
+		await file.close();
+	}
+}
+
 async function buildSessionInfo(
 	filePath: string,
 	signal?: AbortSignal,
@@ -830,54 +857,43 @@ async function buildSessionInfo(
 		let name: string | undefined;
 		let lastActivityTime: number | undefined;
 
-		const input = createReadStream(filePath, { encoding: "utf8", signal });
-		const rl = createInterface({
-			input,
-			crlfDelay: Infinity,
-		});
+		for await (const line of readSessionLines(filePath, signal)) {
+			const entry = parseSessionEntryLine(line);
+			if (!entry) continue;
 
-		try {
-			for await (const line of rl) {
-				const entry = parseSessionEntryLine(line);
-				if (!entry) continue;
-
-				if (!header) {
-					if (entry.type !== "session") return null;
-					header = entry;
-					if (resolvedCwd !== undefined && !sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd)) {
-						return null;
-					}
-					continue;
+			if (!header) {
+				if (entry.type !== "session") return null;
+				header = entry;
+				if (resolvedCwd !== undefined && !sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd)) {
+					return null;
 				}
-
-				// Extract session name (use latest, including explicit clears)
-				if (entry.type === "session_info") {
-					name = entry.name?.trim() || undefined;
-				}
-
-				if (entry.type !== "message") continue;
-				messageCount++;
-
-				const activityTime = getMessageActivityTime(entry);
-				if (typeof activityTime === "number") {
-					lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
-				}
-
-				const message = entry.message;
-				if (!isMessageWithContent(message)) continue;
-				if (message.role !== "user" && message.role !== "assistant") continue;
-
-				const textContent = extractTextContent(message);
-				if (!textContent) continue;
-
-				allMessages.push(textContent);
-				if (!firstMessage && message.role === "user") {
-					firstMessage = textContent;
-				}
+				continue;
 			}
-		} finally {
-			rl.close();
-			input.destroy();
+
+			// Extract session name (use latest, including explicit clears)
+			if (entry.type === "session_info") {
+				name = entry.name?.trim() || undefined;
+			}
+
+			if (entry.type !== "message") continue;
+			messageCount++;
+
+			const activityTime = getMessageActivityTime(entry);
+			if (typeof activityTime === "number") {
+				lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
+			}
+
+			const message = entry.message;
+			if (!isMessageWithContent(message)) continue;
+			if (message.role !== "user" && message.role !== "assistant") continue;
+
+			const textContent = extractTextContent(message);
+			if (!textContent) continue;
+
+			allMessages.push(textContent);
+			if (!firstMessage && message.role === "user") {
+				firstMessage = textContent;
+			}
 		}
 
 		if (!header) return null;
