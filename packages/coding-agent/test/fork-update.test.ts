@@ -20,6 +20,14 @@ import * as childProcess from "../src/utils/child-process.ts";
 import { runForkUpdate } from "../src/utils/fork-update.ts";
 
 const platforms = ["darwin", "linux", "android"];
+
+interface InstallerInvocation {
+	script: string;
+	args: string[];
+	commit: string;
+	env: NodeJS.ProcessEnv;
+}
+
 describe.skipIf(process.platform === "win32").each(platforms)("fork update bootstrap on %s", (platform) => {
 	const originalPlatform = process.platform;
 	let root: string;
@@ -30,8 +38,15 @@ describe.skipIf(process.platform === "win32").each(platforms)("fork update boots
 	let expectedCommit: string;
 	let temporarySource: string | undefined;
 	let failInstall: boolean;
+	let failPrune: boolean;
 	let fetched: number;
 	let originalExitCode: typeof process.exitCode;
+	let invocationsFile: string;
+	const readInvocations = (): InstallerInvocation[] =>
+		readFileSync(invocationsFile, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as InstallerInvocation);
 
 	beforeEach(() => {
 		Object.defineProperty(process, "platform", { value: platform, configurable: true });
@@ -63,31 +78,34 @@ describe.skipIf(process.platform === "win32").each(platforms)("fork update boots
 		vi.stubEnv("LD_PRELOAD", "");
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
 		temporarySource = undefined;
 		failInstall = false;
+		failPrune = false;
 		fetched = 0;
+		invocationsFile = join(root, "installer-invocations.jsonl");
 
 		source = join(root, "remote");
 		mkdirSync(join(source, "scripts"), { recursive: true });
 		writeFileSync(join(source, "marker"), "pinned main");
-		// Observe the bootstrap boundary. Installer validation and atomic activation
-		// are exercised by scripts/install-fork.test.mjs.
+		// Observe the bootstrap boundary. Installer validation, atomic activation and
+		// retention safeguards are exercised by scripts/install-fork.test.mjs.
 		writeFileSync(
 			join(source, "scripts/install-fork.mjs"),
 			`
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-assert.equal(args[args.indexOf('--ref') + 1], commit);
 assert.equal(readFileSync('marker', 'utf8'), 'pinned main');
 assert.equal(readFileSync('hydrated', 'utf8'), 'ready');
 assert.equal(readFileSync(process.env.npm_config_globalconfig, 'utf8'), '');
 assert.equal(process.env.NPM_CONFIG_GLOBALCONFIG, undefined);
 assert.equal(process.env.npm_config_globalconfig, process.env.HOME + '/npm-globalconfig');
 assert.equal(existsSync(${JSON.stringify(`${selector}.lock`)}), false, 'installer must acquire its own mutation lock');
-writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ args, commit, env: process.env }));
+if (!args.includes('--prune')) assert.equal(args[args.indexOf('--ref') + 1], commit);
+appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: process.argv[1], args, commit, env: process.env }) + '\\n');
 `,
 		);
 		const git = (args: string[]) => execFileSync("git", args, { cwd: source, encoding: "utf8" }).trim();
@@ -146,6 +164,9 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 			if (failInstall && args[0]?.endsWith("install-fork.mjs")) {
 				return spawn(process.execPath, ["-e", "process.exit(23)"], options);
 			}
+			if (failPrune && args.includes("--prune")) {
+				return spawn(process.execPath, ["-e", "process.exit(42)"], options);
+			}
 			return spawn(command, args, options);
 		});
 	});
@@ -158,24 +179,15 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("routes --fork without settings writes, pins fetched main, isolates the build and cleans up", async () => {
+	it("routes --fork without settings writes, pins fetched main, isolates the build, prunes and cleans up", async () => {
 		expect(await handlePackageCommand(["update", "--fork"])).toBe(true);
 		expect(process.exitCode).toBeUndefined();
-		const observed = JSON.parse(readFileSync(join(root, "observed.json"), "utf8")) as {
-			commit: string;
-			args: string[];
-			env: NodeJS.ProcessEnv;
-		};
+		const [observed, prune, ...extra] = readInvocations();
+		const location = ["--selector", selector, "--releases", join(root, "real-home/.local/share/pi-fork/releases")];
 		expect(observed.commit).toBe(expectedCommit);
-		expect(observed.args).toEqual([
-			"--ref",
-			expectedCommit,
-			"--selector",
-			selector,
-			"--releases",
-			join(root, "real-home/.local/share/pi-fork/releases"),
-			"--accept-model-removals",
-		]);
+		expect(observed.args).toEqual(["--ref", expectedCommit, ...location, "--accept-model-removals"]);
+		expect(prune).toEqual({ ...observed, args: ["--prune", "--keep", "5", ...location] });
+		expect(extra).toEqual([]);
 		expect(observed.env.ANTHROPIC_API_KEY).toBeUndefined();
 		expect(observed.env.PI_RESTART_SOCKET).toBeUndefined();
 		expect(observed.env.PI_PACKAGE_DIR).toBeUndefined();
@@ -193,15 +205,31 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 		expect(existsSync(temporarySource!)).toBe(false);
 		expect(existsSync(`${selector}.lock`)).toBe(false);
 		expect(existsSync(join(process.env.HOME!, ".pi"))).toBe(false);
+		expect(console.warn).not.toHaveBeenCalled();
 	});
 
-	it("reports installer failure without success, leaves the selector and cleans up", async () => {
+	it("reports installer failure without success or pruning, leaves the selector and cleans up", async () => {
 		failInstall = true;
 		await handlePackageCommand(["update", "--fork"]);
 		expect(process.exitCode).toBe(1);
 		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("exited with code 23"));
 		expect(console.log).not.toHaveBeenCalledWith(expect.stringContaining("Fork commit"));
+		expect(existsSync(invocationsFile)).toBe(false);
 		expect(readlinkSync(selector)).toBe(oldPackage);
+		expect(existsSync(temporarySource!)).toBe(false);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it("keeps a successful update when pruning fails, warns and cleans up", async () => {
+		failPrune = true;
+		await handlePackageCommand(["update", "--fork"]);
+		expect(process.exitCode).toBeUndefined();
+		expect(console.error).not.toHaveBeenCalled();
+		expect(readInvocations().map(({ args }) => args[0])).toEqual(["--ref"]);
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining(`Fork commit ${expectedCommit} is active`));
+		expect(console.warn).toHaveBeenCalledWith(
+			expect.stringMatching(/update succeeded.*cleanup.*exited with code 42/),
+		);
 		expect(existsSync(temporarySource!)).toBe(false);
 		expect(existsSync(`${selector}.lock`)).toBe(false);
 	});
@@ -268,7 +296,7 @@ writeFileSync(${JSON.stringify(join(root, "observed.json"))}, JSON.stringify({ a
 			} else writeFileSync(`${selector}.previous`, "unrelated");
 			await expect(runForkUpdate()).rejects.toThrow(/Cannot safely update.*Initial setup:/);
 			expect(childProcess.spawnProcess).not.toHaveBeenCalled();
-			expect(existsSync(join(root, "observed.json"))).toBe(false);
+			expect(existsSync(invocationsFile)).toBe(false);
 		},
 	);
 

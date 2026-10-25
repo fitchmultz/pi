@@ -30,6 +30,7 @@
 
 ### Changed
 
+- Import extension modules concurrently while keeping factories and registrations in discovery order. Module-level side effects can interleave. Startup timing reports aggregate import wall time ([#250](https://github.com/fitchmultz/pi/issues/250)).
 - Published settings, models, keybindings, and theme schemas using upstream's shared runtime definitions; the fork settings schema retains boolean and `"hybrid"` compact activity preferences.
 - Reduced repeated session-history work, assistant/tree rendering and native read, grep, edit and image processing.
 - Bound native Bash spill queues and wait for complete private spill files before returning. This bounded-memory path is slower on the recorded 64 MiB workload.
@@ -37,9 +38,11 @@
 - Batch workspace builds and npm/Nix packing, and retain PID-unique CPU profiles from every launcher and worker.
 - Skip unnecessary full archived-history indexing for recent context-usage estimates, preserving context-edit and compaction invalidation.
 - Clarified the codemode store limits in the tool description and docs: each value has a 256 KiB cap, keys and values together a 1 MiB per-branch cap, and background codemode scripts are not a durable monitoring mechanism ([#235](https://github.com/fitchmultz/pi/issues/235)).
+- `pi update --fork` now prunes older owned releases after successful activation, keeping the newest five validated releases plus selected, `.previous`, legacy and detected running releases. Fork CLI and SDK hosts keep their receipt open so process inspection detects JavaScript-only runtimes. Restart older workers to gain this protection. Missing inspection tools or cleanup failures warn without failing the update. See [Fork installation](docs/quickstart.md#fork-installation).
 
 ### Fixed
 
+- Fixed forking legacy sessions skipping migration and losing earlier model context, compaction references, and legacy custom-message roles ([#256](https://github.com/fitchmultz/pi/issues/256)).
 - Fixed chat card backgrounds tinting iTerm margins and window chrome in fullscreen mode; terminal-default side gutters preserve card colors, prompt navigation, and image scrolling ([#243](https://github.com/fitchmultz/pi/issues/243)).
 - Fixed quitting an unready restarted worker rolling back to the previous worker instead of exiting, including when its shutdown handlers outlast the startup deadline.
 - Fixed messages sent while Pi quits, such as a child completion arriving during a shutdown hook, starting a new turn. A managed restart then failed its final capture and stopped unfinished children; quit now admits shutdown persistence but no new or steered turn.
@@ -92,6 +95,7 @@
 - Fixed background command completion notices ignoring compact and hybrid views. Collapsed notices show one row with the finished count and any unsuccessful statuses; expanding shows the original notice.
 - Fixed managed restarts deleting the complete private session state when both the replacement and its one-shot recovery fail before readiness. The launcher now keeps the file and prints its path for `pi --working-session` recovery, and removes only its own native artifacts, never a user-supplied path ([#236](https://github.com/fitchmultz/pi/issues/236)).
 - Fixed compact and hybrid views rendering nonempty assistants twice per frame to check emptiness ([#237](https://github.com/fitchmultz/pi/issues/237)).
+- Fixed HTML exports opening blank for long sessions because recursive tree traversal exhausted the browser's call stack ([#255](https://github.com/fitchmultz/pi/issues/255)).
 
 ## [1.4.0] - 2026-10-21
 

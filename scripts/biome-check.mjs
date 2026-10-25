@@ -50,7 +50,11 @@ const files = execFileSync("git", ["ls-files", "--cached", "--others", "--exclud
 // configured path relative to the project ("./a.grit" becomes "a.grit").
 main();
 const fileSystem = new MemoryFileSystem();
-for (const plugin of configuration.plugins ?? []) {
+const plugins = new Set([
+	...(configuration.plugins ?? []),
+	...(configuration.overrides ?? []).flatMap((override) => override.plugins ?? []),
+]);
+for (const plugin of plugins) {
 	fileSystem.insert(posix.normalize(plugin), readFileSync(plugin));
 }
 const workspace = Workspace.withFileSystem(fileSystem);

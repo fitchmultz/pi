@@ -69,6 +69,16 @@ under `~/.local/share/pi-fork/releases`. It does not edit settings, credentials,
 extensions, or sessions. Running sessions keep their runtime until a full relaunch
 or a [managed restart](restart.md).
 
+After activation, including when the latest commit is already installed, the updater
+runs the installer's `--prune --keep 5` on the same store. This removes owned
+releases older than the newest five validated releases. It keeps the selected
+release, `<selector>.previous`, legacy releases and releases that `lsof` or `ps` show
+in use. Fork CLI and SDK processes keep their release receipt open so `lsof` detects
+JavaScript-only runtimes. Relaunch or restart sessions from older releases to gain
+this protection. Avoid directly launching an old release while pruning is in progress.
+Cleanup requires working `lsof` and `ps` commands. Missing tools or cleanup failures
+print a warning without failing the update. The next `pi update --fork` retries cleanup.
+
 `pi update --fork` accepts upstream catalog removals and prints every removed model
 ID. Older fork installations may still refuse them: use the printed
 `--activate <identity> --accept-model-removals` command from a current fork checkout,

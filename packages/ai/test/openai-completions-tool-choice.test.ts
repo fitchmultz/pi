@@ -75,6 +75,37 @@ const localOpenAICompletionsModel = {
 	maxTokens: 8192,
 } satisfies Omit<Model<"openai-completions">, "id" | "name" | "compat">;
 
+const openAICompletionsModel: Model<"openai-completions"> = {
+	...localOpenAICompletionsModel,
+	id: "gpt-4o-mini",
+	name: "GPT-4o mini",
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	reasoning: false,
+	input: ["text", "image"],
+	maxTokens: 16384,
+};
+
+const openCodeGoCompletionsModel: Model<"openai-completions"> = {
+	...localOpenAICompletionsModel,
+	id: "kimi-k3",
+	name: "Kimi K3",
+	provider: "opencode-go",
+	baseUrl: "https://opencode.ai/inference/go/v1",
+	input: ["text", "image"],
+	contextWindow: 1048576,
+	maxTokens: 131072,
+	thinkingLevelMap: {
+		off: null,
+		minimal: null,
+		low: null,
+		medium: null,
+		high: null,
+		xhigh: null,
+		max: "max",
+	},
+};
+
 type CapturedParams = {
 	chat_template_kwargs?: Record<string, unknown>;
 	thinking?: unknown;
@@ -111,8 +142,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("forwards toolChoice from simple options to payload", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		const tools: Tool[] = [
 			{
 				name: "ping",
@@ -152,8 +182,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("includes toolChoice when no tools are provided", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		let payload: unknown;
 
 		await streamSimple(
@@ -176,12 +205,10 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("omits strict when compat disables strict mode", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
 		const model = {
-			...baseModel,
-			api: "openai-completions",
+			...openAICompletionsModel,
 			compat: { supportsStrictMode: false },
-		} as const;
+		} satisfies Model<"openai-completions">;
 		const tools: Tool[] = [
 			{
 				name: "ping",
@@ -677,8 +704,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		const response = await streamSimple(
 			model,
 			{
@@ -712,8 +738,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		const response = await streamSimple(
 			model,
 			{
@@ -740,12 +765,10 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
 		const model = {
-			...baseModel,
-			api: "openai-completions",
+			...openAICompletionsModel,
 			compat: { supportsFinishReason: false },
-		} as const;
+		} satisfies Model<"openai-completions">;
 		const response = await streamSimple(
 			model,
 			{
@@ -782,8 +805,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		const tool: Tool = {
 			name: "read",
 			description: "Read a file",
@@ -919,8 +941,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		const tool: Tool = {
 			name: "read",
 			description: "Read a file",
@@ -1066,8 +1087,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		const tools: Tool[] = [
 			{
 				name: "read",
@@ -1248,8 +1268,23 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("keeps developer messages for OpenAI reasoning model instructions", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-5.5")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = {
+			...openAICompletionsModel,
+			id: "gpt-5.5",
+			name: "GPT-5.5",
+			reasoning: true,
+			contextWindow: 272000,
+			maxTokens: 128000,
+			thinkingLevelMap: {
+				off: "none",
+				minimal: null,
+				low: "low",
+				medium: "medium",
+				high: "high",
+				xhigh: "xhigh",
+				max: null,
+			},
+		} satisfies Model<"openai-completions">;
 		let payload: unknown;
 
 		await streamSimple(
@@ -1368,8 +1403,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("opencode-go", "kimi-k3")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openCodeGoCompletionsModel;
 		const response = await streamSimple(
 			model,
 			{
@@ -1395,8 +1429,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		const response = await streamSimple(
 			model,
 			{
@@ -1415,17 +1448,16 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("replays OpenCode Go reasoning thinking blocks as reasoning_content", () => {
-		const { compat: _compat, ...baseModel } = getModel("opencode-go", "kimi-k3")!;
-		const model = { ...baseModel, api: "openai-completions" } as Model<"openai-completions">;
+		const model = openCodeGoCompletionsModel;
 		const messages = convertMessages(
 			model,
 			normalizeContext({
 				messages: [
 					{
 						role: "assistant",
-						api: "openai-completions",
-						provider: "opencode-go",
-						model: "kimi-k3",
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
 						content: [
 							{ type: "thinking", thinking: "think", thinkingSignature: "reasoning" },
 							{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "README.md" } },
@@ -1700,8 +1732,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		const response = await streamSimple(
 			model,
 			{
@@ -1739,8 +1770,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		const response = await streamSimple(
 			model,
 			{
@@ -1785,8 +1815,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
-		const model = { ...baseModel, api: "openai-completions" } as const;
+		const model = openAICompletionsModel;
 		const response = await streamSimple(
 			model,
 			{

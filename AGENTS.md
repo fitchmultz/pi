@@ -69,7 +69,7 @@ These publication restrictions apply to `earendil-works/pi` and take precedence 
 ## Commands
 
 - After code changes (not docs): `npm run check` (full output, no tail). Fix all errors, warnings, and infos before committing. Does not run tests.
-- Builds and tests needed for an authorized implementation are covered by the standing fork delivery authorization below. Run the full offline suite through `./test.sh`, not ambient `npm test`.
+- Builds and tests needed for an authorized implementation are covered by the standing fork delivery authorization below. Run the full offline suite through `./test.sh`; `npm test` delegates to the same isolated runner.
 - Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e tests, run `./test.sh` from the repo root. Otherwise run specific tests from the package root:
   - Vitest: `node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --run test/specific.test.ts`
   - `packages/tui` (`node:test`): `node --test test/specific.test.ts`
@@ -87,6 +87,19 @@ These publication restrictions apply to `earendil-works/pi` and take precedence 
 - If dep metadata changes, refresh `package-lock.json` with `npm install --package-lock-only --ignore-scripts`.
 - If `packages/coding-agent/install-lock/` needs regen, run `node scripts/generate-coding-agent-install-lock.mjs` (verify with `--check` or `npm run check`). Review new dependency lifecycle scripts and add any required explicit allowlist entry in that script as part of the reviewed change.
 - Pre-commit blocks lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1`. Set it for reviewed lockfile changes required by the authorized task; keep the lockfile check and other hooks enabled.
+
+## Rule enforcement
+
+Keep this table aligned with executable enforcement, not aspirational rules. When a correction repeats, repair its owner or add a check in the same change. Exceptions to these checks must be on the offending line with a reason, expiry date and named human approval.
+
+| Rule | Enforcement |
+| --- | --- |
+| Default full-suite tests must not inherit caller credentials or user resources | `npm test` and CI use `test.sh`'s empty-environment allowlist and isolated home; `scripts/test-runner.test.mjs` exercises both entrypoints, cleanup and failure propagation |
+| Mocked completions tests use fixed typed models instead of discarded-compat catalog fixtures | `scripts/biome/stable-payload-fixtures.grit`, scoped in `biome.json` to `packages/ai/test/openai-completions-tool-choice.test.ts` and enforced by `npm run check`; native/WASM contract tests in `scripts/biome-check.test.mjs` run through `test.sh` and CI |
+| Direct registry dependencies, including workspace packages, use exact versions | `npm run check:pinned-deps`, included in `npm run check` locally, in pre-commit and in CI |
+| Published sources declare their runtime dependencies and do not import excluded sources | `npm run check:runtime-deps`; isolated public-package consumer installs in CI |
+| Source TypeScript uses erasable syntax and relative `.ts` imports | `erasableSyntaxOnly` in `tsconfig.base.json` and `npm run check:ts-imports`, both enforced by `npm run check` |
+| Chat-model checks handle an omitted `type` | `scripts/biome/model-type-comparison.grit`, enforced by `npm run check` |
 
 ## Git
 

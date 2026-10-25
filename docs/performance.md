@@ -4,6 +4,55 @@ The fork removes repeated work from native file tools, TUI rendering, model meta
 
 These are source-owner measurements of two measured source trees on one workstation, not of the final runtime: later prompt-cache, model-catalog and upstream v1.2.0 integration changes were not timed. They do not show that every CLI invocation, provider, device or downstream adapter becomes faster. Functional tests remain the authority for behavior, safety, cancellation and mutation isolation.
 
+## Extension imports (2026-10-24)
+
+**No reliable compiled-ESM startup benefit was found.** The loader overlaps independent asynchronous module evaluation, then initializes factories sequentially in discovery order. A compiled `type: module` package with a relative dependency tree showed overlapping before/after ranges at every boundary. The deliberately asynchronous TypeScript best case was faster; the CPU-heavy control showed no clear change. This does not establish a general, installed-macOS, private-extension-set or presumed 200 ms recovery claim.
+
+The [result JSON](extension-import-performance-results.json) records all 120 comparative samples, matched input/output witnesses, work counts, source/build/fixture hashes, host identity and separate route diagnostics. Baseline: `c17adbc400319887c5ab34fce1ed2a59be746da4`. Candidate runtime: `46f8d181e0ed76d82413cc56645322cc210109b9`, unchanged at measured head `027de7a1c978768ad2dc12a4ef632a0b293e55c2`; follow-up harness/tests were uncommitted and are identified by their measured hashes. Both 2,907-file dist maps remained byte-identical before and after timing. Both roots used independent frozen installations and identical public model data. Host: Debian 13, Linux x86-64, AMD EPYC, two available CPUs (eight reported), Node 24.22.1, npm 11.19.1, Bun 1.3.14, jiti 2.7.0. One-minute load: 0.10–1.66. No builds or tests overlapped timing.
+
+Each case used five serial, fresh-process pairs in **AB, BA, AB, BA, AB** order (A = baseline, B = candidate), with no discarded comparative samples or explicit warmups. Filesystem caches were not evicted; native module maps were fresh and jiti's filesystem cache was disabled. Temporary HOME/cwd, agent and temp directories excluded personal resources. A new Linux network namespace with no IP interfaces denied network access, including for embedded Bun. Every case matched its semantic witnesses; all 720 extension imports/factories completed, and all 90 RPC starts returned both successful responses and six ordered commands. The compiled graph also evaluated its 20 relative dependency modules exactly once per process.
+
+Values are median (minimum–maximum) milliseconds, five samples per root. **Faster/Slower** requires all five pairs in that direction and nonoverlapping ranges; otherwise **No clear change**. Loader timing brackets the real built loader call after harness setup. RPC timing starts immediately before spawn and stops at the successful `get_commands` response after `get_state`, including response decoding, streamed receipt writes and inline readiness checks. Final transcript/count checks, hashing, generation and shutdown are outside that interval. Do not use the runner's outer process time or subtract the loader row from CLI startup.
+
+| Workload / boundary | Baseline ms | Candidate ms | Result |
+| --- | ---: | ---: | --- |
+| Compiled ESM / loader | 32.10 (27.73–32.73) | 31.71 (29.62–33.18) | No clear change |
+| Compiled ESM / unbundled Node RPC | 865.82 (850.01–907.28) | 868.76 (837.20–935.02) | No clear change |
+| Compiled ESM / bundled Node RPC | 589.32 (585.60–619.72) | 578.17 (570.62–643.25) | No clear change |
+| Compiled ESM / embedded Bun RPC | 673.65 (648.27–702.77) | 674.17 (609.67–687.50) | No clear change |
+| Async best case / loader | 453.05 (433.11–456.64) | 294.11 (288.61–300.78) | Faster |
+| Async best case / unbundled Node RPC | 1279.99 (1223.99–1321.69) | 1114.54 (1094.73–1127.16) | Faster |
+| Async best case / bundled Node RPC | 1020.46 (958.54–1051.55) | 849.03 (827.83–861.83) | Faster |
+| Async best case / embedded Bun RPC | 1016.15 (984.71–1038.48) | 844.47 (812.77–910.01) | Faster |
+| CPU control / loader | 1159.10 (1071.81–1263.43) | 1143.58 (1079.39–1254.87) | No clear change |
+| CPU control / unbundled Node RPC | 2023.81 (1933.93–2054.63) | 2013.27 (1910.92–2060.99) | No clear change |
+| CPU control / bundled Node RPC | 1683.72 (1614.99–1835.07) | 1707.09 (1599.28–1769.06) | No clear change |
+| CPU control / embedded Bun RPC | 1747.24 (1562.91–1811.71) | 1713.10 (1675.79–1796.63) | No clear change |
+
+The representative graph has six compiled `.js` entries, three private dependency modules per entry and two shared modules: 26 evaluated modules. Values, schemas, metadata and formatting derive command/tool descriptions from 16 values (checksum 136), with no module or factory timers. The async best case instead waits 60/50/40/30/20/10 ms at TypeScript module scope and 2 ms per factory. The CPU control has 2,000 typed declarations per entry, zero-delay module timers and 2 ms factories. Promise overlap does not parallelize synchronous jiti/Babel transformation. The no-benefit compiled result was reported without changing production design or enlarging the workload.
+
+Separate instrumented runs used `JITI_DEBUG=1`, `PI_TIMING=1` and PID-specific Node CPU profiles; none contributes to the table. On both roots, all compiled entries used native imports without fallback in unbundled Node, bundled Node and embedded Bun, and TypeScript entries were transformed in all three. Embedded `tryNative:false` disables jiti's initial native-first shortcut, not its later syntax-based ESM native route. Native child imports belong to the runtime, not jiti's alias/virtual-module machinery. `PI_TIMING` now replaces individual import entries with one batch wall time, losing per-file import-duration attribution. Jiti reports transform durations only when transformation occurs; native paths have no per-module compile timing. See [extension loading guidance](../packages/coding-agent/docs/extensions.md#understand-the-runtime-lifecycle).
+
+Reproduce with the existing setup below and coherent offline builds in both roots. Embedded cases currently require Linux and task-local standalone builds; they never select an installed runtime. Use a fresh output directory each time. Actual generated TS/JS inputs, import JSONL, verbatim RPC stdout/stderr, commands, allowlisted environments and profiles are retained under `OUT/artifacts`, outside deleted runner scratch. Diagnostics are separate cases and not latency comparisons.
+
+```sh
+# In each root, after its frozen offline package build. Use pinned Bun 1.3.14.
+./scripts/build-binaries.sh --skip-install --skip-build --offline-model-data \
+  --platform linux-x64 --out .artifacts/performance/extension-imports
+# From the checkout containing these fixtures; the namespace has no IP interfaces.
+unshare --user --map-root-user --net -- node scripts/performance/run.mjs \
+  --before "$BEFORE" --after "$AFTER" --groups extension-imports \
+  --repeat 5 --out "$RESULTS/extension-imports"
+# Separate profiling/route verification; repeat for the other root.
+unshare --user --map-root-user --net -- node scripts/performance/run.mjs \
+  --repo "$AFTER" --groups extension-import-diagnostics \
+  --repeat 1 --out "$RESULTS/extension-import-diagnostics"
+```
+
+Two failed fixture smokes are retained: an invalid fetch-name predicate (Pi installs undici globals) and an unsupported compiled-Bun `--preload` attempt. The existing Node hook was left unchanged; the native network namespace covers every runtime. The corrected smoke passed all 12 cases. These are setup failures, not discarded comparative samples.
+
+The older Python data always ran **before first**. Its contrary alternating-order description and blanket jiti timing claim are superseded here, not silently repaired in historical samples. The [original driver](https://github.com/fitchmultz/pi/blob/027de7a1c978768ad2dc12a4ef632a0b293e55c2/docs/performance/issue-250/measure.py), [raw archive](https://github.com/fitchmultz/pi/blob/027de7a1c978768ad2dc12a4ef632a0b293e55c2/docs/performance/issue-250/raw-evidence.tar.gz) and [original provenance/verification](https://github.com/fitchmultz/pi/blob/027de7a1c978768ad2dc12a4ef632a0b293e55c2/docs/performance/issue-250/verification.md) remain at immutable ancestor links and unchanged outside worktrees with hashes. The parallel driver, binary archive and process notes are no longer shipped in the final tree.
+
 ## Turn-end context reads (2026-10-14)
 
 A long-running session can retain tens of thousands of archived entries while its active context is small. Boundary readers previously copied and indexed that entire ancestry for each preview. Pending-queue readers paid this cost even though they needed no projected messages. Context-usage reads and finalization also walked the ancestry again.
