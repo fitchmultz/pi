@@ -29,7 +29,7 @@ all-platform qualification.
 | `discover_tools`: initial capability summaries, full prior-turn instructions and stable positional declarations | `extensions/instruction-groups/`, native deferred-tool restore in `core/agent-session.ts`, narrow `refreshTools()` seam in `core/{agent-session,extensions/loader,extensions/types}.ts` | `suite/instruction-groups.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Instruction groups](packages/coding-agent/docs/instruction-groups.md) |
 | JSON `read`: selection before paging/truncation, inherited by native factory consumers | `core/tools/{read,read-json}.ts` | `read-json.test.ts` | [SDK](packages/coding-agent/docs/sdk.md#json-selection-with-read) |
 | Compact activity: regroup native cards without replacing the whole TUI | `modes/interactive/{interactive-mode,components/activity}.ts`, card renderers, `core/settings-manager.ts` | `compact-view.test.ts`, `suite/regressions/compact-view.test.ts` | [Settings](packages/coding-agent/docs/settings.md) |
-| Immutable fork update: exact source/catalog, frozen install and guarded selection | `utils/{fork-update,fork-release-store}.ts`, `scripts/install-fork.mjs` | `fork-update.test.ts`, `scripts/install-fork.test.mjs` | [Install and activate](#install-and-activate) |
+| Immutable fork update: exact source/catalog, frozen install, guarded selection and automatic pruning with active-runtime receipts | `config.ts`, `utils/{fork-update,fork-release-store}.ts`, `scripts/install-fork.mjs` | `fork-update.test.ts`, `scripts/{install-fork,fork-release-liveness}.test.mjs` | [Install and activate](#install-and-activate) |
 | Termux: compiler/environment handling and short control-socket paths | `scripts/install-fork.mjs`, `test.sh`, `cli/restart-protocol.ts` | `scripts/install-fork.test.mjs`, `restart-control.test.ts`; device activation is separate | [Termux](packages/coding-agent/docs/termux.md) |
 | Complete working state: native admission, all branches/queues/mode buffers and completed-exit attestation; strict plain-JSON snapshots use Chord's checker with a container hook, so coding-agent keeps its `@earendil-works/chord` dependency after upstream dropped it | `core/{working-session,agent-session,sdk,agent-session-services}.ts`, `cli/working-session-control.ts`, native mode/builtin bindings, `packages/chord/src/json.ts` (`CheckJsonOptions`) | `suite/working-session.test.ts`, `suite/working-session-cli.test.ts`, `packages/chord/test/json.test.ts` | [Working sessions](packages/coding-agent/docs/working-session.md) |
 | Credential isolation: routing providers must not read unrelated stored credentials | `core/model-runtime.ts`, provider registration types/adapter | `provider-credential-isolation.test.ts` | [Custom providers](packages/coding-agent/docs/custom-provider.md) |
@@ -73,8 +73,10 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | WebSocket text frames must not decode object-transport packing markers and bypass untrusted-client compression restrictions | `packages/chord/src/link.ts` | `packages/chord/test/websocket.test.ts` |
 | Releasing the last state view during hydration must not strand a shared method-only reference | `packages/chord/src/remote.ts` | `packages/chord/test/bindings.test.ts` |
 | Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `utils/shell.ts`, `packages/coding-agent/examples/extensions/sandbox/index.ts`, `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
+| File forks must migrate legacy entries before replacing the source header, preserving indexed history and model context | `core/session-manager.ts` | `session-manager/fork-migration.test.ts` |
 | Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
 | HTML export must not replace the journal through any alias | `core/export-html/index.ts` | `file-safety.test.ts` |
+| Long HTML exports must render and navigate without exhausting the browser's call stack | `core/export-html/template.js` | `export-html-tree.test.ts` |
 | Edits must preserve UTF-8 and untouched original text/boundaries | Shared policy in `packages/durable/src/tools/edit-diff.ts`; byte I/O in `packages/durable/src/tools/edit.ts`, `core/tools/{edit,edit-diff}.ts`, `utils/text.ts` | `packages/durable/test/tools.test.ts`, `edit-byte-safety.test.ts` |
 | One auth-check failure must not hide healthy providers or replace saved/scoped selections | `packages/ai/src/models.ts`, `core/{model-runtime,model-resolver,sdk}.ts` | `packages/ai/test/models-runtime.test.ts`, `model-runtime-auth-options.test.ts`, `model-resolver.test.ts`, `agent-session-dynamic-provider.test.ts` |
 | Refresh admission must precede config I/O: awaited scopes follow current per-provider catalog/auth readiness, global availability reads cannot discard credential synchronization or make it join unrelated work, and full-pass auth failures retain provider-local diagnostics and sibling credential filters under scoped overlap. Scoped snapshot updates read only their own catalogs, so a refresh stays linear in the number of providers | `core/model-runtime.ts` | `model-runtime-refresh-order.test.ts`, `agent-session-dynamic-provider.test.ts`, `model-runtime-credential-sync.test.ts` |
@@ -118,6 +120,7 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Retained work reduction | Owner | Primary tests |
 | --- | --- | --- |
 | Lossless upload compression on qualified Anthropic Messages and public OpenAI Responses endpoints; existing Codex zstd stays canonical-endpoint-only. See [support boundaries and measurement](docs/compression.md) | `packages/ai/src/utils/request-compression.ts`, `packages/ai/src/api/{anthropic-messages,openai-responses,openai-codex-responses}.ts` | `packages/ai/test/{anthropic-request-compression,openai-request-compression,openai-codex-stream}.test.ts` |
+| Import extension modules concurrently, then run factories in discovery order to preserve tool, prompt and event registration order | `core/extensions/loader.ts` | `suite/regressions/extension-imports.test.ts`, `suite/regressions/extension-factory-cache.test.ts`, `compiled-extension-packages.test.ts`, `extensions-discovery.test.ts` |
 | Normalize tool declarations once per comparison, index model overlays per read, repair JSON by spans, and drain Codex events without repeated array shifts | `packages/agent/src/agent-loop.ts`, `packages/ai/src/{utils/transcript,utils/json-parse,models,api/openai-codex-responses}.ts` | `packages/agent/test/agent.test.ts`, `packages/ai/test/{system-message-replay,json-parse,model-types,openai-codex-websocket-queue}.test.ts` |
 | Stream long-token wrapping, use native grapheme endpoints, reuse only the current editor layout after comparing text, width and paste membership, and reuse unchanged same-index rows in unstyled Boxes after child changes | `packages/tui/src/{utils,components/editor,components/input,components/box}.ts` | `packages/tui/test/{wrap-ansi,editor,input,layout,mouse-components}.test.ts` |
 | Reuse unchanged assistant runs, avoid rendering assistants to query emptiness in compact/hybrid grouping, reject plain prose before Mermaid lexing, and compute visible tree ancestry in one pass | `modes/interactive/components/{activity,assistant-message,mermaid,tree-selector}.ts` | `{compact-view,assistant-message,mermaid,tree-selector}.test.ts` |
@@ -367,6 +370,13 @@ owner-authorized updater accepts routine catalog removals and prints every remov
 malformed or empty catalogs still fail closed. Its selector is
 `$(npm root -g)/@earendil-works/pi-coding-agent`; on Termux it is
 `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` with `~/.local/bin/pi`.
+After a successful activation, including a same-commit reuse, it runs the pinned installer's
+`--prune --keep 5` with the same `--selector` and `--releases`. The installer's ownership,
+selected, `.previous` and `lsof`/`ps` checks still apply; legacy releases count toward the five
+but are never removed. Fork CLI and SDK processes keep their release receipt open so `lsof`
+can detect JavaScript-only runtimes. Restart workers from older releases to gain this protection.
+Missing or failed process-inspection tools skip cleanup with a warning, not a failed update.
+A direct launch of an old release during pruning is not coordinated with the process snapshot.
 
 After activation, immediately restart running workers and verify their actual runtime, not only
 the selector. Launcher changes require a full CLI relaunch; worker restart leaves the launcher
@@ -376,7 +386,7 @@ only complete current native state, with no journal-only or pre-v1 handoff fallb
 ## Testing
 
 - `npm run check` after code changes.
-- `./test.sh` runs all non-e2e tests offline in an isolated home; `./test.sh -- <command>` runs a
+- `./test.sh` (also the default `npm test`) runs all non-e2e tests offline in an isolated home; `./test.sh -- <command>` runs a
   focused command the same way. Node and npm resolve before HOME isolation so version-manager
   shims keep working. The isolated root follows the caller's `TMPDIR`; Chord's upstream lock
   fallback handles Unix socket paths that exceed the native limit.

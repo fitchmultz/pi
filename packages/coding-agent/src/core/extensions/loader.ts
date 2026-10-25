@@ -701,31 +701,6 @@ async function initializeExtension(
 	return extension;
 }
 
-async function loadExtension(
-	extensionPath: string,
-	cwd: string,
-	eventBus: EventBus,
-	runtime: ExtensionRuntime,
-	cacheToken?: ExtensionCacheToken,
-): Promise<{ extension: Extension | null; error: string | null }> {
-	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
-
-	try {
-		const factory = await loadExtensionModule(resolvedPath, cacheToken);
-		time(`${extensionPath} module import`, "extensions");
-		if (!factory) {
-			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
-		}
-
-		const extension = await initializeExtension(factory, extensionPath, resolvedPath, cwd, eventBus, runtime);
-
-		return { extension, error: null };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		return { extension: null, error: `Failed to load extension: ${message}` };
-	}
-}
-
 /**
  * Create an Extension from an inline factory function.
  */
@@ -758,22 +733,34 @@ async function loadExtensionsInternal(
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const resolvedRuntime = runtime ?? createExtensionRuntime();
 
-	for (const extPath of paths) {
-		const { extension, error } = await loadExtension(
-			extPath,
-			resolvedCwd,
-			resolvedEventBus,
-			resolvedRuntime,
-			cacheToken,
-		);
+	const resolvedPaths = paths.map((extPath) => resolvePath(extPath, resolvedCwd, { normalizeUnicodeSpaces: true }));
+	const modules = await Promise.allSettled(
+		resolvedPaths.map((resolvedPath) => loadExtensionModule(resolvedPath, cacheToken)),
+	);
+	if (paths.length > 0) time("module imports", "extensions");
 
-		if (error) {
-			errors.push({ path: extPath, error });
-			continue;
-		}
-
-		if (extension) {
-			extensions.push(extension);
+	// Factories share registration state, so only module evaluation can overlap.
+	for (const [index, extPath] of paths.entries()) {
+		try {
+			const module = modules[index];
+			if (module.status === "rejected") throw module.reason;
+			if (!module.value) {
+				errors.push({ path: extPath, error: `Extension does not export a valid factory function: ${extPath}` });
+				continue;
+			}
+			extensions.push(
+				await initializeExtension(
+					module.value,
+					extPath,
+					resolvedPaths[index],
+					resolvedCwd,
+					resolvedEventBus,
+					resolvedRuntime,
+				),
+			);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			errors.push({ path: extPath, error: `Failed to load extension: ${message}` });
 		}
 	}
 

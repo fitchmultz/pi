@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { transformSync } from "esbuild";
 import { describe, expect, it } from "vitest";
 
 const cli = process.env.PI_TEST_COMPILED_CLI ?? "";
@@ -141,6 +142,99 @@ export default function(pi) {
 					dotenv: [null, null, null],
 				},
 			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	// fitchmultz/pi#250: embedded loading preserves factory/discovery order for transformed and native module graphs.
+	it.each(["delayed TypeScript", "compiled ESM"])("loads %s before ordered factories", (shape) => {
+		const compiled = shape === "compiled ESM";
+		const root = mkdtempSync(join(tmpdir(), "pi-compiled-imports-"));
+		try {
+			const receipt = join(root, "imports.jsonl");
+			const names = ["beta", "alpha", "gamma"];
+			if (compiled) {
+				writeFileSync(join(root, "package.json"), JSON.stringify({ type: "module" }));
+				mkdirSync(join(root, "shared"));
+				writeFileSync(
+					join(root, "shared/leaf.js"),
+					transformSync('export const leaf: string = "compiled dependency";', { loader: "ts", format: "esm" })
+						.code,
+				);
+				writeFileSync(
+					join(root, "shared/description.js"),
+					'import { leaf } from "./leaf.js"; export const description = leaf + " tree";',
+				);
+			}
+			const paths = names.map((name, index) => {
+				const directory = compiled ? join(root, name) : root;
+				mkdirSync(directory, { recursive: true });
+				if (compiled)
+					writeFileSync(join(directory, "metadata.js"), 'export { description } from "../shared/description.js";');
+				const file = join(directory, compiled ? "index.js" : `${name}.ts`);
+				const source = `import { appendFileSync } from "node:fs";
+${compiled ? 'import { description } from "./metadata.js";' : 'const description = "delayed module";'}
+const state = globalThis.__compiled250 ??= { active: 0, max: 0, factories: [] };
+state.max = Math.max(state.max, ++state.active);
+${compiled ? "" : `await new Promise(resolve => setTimeout(resolve, ${[40, 5, 15][index]}));`}
+state.active--;
+export default async function(pi) {
+	state.factories.push("${name}");
+	await new Promise(resolve => setTimeout(resolve, 2));
+	pi.registerCommand("${name}", { description, handler: async () => {} });
+	appendFileSync(${JSON.stringify(receipt)}, JSON.stringify({ max: state.max, active: state.active, factories: state.factories }) + "\\n");
+}`;
+				writeFileSync(
+					file,
+					compiled ? transformSync(source, { loader: "ts", format: "esm", target: "es2022" }).code : source,
+				);
+				return file;
+			});
+			const result = spawnSync(
+				cli,
+				["--offline", "--mode", "rpc", "--no-session", "--no-extensions", ...paths.flatMap((file) => ["-e", file])],
+				{
+					cwd: root,
+					env: {
+						PATH: dirname(process.execPath),
+						HOME: root,
+						USERPROFILE: root,
+						PI_CODING_AGENT_DIR: join(root, "agent"),
+						PI_TELEMETRY: "0",
+						JITI_FS_CACHE: "0",
+						...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+					},
+					input: `${JSON.stringify({ id: "ready", type: "get_commands" })}\n`,
+					encoding: "utf8",
+					timeout: 30_000,
+				},
+			);
+			expect(result.error, result.stderr).toBeUndefined();
+			expect(result.status, result.stderr).toBe(0);
+			const events = readFileSync(receipt, "utf8")
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			expect(events).toEqual(
+				names.map((_, index) => ({ max: compiled ? 1 : 3, active: 0, factories: names.slice(0, index + 1) })),
+			);
+			const response = result.stdout
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line))
+				.find((value) => value.id === "ready");
+			expect(response?.success).toBe(true);
+			expect(
+				response.data.commands
+					.filter((command: { name: string }) => names.includes(command.name))
+					.map((command: { name: string; description: string }) => ({
+						name: command.name,
+						description: command.description,
+					})),
+			).toEqual(
+				names.map((name) => ({ name, description: compiled ? "compiled dependency tree" : "delayed module" })),
+			);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

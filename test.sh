@@ -11,7 +11,7 @@ fi
 real_node="$(node -p 'require("node:fs").realpathSync(process.execPath)')"
 node_bin="$(dirname "$real_node")"
 real_npm="$("$real_node" -p 'require("node:fs").realpathSync(process.argv[1])' "$node_bin/npm")"
-command=("$real_npm" test)
+command=()
 if [[ $# -gt 0 ]]; then
 	if [[ "$1" != -- || $# -lt 2 ]]; then
 		echo "Usage: $0 [-- <command> [args...]]" >&2
@@ -113,4 +113,9 @@ if [[ ${PI_TEST_COMPILED_CLI+x} ]]; then
 fi
 
 echo "Running tests without API keys in isolated home: $test_root/home"
-env -i "${test_env[@]}" "${command[@]}"
+if [[ ${#command[@]} -gt 0 ]]; then
+	env -i "${test_env[@]}" "${command[@]}"
+else
+	env -i "${test_env[@]}" "$real_npm" run test:scripts
+	env -i "${test_env[@]}" "$real_npm" run test --workspaces --if-present
+fi

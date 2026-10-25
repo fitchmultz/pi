@@ -27,7 +27,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep tmux
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep tmux lsof procps
           sudo ln -s "$(command -v fdfind)" /usr/local/bin/fd
 
       - name: Install dependencies
@@ -97,8 +97,8 @@ jobs:
         # Avoid CPU/I/O contention between the large-journal and launcher subprocess tests.
         run: node ../../node_modules/vitest/dist/cli.js --run --no-file-parallelism restart background-command
 
-      - name: Case-insensitive workspace build
-        run: node --test scripts/workspace-build.test.mjs
+      - name: Case-insensitive workspace build and release liveness
+        run: node --test scripts/workspace-build.test.mjs scripts/fork-release-liveness.test.mjs
 
   mcp-conformance:
     runs-on: ubuntu-latest
