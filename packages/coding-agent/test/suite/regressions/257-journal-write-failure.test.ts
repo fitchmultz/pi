@@ -42,7 +42,14 @@ it.runIf(process.platform !== "win32" && process.getuid?.() !== 0)(
 		roots.push(root);
 		const child = spawnSync(
 			"/bin/sh",
-			["-c", 'ulimit -f 8; exec "$0" --input-type=module -e "$1" "$2" "$3"', process.execPath, failingWriter, sessionManagerSource, root],
+			[
+				"-c",
+				'ulimit -f 8; exec "$0" --input-type=module -e "$1" "$2" "$3"',
+				process.execPath,
+				failingWriter,
+				sessionManagerSource,
+				root,
+			],
 			{ encoding: "utf8" },
 		);
 		expect(child.stderr).toBe("");
