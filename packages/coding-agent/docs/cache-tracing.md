@@ -79,4 +79,18 @@ No natural request measurements are created by installing this source change. Re
 
 The native recorder remains because public payload hooks run before final serialization, and public stream events alone do not identify every transport attempt or the raw usage record actually consumed. Moving those observations into an extension today would lose evidence, not remove equivalent plumbing.
 
+Installing the recorder does not close the investigation. The open question is whether ordinary requests preserve the earlier serialized prefix and report the cache usage actually consumed. The recorder cannot establish server-internal cache identity.
+
+The remaining natural-request coverage is:
+
+| Scenario | Evidence needed for a conclusion |
+| --- | --- |
+| GLM wake, tool and user requests | Comparable ordinary request pairs, with warming and summary traffic classified separately |
+| Sol discovery and reload | Request pairs with runtime and reload generations, tool declarations and prefix changes identified |
+| Codex short-gap continuation | Request pairs with connection reuse, retry attempts and consumed raw usage presence identified |
+
+For each scenario, record the report classification, supporting capture identities and remaining gaps. If no admissible capture exists, record "not observed". Do not infer coverage from an offline test, a later installation or a normalized cache-token count. Do not reconstruct historical request bodies.
+
+The investigation is ready for Mitch's closure decision once every scenario has a report classification or "not observed", with its remaining gaps recorded. Keep it open until that decision is recorded. A decision to leave a question unresolved is not a provider diagnosis or cache improvement. Closure does not authorize new collection or override an existing collection stop.
+
 Retire the recorder, SDK provenance and report tooling when the investigation ends, or when a replacement proves equivalent coverage of post-hook serialized bodies, HTTP/WebSocket attempts and consumed raw usage presence/provenance while retaining these privacy limits. Do not present entry-file digests as loaded-module identity or passive correlations as server causation.
