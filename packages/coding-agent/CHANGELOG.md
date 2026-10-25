@@ -97,6 +97,7 @@
 - Fixed managed restarts deleting the complete private session state when both the replacement and its one-shot recovery fail before readiness. The launcher now keeps the file and prints its path for `pi --working-session` recovery, and removes only its own native artifacts, never a user-supplied path ([#236](https://github.com/fitchmultz/pi/issues/236)).
 - Fixed compact and hybrid views rendering nonempty assistants twice per frame to check emptiness ([#237](https://github.com/fitchmultz/pi/issues/237)).
 - Fixed HTML exports opening blank for long sessions because recursive tree traversal exhausted the browser's call stack ([#255](https://github.com/fitchmultz/pi/issues/255)).
+- Fixed the Gondolin example extension installing node-forge 1.4.0 (GHSA-86w9-cpqp-85rv) and undici 6.26.0 by updating it to Gondolin 0.14.0. Gondolin now blocks guest HTTP and TLS requests to loopback, private and link-local addresses by default.
 
 ## [1.4.0] - 2026-10-21
 

@@ -8,7 +8,6 @@ import test from "node:test";
 
 const script = fileURLToPath(new URL("./npm-audit.mjs", import.meta.url));
 const zodAdvisory = "GHSA-mrhx-c7xc-m3w5";
-const forgeAdvisory = "GHSA-86w9-cpqp-85rv";
 const installLockPath = "packages/coding-agent/install-lock/package-lock.json";
 const auditReport = {
 	auditReportVersion: 2,
@@ -25,14 +24,6 @@ const auditReport = {
 			}],
 			nodes: ["node_modules/zod"],
 			effects: ["@anthropic-ai/sandbox-runtime"],
-		},
-		"node-forge": {
-			name: "node-forge",
-			via: [{
-				name: "node-forge",
-				url: `https://github.com/advisories/${forgeAdvisory}`,
-				severity: "high",
-			}],
 		},
 	},
 };
@@ -66,11 +57,10 @@ async function audit(t, change = () => {}) {
 // The temporary executable stub uses a POSIX shebang.
 const options = { skip: process.platform === "win32" };
 
-test("accepts the reviewed workspace Zod graph and preserves the node-forge acceptance", options, async (t) => {
+test("accepts the reviewed workspace Zod graph", options, async (t) => {
 	const result = await audit(t);
 	assert.equal(result.status, 0, result.stderr);
 	assert.ok(result.stdout.includes(`Accepted ${zodAdvisory}`), result.stdout);
-	assert.ok(result.stdout.includes(`Accepted ${forgeAdvisory}`), result.stdout);
 });
 
 test("does not pin unrelated development or extraneous lock entries", options, async (t) => {
