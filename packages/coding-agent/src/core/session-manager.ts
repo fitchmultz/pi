@@ -1034,13 +1034,13 @@ function contextEntriesFor(path: SessionEntry[]): SessionEntry[] {
  */
 export class SessionManager {
 	beforeMutation?: () => void;
-	private writeError?: unknown;
 	private sessionId: string = "";
 	private sessionFile: string | undefined;
 	private sessionDir: string;
 	private cwd: string;
 	private persist: boolean;
-	private flushed: boolean = false;
+	/** Leading fileEntries known to be in the journal. Entries after a failed append stay unwritten. */
+	private writtenEntryCount = 0;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
@@ -1094,12 +1094,12 @@ export class SessionManager {
 				this.newSession();
 				this.sessionFile = explicitPath;
 				this._rewriteFile();
-				this.flushed = true;
+				this.writtenEntryCount = this.fileEntries.length;
 				return;
 			}
 
 			this._loadEntries(entries);
-			this.flushed = true;
+			this.writtenEntryCount = this.fileEntries.length;
 		} else {
 			const explicitPath = this.sessionFile;
 			this.newSession();
@@ -1128,7 +1128,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.latestSessionInfo = undefined;
 		this.leafId = null;
-		this.flushed = false;
+		this.writtenEntryCount = 0;
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -1226,7 +1226,7 @@ export class SessionManager {
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
-		if (!this.flushed) {
+		if (this.writtenEntryCount === 0) {
 			if (!this._hasConversation()) return;
 			const fd = openSync(this.sessionFile, "wx");
 			try {
@@ -1236,10 +1236,23 @@ export class SessionManager {
 			} finally {
 				closeSync(fd);
 			}
-			this.flushed = true;
+			this.writtenEntryCount = this.fileEntries.length;
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			this._writeUnwritten(this.sessionFile, entry);
 		}
+	}
+
+	/** Write every accepted entry the journal lacks, so later entries never reference a missing parent. */
+	private _writeUnwritten(sessionFile: string, appended?: SessionEntry): void {
+		const unwritten = this.fileEntries.slice(this.writtenEntryCount);
+		if (unwritten.length === 0) return;
+		if (unwritten[0] === appended) {
+			appendFileSync(sessionFile, `${JSON.stringify(appended)}\n`);
+		} else {
+			// A failed append may have left nothing, complete records or a partial line; memory is authoritative.
+			this._rewriteFile();
+		}
+		this.writtenEntryCount = this.fileEntries.length;
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1256,12 +1269,7 @@ export class SessionManager {
 			if (entry.type === "compaction") branch.contextEntries = contextEntriesFor(branch.path);
 			else branch.contextEntries.push(entry);
 		}
-		try {
-			this._persist(entry);
-		} catch (error) {
-			this.writeError = error;
-			throw error;
-		}
+		this._persist(entry);
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
@@ -1791,15 +1799,14 @@ export class SessionManager {
 			this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
 			this.sessionId = newSessionId;
 			this.sessionFile = newSessionFile;
+			this.writtenEntryCount = 0;
 			this._buildIndex();
 
 			// Use the same rule as _persist(): write now if the branched path already
 			// has a conversation, otherwise let _persist() create the file later.
 			if (this._hasConversation()) {
 				this._rewriteFile();
-				this.flushed = true;
-			} else {
-				this.flushed = false;
+				this.writtenEntryCount = this.fileEntries.length;
 			}
 
 			return newSessionFile;
@@ -1846,20 +1853,21 @@ export class SessionManager {
 	): SessionManager {
 		const manager = new SessionManager(cwd, sessionDir, undefined, sessionFile !== undefined, undefined, entries);
 		manager.sessionFile = sessionFile;
-		manager.flushed = sessionFile !== undefined && existsSync(sessionFile);
+		manager.writtenEntryCount = sessionFile !== undefined && existsSync(sessionFile) ? manager.fileEntries.length : 0;
 		if (leafId === null) manager.resetLeaf();
 		else manager.branch(leafId);
 		manager.flushWorkingSession();
 		return manager;
 	}
 
-	/** Save boundaries force even setup-only state to disk and reject earlier write failures. */
+	/** Save boundaries force even setup-only state and entries left by failed appends to disk, or throw. */
 	flushWorkingSession(): void {
-		if (this.writeError) throw this.writeError;
 		if (!this.persist || !this.sessionFile) return;
-		if (!this.flushed) {
+		if (this.writtenEntryCount === 0) {
 			this._rewriteFile();
-			this.flushed = true;
+			this.writtenEntryCount = this.fileEntries.length;
+		} else {
+			this._writeUnwritten(this.sessionFile);
 		}
 		const fd = openSync(this.sessionFile, "r");
 		try {
