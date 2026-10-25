@@ -61,6 +61,11 @@ class StrictStrikethroughTokenizer extends Tokenizer {
 			tokens: this.lexer.inlineTokens(text),
 		};
 	}
+
+	// A setext heading needs a newline. Marked's setext regex overflows the native RegExp stack on very long single lines.
+	override lheading(src: string): Tokens.Heading | undefined {
+		return src.includes("\n") ? super.lheading(src) : undefined;
+	}
 }
 
 interface LatexToken extends Tokens.Generic {
