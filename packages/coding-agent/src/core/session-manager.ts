@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
@@ -832,7 +833,7 @@ async function buildSessionInfo(
 		if (cached && revision === getFileRevision(filePath)) {
 			return resolvedCwd === undefined || sessionCwdMatches(cached.cwd, resolvedCwd) ? cached : null;
 		}
-		const context = getContext();
+		let context = getContext();
 		const stats = await stat(filePath);
 		let header: SessionHeader | null = null;
 		let messageCount = 0;
@@ -841,7 +842,13 @@ async function buildSessionInfo(
 		let name: string | undefined;
 		let lastActivityTime: number | undefined;
 
-		const input = createReadStream(filePath, { encoding: "utf8", signal });
+		// Hash the raw chunks feeding this exact scan, not a later reread that could bind
+		// stale parsed metadata to a writer's newer bytes. Readline handles UTF-8 decoding.
+		const hash = createHash("sha256");
+		const input = createReadStream(filePath, { signal });
+		input.on("data", (chunk) => {
+			hash.update(chunk);
+		});
 		const rl = createInterface({
 			input,
 			crlfDelay: Infinity,
@@ -872,6 +879,8 @@ async function buildSessionInfo(
 				if (entry.type !== "message") continue;
 				messageCount++;
 
+				// Never publish dates parsed across different contexts, even if TZ later changes back.
+				if (context !== undefined && getContext() !== context) context = undefined;
 				const activityTime = getMessageActivityTime(entry);
 				if (typeof activityTime === "number") {
 					lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
@@ -899,6 +908,7 @@ async function buildSessionInfo(
 			return null;
 		}
 
+		if (context !== undefined && getContext() !== context) context = undefined;
 		const cwd = typeof header.cwd === "string" ? header.cwd : "";
 		const parentSessionPath = header.parentSession;
 		const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
@@ -922,7 +932,7 @@ async function buildSessionInfo(
 			allMessagesText: allMessages.join(" "),
 		};
 		signal?.throwIfAborted();
-		if (revision) await writeSessionListCache(info, revision, context, signal);
+		if (revision) await writeSessionListCache(info, revision, hash.digest("hex"), context, signal);
 		signal?.throwIfAborted();
 		return info;
 	} catch {

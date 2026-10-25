@@ -30,7 +30,7 @@
 
 ### Changed
 
-- Cache complete session-list metadata and search text under unchanged file revisions, avoiding repeated journal scans while preserving exact counts, names, previews, activity order, and full-text search ([#251](https://github.com/fitchmultz/pi/issues/251)). See [Session listing cache](docs/session-listing.md) for cold-scan and storage tradeoffs.
+- Cache complete session-list metadata and search text under unchanged source revisions and full-byte digests, avoiding repeated JSONL parsing while preserving exact counts, names, previews, activity order, and full-text search ([#251](https://github.com/fitchmultz/pi/issues/251)). See [Session listing cache](docs/session-listing.md) for cold-scan and storage tradeoffs.
 - Import extension modules concurrently while keeping factories and registrations in discovery order. Module-level side effects can interleave. Startup timing reports aggregate import wall time ([#250](https://github.com/fitchmultz/pi/issues/250)).
 - Published settings, models, keybindings, and theme schemas using upstream's shared runtime definitions; the fork settings schema retains boolean and `"hybrid"` compact activity preferences.
 - Reduced repeated session-history work, assistant/tree rendering and native read, grep, edit and image processing.

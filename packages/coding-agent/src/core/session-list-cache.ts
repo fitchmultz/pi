@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { lstat, mkdir, open, readdir, readFile, rename, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { getFileRevision, resolvePath } from "../utils/paths.ts";
@@ -27,7 +28,7 @@ export function createSessionListCacheContext(): () => string | undefined {
 	let context: string | undefined;
 	return () => {
 		try {
-			if (timezone !== process.env.TZ || formatter !== Intl.DateTimeFormat) {
+			if (context === undefined || timezone !== process.env.TZ || formatter !== Intl.DateTimeFormat) {
 				timezone = process.env.TZ;
 				formatter = Intl.DateTimeFormat;
 				context = getSessionListCacheContext();
@@ -71,8 +72,15 @@ export async function readSessionListCache(
 			return undefined;
 		}
 		if (
+			isRecord(record) &&
+			(record.version !== 2 || typeof record.digest !== "string" || !/^[0-9a-f]{64}$/.test(record.digest))
+		) {
+			// Retire metadata-only records even if the fallback cannot publish a replacement.
+			await unlink(path).catch(() => {});
+			return undefined;
+		}
+		if (
 			!isRecord(record) ||
-			record.version !== 1 ||
 			typeof record.context !== "string" ||
 			record.context !== getContext() ||
 			!isRecord(record.info)
@@ -96,6 +104,15 @@ export async function readSessionListCache(
 		const created = new Date(info.created);
 		const modified = new Date(info.modified);
 		if (!Number.isFinite(created.getTime()) || !Number.isFinite(modified.getTime())) return undefined;
+		// Metadata is only a quick rejection: already-dirty shared mappings can change bytes
+		// without changing any revision field. Validate the entire source before reusing a scan.
+		const hash = createHash("sha256");
+		for await (const chunk of createReadStream(filePath, { signal })) hash.update(chunk);
+		if (hash.digest("hex") !== record.digest) {
+			await removeSessionListCache(filePath);
+			return undefined;
+		}
+		if (record.context !== getContext()) return undefined;
 		return {
 			path: filePath,
 			id: info.id,
@@ -161,6 +178,7 @@ export async function pruneSessionListCache(
 export async function writeSessionListCache(
 	info: SessionInfo,
 	revision: string,
+	digest: string,
 	context: string | undefined,
 	signal?: AbortSignal,
 ): Promise<void> {
@@ -176,7 +194,7 @@ export async function writeSessionListCache(
 		const file = await open(temporary, "wx", 0o600);
 		createdTemporary = true;
 		try {
-			await file.writeFile(JSON.stringify({ version: 1, revision, context, info }), { signal });
+			await file.writeFile(JSON.stringify({ version: 2, revision, digest, context, info }), { signal });
 		} finally {
 			await file.close();
 		}

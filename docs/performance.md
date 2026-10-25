@@ -4,7 +4,32 @@ The fork removes repeated work from native file tools, TUI rendering, model meta
 
 The older [recorded results](#recorded-results) are source-owner measurements of two measured source trees on one workstation, not of the final runtime: later prompt-cache, model-catalog and upstream v1.2.0 integration changes were not timed. Dated sections identify their own workloads and measurement status. These results do not show that every CLI invocation, provider, device or downstream adapter becomes faster. Functional tests remain the authority for behavior, safety, cancellation and mutation isolation.
 
+## Session listing (2026-10-25)
+
+The current cache validates **all raw journal bytes with SHA-256**, not just filesystem metadata. Native Linux shared-mapping regressions prove that all five stat fields can remain unchanged while journal names and searchable text change. Warm hits still read the whole journal, but avoid JSONL parsing. The digest stored on a cold miss comes from the exact raw stream being parsed, not a later reread. See the [cache contract](../packages/coding-agent/docs/session-listing.md).
+
+Against current-main `bf1225f6e` without the cache, the content-validated implementation reduced the larger synthetic workload's **warm-cache picker median from 1695.89 to 1155.16 ms (32%)**. Cold population was **28% slower**. This is a correctness/performance trade-off, not the historical zero-warm-read or 48 ms claim. Values below are median (minimum–maximum), milliseconds, five fresh-process samples per side and size.
+
+| Workload | Operation | Main, no cache | Content-validated cache |
+| --- | --- | ---: | ---: |
+| 12 files | Cold list and cache population | 95.48 (89.74–96.26) | 123.22 (115.48–134.72) |
+| 12 files | Warm complete list | 68.87 (66.89–75.18) | 46.52 (38.69–61.74) |
+| 12 files | Warm current-project list | 17.66 (12.98–19.00) | 8.80 (6.93–13.17) |
+| 12 files | Warm picker load/search/render/select | 78.75 (76.14–79.62) | 44.69 (41.01–45.61) |
+| 64 files | Cold list and cache population | 2358.81 (2299.49–2458.42) | 3027.80 (2992.63–3094.43) |
+| 64 files | Warm complete list | 1566.22 (1542.57–1638.83) | 1078.90 (1034.24–1147.53) |
+| 64 files | Warm current-project list | 394.61 (362.80–417.46) | 294.87 (264.25–326.53) |
+| 64 files | Warm picker load/search/render/select | 1695.89 (1633.59–1712.32) | 1155.16 (1064.35–1187.44) |
+
+[Current samples, complete source/workload hashes, loads, witnesses and retained-input manifests](session-listing-content-validation-results.json) identify the measured uncommitted source tree based on merge `ee55b916e`. Both roots had independent `npm ci --ignore-scripts` installations and identical frozen public model data. The 20 processes ran serially in AB, BA, AB, BA, AB order per size, with no concurrent builds, tests or other benchmark processes. All semantic witnesses matched. Warm ranges are nonoverlapping except the 12-file current-project row; cold ranges are nonoverlapping in the slower direction. No samples were discarded from this final cohort. Two earlier overlapping cohorts are retained as noncomparative diagnostics, not mixed into these results.
+
+The existing 12 × 128 and 64 × 512 synthetic fixtures and operation boundaries described below were reused. Before timing, each process retained its original generated journals as gzip files under the runner's existing `OUT/artifacts` directory. `inputs.json` records original/compressed lengths and SHA-256 hashes. **All 760 originals (9,715,256,200 raw bytes) were decompressed and byte-hash verified after scratch cleanup.** Retention is limited to these generated regular-file inputs, fails on errors, and caps each process at 1 GiB of raw inputs. Generation, compression and verification are outside operation clocks; both sides receive the same preparation and filesystem caches are not evicted.
+
+Reproduce with the command below, selecting current main as `BEFORE` and this content-validated source as `AFTER`. Keep the output directory outside disposable scratch and preserve its artifacts. This does not restore previously deleted measured inputs or claim comprehensive preservation of SDK/in-memory or full-suite histories. The synthetic Linux results do not qualify an installed macOS runtime, private corpus, live provider, cold filesystem, session-open parsing or per-keystroke search.
+
 ## Session listing (2026-10-24)
+
+**Historical only:** this implementation could return stale results after metadata-preserving shared-mapped writes. Its figures and zero-warm-read behavior do not qualify the content-validated cache above. Historical missing-input corrections remain in the [PR evidence](https://github.com/fitchmultz/pi/pull/253#issuecomment-6386363606); hashes and generators are not substitutes for lost original bytes.
 
 `SessionManager.list()` and `listAll()` reuse complete per-journal scan results under unchanged source revisions and date-parser context. Counts, names, activity dates, previews, and full user/assistant search text remain exact; the source scanner is authoritative. See the [cache contract](../packages/coding-agent/docs/session-listing.md) for invalidation, cleanup, permissions, and concurrent-write limits.
 
@@ -23,7 +48,7 @@ On the larger synthetic Linux workload, **warm-cache** picker load/search/render
 
 Cold initialization is not improved: it scans complete journals and adds cache publication work, and both candidate cold medians are higher with overlapping ranges. The cache also duplicates complete searchable text on disk. The historical **2284.40 → 51.91 ms warm-cache** result belongs only to the [original `0998f135` qualification][listing-original], not the changed runtime.
 
-The retained fixture uses 12 files × 128 messages and 64 files × 512 messages across four project directories. Seven of every eight messages contain synthetic tool output; the rest retain complete searchable Unicode text and late-row markers. Each process times these separate operations:
+The workload fixture uses 12 files × 128 messages and 64 files × 512 messages across four project directories. Seven of every eight messages contain synthetic tool output; the rest retain complete searchable Unicode text and late-row markers. Each process times these separate operations:
 
 | Operation label | Timed work |
 | --- | --- |
@@ -33,6 +58,8 @@ The retained fixture uses 12 files × 128 messages and 64 files × 512 messages 
 | Warm picker load, search, render, and selection | Real picker all-project loading through the listing API, full-text query, render, and selection; waits for complete results |
 
 Run five serial fresh-process pairs per size, alternating before/after order. Both roots get freshly written, filesystem-warm synthetic inputs; only the candidate's warm operations use a populated derived cache. Imports, fixture generation, assertions, and result hashing are outside the operation clocks. The fixture checks exact cold/warm metadata, message counts, search and selection, progress, and semantic witnesses. The picker clock excludes application startup and terminal-emulator display.
+
+### Reproduction for the current content-validated cache
 
 ```sh
 # In each isolated root, before timing; use identical frozen model data.
