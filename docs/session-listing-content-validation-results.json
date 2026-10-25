@@ -6,6 +6,12 @@
   "scope": "Synthetic Linux source APIs and real source picker; full-byte content validation, not metadata-only cache timings.",
   "qualification": {
     "comparative": true,
+    "subsequentIntegration": {
+      "main": "0c4da428aec523c28c8e402344fb1ce663cfc584",
+      "runtimeChange": "Untimed loadEntriesFromFile only; listing/cache/shared line parser/picker/search paths and timing boundaries unchanged.",
+      "remeasured": false,
+      "reason": "No affected timed runtime path changed. Original measured identities and hashes remain intact."
+    },
     "serial": true,
     "order": "AB, BA, AB, BA, AB per size",
     "overlappingBuildsOrTests": false,
