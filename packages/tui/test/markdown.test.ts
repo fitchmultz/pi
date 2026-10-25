@@ -1328,6 +1328,78 @@ This is a paragraph`,
 		});
 	});
 
+	describe("Setext headings", () => {
+		it("renders setext headings and leaves single-line underline text as a paragraph", () => {
+			const cases = [
+				{ source: "Title\n=====", expected: ["Title"], underline: true },
+				{ source: "Subtitle\n---", expected: ["Subtitle"], underline: false },
+				{ source: "Line one\nline two\n===", expected: ["Line one", "line two"], underline: true },
+				{ source: "Title\n=====\n\nbody", expected: ["Title", "", "body"], underline: true },
+				{ source: "Title =====", expected: ["Title ====="], underline: false },
+			];
+
+			for (const { source, expected, underline } of cases) {
+				const lines = new Markdown(source, 0, 0, defaultMarkdownTheme).render(80);
+				assert.deepStrictEqual(
+					lines.map((line) => stripAnsi(line).trimEnd()),
+					expected,
+					JSON.stringify(source),
+				);
+				assert.strictEqual(lines[0]?.includes("\x1b[4m"), underline, JSON.stringify(source));
+			}
+		});
+
+		it("renders a newline-free 20M-unit Unicode line completely, in order and within width", () => {
+			const length = 20_000_000;
+			const start = "PCM40-START ";
+			const end = " PCM40-END";
+			const parts = [start];
+			let size = start.length;
+			for (let i = 0; ; i++) {
+				// Numbered words make any dropped, repeated or reordered row detectable.
+				const word = `t${i} naïve café 🙂 `;
+				if (size + word.length > length - end.length) {
+					break;
+				}
+				parts.push(word);
+				size += word.length;
+			}
+			parts.push("z".repeat(length - end.length - size), end);
+			const source = parts.join("");
+			assert.strictEqual(source.length, length);
+
+			// The fixture alphabet is printable ASCII, the one-cell "ï" and "é", and the two-cell "🙂".
+			const cellWidth = (row: string): number => {
+				let width = 0;
+				for (const char of row) {
+					if (char === "🙂") {
+						width += 2;
+					} else if (char === "ï" || char === "é" || (char >= " " && char <= "~")) {
+						width += 1;
+					} else {
+						assert.fail(`Unexpected character ${JSON.stringify(char)} in ${JSON.stringify(row)}`);
+					}
+				}
+				return width;
+			};
+
+			const lines = new Markdown(source, 1, 0, defaultMarkdownTheme).render(100).map(stripAnsi);
+
+			const wrongWidthRow = lines.findIndex((line) => cellWidth(line) !== 100);
+			assert.strictEqual(wrongWidthRow, -1, `Row ${wrongWidthRow}: ${JSON.stringify(lines[wrongWidthRow])}`);
+			const rendered = lines.map((line) => line.trim()).join(" ");
+			if (rendered !== source) {
+				let index = 0;
+				while (rendered[index] === source[index]) {
+					index++;
+				}
+				assert.fail(
+					`Rendered text diverges at ${index}: ${JSON.stringify(rendered.slice(Math.max(0, index - 40), index + 40))} != ${JSON.stringify(source.slice(Math.max(0, index - 40), index + 40))}`,
+				);
+			}
+		});
+	});
+
 	describe("Spacing after blockquotes", () => {
 		it("should have only one blank line between blockquote and following paragraph", () => {
 			const markdown = new Markdown(

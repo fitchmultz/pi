@@ -11,6 +11,10 @@
 - Reuse unchanged editor layouts and stream long-token wrapping and grapheme scans without rebuilding intermediate arrays.
 - Reuse unchanged same-index content rows in unstyled Boxes after child changes, preserving native invalidation, mouse geometry and styled-background sampling.
 
+### Fixed
+
+- Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
+
 ## [1.4.0] - 2026-10-21
 
 ### Added
