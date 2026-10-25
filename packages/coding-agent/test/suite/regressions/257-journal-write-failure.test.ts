@@ -2,18 +2,19 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, expect, it } from "vitest";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { openWorkingSession } from "../../../src/core/working-session.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
-const sessionManagerSource = resolve(import.meta.dirname, "../../../src/core/session-manager.ts");
+const sessionManagerUrl = pathToFileURL(resolve(import.meta.dirname, "../../../src/core/session-manager.ts")).href;
 
 // A failed write cannot be undone in-process, so the failing writer runs under an 8 KiB file-size limit.
 const failingWriter = `
 import { chmodSync } from "node:fs";
-const { SessionManager } = await import(process.argv[1]);
-const session = SessionManager.create(process.argv[2], process.argv[2]);
+import { SessionManager } from ${JSON.stringify(sessionManagerUrl)};
+const session = SessionManager.create(process.argv[1], process.argv[1]);
 const add = (content) => session.appendMessage({ role: "user", content, timestamp: 1 });
 const codes = [];
 const attempt = (write) => { try { write(); codes.push("ok"); } catch (error) { codes.push(error.code); } };
@@ -42,14 +43,7 @@ it.runIf(process.platform !== "win32" && process.getuid?.() !== 0)(
 		roots.push(root);
 		const child = spawnSync(
 			"/bin/sh",
-			[
-				"-c",
-				'ulimit -f 8; exec "$0" --input-type=module -e "$1" "$2" "$3"',
-				process.execPath,
-				failingWriter,
-				sessionManagerSource,
-				root,
-			],
+			["-c", 'ulimit -f 8; exec "$0" --input-type=module -e "$1" "$2"', process.execPath, failingWriter, root],
 			{ encoding: "utf8" },
 		);
 		expect(child.stderr).toBe("");

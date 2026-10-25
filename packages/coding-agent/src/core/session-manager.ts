@@ -1039,7 +1039,7 @@ export class SessionManager {
 	private sessionDir: string;
 	private cwd: string;
 	private persist: boolean;
-	/** Leading fileEntries the journal holds; 0 until the file exists. Entries after a failed append stay unwritten. */
+	/** Leading fileEntries known to be in the journal. Entries after a failed append stay unwritten. */
 	private writtenEntryCount = 0;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
