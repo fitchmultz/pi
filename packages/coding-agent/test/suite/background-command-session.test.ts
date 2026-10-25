@@ -421,6 +421,8 @@ describe("background command extension delivery", () => {
 		"uses effective shell settings, relative cwd, and session metadata",
 		async () => {
 			const h = await harness();
+			// #259: keep the job running through the start boundary so explicit status acknowledges completion first.
+			const release = join(h.tempDir, "release");
 			const shell = join(h.tempDir, "shell");
 			writeFileSync(shell, '#!/bin/sh\nexport BACKGROUND_SHELL=effective\nexec /bin/bash "$@"\n', { mode: 0o755 });
 			mkdirSync(join(h.tempDir, "child"));
@@ -432,17 +434,14 @@ describe("background command extension delivery", () => {
 						action: "start",
 						cwd: "child",
 						command:
-							'pwd; printf "%s %s %s %s" "$BACKGROUND_SHELL" "$BACKGROUND_PREFIX" "$PI_SESSION_ID" "$PI_MODEL"',
+							'pwd; printf "%s %s %s %s" "$BACKGROUND_SHELL" "$BACKGROUND_PREFIX" "$PI_SESSION_ID" "$PI_MODEL"; ' +
+							`while [ ! -f ${quote(release)} ]; do sleep 0.02; done`,
 					}),
 					{ stopReason: "toolUse" },
 				),
 				async () => {
 					const job = jobFrom(h);
-					await until(() =>
-						backgroundCommandFinished(
-							readBackgroundCommand(backgroundCommandDirectory(h.sessionManager), job.id),
-						),
-					);
+					await finish(h, release);
 					expect(readFileSync(job.logFile, "utf8")).toBe(
 						`${realpathSync(join(h.tempDir, "child"))}\neffective effective ${h.sessionManager.getSessionId()} ${h.getModel().id}`,
 					);
