@@ -393,6 +393,40 @@ describe("SessionManager custom flat session directory", () => {
 		expect(continuedA.getSessionFile()).toBe(sessionA);
 	});
 
+	it("lists records across read-buffer boundaries the way open() loads them", async () => {
+		const file = join(tempDir, "2025-01-01T00-00-00-000Z_boundary.jsonl");
+		const header = `${JSON.stringify({ type: "session", version: 3, id: "boundary", timestamp: "2025-01-01T00:00:00Z", cwd: projectA })}\n`;
+		const userLine = (text: string) =>
+			JSON.stringify({
+				type: "message",
+				id: "u1",
+				parentId: null,
+				timestamp: "2025-01-01T00:00:01Z",
+				message: { role: "user", content: text, timestamp: 1 },
+			});
+		// Start a three-byte character one byte before the 1 MiB read boundary.
+		const contentOffset = Buffer.byteLength(header) + userLine("").indexOf('"content":"') + '"content":"'.length;
+		const text = `${"a".repeat(1024 * 1024 - 1 - contentOffset)}東京`;
+		// JSON allows a raw carriage return as whitespace; open() keeps this record.
+		const assistantLine = JSON.stringify({
+			type: "message",
+			id: "a1",
+			parentId: "u1",
+			timestamp: "2025-01-01T00:00:02Z",
+			message: { role: "assistant", content: [{ type: "text", text: "done" }], timestamp: 2 },
+		}).replace(',"timestamp":2', ',\r"timestamp":2');
+		writeFileSync(file, `${header}${userLine(text)}\n${assistantLine}`);
+
+		const [listed] = await SessionManager.list(projectA, tempDir);
+		expect(listed).toMatchObject({ messageCount: 2, firstMessage: text, allMessagesText: `${text} done` });
+		expect(listed?.modified.getTime()).toBe(2);
+		expect(
+			SessionManager.open(file)
+				.buildSessionContext()
+				.messages.map((message) => message.role),
+		).toEqual(["user", "assistant"]);
+	});
+
 	it.each(["current", "excluded", "all"] as const)("rejects a cancelled %s session listing", async (scope) => {
 		createPersistedSession(projectA, "from A");
 		createPersistedSession(projectB, "from B");
