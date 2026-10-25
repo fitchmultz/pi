@@ -1,6 +1,7 @@
 import { constants as bufferConstants } from "buffer";
 import {
 	appendFileSync,
+	chmodSync,
 	closeSync,
 	existsSync,
 	mkdirSync,
@@ -637,5 +638,62 @@ describe("SessionManager session file creation", () => {
 		session.appendMessage(assistantMsg("first answer"));
 
 		expect(readSessionFileRoles(session.getSessionFile()!)).toEqual(["session", "user", "custom", "assistant"]);
+	});
+
+	const canDenyWrites = process.platform !== "win32" && process.getuid?.() !== 0;
+	const eacces = expect.objectContaining({ code: "EACCES" });
+
+	// fitchmultz/pi#257: later appends must not leave entries from a failed append missing as their parents.
+	it.runIf(canDenyWrites).each([
+		{ recovery: "append", recover: (session: SessionManager) => session.appendMessage(userMsg("accepted after")) },
+		{
+			recovery: "save boundary",
+			recover: (session: SessionManager) => {
+				session.flushWorkingSession();
+				session.appendMessage(userMsg("accepted after"));
+			},
+		},
+	])("writes every entry from failed appends at the next $recovery once writable", ({ recover }) => {
+		const session = SessionManager.create(tempDir, tempDir);
+		const before = session.appendMessage(userMsg("durable before"));
+		const file = session.getSessionFile()!;
+		chmodSync(file, 0o400);
+		expect(() => session.appendMessage(userMsg("failed during"))).toThrow(eacces);
+		const failed = session.getLeafId()!;
+		session.branch(before);
+		expect(() => session.appendMessage(userMsg("other branch"))).toThrow(eacces);
+		expect(() => session.flushWorkingSession()).toThrow(eacces);
+
+		chmodSync(file, 0o600);
+		recover(session);
+
+		const reopened = SessionManager.open(file);
+		expect(reopened.getLeafId()).toBe(session.getLeafId());
+		expect(reopened.buildSessionContext()).toEqual(session.buildSessionContext());
+		expect(reopened.buildSessionContext().messages).toMatchObject([
+			{ content: "durable before" },
+			{ content: "other branch" },
+			{ content: "accepted after" },
+		]);
+		reopened.branch(failed);
+		expect(reopened.buildSessionContext().messages).toMatchObject([
+			{ content: "durable before" },
+			{ content: "failed during" },
+		]);
+		session.flushWorkingSession();
+	});
+
+	it.runIf(canDenyWrites)("does not carry an unresolved write failure into a new session", () => {
+		const session = SessionManager.create(tempDir, tempDir);
+		session.appendMessage(userMsg("old session"));
+		chmodSync(session.getSessionFile()!, 0o400);
+		expect(() => session.appendMessage(userMsg("unwritten"))).toThrow(eacces);
+
+		session.newSession();
+		session.appendMessage(userMsg("new session"));
+		session.flushWorkingSession();
+		expect(SessionManager.open(session.getSessionFile()!).buildSessionContext().messages).toMatchObject([
+			{ content: "new session" },
+		]);
 	});
 });
