@@ -156,7 +156,7 @@ OpenShell inference routing can keep raw model credentials outside the sandbox. 
 
 Commands inside the VM inherit the host process environment. Provider keys supplied through environment variables can therefore be visible inside the VM. Do not use this pattern as a credential boundary unless you remove sensitive variables or change the extension's environment handling.
 
-Gondolin requires Node.js 23.6 or newer and QEMU installed through your operating-system package manager.
+Gondolin requires QEMU installed through your operating-system package manager.
 
 ### Install the extension
 
