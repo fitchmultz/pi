@@ -1234,17 +1234,20 @@ export class SessionManager {
 			}
 			this.writtenEntryCount = this.fileEntries.length;
 		} else {
-			this._appendUnwritten(this.sessionFile, entry);
+			this._writeUnwritten(this.sessionFile, entry);
 		}
 	}
 
-	/** Append every accepted entry the journal lacks, so later entries never reference a missing parent. */
-	private _appendUnwritten(sessionFile: string, appended?: SessionEntry): void {
+	/** Write every accepted entry the journal lacks, so later entries never reference a missing parent. */
+	private _writeUnwritten(sessionFile: string, appended?: SessionEntry): void {
 		const unwritten = this.fileEntries.slice(this.writtenEntryCount);
 		if (unwritten.length === 0) return;
-		// Any entry before `appended` follows a failed append, which can leave a partial last line.
-		const separator = unwritten[0] === appended ? "" : "\n";
-		appendFileSync(sessionFile, separator + unwritten.map((e) => `${JSON.stringify(e)}\n`).join(""));
+		if (unwritten[0] === appended) {
+			appendFileSync(sessionFile, `${JSON.stringify(appended)}\n`);
+		} else {
+			// A failed append may have left nothing, complete records or a partial line; memory is authoritative.
+			this._rewriteFile();
+		}
 		this.writtenEntryCount = this.fileEntries.length;
 	}
 
@@ -1860,7 +1863,7 @@ export class SessionManager {
 			this._rewriteFile();
 			this.writtenEntryCount = this.fileEntries.length;
 		} else {
-			this._appendUnwritten(this.sessionFile);
+			this._writeUnwritten(this.sessionFile);
 		}
 		const fd = openSync(this.sessionFile, "r");
 		try {

@@ -43,7 +43,7 @@
 ### Fixed
 
 - Fixed forking legacy sessions skipping migration and losing earlier model context, compaction references, and legacy custom-message roles ([#256](https://github.com/fitchmultz/pi/issues/256)).
-- Fixed a failed session journal write, such as a temporary permission error, disconnecting earlier history on reopen once writes recovered. The next append or save writes every entry the journal missed; new sessions no longer report an earlier session's write failure ([#257](https://github.com/fitchmultz/pi/issues/257)).
+- Fixed a failed session journal write, such as a temporary permission error, disconnecting earlier history on reopen once writes recovered. The next append or save rewrites the journal from accepted history, replacing any partial record; new sessions no longer report an earlier session's write failure ([#257](https://github.com/fitchmultz/pi/issues/257)).
 - Fixed chat card backgrounds tinting iTerm margins and window chrome in fullscreen mode; terminal-default side gutters preserve card colors, prompt navigation, and image scrolling ([#243](https://github.com/fitchmultz/pi/issues/243)).
 - Fixed quitting an unready restarted worker rolling back to the previous worker instead of exiting, including when its shutdown handlers outlast the startup deadline.
 - Fixed messages sent while Pi quits, such as a child completion arriving during a shutdown hook, starting a new turn. A managed restart then failed its final capture and stopped unfinished children; quit now admits shutdown persistence but no new or steered turn.
