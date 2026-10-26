@@ -23,8 +23,10 @@ process.exitCode = await runCliLauncher(process.argv.slice(2), process.argv[1]);
 	const worker = `
 import { createInterface } from "node:readline";
 function workerStartupProbe() {
-	const end = Date.now() + 30;
-	while (Date.now() < end) {}
+	// Spend 30ms on-CPU, not 30ms wall clock: V8 samples only while this thread runs, so a preempted wall-clock loop can go unsampled.
+	const start = process.threadCpuUsage();
+	let used = { user: 0, system: 0 };
+	while (used.user + used.system < 30_000) used = process.threadCpuUsage(start);
 }
 workerStartupProbe();
 console.error("--- Startup Timings ---\\n  fixture: 30ms\\n------------------------");
