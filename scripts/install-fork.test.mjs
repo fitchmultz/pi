@@ -3,7 +3,7 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
-	readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync,
+	readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -43,7 +43,7 @@ function fixture(t) {
 	const root = mkdtempSync(join(tmpdir(), "pi-fork-selector-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const home = join(root, "home");
-	const env = isolatedEnvironment(home, tools);
+	const env = isolatedEnvironment(home, tools, join(root, "cache"));
 	const selector = join(root, "npm-global/lib/node_modules", name);
 	const oldPackage = join(root, "old-release");
 	mkdirSync(oldPackage);
@@ -361,11 +361,18 @@ test("a real child build failure cannot select or leave a reusable success recei
 	assert.deepEqual(readdirSync(f.releases), [".owner-selector"]);
 });
 
-test("a real npm install failure leaves the selector unchanged", async (t) => {
+test("a real npm install failure leaves the selector unchanged and keeps npm's private debug log", async (t) => {
 	const f = fixture(t);
 	await assert.rejects(installRelease({ ...f, receipt: receipt() }, installFixture(f, { brokenTarball: true })), /Command failed/);
 	assertPreserved(f);
 	assert.deepEqual(readdirSync(f.releases), [".owner-selector"]);
+	// #285: the installer deletes its isolated home, so npm's failure log must live in a private attempt directory.
+	rmSync(f.env.HOME, { recursive: true, force: true });
+	const cache = join(f.root, "cache");
+	const logs = existsSync(join(cache, "npm-logs")) ? readdirSync(join(cache, "npm-logs")).map((attempt) => join(cache, "npm-logs", attempt)) : [];
+	assert.deepEqual([cache, ...logs].map((path) => existsSync(path) && statSync(path).mode & 0o777), [0o700, 0o700]);
+	const contents = readdirSync(logs[0]).map((file) => readFileSync(join(logs[0], file), "utf8"));
+	assert.ok(contents.some((log) => log.includes("verbose title npm ci") && /^\d+ error /m.test(log)), "failed npm ci log is retained");
 });
 
 test("an installed CLI smoke failure leaves selector/config/journals intact", async (t) => {
@@ -661,7 +668,7 @@ test("keeps only Termux's exec wrapper, prefix and native shell in the isolated 
 		process.env.PREFIX = join(f.root, "termux-prefix");
 		process.env.LD_PRELOAD = join(f.root, "libtermux-exec.so");
 		Object.defineProperty(process, "platform", { value: "android", configurable: true });
-		const env = isolatedEnvironment(f.env.HOME, tools);
+		const env = isolatedEnvironment(f.env.HOME, tools, join(f.root, "cache"));
 		assert.equal(env.PREFIX, process.env.PREFIX);
 		assert.equal(env.LD_PRELOAD, process.env.LD_PRELOAD);
 		assert.equal(env.npm_config_script_shell, join(dirname(tools.node), "bash"));
