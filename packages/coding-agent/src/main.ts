@@ -63,7 +63,7 @@ import {
 	MissingSessionCwdError,
 	type SessionCwdIssue,
 } from "./core/session-cwd.ts";
-import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
+import { assertValidSessionId, listAllSessions, listProjectSessions, SessionManager } from "./core/session-manager.ts";
 import { collectSettingsDiagnostics, deduplicateDiagnostics } from "./core/settings-diagnostics.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { printTimings, resetTimings, time } from "./core/timings.ts";
@@ -264,24 +264,21 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
 		return { type: "path", path: resolvePath(sessionArg, cwd) };
 	}
 
-	// Exact IDs only require reading session headers. Fall back to the full
-	// metadata listing for prefix matches.
+	// Exact IDs only require reading session headers. Prefix lookups fully read
+	// only matching sessions, whose activity times order ambiguous matches.
 	const exactLocalMatch = findLocalSessionByExactId(sessionArg, cwd, sessionDir);
 	if (exactLocalMatch) {
 		return exactLocalMatch;
 	}
 
-	const localSessions = await SessionManager.list(cwd, sessionDir);
-	const localMatch = localSessions.find((s) => s.id.startsWith(sessionArg));
-
+	const [localMatch] = await listProjectSessions(cwd, sessionDir, { idPrefix: sessionArg });
 	if (localMatch) {
 		return { type: "local", path: localMatch.path };
 	}
 
 	// Try global search across all projects
-	const allSessions = await SessionManager.listAll(sessionDir);
-	const globalMatch =
-		allSessions.find((s) => s.id === sessionArg) ?? allSessions.find((s) => s.id.startsWith(sessionArg));
+	const globalMatches = await listAllSessions(sessionDir, { idPrefix: sessionArg });
+	const globalMatch = globalMatches.find((s) => s.id === sessionArg) ?? globalMatches[0];
 
 	if (globalMatch) {
 		return { type: "global", path: globalMatch.path, cwd: globalMatch.cwd };
