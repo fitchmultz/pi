@@ -353,6 +353,9 @@ the removed IDs are still printed. No model generation or remote refresh occurs 
 Missing, invalid or unsupported-schema selected catalogs fail closed. Explicit `--rollback`
 skips the catalog downgrade check for recovery, not receipt/identity or store/lock safeguards.
 Settings, credentials, sessions and extensions are never edited.
+Builds share a private npm cache in `~/.cache/pi-fork/npm-cache` and keep each failed
+attempt's npm debug logs in `~/.cache/pi-fork/npm-logs/<attempt>`; see
+[Fork installation](packages/coding-agent/docs/quickstart.md#fork-installation) for cleanup.
 `node scripts/install-fork.mjs --help` lists every option.
 
 All release mutations share `<selector>.lock`. A release store belongs to one selector, recorded

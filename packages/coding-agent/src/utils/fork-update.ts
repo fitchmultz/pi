@@ -14,6 +14,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getPackageDir, isBunRuntime, PACKAGE_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./child-process.ts";
+import { forkNpmEnvironment } from "./fork-npm-cache.ts";
 import { claimForkReleaseStore } from "./fork-release-store.ts";
 
 /** Bootstrap a pinned fork checkout; the fork installer owns validation and atomic selection. */
@@ -48,6 +49,7 @@ export async function runForkUpdate(): Promise<void> {
 	}
 	const selector = join(globalRoot, PACKAGE_NAME);
 	const releases = join(homedir(), ".local/share/pi-fork/releases");
+	const cacheDir = join(homedir(), ".cache/pi-fork");
 	const bin = termux ? join(homedir(), ".local/bin/pi") : resolve(globalRoot, "../../bin/pi");
 	const validateSelector = (): void => {
 		try {
@@ -95,6 +97,7 @@ export async function runForkUpdate(): Promise<void> {
 	try {
 		validateSelector();
 		claimForkReleaseStore(releases, selector);
+		const npmEnvironment = forkNpmEnvironment(cacheDir);
 		temporary = mkdtempSync(join(tmpdir(), "pi-fork-update-"));
 		const home = join(temporary, "home");
 		const source = join(temporary, "source");
@@ -117,7 +120,7 @@ export async function runForkUpdate(): Promise<void> {
 			GIT_CONFIG_NOSYSTEM: "1",
 			GIT_CONFIG_GLOBAL: "/dev/null",
 			GIT_TERMINAL_PROMPT: "0",
-			npm_config_cache: join(home, "npm-cache"),
+			...npmEnvironment,
 			npm_config_userconfig: join(home, ".npmrc"),
 			npm_config_globalconfig: npmGlobalConfig,
 			...(termux
@@ -141,6 +144,7 @@ export async function runForkUpdate(): Promise<void> {
 		await run("git", ["checkout", "--detach", commit]);
 		await run(node, [npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
 		await run(node, [npm, "run", "hydrate:model-data"]);
+		rmSync(npmEnvironment.npm_config_logs_dir, { recursive: true, force: true });
 		// The installer revalidates and locks all release mutations itself. Hand off
 		// ownership rather than allowing a child to bypass the shared selector lock.
 		await releaseLock();
@@ -152,6 +156,8 @@ export async function runForkUpdate(): Promise<void> {
 			"--ref",
 			commit,
 			...location,
+			"--cache-dir",
+			cacheDir,
 			// Upstream catalog changes (provider renames, model pruning) are routine.
 			// Never block the update on them; the installer prints every removed ID.
 			// ponytail: no updater-level consent gate by owner decision. Malformed or

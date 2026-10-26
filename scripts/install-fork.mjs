@@ -12,6 +12,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import lockfile from "proper-lockfile";
 import { validateModelDataDirectory } from "../packages/ai/scripts/model-data.ts";
+import { forkNpmEnvironment } from "../packages/coding-agent/src/utils/fork-npm-cache.ts";
 import { claimForkReleaseStore } from "../packages/coding-agent/src/utils/fork-release-store.ts";
 import { codingAgentName, smokeTestCodingAgent } from "./coding-agent-smoke.mjs";
 import { wireConsumer } from "./local-package-install.mjs";
@@ -44,7 +45,7 @@ export function resolveBuildTools() {
 	return { node, npm, path, npmVersion };
 }
 
-export function isolatedEnvironment(home, tools) {
+export function isolatedEnvironment(home, tools, cacheDir) {
 	mkdirSync(join(home, "tmp"), { recursive: true });
 	const npmGlobalConfig = join(home, "npm-globalconfig");
 	writeFileSync(npmGlobalConfig, "");
@@ -61,7 +62,7 @@ export function isolatedEnvironment(home, tools) {
 		PI_TELEMETRY: "0",
 		HUSKY: "0",
 		JITI_FS_CACHE: "0",
-		npm_config_cache: join(home, "npm-cache"),
+		...forkNpmEnvironment(cacheDir),
 		npm_config_userconfig: join(home, ".npmrc"),
 		npm_config_globalconfig: npmGlobalConfig,
 		...(process.platform === "android" ? {
@@ -387,6 +388,10 @@ and tmux. Termux also needs Go >=1.26 when Android blocks the compiler's fanotif
                         except legacy, selected, .previous and visibly running ones
 --releases <directory>  Default: ~/.local/share/pi-fork/releases
 --selector <symlink>    Default: ~/.local/share/npm-global/lib/node_modules/${codingAgentName}
+--cache-dir <directory> Private npm state shared by builds. Default: ~/.cache/pi-fork
+                        npm-cache/ holds integrity-checked packages; npm-logs/<attempt>/
+                        keeps a failed build's npm debug logs. Remove either when no
+                        update or installation is running.
 -h, --help              Show this help
 
 Examples: node scripts/install-fork.mjs --ref HEAD --stage
@@ -413,6 +418,7 @@ export async function main(args = process.argv.slice(2)) {
 	const options = {
 		ref: "HEAD", stage: false, prune: false,
 		releases: join(homedir(), ".local/share/pi-fork/releases"),
+		"cache-dir": join(homedir(), ".cache/pi-fork"),
 		selector: join(homedir(), ".local/share/npm-global/lib/node_modules", codingAgentName),
 	};
 	let selection;
@@ -423,7 +429,7 @@ export async function main(args = process.argv.slice(2)) {
 		if (arg === "--stage") { options.stage = true; continue; }
 		if (arg === "--prune") { options.prune = true; continue; }
 		if (arg === "--accept-model-removals") { options.acceptModelRemovals = true; continue; }
-		if (!["--ref", "--source-archive", "--releases", "--selector", "--activate", "--rollback", "--keep"].includes(arg)) throw new Error(`Unknown option: ${arg}`);
+		if (!["--ref", "--source-archive", "--releases", "--selector", "--cache-dir", "--activate", "--rollback", "--keep"].includes(arg)) throw new Error(`Unknown option: ${arg}`);
 		const value = args[++i];
 		if (!value || value.startsWith("--")) throw new Error(`${arg} requires a value`);
 		if (arg === "--activate" || arg === "--rollback") {
@@ -458,7 +464,7 @@ export async function main(args = process.argv.slice(2)) {
 	const tools = resolveBuildTools();
 	const root = mkdtempSync(join(tmpdir(), "pi-fork-install-"));
 	try {
-		const env = isolatedEnvironment(join(root, "home"), tools);
+		const env = isolatedEnvironment(join(root, "home"), tools, resolve(options["cache-dir"]));
 		const git = (args) => run("git", args, { cwd: repoRoot, env, stdio: "pipe" });
 		const commit = git(["rev-parse", "--verify", "--end-of-options", `${options.ref}^{commit}`]);
 		const version = JSON.parse(git(["show", `${commit}:packages/coding-agent/package.json`])).version;
@@ -515,6 +521,7 @@ export async function main(args = process.argv.slice(2)) {
 				env: { ...env, PI_TEST_CLI: cli },
 			});
 		});
+		rmSync(env.npm_config_logs_dir, { recursive: true, force: true });
 		console.log(JSON.stringify(result, null, 2));
 		return result;
 	} finally {
