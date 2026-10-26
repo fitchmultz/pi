@@ -842,11 +842,17 @@ async function* readSessionLines(filePath: string, signal?: AbortSignal): AsyncG
 	}
 }
 
+/** Header conditions a listed session must meet. Rejected transcripts are not parsed past their headers. */
+interface SessionHeaderFilter {
+	resolvedCwd?: string;
+	idPrefix?: string;
+}
+
 async function buildSessionInfo(
 	filePath: string,
 	signal?: AbortSignal,
 	fileStats?: Stats,
-	resolvedCwd?: string,
+	filter: SessionHeaderFilter = {},
 ): Promise<SessionInfo | null> {
 	try {
 		const stats = fileStats ?? (await stat(filePath));
@@ -864,9 +870,13 @@ async function buildSessionInfo(
 			if (!header) {
 				if (entry.type !== "session") return null;
 				header = entry;
-				if (resolvedCwd !== undefined && !sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd)) {
+				if (
+					filter.resolvedCwd !== undefined &&
+					!sessionCwdMatches(getSessionHeaderCwd(header), filter.resolvedCwd)
+				) {
 					return null;
 				}
+				if (filter.idPrefix !== undefined && !header.id.startsWith(filter.idPrefix)) return null;
 				continue;
 			}
 
@@ -970,13 +980,13 @@ function buildSessionInfosWithConcurrency(
 	files: SessionFileCandidate[],
 	onLoaded: (info: SessionInfo | null, index: number) => void,
 	signal?: AbortSignal,
-	resolvedCwd?: string,
+	filter?: SessionHeaderFilter,
 ): Promise<(SessionInfo | null)[]> {
 	return mapWithConcurrency(
 		files,
 		MAX_CONCURRENT_SESSION_INFO_LOADS,
 		async (file, index) => {
-			const info = await buildSessionInfo(file.path, signal, file.stats, resolvedCwd);
+			const info = await buildSessionInfo(file.path, signal, file.stats, filter);
 			onLoaded(info, index);
 			return info;
 		},
@@ -988,7 +998,7 @@ async function listSessionsFromDir(
 	dir: string,
 	onProgress?: SessionListProgress,
 	signal?: AbortSignal,
-	resolvedCwd?: string,
+	filter?: SessionHeaderFilter,
 ): Promise<SessionInfo[]> {
 	signal?.throwIfAborted();
 	if (!existsSync(dir)) return [];
@@ -1012,10 +1022,109 @@ async function listSessionsFromDir(
 				onProgress?.(loaded, total, publishPartial ? sortSessionInfos([...partialSessions]) : undefined);
 			},
 			signal,
-			resolvedCwd,
+			filter,
 		);
 		signal?.throwIfAborted();
 		return results.filter((info): info is SessionInfo => info !== null);
+	} catch {
+		signal?.throwIfAborted();
+		return [];
+	}
+}
+
+interface SessionListOptions {
+	onProgress?: SessionListProgress;
+	signal?: AbortSignal;
+	/** List only sessions whose IDs start with this prefix; other transcripts are not parsed past their headers. */
+	idPrefix?: string;
+}
+
+/** Shared by SessionManager.list() and session ID prefix lookups. */
+export async function listProjectSessions(
+	cwd: string,
+	sessionDir: string | undefined,
+	{ onProgress, signal, idPrefix }: SessionListOptions = {},
+): Promise<SessionInfo[]> {
+	const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
+	const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
+	const sessions = await listSessionsFromDir(dir, onProgress, signal, {
+		resolvedCwd: filterCwd ? resolvePath(cwd) : undefined,
+		idPrefix,
+	});
+	return sortSessionInfos(sessions);
+}
+
+/** Shared by SessionManager.listAll() and session ID prefix lookups. */
+export async function listAllSessions(
+	sessionDir: string | undefined,
+	{ onProgress, signal, idPrefix }: SessionListOptions = {},
+): Promise<SessionInfo[]> {
+	signal?.throwIfAborted();
+	const filter = { idPrefix };
+	if (sessionDir) {
+		return sortSessionInfos(await listSessionsFromDir(normalizePath(sessionDir), onProgress, signal, filter));
+	}
+
+	const sessionsDir = getSessionsDir();
+
+	try {
+		if (!existsSync(sessionsDir)) return [];
+		const entries = await readdir(sessionsDir, { withFileTypes: true });
+		const dirs = entries
+			.filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+			.map((entry) => join(sessionsDir, entry.name));
+
+		const dirFiles = await mapWithConcurrency(
+			dirs,
+			MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
+			async (dir) => {
+				try {
+					return (await readdir(dir)).filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
+				} catch {
+					return [];
+				}
+			},
+			signal,
+		);
+		const allFiles = dirFiles.flat();
+		const candidates = await mapWithConcurrency(
+			allFiles,
+			MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
+			async (path): Promise<SessionFileCandidate> => {
+				try {
+					return { path, stats: await stat(path) };
+				} catch {
+					return { path };
+				}
+			},
+			signal,
+		);
+		candidates.sort(
+			(a, b) =>
+				(b.stats?.mtimeMs ?? Number.NEGATIVE_INFINITY) - (a.stats?.mtimeMs ?? Number.NEGATIVE_INFINITY) ||
+				basename(b.path).localeCompare(basename(a.path)),
+		);
+
+		const totalFiles = candidates.length;
+		let loaded = 0;
+		let firstCandidateLoaded = false;
+		const partialSessions: SessionInfo[] = [];
+		const results = await buildSessionInfosWithConcurrency(
+			candidates,
+			(info, index) => {
+				loaded++;
+				if (index === 0) firstCandidateLoaded = true;
+				if (info) partialSessions.push(info);
+				const publishPartial =
+					firstCandidateLoaded &&
+					(index === 0 || loaded % ALL_SESSION_LIST_PUBLISH_INTERVAL === 0 || loaded === totalFiles);
+				onProgress?.(loaded, totalFiles, publishPartial ? sortSessionInfos([...partialSessions]) : undefined);
+			},
+			signal,
+			filter,
+		);
+
+		return sortSessionInfos(results.filter((info): info is SessionInfo => info !== null));
 	} catch {
 		signal?.throwIfAborted();
 		return [];
@@ -2054,10 +2163,7 @@ export class SessionManager {
 		onProgress?: SessionListProgress,
 		signal?: AbortSignal,
 	): Promise<SessionInfo[]> {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
-		const sessions = await listSessionsFromDir(dir, onProgress, signal, filterCwd ? resolvePath(cwd) : undefined);
-		return sortSessionInfos(sessions);
+		return listProjectSessions(cwd, sessionDir, { onProgress, signal });
 	}
 
 	/**
@@ -2075,8 +2181,6 @@ export class SessionManager {
 		onProgressOrSignal?: SessionListProgress | AbortSignal,
 		signal?: AbortSignal,
 	): Promise<SessionInfo[]> {
-		const customSessionDir =
-			typeof sessionDirOrOnProgress === "string" ? normalizePath(sessionDirOrOnProgress) : undefined;
 		const progress =
 			typeof sessionDirOrOnProgress === "function"
 				? sessionDirOrOnProgress
@@ -2087,73 +2191,9 @@ export class SessionManager {
 			typeof sessionDirOrOnProgress === "string" || typeof onProgressOrSignal === "function"
 				? signal
 				: (onProgressOrSignal ?? signal);
-		abortSignal?.throwIfAborted();
-		if (customSessionDir) {
-			return sortSessionInfos(await listSessionsFromDir(customSessionDir, progress, abortSignal));
-		}
-
-		const sessionsDir = getSessionsDir();
-
-		try {
-			if (!existsSync(sessionsDir)) return [];
-			const entries = await readdir(sessionsDir, { withFileTypes: true });
-			const dirs = entries
-				.filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-				.map((entry) => join(sessionsDir, entry.name));
-
-			const dirFiles = await mapWithConcurrency(
-				dirs,
-				MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
-				async (dir) => {
-					try {
-						return (await readdir(dir)).filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
-					} catch {
-						return [];
-					}
-				},
-				abortSignal,
-			);
-			const allFiles = dirFiles.flat();
-			const candidates = await mapWithConcurrency(
-				allFiles,
-				MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
-				async (path): Promise<SessionFileCandidate> => {
-					try {
-						return { path, stats: await stat(path) };
-					} catch {
-						return { path };
-					}
-				},
-				abortSignal,
-			);
-			candidates.sort(
-				(a, b) =>
-					(b.stats?.mtimeMs ?? Number.NEGATIVE_INFINITY) - (a.stats?.mtimeMs ?? Number.NEGATIVE_INFINITY) ||
-					basename(b.path).localeCompare(basename(a.path)),
-			);
-
-			const totalFiles = candidates.length;
-			let loaded = 0;
-			let firstCandidateLoaded = false;
-			const partialSessions: SessionInfo[] = [];
-			const results = await buildSessionInfosWithConcurrency(
-				candidates,
-				(info, index) => {
-					loaded++;
-					if (index === 0) firstCandidateLoaded = true;
-					if (info) partialSessions.push(info);
-					const publishPartial =
-						firstCandidateLoaded &&
-						(index === 0 || loaded % ALL_SESSION_LIST_PUBLISH_INTERVAL === 0 || loaded === totalFiles);
-					progress?.(loaded, totalFiles, publishPartial ? sortSessionInfos([...partialSessions]) : undefined);
-				},
-				abortSignal,
-			);
-
-			return sortSessionInfos(results.filter((info): info is SessionInfo => info !== null));
-		} catch {
-			abortSignal?.throwIfAborted();
-			return [];
-		}
+		return listAllSessions(typeof sessionDirOrOnProgress === "string" ? sessionDirOrOnProgress : undefined, {
+			onProgress: progress,
+			signal: abortSignal,
+		});
 	}
 }
