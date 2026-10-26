@@ -12,7 +12,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import lockfile from "proper-lockfile";
 import { validateModelDataDirectory } from "../packages/ai/scripts/model-data.ts";
-import { forkNpmEnvironment } from "../packages/coding-agent/src/utils/fork-npm-cache.ts";
+import { forkNpmEnvironment, removeForkNpmLogs } from "../packages/coding-agent/src/utils/fork-npm-cache.ts";
 import { claimForkReleaseStore } from "../packages/coding-agent/src/utils/fork-release-store.ts";
 import { codingAgentName, smokeTestCodingAgent } from "./coding-agent-smoke.mjs";
 import { wireConsumer } from "./local-package-install.mjs";
@@ -521,7 +521,7 @@ export async function main(args = process.argv.slice(2)) {
 				env: { ...env, PI_TEST_CLI: cli },
 			});
 		});
-		rmSync(env.npm_config_logs_dir, { recursive: true, force: true });
+		removeForkNpmLogs(env.npm_config_logs_dir);
 		console.log(JSON.stringify(result, null, 2));
 		return result;
 	} finally {

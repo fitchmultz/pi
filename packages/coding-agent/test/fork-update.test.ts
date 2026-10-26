@@ -289,6 +289,8 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 					join(source, "package.json"),
 					JSON.stringify({ name: "fixture", version: "1.0.0", dependencies }),
 				);
+				// The fixture uses local tarball URLs, which npm 12 blocks by default.
+				writeFileSync(join(source, ".npmrc"), "allow-remote=all\n");
 				writeFileSync(
 					join(source, "package-lock.json"),
 					JSON.stringify({
@@ -312,7 +314,7 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 					}),
 				);
 				const git = (args: string[]) => execFileSync("git", args, { cwd: source, encoding: "utf8" });
-				git(["add", "package.json", "package-lock.json"]);
+				git(["add", ".npmrc", "package.json", "package-lock.json"]);
 				git(["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "locked"]);
 				const ambientCaches = [join(root, "ambient-npm-cache"), join(root, "ambient-userconfig-cache")];
 				writeFileSync(join(root, "ambient-userconfig"), `cache=${ambientCaches[1]}\n`);
@@ -339,6 +341,7 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 						await firstMissingRequest.promise;
 						for (let i = 0; i < 12; i++) {
 							await promisify(execFile)(process.execPath, [npm, "config", "get", "cache"], {
+								cwd: root,
 								env: otherNpmUser,
 							});
 						}
@@ -347,7 +350,8 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 					await update;
 					expect(process.exitCode).toBe(1);
 					failedLogs.push(
-						/A complete log of this run can be found in: (\S+)/.exec(npmOutput)?.[1] ?? "not printed",
+						/A complete log of this run can be found in:\s*(?:npm ERR!\s*)?(\S+)/i.exec(npmOutput)?.[1] ??
+							"not printed",
 					);
 				}
 				const mode = (path: string) => (existsSync(path) ? statSync(path).mode & 0o777 : "missing");

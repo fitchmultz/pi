@@ -14,7 +14,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 import { getPackageDir, isBunRuntime, PACKAGE_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./child-process.ts";
-import { forkNpmEnvironment } from "./fork-npm-cache.ts";
+import { forkNpmEnvironment, removeForkNpmLogs } from "./fork-npm-cache.ts";
 import { claimForkReleaseStore } from "./fork-release-store.ts";
 
 /** Bootstrap a pinned fork checkout; the fork installer owns validation and atomic selection. */
@@ -144,7 +144,7 @@ export async function runForkUpdate(): Promise<void> {
 		await run("git", ["checkout", "--detach", commit]);
 		await run(node, [npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
 		await run(node, [npm, "run", "hydrate:model-data"]);
-		rmSync(npmEnvironment.npm_config_logs_dir, { recursive: true, force: true });
+		removeForkNpmLogs(npmEnvironment.npm_config_logs_dir);
 		// The installer revalidates and locks all release mutations itself. Hand off
 		// ownership rather than allowing a child to bypass the shared selector lock.
 		await releaseLock();

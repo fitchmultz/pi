@@ -99,7 +99,7 @@
 - Fixed compact and hybrid views rendering nonempty assistants twice per frame to check emptiness ([#237](https://github.com/fitchmultz/pi/issues/237)).
 - Fixed HTML exports opening blank for long sessions because recursive tree traversal exhausted the browser's call stack ([#255](https://github.com/fitchmultz/pi/issues/255)).
 - Fixed the Gondolin example extension installing node-forge 1.4.0 (GHSA-86w9-cpqp-85rv) and undici 6.26.0 by updating it to Gondolin 0.14.0. Gondolin now blocks guest HTTP and TLS requests to loopback, private and link-local addresses by default.
-- Fixed `pi update --fork` and `scripts/install-fork.mjs` deleting the npm debug log printed after a failed dependency install and downloading every package again on retry. Both now share a private npm package cache in `~/.cache/pi-fork/npm-cache`; each attempt writes npm logs to its own private `~/.cache/pi-fork/npm-logs/<attempt>` directory, removed after success and kept after failure. The installer accepts `--cache-dir` to choose another location ([#285](https://github.com/fitchmultz/pi/issues/285)). See [Fork installation](docs/quickstart.md#fork-installation).
+- Fixed fork updates and installs losing npm error logs and redownloading dependencies on retry. Both now share a private npm cache and retain failed-attempt logs ([#285](https://github.com/fitchmultz/pi/issues/285)). See [Fork installation](docs/quickstart.md#fork-installation).
 
 ## [1.4.0] - 2026-10-21
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-	existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
+	chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
 	readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import lockfile from "proper-lockfile";
 import { createModelDataManifest } from "../packages/ai/scripts/model-data.ts";
+import { removeForkNpmLogs } from "../packages/coding-agent/src/utils/fork-npm-cache.ts";
 import { smokeTestCodingAgent } from "./coding-agent-smoke.mjs";
 import { produceArtifactSet } from "./package-artifacts.mjs";
 import {
@@ -323,6 +324,57 @@ test("rejects a CI archive for another commit before building or changing the se
 		"--releases", f.releases, "--selector", f.selector]), /Source archive commit .* does not match selected commit/);
 	assertPreserved(f);
 	assert.equal(existsSync(f.releases), false);
+});
+
+// #285: choosing a cache location must not change the permissions of an existing directory.
+test("keeps an existing cache parent unchanged while protecting npm state", { skip: process.platform === "win32" }, async (t) => {
+	const f = fixture(t);
+	const cache = join(f.root, "shared");
+	mkdirSync(cache);
+	chmodSync(cache, 0o755);
+	const archive = join(f.root, "source.tar.gz");
+	writeFileSync(archive, "must not be extracted");
+	writeFileSync(join(f.root, "source.commit"), `${"0".repeat(40)}\n`);
+	await assert.rejects(main(["--ref", "HEAD", "--source-archive", archive, "--cache-dir", cache,
+		"--releases", f.releases, "--selector", f.selector]), /Source archive commit .* does not match selected commit/);
+	assert.equal(statSync(cache).mode & 0o777, 0o755);
+	assert.equal(statSync(join(cache, "npm-cache")).mode & 0o777, 0o700);
+	assert.equal(statSync(join(cache, "npm-logs")).mode & 0o777, 0o700);
+	assertPreserved(f);
+});
+
+// #285: an existing shared npm directory must not expose the persisted cache.
+test("refuses a nonprivate existing npm cache without changing its permissions", { skip: process.platform === "win32" }, async (t) => {
+	const f = fixture(t);
+	const cache = join(f.root, "shared");
+	const npmCache = join(cache, "npm-cache");
+	mkdirSync(npmCache, { recursive: true });
+	chmodSync(npmCache, 0o755);
+	writeFileSync(join(f.root, "source.commit"), `${"0".repeat(40)}\n`);
+	await assert.rejects(main(["--cache-dir", cache, "--source-archive", join(f.root, "source.tar.gz"),
+		"--releases", f.releases, "--selector", f.selector]), /private.*npm-cache/);
+	assert.equal(statSync(npmCache).mode & 0o777, 0o755);
+	assertPreserved(f);
+	assert.equal(existsSync(f.releases), false);
+});
+
+// #285: an npm log cleanup error must not turn a successful installation into a reported failure.
+test("warns without failing when successful npm logs cannot be removed", {
+	skip: process.platform === "win32" || process.getuid?.() === 0,
+}, (t) => {
+	const root = mkdtempSync(join(tmpdir(), "pi-fork-npm-cleanup-test-"));
+	const logs = join(root, "logs");
+	mkdirSync(logs);
+	writeFileSync(join(logs, "npm-debug.log"), "npm log");
+	chmodSync(logs, 0o500);
+	t.after(() => {
+		chmodSync(logs, 0o700);
+		rmSync(root, { recursive: true, force: true });
+	});
+	const warn = t.mock.method(console, "warn", () => {});
+	assert.doesNotThrow(() => removeForkNpmLogs(logs));
+	assert.match(String(warn.mock.calls[0]?.arguments[0]), /Could not remove npm logs/);
+	assert.ok(existsSync(join(logs, "npm-debug.log")));
 });
 
 test("rejects changed or extra archive source despite a matching companion commit", async (t) => {

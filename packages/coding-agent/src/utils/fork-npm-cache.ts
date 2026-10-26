@@ -1,7 +1,6 @@
-import { chmodSync, mkdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-/** npm settings for one fork update or install attempt. */
 export interface ForkNpmEnvironment {
 	/** Shared across attempts; npm verifies cached packages against lockfile integrity. */
 	npm_config_cache: string;
@@ -12,12 +11,30 @@ export interface ForkNpmEnvironment {
 }
 
 export function forkNpmEnvironment(cacheDir: string): ForkNpmEnvironment {
-	mkdirSync(join(cacheDir, "npm-logs"), { recursive: true, mode: 0o700 });
-	// npm writes world-readable cache and log files, and its log redaction is best effort.
-	chmodSync(cacheDir, 0o700);
+	const cache = join(cacheDir, "npm-cache");
+	const logs = join(cacheDir, "npm-logs");
+	for (const path of [cache, logs]) {
+		mkdirSync(path, { recursive: true, mode: 0o700 });
+		// npm's log redaction is best effort, and cache contents may include private URLs.
+		if ((statSync(path).mode & 0o077) !== 0) {
+			throw new Error(
+				`Expected private npm directory ${path}; set its permissions to 700 or choose another --cache-dir.`,
+			);
+		}
+	}
 	return {
-		npm_config_cache: join(cacheDir, "npm-cache"),
-		npm_config_logs_dir: mkdtempSync(join(cacheDir, "npm-logs", "attempt-")),
+		npm_config_cache: cache,
+		npm_config_logs_dir: mkdtempSync(join(logs, "attempt-")),
 		npm_config_logs_max: "Infinity",
 	};
+}
+
+export function removeForkNpmLogs(logsDir: string): void {
+	try {
+		rmSync(logsDir, { recursive: true, force: true });
+	} catch (error) {
+		console.warn(
+			`Could not remove npm logs at ${logsDir}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 }
