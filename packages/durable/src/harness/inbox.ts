@@ -1,6 +1,7 @@
 import { copyJson, type Draft, type JsonRepresentation } from "@earendil-works/chord";
 import { defineDoc } from "../documents.ts";
 import { UserEntry } from "../entries.ts";
+import { StorageCapacityError } from "../errors.ts";
 import type { ConversationId, EntryDraft, EntryId, EntryRecord, JsonObject, SubmissionId, Tx } from "../types.ts";
 import type { InputEntry, QueueMode, Settings, UserInput } from "./types.ts";
 
@@ -72,18 +73,13 @@ export async function applyBoundary(
 	boundary: Boundary,
 	at: "postTools" | "final",
 	now: number,
+	admitting?: SubmissionId,
 ): Promise<BoundaryResult> {
 	const { conversationId, inbox } = boundary;
 	const items = inbox.items;
 	const reset = hasQueuedReset(items);
 	const final = at === "final" || reset;
-	const pick = (mode: "steer" | "followUp", queueMode: QueueMode): number[] => {
-		const indexes = items.flatMap((item, index) => (item.mode === mode ? [index] : []));
-		return queueMode === "all" ? indexes : indexes.slice(0, 1);
-	};
 	const writes = items.flatMap((item, index) => (item.mode === "write" ? [index] : []));
-	const users = [...pick("steer", boundary.steeringMode), ...(final ? pick("followUp", boundary.followUpMode) : [])];
-	users.sort((a, b) => a - b);
 
 	// `appendEntry()` copies the drafts' values; the items are removed only afterwards.
 	for (const index of writes) {
@@ -98,13 +94,27 @@ export async function applyBoundary(
 		tx.placeSubmission(item.id, entry.id);
 	}
 	const placed: SubmissionId[] = [];
-	for (const index of users) {
-		const item = items[index] as Draft<Extract<InboxItem, { mode: "steer" | "followUp" }>>;
-		const entry = await appendInput(tx, conversationId, item.content as UserInput, item.entry as InputEntry, now);
+	const placedModes = new Set<"steer" | "followUp">();
+	const removed = [...writes];
+	for (const [index, item] of items.entries()) {
+		if (item.mode === "write" || (!final && item.mode === "followUp")) continue;
+		const queueMode = item.mode === "steer" ? boundary.steeringMode : boundary.followUpMode;
+		if (queueMode !== "all" && placedModes.has(item.mode)) continue;
+		let entry: EntryRecord;
+		try {
+			entry = await appendInput(tx, conversationId, item.content as UserInput, item.entry as InputEntry, now, true);
+		} catch (error) {
+			if (!(error instanceof StorageCapacityError) || item.id === admitting) throw error;
+			tx.settleSubmission(item.id, { status: "unanswered", reason: "input_too_large", detail: error.message });
+			removed.push(index);
+			continue;
+		}
 		tx.placeSubmission(item.id, entry.id);
 		placed.push(item.id);
+		placedModes.add(item.mode);
+		removed.push(index);
 	}
-	const removed = [...writes, ...users].sort((a, b) => b - a);
+	removed.sort((a, b) => b - a);
 	for (const index of removed) items.splice(index, 1);
 	return { users: placed, reset };
 }
@@ -116,10 +126,11 @@ export function appendInput(
 	content: UserInput,
 	entry: InputEntry | undefined,
 	now: number,
+	admission = false,
 ): Promise<EntryRecord> {
 	const message = { role: "user", content, timestamp: now } as const;
-	if (entry === undefined) return tx.appendEntry(UserEntry, conversationId, { model: [message] });
-	return tx.appendEntry(conversationId, { ...pickInputEntry(entry), model: [message] });
+	if (entry === undefined) return tx.appendEntry(UserEntry, conversationId, { model: [message] }, { admission });
+	return tx.appendEntry(conversationId, { ...pickInputEntry(entry), model: [message] }, { admission });
 }
 
 /** The kind and data of an input's entry as strict JSON, without other fields an untyped caller might pass. */

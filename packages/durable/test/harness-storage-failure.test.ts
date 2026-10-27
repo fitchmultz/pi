@@ -9,7 +9,9 @@ import {
 	type Id,
 	LiveDoc,
 	MemoryStorage,
+	StorageCapacityError,
 	StorageRequestError,
+	type StorageWrite,
 	type TaskId,
 	watchEvents,
 } from "@earendil-works/pi-durable";
@@ -42,11 +44,19 @@ const Waiting = defineTask<null, { phase: "work" }, null>({
  * read's scan of its range, off the Session line; `heldRange` holds it until released.
  */
 class FailingCalls extends ControlledStorage {
-	readonly error = new Error("disk gone");
+	readonly error: Error;
 	readonly failing = new Set<string>();
 	heldRange: { readonly entered: ReturnType<typeof deferred<void>>; readonly release: Promise<unknown> } | undefined;
+	constructor(error = new Error("disk gone")) {
+		super();
+		this.error = error;
+	}
 	#fail(method: string): void {
 		if (this.failing.delete(method)) throw this.error;
+	}
+	async checkAdmission(_writes: readonly StorageWrite[], _context: Context): Promise<boolean> {
+		this.#fail("checkAdmission");
+		return true;
 	}
 	override async task(...args: Parameters<MemoryStorage["task"]>) {
 		this.#fail("task");
@@ -83,8 +93,20 @@ async function running(harness: Harness, id: TaskId): Promise<void> {
 }
 
 describe("a failed Storage call", () => {
-	it("ends everything with the first error: the call, later calls, waits, watches, streams, running tasks", async () => {
-		const storage = new ControlledStorage();
+	it.each([
+		{ source: "commit", failure: new Error("disk gone") },
+		{ source: "admission check", failure: new Error("capacity check failed") },
+		{
+			source: "admission rollback",
+			failure: new AggregateError(
+				[new Error("string or blob too big: SQLITE_TOOBIG"), new Error("rollback failed")],
+				"SQLite transaction failed and rollback failed",
+			),
+		},
+		{ source: "admission request", failure: new StorageRequestError("bad check batch") },
+		{ source: "thrown admission capacity", failure: new StorageCapacityError() },
+	])("ends calls, waits, watches, streams and running tasks on a $source failure", async ({ source, failure }) => {
+		const storage = new FailingCalls(failure);
 		const { harness, root, reports } = await started(storage);
 		const id = await root.commit(
 			(tx) => tx.createTask(Waiting, null, { ownership: { kind: "conversation" } }),
@@ -98,10 +120,14 @@ describe("a failed Storage call", () => {
 		const stream = await watchEvents(harness, root.id, context);
 		stream.start(async () => {});
 
-		const failure = new Error("disk gone");
-		storage.failNextCommit(failure);
+		if (source === "commit") storage.failNextCommit(failure);
+		else storage.failing.add("checkAdmission");
 		// The call that hit it gets the storage error itself.
-		await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context)).rejects.toBe(failure);
+		await expect(
+			source === "commit"
+				? root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context)
+				: root.submit({ type: "input", content: "x" }, context),
+		).rejects.toBe(failure);
 
 		const failed = { name: "SessionFailed", cause: failure };
 		await expect(task).rejects.toMatchObject(failed);
@@ -288,12 +314,26 @@ describe("a failed Storage call", () => {
 		await harness.close(context);
 	});
 
-	it("fails it for a StorageRequestError from a commit, whose effect is unknown", async () => {
-		const storage = new ControlledStorage();
+	it.each([
+		{ error: "StorageRequestError", rejection: new StorageRequestError("bad batch") },
+		{ error: "StorageCapacityError", rejection: new StorageCapacityError() },
+		{ error: "Cloudflare SQLITE_TOOBIG", rejection: new Error("string or blob too big: SQLITE_TOOBIG") },
+		{
+			error: "Node SQLITE_TOOBIG",
+			rejection: Object.assign(new Error("string or blob too big"), {
+				code: "ERR_SQLITE_ERROR",
+				errcode: 18,
+			}),
+		},
+	])("fails it for $error from the actual commit after a successful admission check", async ({ rejection }) => {
+		const storage = new FailingCalls();
 		const { harness, root } = await started(storage);
-		const rejection = new StorageRequestError("bad batch");
 		storage.failNextCommit(rejection);
-		await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context)).rejects.toBe(rejection);
+		await expect(root.submit({ type: "input", content: "x" }, context)).rejects.toBe(rejection);
+		await expect(root.submit({ type: "input", content: "valid retry" }, context)).rejects.toMatchObject({
+			name: "SessionFailed",
+			cause: rejection,
+		});
 		expect(await harness.closed).toEqual({ reason: "failed", error: rejection });
 		await harness.close(context);
 	});

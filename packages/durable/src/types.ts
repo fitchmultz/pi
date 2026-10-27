@@ -448,6 +448,11 @@ export type EntryDraft = Omit<EntryRecord, "id" | "conversationId" | "byTaskId" 
 	readonly head?: EntryId | "self";
 };
 
+export type EntryAppendOptions = {
+	/** If the backend supports it, check capacity before staging; refusal throws `StorageCapacityError`. */
+	readonly admission?: boolean;
+};
+
 /** Entry whose `data` has type `D`; `never` means the kind carries no data. */
 export type TypedEntry<D extends JsonValue> = Omit<EntryRecord, "data"> &
 	([D] extends [never] ? { readonly data?: never } : { readonly data: D });
@@ -938,12 +943,13 @@ export interface Tx {
 		options: { readonly ownership: ConversationOwnership },
 	): Promise<ConversationRecord>;
 	/** Returned records are Session-owned immutable values and may be shared with commit listeners. */
-	appendEntry(conversationId: ConversationId, value: EntryDraft): Promise<EntryRecord>;
+	appendEntry(conversationId: ConversationId, value: EntryDraft, options?: EntryAppendOptions): Promise<EntryRecord>;
 	/** The token supplies `kind` and types `data`. */
 	appendEntry<D extends JsonValue>(
 		token: Entry<D>,
 		conversationId: ConversationId,
 		value: TypedEntryDraft<NoInfer<D>>,
+		options?: EntryAppendOptions,
 	): Promise<TypedEntry<D>>;
 	createTask<I, S extends { phase: string }, R, H extends object>(
 		task: Task<I, S, R, H>,
@@ -1066,12 +1072,22 @@ export interface DocumentObserver {
 /** Why a Session ended: `close()`, or a failed Storage call, whose error it carries. */
 export type SessionEnd = { readonly reason: "closed" } | { readonly reason: "failed"; readonly error: unknown };
 
+/** Options for a host Session, Harness, or Conversation commit. */
+export type CommitOptions = {
+	/**
+	 * Check the assembled batch with `Storage.checkAdmission` when supported; omitted: commit directly. A known
+	 * refusal discards the batch and throws `StorageCapacityError` without failing the Session. The callback runs once,
+	 * without replay; use only before external effects. Errors thrown by the check or actual commit remain fatal.
+	 */
+	readonly admission?: boolean;
+};
+
 /** Owner of one mutation line, its records, and its tracked documents. */
 export interface Session extends DocumentObserver {
 	/**
 	 * Run one atomic transaction on the Session mutation line. Inside the callback read only through `tx`: `snapshot()`, `documentState()`, `watchDoc()`, `getTask()`, and the other Session and runtime reads may queue on the line the callback holds, and then never resolve.
 	 */
-	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context): Promise<T>;
+	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context, options?: CommitOptions): Promise<T>;
 	/** Seal admission, settle admitted commits, then close storage. */
 	close(context: Context): Promise<void>;
 	/**
@@ -1181,6 +1197,13 @@ export interface Storage {
 	 * Atomically persist one batch and return its sequence. Once resolved, later reads through this storage observe it.
 	 */
 	commit(writes: readonly StorageWrite[], context: Context): Promise<Seq>;
+
+	/**
+	 * Optional, no-effect check of the exact encoded batch against backend capacity. `false` means a known size
+	 * refusal after confirmed rollback; `true` is not a promise that a later commit succeeds. Throw on any other
+	 * error or uncertain rollback: the Session treats those failures as fatal. Do not reserve IDs or sequences.
+	 */
+	checkAdmission?(writes: readonly StorageWrite[], context: Context): Promise<boolean>;
 
 	/**
 	 * Return a fresh branded candidate from the Session-global numeric ID namespace, greater than every ID minted or stored

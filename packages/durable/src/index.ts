@@ -8,7 +8,13 @@ export {
 	ToolResultEntry,
 	UserEntry,
 } from "./entries.ts";
-export { ConversationBusy, ReadAfterWrite, SessionFailed, StorageRequestError } from "./errors.ts";
+export {
+	ConversationBusy,
+	ReadAfterWrite,
+	SessionFailed,
+	StorageCapacityError,
+	StorageRequestError,
+} from "./errors.ts";
 export {
 	AgentDoc,
 	configure,
@@ -129,6 +135,7 @@ export { defineTask } from "./tasks.ts";
 export type {
 	CheckpointInfo,
 	CommitChange,
+	CommitOptions,
 	CommitPublication,
 	CommonDocDefinition,
 	ContextEdit,
@@ -158,6 +165,7 @@ export type {
 	DocumentState,
 	DocumentWatch,
 	Entry,
+	EntryAppendOptions,
 	EntryDraft,
 	EntryId,
 	EntryQuery,

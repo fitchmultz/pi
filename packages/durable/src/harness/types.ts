@@ -18,6 +18,7 @@ import type {
 import type { TelemetryContext } from "@earendil-works/pi-telemetry";
 import type { ExecutionEnv, ShellOutputSkip, ShellOutputWindow } from "../env/index.ts";
 import type {
+	CommitOptions,
 	ConversationId,
 	ConversationOwnership,
 	ConversationRecord,
@@ -747,7 +748,7 @@ export interface Conversation {
 	compact(instructions: string | undefined, context: Context): Promise<TaskId<CompactionResult>>;
 
 	/** Session commit whose `tx.createTask()` defaults to this conversation. */
-	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context): Promise<T>;
+	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context, options?: CommitOptions): Promise<T>;
 	/**
 	 * Committed raw active transcript and model context. With `at`, the context as of that visible entry: the same view
 	 * `fork(at)` would start with, without creating a conversation.

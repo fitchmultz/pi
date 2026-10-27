@@ -6,6 +6,10 @@
 
 - The env conformance suite now checks that aborting POSIX shell commands stops all process-group descendants without letting waiting shells run later steps. Custom environments may need changes to pass.
 
+### Added
+
+- Host Session, Harness and Conversation commits accept `{ admission: true }` as a third argument to check the assembled batch, including document revisions, before committing. A confirmed refusal throws `StorageCapacityError` without failing the Session; the callback is not replayed. Use only before external effects.
+
 ### Changed
 
 - Reduced retained-context scheduling and historical-read work, skipped redundant SQLite writes and avoided repeated copying of partial lines.
@@ -14,6 +18,7 @@
 
 - Fuzzy edits preserve untouched text on the same line, Unicode boundaries and literal carriage returns. Editing invalid UTF-8 now fails without rewriting the file ([#10655](https://github.com/earendil-works/pi/issues/10655)).
 - An aborted or timed-out `NodeExecutionEnv.exec()` shell command on macOS no longer runs its later steps after the current step is killed.
+- SQLite refuses oversized input and write admissions without failing the Session. An already queued input whose encoded entry cannot fit settles `unanswered` with `input_too_large`, preserving the current answer and allowing valid queued inputs to continue. Actual commit and uncertain storage failures remain fatal.
 
 ## [1.4.0] - 2026-10-21
 

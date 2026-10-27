@@ -9,11 +9,12 @@ import {
 	materializeDocument,
 	resolveAddress,
 } from "../documents.ts";
-import { SessionFailed, StorageRequestError } from "../errors.ts";
+import { SessionFailed, StorageCapacityError, StorageRequestError } from "../errors.ts";
 import { idFromNumber } from "../ids.ts";
 import { hostTimers, type Timers } from "../timers.ts";
 import type {
 	CommitChange,
+	CommitOptions,
 	CommitPublication,
 	ConversationDocFamilyToken,
 	ConversationDocToken,
@@ -210,8 +211,8 @@ export class SessionImpl implements Session {
 		return this.#storage;
 	}
 
-	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context): Promise<T> {
-		return this.commitWith(change, context);
+	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context, options?: CommitOptions): Promise<T> {
+		return this.commitWith(change, context, { admission: options?.admission });
 	}
 
 	/**
@@ -745,6 +746,17 @@ export class SessionImpl implements Session {
 			return result;
 		}
 		let seq: Seq;
+		if (scope?.admission === true) {
+			try {
+				if ((await this.#storage.checkAdmission?.(writes, withoutAbortSignal(context))) === false) {
+					throw new StorageCapacityError();
+				}
+			} catch (error) {
+				tx.discard();
+				this.#sweepDocuments();
+				throw error;
+			}
+		}
 		try {
 			// Once admitted, caller cancellation does not interrupt Storage settlement.
 			seq = await this.#storage.commit(writes, withoutAbortSignal(context));
@@ -973,6 +985,10 @@ class GuardedStorage implements Storage {
 	/** Never exempt, whatever it throws: once admitted, whether a failed batch committed is unknown. */
 	commit(writes: readonly StorageWrite[], context: Context): Promise<Seq> {
 		return this.#call(undefined, () => this.#storage.commit(writes, context));
+	}
+
+	checkAdmission(writes: readonly StorageWrite[], context: Context): Promise<boolean> {
+		return this.#call(undefined, () => this.#storage.checkAdmission?.(writes, context) ?? Promise.resolve(true));
 	}
 
 	mintId<I extends Id<string>>(): Promise<I> {

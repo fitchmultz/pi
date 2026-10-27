@@ -520,6 +520,13 @@ await root.submit({ type: "write", entry: { kind: "app.note", data: "user opened
 
 If a run fails, queued items stay in the inbox until the next input or queued write places them, oldest first.
 
+SQLite checks the exact encoded rows before admitting an input or write submission. A known size refusal throws `StorageCapacityError`
+without accepting a submission or changing history or the inbox; reduce the input or entry data and retry, including
+with the same `requestId`. An already queued input whose entry cannot fit when placed instead settles `unanswered`
+with reason `input_too_large`. Submit its corrected replacement with a new `requestId`. Other eligible queued inputs
+continue, and the answer or tool work at that boundary is preserved. Checks apply to each encoded row, not the
+combined inbox size. Actual commit failures still fail the Session.
+
 An input is placed as a `pi.user` entry. To show it as something else, give it an `entry` with your kind and data; the model still sees `content` as the user message:
 
 ```typescript
@@ -746,6 +753,13 @@ await root.commit(async (tx) => {
 console.log(await harness.snapshot(Todos, root.id, context));
 ```
 
+Host-composed admission can pass `{ admission: true }` as the third argument to `session.commit()`,
+`harness.commit()` or `conversation.commit()`. When storage supports the optional check, this validates the complete
+batch, including document revisions, before committing. A confirmed capacity refusal discards the batch and throws
+`StorageCapacityError` without ending the Session. Catch it **outside** the commit and request corrected input.
+The callback runs once and is not replayed; use this only before external effects. Omitted options and backends
+without the capability commit directly. Thrown check errors and actual commit errors remain fatal.
+
 `harness.watchDoc()` and `harness.documentState()` observe one document like the view above. `HarnessOptions.conversationCreated(tx, conversation)` runs in every commit that creates or forks a conversation, including a tool's raw `tx.createConversation()`, so every conversation gets your documents; `init` in `createConversation()`, `fork()`, and `root()` writes per-call data in the same commit. An extension's tools, sections, and hooks read their own documents through `api` or `input.read`, and treat an absent one as its default ([`11-extension-state.ts`](test/examples/11-extension-state.ts)).
 
 ## Usage and Cost
@@ -787,6 +801,13 @@ await database.exec("CREATE TABLE IF NOT EXISTS host_notes (text TEXT)");
 await database.run("INSERT INTO host_notes (text) VALUES (?)", text);
 ```
 
+Custom backends can implement optional `Storage.checkAdmission(writes, context)`: check the exact batch without
+persisting it or changing IDs or sequences, returning `false` only for a known capacity refusal after confirmed
+rollback. Any thrown error, including uncertain rollback, fails the Session. SQLite reuses its commit encoder and
+SQL inside a deliberately rolled-back transaction. Backends without this capability keep their existing behavior.
+`tx.appendEntry(..., { admission: true })` checks the assigned entry before staging it when the backend supports this
+capability; it is not a recovery path for a failed commit or already-performed caller effects.
+
 One process owns a storage at a time; there is no cross-process locking. The portable SQLite and JSONL cores (`/storage/sqlite`, `/storage/jsonl`) run without Node APIs, for example on Bun or in Cloudflare Durable Objects, given an asynchronous `SqliteDatabase` facade or a `FileSystem` from `@earendil-works/pi-durable/env`.
 
 SQLite adapters implement promise-based `exec`, `run`, `get`, `all`, `transaction`, and `close`. `run`, `get`, and `all` take SQL text plus positional bindings; adapters may cache prepared statements by SQL text. A transaction callback receives a transaction handle; all work in the transaction must use it, and the handle expires when the callback settles. Adapters must queue unrelated operations and other transactions until the transaction finishes, so calling `database` itself inside the callback never settles:
@@ -819,6 +840,10 @@ The package root loads TypeBox, because the tool task validates arguments with p
 ## Errors
 
 Three rules decide what an error does:
+
+Confirmed capacity refusals from admission checks are not storage exceptions: the Session throws
+`StorageCapacityError` without committing or closing. A backend that **throws** that class, like any other check or
+commit error, still fails the Session.
 
 1. **A storage error ends the Harness.** The call that hit it rejects with the error. Everything after it, and every pending wait, rejects with `SessionFailed` (its `cause` is that error); watches and event streams end with `session_failed`; running tasks get their abort signal; `onReport` gets the error once. The Harness then closes itself. Nothing is retried; a custom storage retries its own transient failures. Reopen to recover: commits are atomic, so the store is consistent, and resubmitting with the same `requestId` finds a submission that was already admitted.
 2. **An invalid read fails only that call:** a storage read throws `StorageRequestError` for a bad cursor, an unknown conversation, or history a document does not keep. A read you cancelled fails only itself too. The exemption covers reads only: any error from `commit()` or `mintId()`, `StorageRequestError` included, ends the Harness as in rule 1.
