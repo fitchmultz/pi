@@ -520,6 +520,13 @@ await root.submit({ type: "write", entry: { kind: "app.note", data: "user opened
 
 If a run fails, queued items stay in the inbox until the next input or queued write places them, oldest first.
 
+SQLite checks the exact encoded rows before admitting an input. A known size refusal throws `StorageCapacityError`
+without accepting a submission or changing history or the inbox; reduce the input or entry data and retry, including
+with the same `requestId`. An already queued input whose entry cannot fit when placed instead settles `unanswered`
+with reason `input_too_large`. Submit its corrected replacement with a new `requestId`. Other eligible queued inputs
+continue, and the answer or tool work at that boundary is preserved. Checks apply to each encoded row, not the
+combined inbox size. Actual commit failures still fail the Session.
+
 An input is placed as a `pi.user` entry. To show it as something else, give it an `entry` with your kind and data; the model still sees `content` as the user message:
 
 ```typescript
@@ -786,6 +793,13 @@ const piStorage = await SqliteStorage.open(database, { prefix: "pi_" });
 await database.exec("CREATE TABLE IF NOT EXISTS host_notes (text TEXT)");
 await database.run("INSERT INTO host_notes (text) VALUES (?)", text);
 ```
+
+Custom backends can implement optional `Storage.checkAdmission(writes, context)`: check the exact batch without
+persisting it or changing IDs or sequences, returning `false` only for a known capacity refusal after confirmed
+rollback. Any thrown error, including uncertain rollback, fails the Session. SQLite reuses its commit encoder and
+SQL inside a deliberately rolled-back transaction. Backends without this capability keep their existing behavior.
+`tx.appendEntry(..., { admission: true })` checks the assigned entry before staging it when the backend supports this
+capability; it is not a recovery path for a failed commit or already-performed caller effects.
 
 One process owns a storage at a time; there is no cross-process locking. The portable SQLite and JSONL cores (`/storage/sqlite`, `/storage/jsonl`) run without Node APIs, for example on Bun or in Cloudflare Durable Objects, given an asynchronous `SqliteDatabase` facade or a `FileSystem` from `@earendil-works/pi-durable/env`.
 

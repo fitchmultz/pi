@@ -189,32 +189,72 @@ export class SqliteStorage implements Storage {
 		this.assertOpen();
 		const documentActions = this.prepareDocumentActions(writes);
 		const candidateNextId = this.candidateNextId(writes);
-		const seq = await this.db.transaction(async (transaction) => {
-			const metadata = await transaction.get<MetadataRow>(
-				`SELECT next_id, next_seq FROM ${this.schema.tables.durableMetadata} WHERE singleton = 1`,
-			);
-			if (metadata === undefined) throw new Error("Durable SQLite metadata is missing");
-			const committedSeq = seqFromNumber(metadata.next_seq);
-			const newClaims = await this.checkGlobalIds(transaction, writes);
-			await this.checkDocumentActions(transaction, documentActions);
-			for (const [id, table] of newClaims) {
-				await transaction.run(
-					`INSERT INTO ${this.schema.tables.recordIds} (id, record_type) VALUES (?, ?)`,
-					id,
-					table,
-				);
-			}
-			for (const write of writes) await this.applyTableWrite(transaction, write, committedSeq);
-			await this.applyDocumentActions(transaction, documentActions, committedSeq);
-			await transaction.run(
-				`UPDATE ${this.schema.tables.durableMetadata} SET next_id = ?, next_seq = ? WHERE singleton = 1`,
-				String(Math.max(Number(metadata.next_id), candidateNextId)),
-				committedSeq + 1,
-			);
-			return committedSeq;
-		});
+		const seq = await this.db.transaction((transaction) =>
+			this.writeBatch(transaction, writes, documentActions, candidateNextId),
+		);
 		this.nextId = Math.max(this.nextId, candidateNextId);
 		return seq;
+	}
+
+	async checkAdmission(writes: readonly StorageWrite[], _context: Context): Promise<boolean> {
+		this.assertOpen();
+		const documentActions = this.prepareDocumentActions(writes);
+		const candidateNextId = this.candidateNextId(writes);
+		const rollback = new Error("Rollback SQLite admission check");
+		let accepted = true;
+		try {
+			await this.db.transaction(async (transaction) => {
+				try {
+					await this.writeBatch(transaction, writes, documentActions, candidateNextId);
+				} catch (error) {
+					// Classify only the statement failure, never a transaction/rollback failure.
+					const tooBig =
+						error instanceof Error &&
+						(("code" in error &&
+							error.code === "ERR_SQLITE_ERROR" &&
+							"errcode" in error &&
+							error.errcode === 18) ||
+							error.message === "string or blob too big: SQLITE_TOOBIG");
+					if (!tooBig) throw error;
+					accepted = false;
+				}
+				throw rollback;
+			});
+		} catch (error) {
+			if (error !== rollback) throw error;
+			return accepted;
+		}
+		throw new Error("SQLite admission check did not roll back");
+	}
+
+	private async writeBatch(
+		transaction: SqliteExecutor,
+		writes: readonly StorageWrite[],
+		documentActions: ReadonlyMap<DocumentId, DocumentAction>,
+		candidateNextId: number,
+	): Promise<Seq> {
+		const metadata = await transaction.get<MetadataRow>(
+			`SELECT next_id, next_seq FROM ${this.schema.tables.durableMetadata} WHERE singleton = 1`,
+		);
+		if (metadata === undefined) throw new Error("Durable SQLite metadata is missing");
+		const committedSeq = seqFromNumber(metadata.next_seq);
+		const newClaims = await this.checkGlobalIds(transaction, writes);
+		await this.checkDocumentActions(transaction, documentActions);
+		for (const [id, table] of newClaims) {
+			await transaction.run(
+				`INSERT INTO ${this.schema.tables.recordIds} (id, record_type) VALUES (?, ?)`,
+				id,
+				table,
+			);
+		}
+		for (const write of writes) await this.applyTableWrite(transaction, write, committedSeq);
+		await this.applyDocumentActions(transaction, documentActions, committedSeq);
+		await transaction.run(
+			`UPDATE ${this.schema.tables.durableMetadata} SET next_id = ?, next_seq = ? WHERE singleton = 1`,
+			String(Math.max(Number(metadata.next_id), candidateNextId)),
+			committedSeq + 1,
+		);
+		return committedSeq;
 	}
 
 	async mintId<I extends Id<string>>(): Promise<I> {

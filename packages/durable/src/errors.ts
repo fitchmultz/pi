@@ -33,6 +33,14 @@ export class StorageRequestError extends Error {
 	}
 }
 
+/** An input failed a no-effect storage capacity check before admission or entry staging. */
+export class StorageCapacityError extends Error {
+	constructor() {
+		super("Input exceeds storage capacity; reduce the input or entry data and submit again");
+		this.name = "StorageCapacityError";
+	}
+}
+
 /**
  * The Session failed, so nothing runs or commits any more. It fails when a Storage method throws, a commit cannot be
  * adopted, or the Harness's own bookkeeping throws (a scheduler commit, an internal commit listener, a registry whose

@@ -14,6 +14,7 @@
 
 - Fuzzy edits preserve untouched text on the same line, Unicode boundaries and literal carriage returns. Editing invalid UTF-8 now fails without rewriting the file ([#10655](https://github.com/earendil-works/pi/issues/10655)).
 - An aborted or timed-out `NodeExecutionEnv.exec()` shell command on macOS no longer runs its later steps after the current step is killed.
+- SQLite refuses oversized input admissions without failing the Session. An already queued input whose encoded entry cannot fit settles `unanswered` with `input_too_large`, preserving the current answer and allowing valid queued inputs to continue. Actual commit and uncertain storage failures remain fatal.
 
 ## [1.4.0] - 2026-10-21
 

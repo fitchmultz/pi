@@ -1,5 +1,5 @@
 import { type Context, copyJson, type Draft, type JsonValue } from "@earendil-works/chord";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { BACKGROUND_CONTEXT, withoutAbortSignal } from "@earendil-works/chord/context";
 import { type Change, type Op, type Prepared, type Tracker, track } from "@earendil-works/chord/delta";
 import type { TelemetryCarrier } from "@earendil-works/pi-telemetry";
 import {
@@ -13,7 +13,7 @@ import {
 	type ResolvedAddress,
 	resolveAddress,
 } from "../documents.ts";
-import { ReadAfterWrite } from "../errors.ts";
+import { ReadAfterWrite, StorageCapacityError } from "../errors.ts";
 import type {
 	ConversationDocFamilyToken,
 	ConversationDocToken,
@@ -29,6 +29,7 @@ import type {
 	DocumentId,
 	DocumentRecord,
 	Entry,
+	EntryAppendOptions,
 	EntryDraft,
 	EntryId,
 	EntryQuery,
@@ -134,6 +135,8 @@ export type TransactionScope = {
 	readonly conversationId?: ConversationId;
 	/** Task whose runtime commit this is; stamped as `byTaskId` on appended entries. */
 	readonly taskId?: TaskId;
+	/** Validate an input-only admission batch before committing; never use for post-effect commits. */
+	readonly admission?: boolean;
 };
 
 /** Storage/cache provenance of one staged document incarnation. */
@@ -347,22 +350,24 @@ export class Transaction implements Tx {
 		return record;
 	}
 
-	appendEntry(conversationId: ConversationId, value: EntryDraft): Promise<EntryRecord>;
+	appendEntry(conversationId: ConversationId, value: EntryDraft, options?: EntryAppendOptions): Promise<EntryRecord>;
 	appendEntry<D extends JsonValue>(
 		token: Entry<D>,
 		conversationId: ConversationId,
 		value: TypedEntryDraft<NoInfer<D>>,
+		options?: EntryAppendOptions,
 	): Promise<TypedEntry<D>>;
 	appendEntry(
 		first: ConversationId | { readonly kind: string },
 		second: ConversationId | EntryDraft,
 		third?: object,
+		fourth?: EntryAppendOptions,
 	): Promise<EntryRecord> {
-		if (typeof first === "number") return this.#appendEntry(first, second as EntryDraft);
-		return this.#appendEntry(second as ConversationId, { ...third, kind: first.kind } as EntryDraft);
+		if (typeof first === "number") return this.#appendEntry(first, second as EntryDraft, third as EntryAppendOptions);
+		return this.#appendEntry(second as ConversationId, { ...third, kind: first.kind } as EntryDraft, fourth);
 	}
 
-	#appendEntry(conversationId: ConversationId, value: EntryDraft): Promise<EntryRecord> {
+	#appendEntry(conversationId: ConversationId, value: EntryDraft, options?: EntryAppendOptions): Promise<EntryRecord> {
 		return this.#write(async () => {
 			await this.#requireConversation(conversationId);
 			this.#assertOpen();
@@ -380,7 +385,16 @@ export class Transaction implements Tx {
 				},
 				TABLE_JSON_COPY_OPTIONS,
 			) as unknown as EntryRecord;
-			this.#writes.push({ type: "entry", value: record });
+			const write = { type: "entry", value: record } as const;
+			if (
+				options?.admission === true &&
+				this.#host.storage.checkAdmission !== undefined &&
+				!(await this.#host.storage.checkAdmission([write], withoutAbortSignal(this.#context)))
+			) {
+				throw new StorageCapacityError();
+			}
+			this.#assertOpen();
+			this.#writes.push(write);
 			return record;
 		});
 	}

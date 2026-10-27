@@ -88,6 +88,7 @@ export class Submissions {
 					const { id, status } = await this.#session.commitWith(
 						(tx) => admitSubmission(tx, conversationId, draft, this.#now(), this.#queueModes(), span),
 						withTelemetry(span, context),
+						{ admission: draft.type === "input" },
 					);
 					span.setAttributes({ "submission.id": id, result: status });
 					return new SubmissionHandle(id, this);
@@ -259,7 +260,7 @@ export async function admitSubmission(
 			items.push({ id, mode, content, ...entry });
 		}
 		if (boundary === undefined) return { id, status: "queued" };
-		const { users } = await applyBoundary(tx, boundary, "final", now);
+		const { users } = await applyBoundary(tx, boundary, "final", now, id);
 		if (users.length > 0) await startRun(tx, conversationId, live, users);
 		return { id, status: draft.type === "write" ? "done" : users.at(-1) === id ? "placed" : "queued" };
 	}
@@ -275,7 +276,7 @@ export async function admitSubmission(
 		const write = { ...fields, type: "write", status: "done", entry: entry.id } as const;
 		return { id: (await tx.createSubmission(write)).id, status: "done" };
 	}
-	const entry = await appendInput(tx, conversationId, draft.content, draft.entry, now);
+	const entry = await appendInput(tx, conversationId, draft.content, draft.entry, now, true);
 	const input = { ...fields, type: "input", status: "placed", entry: entry.id } as const;
 	const { id } = await tx.createSubmission(input);
 	await startRun(tx, conversationId, live, [id]);
