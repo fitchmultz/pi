@@ -186,6 +186,30 @@ function firstUserText(messages: readonly Message[]): string {
 	return userText(messages.find((message) => message.role === "user"));
 }
 
+/** A real tool round large enough that ordinary selection keeps both results with their calls. */
+async function largeRound(chat: Chat) {
+	const executions: string[] = [];
+	const output = text("FILE CONTENT", 3000);
+	addTool(
+		chat.setup.registry,
+		defineTool({
+			name: "read",
+			description: "Read a file",
+			parameters: Type.Object({ path: Type.String() }),
+			execute: async ({ path }) => {
+				executions.push(path);
+				return { output: [{ type: "text", text: `${path}: ${output}` }] };
+			},
+		}),
+	);
+	await chat.root.configure({ tools: toolsNamed(chat.setup, "read") }, context);
+	const calls = fauxAssistantMessage(
+		["one", "two"].map((path) => fauxToolCall("read", { path }, { id: path })),
+		{ stopReason: "toolUse" },
+	);
+	return { calls, executions, output };
+}
+
 // ─── Range selection ──────────────────────────────────────────────────────
 
 let nextId = 1;
@@ -1271,6 +1295,120 @@ describe("overflow compaction", () => {
 		await chat.harness.close(context);
 	});
 
+	it("summarizes the completed round on a second overflow without replaying tools or changing history", async () => {
+		const setup = chatSetup({ models: [{ id: "custom/model:unlisted", contextWindow: 0, maxTokens: 900 }] });
+		const chat = await open({}, setup);
+		await chat.root.configure({ model: { provider: "faux", modelId: "custom/model:unlisted" } }, context);
+		const round = await largeRound(chat);
+		chat.setup.settings.compaction = ENABLED;
+		const selected: { entries: readonly EntryRecord[]; messages: readonly Message[] }[] = [];
+		addHooks(chat.setup.registry, CompactionTask, {
+			beforeCompact: (compaction) => {
+				selected.push(compaction);
+				return undefined;
+			},
+		});
+		let before: EntryRecord[] = [];
+		chat.faux.agent.push(
+			round.calls,
+			failure(OVERFLOW),
+			async () => {
+				const retained = await chat.root.context(context);
+				expect(selectCut(retained, 1)).toBeUndefined();
+				expect(retained.messages.filter((message) => message.role === "toolResult")).toHaveLength(2);
+				await chat.root.submit({ type: "write", entry: { kind: "app.notice", data: "still working" } }, context);
+				before = await allEntries(chat.root);
+				return failure(OVERFLOW);
+			},
+			answer("fits"),
+		);
+		chat.faux.summaries.push(summary("GOAL: compare the files"), summary("ROUND SUMMARY"));
+		const input = await chat.root.submit({ type: "input", content: "Compare the files" }, context);
+		expect((await input.wait(context)).status).toBe("done");
+
+		const after = await allEntries(chat.root);
+		expect(after.slice(0, before.length)).toEqual(before);
+		const markers = after.filter((record) => record.kind === "pi.compaction");
+		const errors = after.filter(
+			(record) => record.model?.[0]?.role === "assistant" && record.model[0].stopReason === "error",
+		);
+		expect(markers).toHaveLength(2);
+		expect(markers[1]).toMatchObject({ head: errors[1]!.id, data: { reason: "overflow" } });
+		expect(selected).toHaveLength(2);
+		expect(selected[1]!.entries[0]!.id).toBe(markers[0]!.id);
+		expect(selected[1]!.messages.filter((message) => message.role === "toolResult").map(userText)).toEqual(
+			["one", "two"].map((path) => `${path}: ${round.output}`),
+		);
+		const source = userText(chat.faux.summaryRequests[1]!.messages[1]);
+		expect(source).toContain("GOAL: compare the files");
+		expect(source).toContain('[Assistant tool calls]: read(path="one"); read(path="two")');
+		expect(source).toContain("[Tool result]: one: FILE CONTENT");
+		const resumed = chat.faux.agentRequests.at(-1)!.messages;
+		expect(resumed.map((message) => message.role)).toEqual(["system", "user"]);
+		expect(resumed[0]).toMatchObject({ sections: { preamble: "You are helpful." }, toolsAdded: [{ name: "read" }] });
+		expect(userText(resumed[1])).toContain("ROUND SUMMARY");
+		expect(round.executions).toEqual(["one", "two"]);
+		await chat.harness.close(context);
+	});
+
+	for (const how of ["declines", "fails"] as const) {
+		it(`does not resend oversized context when the completed-round fallback ${how}`, async () => {
+			const chat = await open({ contextWindow: 0 });
+			const round = await largeRound(chat);
+			chat.setup.settings.compaction = ENABLED;
+			let selected = 0;
+			addHooks(chat.setup.registry, CompactionTask, {
+				beforeCompact: () => {
+					selected++;
+					return selected === 2 && how === "declines" ? { decline: true } : undefined;
+				},
+			});
+			chat.faux.agent.push(round.calls, failure(OVERFLOW), failure(OVERFLOW));
+			chat.faux.summaries.push(summary("FIRST"), failure(OVERFLOW));
+			const input = await chat.root.submit({ type: "input", content: "Compare the files" }, context);
+			expect(await input.wait(context)).toMatchObject({
+				status: "unanswered",
+				reason: "model_error",
+				detail: OVERFLOW,
+			});
+			expect(selected).toBe(2);
+			expect(chat.faux.agentRequests).toHaveLength(3);
+			expect(chat.faux.summaryRequests).toHaveLength(how === "declines" ? 1 : 2);
+			expect((await kinds(chat.root)).filter((kind) => kind === "pi.compaction")).toHaveLength(1);
+			expect((await live(chat)).compactions).toBeUndefined();
+			expect(round.executions).toEqual(["one", "two"]);
+			await chat.harness.close(context);
+		});
+	}
+
+	it("does not sweep later user work into the completed-round fallback", async () => {
+		const chat = await open({ contextWindow: 0 });
+		const round = await largeRound(chat);
+		chat.setup.settings.compaction = ENABLED;
+		chat.faux.agent.push(
+			async () => {
+				await chat.root.submit(
+					{ type: "input", content: "Keep this instruction verbatim", whenBusy: "steer" },
+					context,
+				);
+				return round.calls;
+			},
+			failure(OVERFLOW),
+			failure(OVERFLOW),
+		);
+		chat.faux.summaries.push(summary("FIRST"));
+		const input = await chat.root.submit({ type: "input", content: "Compare the files" }, context);
+		expect(await input.wait(context)).toMatchObject({
+			status: "unanswered",
+			reason: "model_error",
+			detail: OVERFLOW,
+		});
+		expect(chat.faux.summaryRequests).toHaveLength(1);
+		expect(chat.faux.agentRequests.at(-1)!.messages.map(userText)).toContain("Keep this instruction verbatim");
+		expect(round.executions).toEqual(["one", "two"]);
+		await chat.harness.close(context);
+	});
+
 	it("fails without compacting when compaction is disabled, even for a retryable-looking overflow", async () => {
 		const chat = await open();
 		await history(chat);
@@ -1674,6 +1812,85 @@ describe("compaction recovery", () => {
 		chat.faux.summaries.push(failure("bad request"));
 		const settled = await (await chat.harness.submission(input.id, context))!.wait(context);
 		expect(settled).toMatchObject({ status: "unanswered", reason: "model_error", detail: OVERFLOW });
+		await chat.harness.close(context);
+	});
+
+	it("retains the completed-round recovery receipt through summary replay, retry and deferred reopen", async () => {
+		const path = await sqlitePath();
+		const setup = chatSetup({ models: [{ id: "faux-1", contextWindow: 0 }], deferred: { pollAfterMs: 60_000 } });
+		const faux = script(setup);
+		addSection(setup.registry, "preamble", () => "You are helpful.", { tag: false });
+		let chat = await reopen(path, setup, faux);
+		let now = Date.now();
+		setup.now = () => now;
+		setup.settings.compaction = { ...MANUAL, enabled: true };
+		setup.settings.retry = { enabled: true, maxRetries: 2, baseDelayMs: 60_000 };
+		const round = await largeRound(chat);
+		const reached = deferred();
+		faux.agent.push(round.calls, failure(OVERFLOW), failure(OVERFLOW), failure("overloaded"), failure(OVERFLOW));
+		faux.summaries.push(
+			() => {
+				setup.settings.stream = { deferred: true };
+				return summary("FIRST");
+			},
+			gated(deferred(), summary("interrupted"), reached),
+		);
+		const input = await chat.root.submit({ type: "input", content: "Compare the files" }, context);
+		// The ordinary summary is terminal, while its recovery request is asleep in a native deferred poll.
+		await waitFor(async () => (await live(chat)).generation?.deferred !== undefined);
+		const generation = (await live(chat)).run!.taskId;
+		await chat.harness.close(context);
+		now += 60_000;
+		chat = await reopen(path, setup, faux);
+		await reached.promise;
+		const [fallback] = await compactionTasks(chat);
+		const boundary = (await allEntries(chat.root)).at(-1)!;
+		expect(boundary.model?.[0]).toMatchObject({ role: "assistant", stopReason: "error", errorMessage: OVERFLOW });
+		expect(fallback).toMatchObject({
+			owner: generation,
+			input: { reason: "overflow", completedRoundBoundary: boundary.id },
+		});
+		await chat.harness.close(context);
+		// Reopen resends only the interrupted summary, with the same selected source and actual error boundary.
+		faux.summaries.push(() => {
+			setup.settings.stream = {};
+			return summary("FALLBACK");
+		});
+		chat = await reopen(path, setup, faux);
+		await waitFor(async () => (await live(chat)).generation?.retry !== undefined);
+		expect(faux.summaryRequests[2]!.messages).toEqual(
+			faux.summaryRequests[1]!.messages.map((message) => ({ ...message, timestamp: expect.any(Number) })),
+		);
+		const receipt = await chat.harness.getTask(fallback!.id, context);
+		expect(receipt).toMatchObject({
+			input: { completedRoundBoundary: boundary.id },
+			state: { status: "terminal", outcome: { status: "completed" } },
+		});
+		expect((await chat.harness.getTask(generation, context))?.state).toMatchObject({
+			checkpoint: { phase: "retry", compacted: fallback!.id },
+		});
+		expect((await chat.root.context(context)).head?.head).toBe(boundary.id);
+		await chat.harness.close(context);
+		setup.settings.stream = { deferred: true };
+		now += 60_000;
+		chat = await reopen(path, setup, faux);
+		await waitFor(async () => (await live(chat)).generation?.deferred !== undefined);
+		expect((await chat.harness.getTask(generation, context))?.state).toMatchObject({
+			checkpoint: { phase: "poll", compacted: fallback!.id },
+		});
+		await chat.harness.close(context);
+		now += 60_000;
+		chat = await reopen(path, setup, faux);
+		expect(await (await chat.harness.submission(input.id, context))!.wait(context)).toMatchObject({
+			status: "unanswered",
+			reason: "model_error",
+			detail: OVERFLOW,
+		});
+		expect(faux.summaryRequests).toHaveLength(3);
+		expect(faux.agentRequests).toHaveLength(5);
+		expect((await kinds(chat.root)).filter((kind) => kind === "pi.compaction")).toHaveLength(2);
+		expect(await chat.harness.getTask(fallback!.id, context)).toEqual(receipt);
+		expect(round.executions).toEqual(["one", "two"]);
 		await chat.harness.close(context);
 	});
 

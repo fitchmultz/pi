@@ -1,8 +1,9 @@
 import type { Context, Draft } from "@earendil-works/chord";
 import type { AssistantMessage, Message, ModelThinkingLevel, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { calculateContextTokens, estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
 import { isRetryableAssistantError, retryDelayMs } from "@earendil-works/pi-ai/utils/retry";
-import { CompactionEntry } from "../entries.ts";
+import { AssistantEntry, CompactionEntry, ToolResultEntry } from "../entries.ts";
 import { defineTask } from "../tasks.ts";
 import type {
 	ConversationId,
@@ -37,7 +38,12 @@ import type {
 } from "./types.ts";
 import { recordUsage } from "./usage.ts";
 
-export type CompactionInput = { reason: CompactionReason; instructions?: string };
+export type CompactionInput = {
+	reason: CompactionReason;
+	instructions?: string;
+	/** Generation-owned overflow fallback: the actual second overflow error, kept instead of the completed tool round. */
+	completedRoundBoundary?: EntryId;
+};
 
 /** The pinned summarization request. */
 export type SummaryRequest = {
@@ -122,11 +128,37 @@ export const CompactionTask = defineTask<CompactionInput, CompactionCheckpoint, 
 			const model = ref === undefined ? undefined : runtime.models.getModel(ref.provider, ref.modelId);
 			if (ref === undefined || model === undefined) return failNoModel(runtime, ref, context);
 			const policy = compactionPolicy(settings, ref);
-			const view = await runtime.context(conversationId, context);
-			const cut = selectCut(view, policy.keepRecentTokens);
+			const { reason, instructions, completedRoundBoundary } = task.input;
+			const view = await runtime.context(
+				conversationId,
+				context,
+				completedRoundBoundary === undefined ? undefined : { at: completedRoundBoundary },
+			);
+			let cut: number | undefined;
+			if (completedRoundBoundary === undefined) {
+				cut = selectCut(view, policy.keepRecentTokens);
+			} else {
+				const owner = task.owner === undefined ? undefined : await runtime.getTask(task.owner, context);
+				const index = view.entries.findIndex((entry) => entry.id === completedRoundBoundary);
+				const boundary = view.entries[index];
+				const message = boundary?.model?.[0];
+				if (
+					reason === "overflow" &&
+					owner?.kind === "pi.generation" &&
+					owner.state.status === "waiting" &&
+					owner.state.on.includes(task.id) &&
+					AssistantEntry.is(boundary) &&
+					boundary.byTaskId === owner.id &&
+					message?.role === "assistant" &&
+					isContextOverflow(message) &&
+					view.contributions[index]!.length === 0 &&
+					completedToolRound(view)
+				) {
+					cut = index;
+				}
+			}
 			if (cut === undefined) return complete(runtime, context);
 			const firstKept = view.entries[cut]!.id;
-			const { reason, instructions } = task.input;
 			const compaction = {
 				reason,
 				entries: view.entries.slice(0, cut),
@@ -149,7 +181,9 @@ export const CompactionTask = defineTask<CompactionInput, CompactionCheckpoint, 
 					Math.floor(0.8 * policy.reserveTokens),
 					model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 				),
-				tail: view.entries.reduce((tail, entry) => (entry.id > tail ? entry.id : tail), firstKept),
+				tail:
+					completedRoundBoundary ??
+					view.entries.reduce((tail, entry) => (entry.id > tail ? entry.id : tail), firstKept),
 				firstKept,
 			};
 			await runtime.commit(() => ({ status: "running", checkpoint: { phase: "summarize", ...request } }), context);
@@ -294,6 +328,37 @@ export function selectCut(view: ContextView, keepRecentTokens: number): number |
 	if (cut === undefined) return undefined;
 	for (let index = start; index < cut; index++) if (contributions[index]!.length > 0) return cut;
 	return undefined;
+}
+
+/** A previous overflow summary followed only by one tool-calling assistant and its committed results. */
+export function completedToolRound(view: ContextView): boolean {
+	if (!CompactionEntry.is(view.head) || view.head.data.reason !== "overflow") return false;
+	let pending: Set<string> | undefined;
+	for (let index = 1; index < view.entries.length; index++) {
+		const entry = view.entries[index]!;
+		for (const message of view.contributions[index]!) {
+			if (message.role === "system") continue;
+			if (message.role === "assistant") {
+				if (
+					pending !== undefined ||
+					!AssistantEntry.is(entry) ||
+					view.head.head !== entry.id ||
+					message.stopReason !== "toolUse"
+				) {
+					return false;
+				}
+				const calls = message.content.filter((content) => content.type === "toolCall");
+				pending = new Set(calls.map((call) => call.id));
+				if (pending.size === 0 || pending.size !== calls.length) return false;
+			} else if (message.role === "toolResult") {
+				// Use raw contributions, not `view.messages`, which synthesizes missing results.
+				if (!ToolResultEntry.is(entry) || !pending?.delete(message.toolCallId)) return false;
+			} else {
+				return false;
+			}
+		}
+	}
+	return pending?.size === 0;
 }
 
 function isCandidate(contributions: ContextView["contributions"], index: number): boolean {

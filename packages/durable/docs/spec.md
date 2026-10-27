@@ -4140,7 +4140,7 @@ type GenerationCheckpoint =
   | {
       phase: "prepare";
       attempt: number;
-      /** The blocking compaction this generation waited for; it starts no other compaction. */
+      /** Most recent blocking compaction; its retained input also records the sole completed-round fallback. */
       compacted?: TaskId<CompactionResult>;
       /** Error text of the overflow that started `compacted`; checked once when `prepare` resumes. */
       overflow?: string;
@@ -4256,9 +4256,19 @@ The run's inputs live in `pi.live.run`, not in the task input.
     compaction owned by the generation with reason `overflow`, adds its status,
     and commits `waiting` on it with `allSettled` and checkpoint `{ phase:
     "prepare", attempt, compacted, overflow }`; the recovery request does not
-    count against the retry policy. Any other overflow,
-    including a second one, is never retried and fails like the non-retryable
-    errors below. A `stop` or `length` response is never classified as overflow;
+    count against the retry policy.
+    When `compacted` instead names this generation's completed ordinary overflow
+    compaction, with an `entryId` matching the active summary marker, one
+    completed-round fallback is allowed (section 8.7). It requires the remaining
+    context to be only that summary and a complete tool round, without later user
+    or assistant work. The same commit appends the second overflow error and
+    starts the blocking child with `completedRoundBoundary` set to that actual
+    entry ID. `compacted` is replaced with the new child's ID, using the same
+    wait and `prepare` outcome check. Its retained input durably consumes this
+    sole fallback through request, retry, poll, and reopen; no counter resets
+    on those transitions. A third overflow, a text-only second overflow, or one
+    after a threshold compaction fails like the non-retryable errors below.
+    First-overflow no-cut behavior is unchanged. A `stop` or `length` response is never classified as overflow;
     the next threshold check handles silent overflow.
   - `error` that `isRetryableAssistantError()` accepts while the settings'
     retry policy allows another attempt (`enabled` and `attempt <= maxRetries`,
@@ -4439,7 +4449,12 @@ total; other totals, such as an ownership subtree, are application sums over
 
 ```ts
 type CompactionReason = "manual" | "threshold" | "overflow";
-type CompactionInput = { reason: CompactionReason; instructions?: string };
+type CompactionInput = {
+  reason: CompactionReason;
+  instructions?: string;
+  /** Generation-owned overflow fallback: the actual second overflow error, kept instead of the completed tool round. */
+  completedRoundBoundary?: EntryId;
+};
 /** The pinned summarization request. */
 type SummaryRequest = {
   attempt: number;
@@ -4480,7 +4495,7 @@ summarize, and their summary is placed like any passive write. Compactions do
 not coordinate with each other; several may run at once, and section 6 decides
 between their summaries.
 
-**Range selection** is a pure function of a `ContextView`, whose
+**Ordinary range selection** is a pure function of a `ContextView`, whose
 `contributions` give each active entry's model messages after every edit in the
 range (section 2.1, rules 4 and 9), including edits carried by older in-range
 markers, and the settings' `keepRecentTokens`.
@@ -4509,6 +4524,41 @@ is below it, overflow may come before any threshold compaction.
 keepRecentTokens 20k: the walk from 6 reaches 20k at 3; the first candidate at or after 3 is 4.
 The summary covers 1-3; the model context becomes [summary, 4, 5, 6].
 ```
+
+**Completed-round overflow fallback.** Only after a completed ordinary overflow
+child produced the current summary may generation admit one extra child after
+a second recognized provider overflow (section 8.3). After the summary marker,
+the active context must contain exactly one native tool-calling assistant,
+at the marker's `head`, and committed native results for all its calls.
+Completion is checked against raw contributions, not synthesized missing-result
+messages. System, excluded-error, and display-only entries may be present;
+later contributed user or assistant work is not eligible.
+
+The child's optional `completedRoundBoundary` pins the actual second overflow
+error appended by its owning generation in the admission commit. `select`
+requires reason `overflow`, a generation owner waiting on this child, an error
+boundary written by that owner with recognized overflow and no model
+contribution, and the complete round above. This field is not a general
+force-cut option for manual or conversation-owned compactions. Selection reads
+context through that boundary and sets both `tail` and `firstKept` to it.
+The summary source includes the previous summary and the complete round.
+The new head removes calls and results from model context together; the error
+it keeps contributes no model messages, and preparation restores the system
+baseline normally. No tool executes again and raw history is unchanged.
+
+The retained child input records the fallback as consumed, even once its
+checkpoint is gone at terminal settlement. Reopen resumes the same child and
+boundary; normal transient retries and deferred polls retain its task ID.
+The normal `beforeCompact` hook sees the full selected entries and messages,
+may decline or supply a summary, and can run twice in one generation.
+An invalid boundary or no eligible round completes without an entry, so the
+waiting overflow generation fails normally; it never resends unchanged context.
+
+This is a lossy recovery policy, not a guarantee that summarization or the
+resumed request fits, or that exact tool-output details survive the summary.
+Ordinary first-overflow no-cut, threshold-first, and normal range selection
+are unchanged. Admission depends on actual provider overflow, not a model-ID
+allowlist or a positive context window.
 
 Phases:
 

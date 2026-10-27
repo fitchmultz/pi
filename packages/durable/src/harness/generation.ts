@@ -29,7 +29,7 @@ import type {
 	TypedEntry,
 } from "../types.ts";
 import { addTools, sectionExtension } from "./agent.ts";
-import { compactionPolicy, createCompaction, estimateContext, selectCut } from "./compaction.ts";
+import { compactionPolicy, completedToolRound, createCompaction, estimateContext, selectCut } from "./compaction.ts";
 import { applyBoundary, type Boundary, prepareBoundary, withdrawQueuedInputs } from "./inbox.ts";
 import { assignJson } from "./json.ts";
 import { endRun, LiveDoc, type LiveState, type ToolSlot } from "./live.ts";
@@ -57,7 +57,7 @@ export type GenerationCheckpoint =
 	| {
 			phase: "prepare";
 			attempt: number;
-			/** The blocking compaction this generation waited for; it starts no other compaction (spec §8.3). */
+			/** Most recent blocking compaction; its retained input also records the sole completed-round fallback (spec §8.3). */
 			compacted?: TaskId<CompactionResult>;
 			/** Error text of the overflow that started `compacted`; checked once when `prepare` resumes. */
 			overflow?: string;
@@ -541,15 +541,37 @@ async function classify(
 	const settings = runtime.settings;
 	const overflow = message.stopReason === "error" && isContextOverflow(message);
 	const compaction = compactionPolicy(settings, ref);
-	if (overflow && compacted === undefined && compaction.enabled) {
+	if (overflow && compaction.enabled) {
 		const view = await runtime.context(conversationId, context, { at: cutoff });
-		if (selectCut(view, compaction.keepRecentTokens) !== undefined) {
+		let completedRound = false;
+		if (compacted !== undefined) {
+			const previous = await runtime.getTask(compacted, context);
+			completedRound =
+				previous?.kind === "pi.compaction" &&
+				previous.owner === runtime.taskId &&
+				previous.state.status === "terminal" &&
+				previous.state.outcome.status === "completed" &&
+				previous.state.outcome.result.entryId !== undefined &&
+				previous.state.outcome.result.entryId === view.head?.id &&
+				typeof previous.input === "object" &&
+				previous.input !== null &&
+				!Array.isArray(previous.input) &&
+				previous.input.reason === "overflow" &&
+				previous.input.completedRoundBoundary === undefined &&
+				completedToolRound(view);
+		}
+		if (completedRound || (compacted === undefined && selectCut(view, compaction.keepRecentTokens) !== undefined)) {
 			const text = message.errorMessage ?? "Context overflow";
 			await runtime.commit(async (tx): Promise<Next> => {
 				const live = await tx.doc(LiveDoc, conversationId);
-				await appendAssistant(tx, conversationId, message);
+				const error = await appendAssistant(tx, conversationId, message);
 				delete live.generation;
-				const child = await createCompaction(tx, conversationId, { reason: "overflow" }, runtime.taskId);
+				const child = await createCompaction(
+					tx,
+					conversationId,
+					{ reason: "overflow", ...(completedRound ? { completedRoundBoundary: error.id } : {}) },
+					runtime.taskId,
+				);
 				const checkpoint = { phase: "prepare", attempt, compacted: child, overflow: text } as const;
 				return { status: "waiting", checkpoint, on: [child], policy: "allSettled" };
 			}, context);
