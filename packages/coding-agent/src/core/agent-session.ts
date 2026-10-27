@@ -468,6 +468,7 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	private _skipNextRequestCompaction = false;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -1381,6 +1382,8 @@ export class AgentSession {
 		const previousPrepareRequest = this.agent.prepareRequest;
 		this.agent.prepareRequest = async (request, signal) => {
 			this._syncContextWindowCap();
+			let skipCompaction = this._skipNextRequestCompaction;
+			this._skipNextRequestCompaction = false;
 			const failed = this._failedResponse;
 			this._failedResponse = undefined;
 			const prepare = async () => {
@@ -1403,8 +1406,21 @@ export class AgentSession {
 				return { previous, context: previous?.context ?? canonicalContext, projection };
 			};
 			let { previous, context, projection } = await prepare();
-			const model = this._modelRuntime.applyContextWindowCap(previous?.model ?? this.agent.state.model);
-			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
+			let model = this._modelRuntime.applyContextWindowCap(previous?.model ?? this.agent.state.model);
+			let thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
+			if (
+				!isVirtualModel(model) &&
+				!skipCompaction &&
+				this._modelRuntime.getContextWindowCap(model.provider) !== undefined &&
+				this._exceedsCompactionThreshold(model, projection)
+			) {
+				await this._runAutoCompaction("threshold", false);
+				skipCompaction = this._skipNextRequestCompaction;
+				this._skipNextRequestCompaction = false;
+				({ previous, context, projection } = await prepare());
+				model = this._modelRuntime.applyContextWindowCap(previous?.model ?? this.agent.state.model);
+				thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
+			}
 			if (!isVirtualModel(model)) return { ...previous, context, model, thinkingLevel };
 
 			// The selection stays in agent state; only this request uses the routed model. A routing
@@ -1429,8 +1445,9 @@ export class AgentSession {
 			}
 			// The route stands: the router already decided this request. The state entry does not change
 			// the projection.
-			if (this._exceedsCompactionThreshold(route.model, projection)) {
+			if (!skipCompaction && this._exceedsCompactionThreshold(route.model, projection)) {
 				await this._runAutoCompaction("threshold", false);
+				this._skipNextRequestCompaction = false;
 				({ previous, context } = await prepare());
 			}
 			return { ...previous, context, model: route.model, thinkingLevel: route.thinkingLevel };
@@ -2607,12 +2624,22 @@ export class AgentSession {
 	 * system patch first when the prompt changed.
 	 */
 	private async _prepareRun(trigger: BeforeAgentStartTrigger): Promise<AgentMessage[]> {
+		this._skipNextRequestCompaction = false;
 		this._syncContextWindowCap();
 		// Check if we need to compact before sending (catches aborted responses).
 		// The starting message is sent below, so do not call agent.continue() here.
 		const lastAssistant = this._findLastAssistantMessage();
-		if (lastAssistant) {
-			await this._checkCompaction(lastAssistant, false);
+		const model = this.model;
+		if (
+			lastAssistant &&
+			(!model ||
+				!isVirtualModel(model) ||
+				this._modelRuntime.getContextWindowCap(lastAssistant.provider) === undefined)
+		) {
+			// A capped physical model is checked after start handlers, when the request model is final.
+			const deferWindowCheck =
+				!!model && !isVirtualModel(model) && this._modelRuntime.getContextWindowCap(model.provider) !== undefined;
+			await this._checkCompaction(lastAssistant, false, deferWindowCheck);
 		}
 
 		// Retire old deferrals before discovery suppresses this run's selected tools.
@@ -3744,9 +3771,14 @@ export class AgentSession {
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
+	 * @param deferWindowCheck If true, defer usage-based checks until the request model is known
 	 * @returns Whether the post-run loop should call `agent.continue()` for overflow recovery or queued messages
 	 */
-	private async _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
+	private async _checkCompaction(
+		assistantMessage: AssistantMessage,
+		skipAbortedCheck = true,
+		deferWindowCheck = false,
+	): Promise<boolean> {
 		const settings = this.settingsManager.getCompactionSettings(this.model);
 		if (!settings.enabled) return false;
 
@@ -3802,7 +3834,9 @@ export class AgentSession {
 		const contextOverflow =
 			sameModel &&
 			((explicitOverflow && assistantRetainedForExplicitRecovery) ||
-				(assistantUsageMatchesProjection && isContextOverflow(assistantMessage, contextWindow)));
+				(!deferWindowCheck &&
+					assistantUsageMatchesProjection &&
+					isContextOverflow(assistantMessage, contextWindow)));
 		const recoverableLength =
 			sameModel && assistantIsProjected && isRecoverableLength(assistantMessage, messageModel.maxTokens);
 		if (contextOverflow || recoverableLength) {
@@ -3843,6 +3877,8 @@ export class AgentSession {
 			if (retry) this._failedResponse = assistantMessage;
 			return retry;
 		}
+
+		if (deferWindowCheck) return false;
 
 		// Case 3: threshold compaction without retry.
 		// For error messages or all-zero usage messages, estimate from the last valid response.
@@ -4011,6 +4047,7 @@ export class AgentSession {
 			const message = error instanceof Error ? error.message : "compaction failed";
 			const aborted = abortController?.signal.aborted === true || cancelledByExtension;
 			if (started) {
+				if (this._modelRuntime.hasContextWindowCaps()) this._skipNextRequestCompaction = true;
 				const errorMessage = aborted
 					? undefined
 					: reason === "overflow"

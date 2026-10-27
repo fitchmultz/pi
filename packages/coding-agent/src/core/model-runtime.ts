@@ -204,6 +204,7 @@ export class ModelRuntime implements Models {
 	/** Source windows before models.json overrides, and unmodified models behind capped views. */
 	private readonly overriddenWindows = new WeakMap<Model<Api>, number>();
 	private readonly uncappedModels = new WeakMap<Model<Api>, Model<Api>>();
+	private readonly registryModels = new WeakSet<Model<Api>>();
 	/** Virtual models by provider id, then model id. */
 	private readonly virtualModels = new Map<string, Map<string, RegisteredVirtualModel>>();
 	private readonly compositionErrors = new Map<string, string>();
@@ -528,7 +529,12 @@ export class ModelRuntime implements Models {
 	 * Apply the policy after credential filtering, without changing provider catalogs or their
 	 * persisted data. Each provider's original catalog is read once for a list.
 	 */
-	private capModels<TModel extends AnyModel>(models: readonly TModel[]): readonly TModel[] {
+	private capModels<TModel extends AnyModel>(models: readonly TModel[], trackRegistry = true): readonly TModel[] {
+		if (trackRegistry) {
+			for (const model of models) {
+				if (isModelType(model, "chat")) this.registryModels.add(model);
+			}
+		}
 		if (!this.config.hasContextWindowCaps()) return models;
 		const sources = new Map<string, Map<string, number>>();
 		return models.map((entry) => {
@@ -570,6 +576,7 @@ export class ModelRuntime implements Models {
 			if (reportedWindow === 0 || this.overriddenWindows.get(model) === 0) {
 				const effective = { ...model, contextWindow: 0 };
 				this.uncappedModels.set(effective, model);
+				if (trackRegistry) this.registryModels.add(effective);
 				return effective as TModel;
 			}
 			const limits = [
@@ -583,6 +590,7 @@ export class ModelRuntime implements Models {
 			const contextWindow = Math.min(...limits);
 			const effective = contextWindow === model.contextWindow ? model : { ...model, contextWindow };
 			this.uncappedModels.set(effective, model);
+			if (trackRegistry) this.registryModels.add(effective);
 			return effective as TModel;
 		});
 	}
@@ -590,17 +598,37 @@ export class ModelRuntime implements Models {
 	/** Apply current limits to a retained selection or request without replacing its other metadata. */
 	applyContextWindowCap<TApi extends Api>(model: Model<TApi>): Model<TApi> {
 		const source = (this.uncappedModels.get(model) ?? model) as Model<TApi>;
-		if (this.config.getContextWindowCap(source.provider) === undefined) return source;
-		const effective = this.capModels([source])[0];
-		if (source.contextWindow <= 0) return effective;
+		const cap = this.config.getContextWindowCap(source.provider);
+		if (cap === undefined || !Number.isFinite(source.contextWindow) || source.contextWindow < 0) return source;
+		const registryOwned = this.registryModels.has(model) || this.registryModels.has(source);
 		const current = this.models.getModel(source.provider, source.id);
-		if (!current || !Number.isFinite(current.contextWindow) || current.contextWindow < 0) return effective;
-		const currentWindow = this.capModels([current])[0].contextWindow;
-		const contextWindow = Math.min(effective.contextWindow, currentWindow);
-		if (contextWindow === effective.contextWindow) return effective;
+		const sameEndpoint = current && current.api === source.api && current.baseUrl === source.baseUrl;
+		let contextWindow = source.contextWindow;
+		if (registryOwned && sameEndpoint && Number.isFinite(current.contextWindow) && current.contextWindow >= 0) {
+			contextWindow = this.capModels([current], false)[0].contextWindow;
+		} else if (contextWindow > 0) {
+			const original = registryOwned ? this.overriddenWindows.get(source) : undefined;
+			const originalWindow =
+				original !== undefined && Number.isFinite(original) && original >= 0 ? original : Infinity;
+			contextWindow = originalWindow === 0 ? 0 : Math.min(cap, contextWindow, originalWindow);
+			if (!registryOwned && sameEndpoint && Number.isFinite(current.contextWindow) && current.contextWindow > 0) {
+				const currentWindow = this.capModels([current], false)[0].contextWindow;
+				if (currentWindow > 0) contextWindow = Math.min(contextWindow, currentWindow);
+			}
+		}
+		if (contextWindow === source.contextWindow) return source;
 		const result = { ...source, contextWindow };
 		this.uncappedModels.set(result, source);
+		if (registryOwned) this.registryModels.add(result);
 		return result;
+	}
+
+	getContextWindowCap(providerId: string): number | undefined {
+		return this.config.getContextWindowCap(providerId);
+	}
+
+	hasContextWindowCaps(): boolean {
+		return this.config.hasContextWindowCaps();
 	}
 
 	getProviders(): readonly Provider[] {
@@ -628,6 +656,7 @@ export class ModelRuntime implements Models {
 								models.map((model) => this.uncappedModels.get(model) ?? model),
 								credential,
 							),
+							false,
 						)
 				: undefined,
 			filterAllModels: provider.filterAllModels
@@ -639,6 +668,7 @@ export class ModelRuntime implements Models {
 								),
 								credential,
 							),
+							false,
 						)
 				: undefined,
 			stream: (model, context, options) => provider.stream(this.applyContextWindowCap(model), context, options),
