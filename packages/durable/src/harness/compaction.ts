@@ -413,7 +413,8 @@ function contentText(content: string | readonly { readonly type: string; readonl
 
 function truncate(text: string, maxChars: number): string {
 	if (text.length <= maxChars) return text;
-	return `${text.slice(0, maxChars)}\n\n[... ${text.length - maxChars} more characters truncated]`;
+	const tailChars = Math.floor(maxChars / 2);
+	return `${text.slice(0, maxChars - tailChars)}\n\n[... ${text.length - maxChars} more characters truncated]\n\n${text.slice(-tailChars)}`;
 }
 
 /** Place a summary supplied by a hook in its own commit. */
