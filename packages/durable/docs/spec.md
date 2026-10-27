@@ -4526,8 +4526,7 @@ Phases:
 - `summarize` derives the summarized messages again from the context at `tail`,
   which is immutable, and serializes them to text: `[User]: ...`,
   `[Assistant]: ...`, `[Assistant tool calls]: name(key=json, ...)`, and
-  `[Tool result]: ...` truncated to the first and last 1000 characters, with an
-  omitted-character count between them; shorter results are kept whole. System messages and
+  `[Tool result]: ...` truncated to 2000 characters; system messages and
   thinking are omitted (replayed thinking is often not part of the live
   context, so it could make the request larger than the context it
   summarizes). The request has no
