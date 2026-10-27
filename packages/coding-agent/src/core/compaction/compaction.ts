@@ -24,6 +24,7 @@ import type {
 	Usage,
 } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { completeDaybreakSummary } from "../daybreak-provider.ts";
 import { convertToLlm } from "../messages.ts";
 import {
 	buildSessionProjection,
@@ -642,7 +643,7 @@ export async function completeSummarization(
 	const produce = async (): Promise<AssistantMessage> =>
 		streamFn
 			? (await streamFn(model, context, requestOptions)).result()
-			: completeSimple(model, context, requestOptions);
+			: (completeDaybreakSummary(model, context, requestOptions) ?? completeSimple(model, context, requestOptions));
 	return retryAssistantCall(produce, retry, requestOptions.signal, callbacks);
 }
 

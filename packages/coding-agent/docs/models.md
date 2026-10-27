@@ -34,6 +34,16 @@ Run `/thinking` to select the thinking level for the current model. Press `Ctrl+
 
 A session records model and thinking-level changes. Resuming the session restores them without changing defaults for new sessions.
 
+### Daybreak Blue
+
+The fork offers `openai/daybreak-blue-luna` as **Daybreak Blue (GPT-6 Luna)**. Select it with `/model` or start Pi with `--model openai/daybreak-blue-luna`. This Pi-local selector is not an OpenAI model ID or an upstream catalog alias. Its requests use `gpt-6-luna` and `access_programs.cyber: "daybreak_blue"` on the direct OpenAI Responses endpoint.
+
+The alias inherits effective Luna metadata, including newer catalog data and Luna's `models.json` overrides. Alias-specific `modelOverrides` apply on top, including headers and `hidden`. It is available only when the native OpenAI Responses route and Luna are available; it is not offered for proxies, replacement Responses transports, or legacy Codex. The normal OpenAI API-key and Sign in with ChatGPT authentication paths are supported, but OpenAI decides whether a particular account, project, model, and product surface are eligible. Selecting the alias does not confirm access or effective treatment. Sign in with ChatGPT eligibility for this program has not been verified.
+
+Switching to another model, including ordinary `openai/gpt-6-luna` or `gpt-6.1-sol`, stops Pi from adding the Daybreak field. OpenAI's own defaults still apply. The selected model also applies to summaries and any cache-warming requests; requests already started are not changed. Pi does not automatically retry a Daybreak refusal with another model or program. See [OpenAI's Daybreak guide](https://developers.openai.com/api/docs/guides/daybreak) for approval requirements, safeguards, and errors.
+
+SDK callers can use the alias with coding-agent's model runtime and summary helpers. A caller-supplied summary `streamFn` is responsible for its own model routing; the lower-level `pi-ai` functions do not translate this coding-agent-only alias.
+
 ### Ultrafast cost estimates
 
 OpenAI Responses (API keys and Sign in with ChatGPT) and legacy Codex Responses price exact

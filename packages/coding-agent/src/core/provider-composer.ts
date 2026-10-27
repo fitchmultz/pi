@@ -126,6 +126,30 @@ export type AuthStatus = {
 
 export const clearApiKeyCache = clearConfigValueCache;
 
+export function mergeHeaders(
+	base: Record<string, string> | undefined,
+	override: Record<string, string> | undefined,
+): Record<string, string> | undefined;
+export function mergeHeaders(
+	base: ProviderHeaders | undefined,
+	override: ProviderHeaders | undefined,
+): ProviderHeaders | undefined;
+export function mergeHeaders(
+	base: ProviderHeaders | undefined,
+	override: ProviderHeaders | undefined,
+): ProviderHeaders | undefined {
+	if (!base && !override) return undefined;
+	const merged = { ...base };
+	for (const [name, value] of Object.entries(override ?? {})) {
+		const lowerName = name.toLowerCase();
+		for (const existingName of Object.keys(merged)) {
+			if (existingName.toLowerCase() === lowerName) delete merged[existingName];
+		}
+		merged[name] = value;
+	}
+	return merged;
+}
+
 function getAllProviderModels(provider: Provider | undefined): readonly AnyModel[] {
 	return provider ? (provider.getAllModels?.() ?? provider.getModels()) : [];
 }
@@ -185,7 +209,7 @@ function mergeSamplingParamsByThinkingLevel(
 	return merged;
 }
 
-function applyModelOverride(model: Model<Api>, override: ModelsJsonModelOverride): Model<Api> {
+export function applyModelOverride(model: Model<Api>, override: ModelsJsonModelOverride): Model<Api> {
 	return {
 		...model,
 		name: override.name ?? model.name,
@@ -532,6 +556,7 @@ function rawModelHeaders(
 	model: AnyModel,
 	config: ModelsJsonProvider | undefined,
 	extension: ProviderConfigInput | undefined,
+	caseInsensitive = false,
 ): Record<string, string> | undefined {
 	// models.json definitions and overrides are chat-only. Extension definitions
 	// are matched by operation and id so colliding models cannot share headers.
@@ -541,8 +566,12 @@ function rawModelHeaders(
 	const extensionModel = extension?.models?.find(
 		(entry) => (entry.type ?? "chat") === (model.type ?? "chat") && entry.id === model.id,
 	);
+	const override = isModelType(model, "chat") ? config?.modelOverrides?.[model.id]?.headers : undefined;
+	if (caseInsensitive) {
+		return mergeHeaders(mergeHeaders(override, chatDefinition?.headers), extensionModel?.headers);
+	}
 	const headers = {
-		...(isModelType(model, "chat") ? config?.modelOverrides?.[model.id]?.headers : undefined),
+		...override,
 		...chatDefinition?.headers,
 		...extensionModel?.headers,
 	};
@@ -713,12 +742,15 @@ export function resolveConfiguredModelHeaders(
 	config: ModelsJsonProvider | undefined,
 	extension: ProviderConfigInput | undefined,
 	env?: Record<string, string>,
+	inheritedModel?: AnyModel,
 ): Record<string, string> | undefined {
-	return resolveHeadersOrThrow(
-		rawModelHeaders(model, config, extension),
-		`model "${model.provider}/${model.id}"`,
-		env,
-	);
+	const headers = inheritedModel
+		? mergeHeaders(
+				rawModelHeaders(inheritedModel, config, extension, true),
+				rawModelHeaders(model, config, extension, true),
+			)
+		: rawModelHeaders(model, config, extension);
+	return resolveHeadersOrThrow(headers, `model "${model.provider}/${model.id}"`, env);
 }
 
 export interface CompatibilityRequestConfig {
@@ -730,13 +762,24 @@ export function resolveCompatibilityRequestConfig(
 	model: AnyModel,
 	config: ModelsJsonProvider | undefined,
 	extension: ProviderConfigInput | undefined,
+	inheritedModel?: AnyModel,
 ): CompatibilityRequestConfig {
-	const configured = resolveHeadersOrThrow(
-		{ ...configuredHeaders(config, extension), ...rawModelHeaders(model, config, extension) },
-		`model "${model.provider}/${model.id}"`,
-	);
+	const rawHeaders = inheritedModel
+		? mergeHeaders(
+				mergeHeaders(config?.headers, extension?.headers),
+				mergeHeaders(
+					rawModelHeaders(inheritedModel, config, extension, true),
+					rawModelHeaders(model, config, extension, true),
+				),
+			)
+		: { ...configuredHeaders(config, extension), ...rawModelHeaders(model, config, extension) };
+	const configured = resolveHeadersOrThrow(rawHeaders, `model "${model.provider}/${model.id}"`);
 	return {
-		headers: model.headers || configured ? { ...model.headers, ...configured } : undefined,
+		headers: inheritedModel
+			? mergeHeaders(model.headers, configured)
+			: model.headers || configured
+				? { ...model.headers, ...configured }
+				: undefined,
 		authHeader: extension?.authHeader ?? config?.authHeader ?? false,
 	};
 }

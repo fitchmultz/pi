@@ -52,7 +52,6 @@ import {
 	type MutableModels,
 	normalizeContext,
 	type Provider,
-	type ProviderHeaders,
 	type ProviderRequestOptions,
 	type SimpleStreamOptions,
 	type StreamOptions,
@@ -70,6 +69,12 @@ import {
 import { getAgentDir } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
+import {
+	DAYBREAK_BLUE_MODEL,
+	daybreakConfigurationModel,
+	isNativeDaybreakModel,
+	withDaybreakBlue,
+} from "./daybreak-provider.ts";
 import { ModelConfig } from "./model-config.ts";
 import {
 	createModelUnavailability,
@@ -83,6 +88,7 @@ import {
 	type CompatibilityRequestConfig,
 	composeModelProvider,
 	configuredRequestAuthStatus,
+	mergeHeaders,
 	type ProviderAuthFallback,
 	type ProviderConfigInput,
 	resolveCompatibilityRequestConfig,
@@ -169,22 +175,6 @@ export class CredentialSynchronizationError extends Error {
 		this.operation = operation;
 		this.credential = credential;
 	}
-}
-
-function mergeHeaders(
-	base: ProviderHeaders | undefined,
-	override: ProviderHeaders | undefined,
-): ProviderHeaders | undefined {
-	if (!base && !override) return undefined;
-	const merged = { ...base };
-	for (const [name, value] of Object.entries(override ?? {})) {
-		const lowerName = name.toLowerCase();
-		for (const existingName of Object.keys(merged)) {
-			if (existingName.toLowerCase() === lowerName) delete merged[existingName];
-		}
-		merged[name] = value;
-	}
-	return merged;
 }
 
 /** Configured pi-ai Models collection used by coding-agent and SDK consumers. */
@@ -336,7 +326,18 @@ export class ModelRuntime implements Models {
 
 	/** Returns the provider without virtual models, or undefined when only virtual models define it. */
 	private recomposeProvider(providerId: string): Provider | undefined {
-		const provider = this.composeProvider(providerId);
+		let provider = this.composeProvider(providerId);
+		if (provider && providerId === "openai") {
+			const extension = this.extensionProviders.get(providerId);
+			const override = this.config.getProvider(providerId)?.modelOverrides?.[DAYBREAK_BLUE_MODEL];
+			const native =
+				this.defaultBuiltins.has(providerId) &&
+				this.builtins.get(providerId) === this.defaultBuiltins.get(providerId) &&
+				!this.nativeExtensionProviders.has(providerId) &&
+				!(extension?.streamSimple && extension.api === "openai-responses") &&
+				override?.hidden !== true;
+			provider = withDaybreakBlue(provider, native, override);
+		}
 		const virtualModels = [...(this.virtualModels.get(providerId)?.values() ?? [])].map((entry) => entry.model);
 		if (virtualModels.length > 0) this.models.setProvider(withVirtualModels(providerId, provider, virtualModels));
 		else if (provider) this.models.setProvider(provider);
@@ -685,11 +686,10 @@ export class ModelRuntime implements Models {
 
 	/** @internal Compatibility fallback for ModelRegistry when provider auth is unconfigured. */
 	getCompatibilityRequestConfig(model: Model<Api>): CompatibilityRequestConfig {
-		return resolveCompatibilityRequestConfig(
-			model,
-			this.config.getProvider(model.provider),
-			this.extensionProviders.get(model.provider),
-		);
+		const config = this.config.getProvider(model.provider);
+		const extension = this.extensionProviders.get(model.provider);
+		const parent = daybreakConfigurationModel(model);
+		return resolveCompatibilityRequestConfig(model, config, extension, parent === model ? undefined : parent);
 	}
 
 	isUsingOAuth(providerId: string): boolean {
@@ -715,13 +715,33 @@ export class ModelRuntime implements Models {
 		overrides: ModelRuntimeAuthOverrides = {},
 	): Promise<AuthResult | undefined> {
 		if (typeof providerOrModel === "string") return this.models.getAuth(providerOrModel, overrides);
+		const parent = daybreakConfigurationModel(providerOrModel);
+		const checkDaybreakRoute = (baseUrl?: string) => {
+			if (parent === providerOrModel) return;
+			const current = this.models.getModel("openai", DAYBREAK_BLUE_MODEL);
+			if (
+				!current ||
+				!isNativeDaybreakModel(current) ||
+				!isNativeDaybreakModel({ ...providerOrModel, baseUrl: baseUrl || providerOrModel.baseUrl })
+			) {
+				throw new Error(
+					"Daybreak Blue requires the native OpenAI Responses endpoint and an available GPT-6 Luna model.",
+				);
+			}
+		};
+		checkDaybreakRoute();
 		const resolution = await this.models.getAuth(providerOrModel, overrides);
+		checkDaybreakRoute(resolution?.auth.baseUrl);
 		if (!resolution) return undefined;
+		const config = this.config.getProvider(providerOrModel.provider);
+		const extension = this.extensionProviders.get(providerOrModel.provider);
+		const env = { ...(resolution.env ?? {}), ...(overrides.env ?? {}) };
 		const configuredHeaders = resolveConfiguredModelHeaders(
 			providerOrModel,
-			this.config.getProvider(providerOrModel.provider),
-			this.extensionProviders.get(providerOrModel.provider),
-			{ ...(resolution.env ?? {}), ...(overrides.env ?? {}) },
+			config,
+			extension,
+			env,
+			parent === providerOrModel ? undefined : parent,
 		);
 		return {
 			...resolution,
@@ -1284,6 +1304,9 @@ export class ModelRuntime implements Models {
 	registerVirtualModel(definition: VirtualModelDefinition): void {
 		const { provider: providerId, id } = definition;
 		if (!providerId.trim() || !id.trim()) throw new Error("Virtual model provider and id must not be empty.");
+		if (providerId === "openai" && id === DAYBREAK_BLUE_MODEL) {
+			throw new Error(`Virtual model ${providerId}/${id} is reserved for the native Daybreak Blue alias.`);
+		}
 		const existing = this.models.getModel(providerId, id);
 		if (existing && !isVirtualModel(existing)) {
 			throw new Error(`Virtual model ${providerId}/${id} conflicts with a physical model.`);
