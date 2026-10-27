@@ -1072,12 +1072,22 @@ export interface DocumentObserver {
 /** Why a Session ended: `close()`, or a failed Storage call, whose error it carries. */
 export type SessionEnd = { readonly reason: "closed" } | { readonly reason: "failed"; readonly error: unknown };
 
+/** Options for a host Session, Harness, or Conversation commit. */
+export type CommitOptions = {
+	/**
+	 * Check the assembled batch with `Storage.checkAdmission` when supported; omitted: commit directly. A known
+	 * refusal discards the batch and throws `StorageCapacityError` without failing the Session. The callback runs once,
+	 * without replay; use only before external effects. Errors thrown by the check or actual commit remain fatal.
+	 */
+	readonly admission?: boolean;
+};
+
 /** Owner of one mutation line, its records, and its tracked documents. */
 export interface Session extends DocumentObserver {
 	/**
 	 * Run one atomic transaction on the Session mutation line. Inside the callback read only through `tx`: `snapshot()`, `documentState()`, `watchDoc()`, `getTask()`, and the other Session and runtime reads may queue on the line the callback holds, and then never resolve.
 	 */
-	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context): Promise<T>;
+	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context, options?: CommitOptions): Promise<T>;
 	/** Seal admission, settle admitted commits, then close storage. */
 	close(context: Context): Promise<void>;
 	/**

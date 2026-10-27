@@ -520,7 +520,7 @@ await root.submit({ type: "write", entry: { kind: "app.note", data: "user opened
 
 If a run fails, queued items stay in the inbox until the next input or queued write places them, oldest first.
 
-SQLite checks the exact encoded rows before admitting an input. A known size refusal throws `StorageCapacityError`
+SQLite checks the exact encoded rows before admitting an input or write submission. A known size refusal throws `StorageCapacityError`
 without accepting a submission or changing history or the inbox; reduce the input or entry data and retry, including
 with the same `requestId`. An already queued input whose entry cannot fit when placed instead settles `unanswered`
 with reason `input_too_large`. Submit its corrected replacement with a new `requestId`. Other eligible queued inputs
@@ -753,6 +753,13 @@ await root.commit(async (tx) => {
 console.log(await harness.snapshot(Todos, root.id, context));
 ```
 
+Host-composed admission can pass `{ admission: true }` as the third argument to `session.commit()`,
+`harness.commit()` or `conversation.commit()`. When storage supports the optional check, this validates the complete
+batch, including document revisions, before committing. A confirmed capacity refusal discards the batch and throws
+`StorageCapacityError` without ending the Session. Catch it **outside** the commit and request corrected input.
+The callback runs once and is not replayed; use this only before external effects. Omitted options and backends
+without the capability commit directly. Thrown check errors and actual commit errors remain fatal.
+
 `harness.watchDoc()` and `harness.documentState()` observe one document like the view above. `HarnessOptions.conversationCreated(tx, conversation)` runs in every commit that creates or forks a conversation, including a tool's raw `tx.createConversation()`, so every conversation gets your documents; `init` in `createConversation()`, `fork()`, and `root()` writes per-call data in the same commit. An extension's tools, sections, and hooks read their own documents through `api` or `input.read`, and treat an absent one as its default ([`11-extension-state.ts`](test/examples/11-extension-state.ts)).
 
 ## Usage and Cost
@@ -833,6 +840,10 @@ The package root loads TypeBox, because the tool task validates arguments with p
 ## Errors
 
 Three rules decide what an error does:
+
+Confirmed capacity refusals from admission checks are not storage exceptions: the Session throws
+`StorageCapacityError` without committing or closing. A backend that **throws** that class, like any other check or
+commit error, still fails the Session.
 
 1. **A storage error ends the Harness.** The call that hit it rejects with the error. Everything after it, and every pending wait, rejects with `SessionFailed` (its `cause` is that error); watches and event streams end with `session_failed`; running tasks get their abort signal; `onReport` gets the error once. The Harness then closes itself. Nothing is retried; a custom storage retries its own transient failures. Reopen to recover: commits are atomic, so the store is consistent, and resubmitting with the same `requestId` finds a submission that was already admitted.
 2. **An invalid read fails only that call:** a storage read throws `StorageRequestError` for a bad cursor, an unknown conversation, or history a document does not keep. A read you cancelled fails only itself too. The exemption covers reads only: any error from `commit()` or `mintId()`, `StorageRequestError` included, ends the Harness as in rule 1.

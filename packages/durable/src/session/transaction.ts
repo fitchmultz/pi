@@ -135,7 +135,7 @@ export type TransactionScope = {
 	readonly conversationId?: ConversationId;
 	/** Task whose runtime commit this is; stamped as `byTaskId` on appended entries. */
 	readonly taskId?: TaskId;
-	/** Validate an input-only admission batch before committing; never use for post-effect commits. */
+	/** Validate the assembled admission batch before committing; never use for post-effect commits. */
 	readonly admission?: boolean;
 };
 

@@ -458,6 +458,9 @@ async function placeSummary(
 							{ type: "write", requestId: `compaction:${runtime.taskId}`, entry },
 							runtime.now(),
 							runtime.settings,
+							undefined,
+							// The summary and its already-incurred usage must commit together, not fail admission.
+							false,
 						)
 					).id,
 				}

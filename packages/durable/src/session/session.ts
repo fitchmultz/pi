@@ -14,6 +14,7 @@ import { idFromNumber } from "../ids.ts";
 import { hostTimers, type Timers } from "../timers.ts";
 import type {
 	CommitChange,
+	CommitOptions,
 	CommitPublication,
 	ConversationDocFamilyToken,
 	ConversationDocToken,
@@ -210,8 +211,8 @@ export class SessionImpl implements Session {
 		return this.#storage;
 	}
 
-	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context): Promise<T> {
-		return this.commitWith(change, context);
+	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context, options?: CommitOptions): Promise<T> {
+		return this.commitWith(change, context, { admission: options?.admission });
 	}
 
 	/**

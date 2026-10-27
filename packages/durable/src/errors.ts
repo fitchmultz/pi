@@ -33,10 +33,10 @@ export class StorageRequestError extends Error {
 	}
 }
 
-/** An input failed a no-effect storage capacity check before admission or entry staging. */
+/** A commit or entry failed a no-effect storage capacity check before commit or entry staging. */
 export class StorageCapacityError extends Error {
 	constructor() {
-		super("Input exceeds storage capacity; reduce the input or entry data and submit again");
+		super("Content exceeds storage capacity; reduce the input, entry or document data and try again");
 		this.name = "StorageCapacityError";
 	}
 }

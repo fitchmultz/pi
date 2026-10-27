@@ -2,20 +2,31 @@ import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
-import { createRegistry, Harness } from "@earendil-works/pi-durable";
+import { createRegistry, Harness, type SubmissionDraft } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { expect, it } from "vitest";
 
 const context = BACKGROUND_CONTEXT;
 
-for (const scenario of ["idle", "busy", "entry data", "boundary", "queue total"] as const) {
-	const busy = scenario === "busy" || scenario === "boundary" || scenario === "queue total";
+for (const scenario of [
+	"idle",
+	"busy",
+	"entry data",
+	"boundary",
+	"queue total",
+	"display write",
+	"idle write",
+	"busy write",
+] as const) {
+	const write = scenario.endsWith("write");
+	const busy =
+		scenario === "busy" || scenario === "boundary" || scenario === "queue total" || scenario === "busy write";
 	const name =
 		scenario === "boundary"
 			? "settles an unstoreable queued input while preserving the answer and advancing valid siblings"
 			: scenario === "queue total"
 				? "admits individually fitting inbox deltas whose combined content exceeds one SQLite row"
-				: `refuses oversized ${scenario} input without admitting it or ending the Session`;
+				: `refuses oversized ${scenario} submission without admitting it or ending the Session`;
 	it(name, async () => {
 		await runInDurableObject(env.SESSIONS.get(env.SESSIONS.newUniqueId()), async (_instance, state) => {
 			// Exercise the pinned workerd row boundary, not a Native byte limit; verify the raw value fits below.
@@ -91,12 +102,20 @@ for (const scenario of ["idle", "busy", "entry data", "boundary", "queue total"]
 					).toEqual(["last", "next", "first"]);
 					return;
 				}
+				const draft: SubmissionDraft = write
+					? {
+							type: "write",
+							entry: {
+								kind: "test.write",
+								data: { body: payload },
+								...(scenario === "display write" ? {} : { head: "self" }),
+							},
+						}
+					: { type: "input", ...input };
 				const view = await root.viewState(context);
 				try {
 					const before = view.value;
-					await expect(
-						root.submit({ type: "input", ...input, requestId: "correctable" }, context),
-					).rejects.toMatchObject({
+					await expect(root.submit({ ...draft, requestId: "correctable" }, context)).rejects.toMatchObject({
 						name: "StorageCapacityError",
 					});
 					expect(view.value).toEqual(before);
@@ -105,12 +124,12 @@ for (const scenario of ["idle", "busy", "entry data", "boundary", "queue total"]
 					).toBeUndefined();
 					release.resolve();
 					if (first !== undefined) expect((await first.wait(context)).status).toBe("done");
-					const next = await root.submit(
-						{ type: "input", content: "corrected", requestId: "correctable" },
-						context,
-					);
+					const corrected: SubmissionDraft = write
+						? { type: "write", entry: { kind: "test.write", head: "self", data: { body: "corrected" } } }
+						: { type: "input", content: "corrected" };
+					const next = await root.submit({ ...corrected, requestId: "correctable" }, context);
 					expect((await next.wait(context)).status).toBe("done");
-					expect(faux.state.callCount).toBe(busy ? 2 : 1);
+					expect(faux.state.callCount).toBe((busy ? 1 : 0) + (write ? 0 : 1));
 				} finally {
 					view.dispose();
 				}

@@ -20,6 +20,7 @@ import { contained, SessionImpl } from "../session/session.ts";
 import type { Transaction } from "../session/transaction.ts";
 import { hostTimers } from "../timers.ts";
 import type {
+	CommitOptions,
 	ConversationId,
 	ConversationOwnership,
 	ConversationRecord,
@@ -138,8 +139,11 @@ class ConversationImpl<Tool extends ToolRegistration> implements Conversation {
 		await this.#host.submissions.submit(this.id, { type: "write", entry }, context);
 	}
 
-	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context): Promise<T> {
-		return this.#host.harness.commitWith(change, context, { conversationId: this.id });
+	commit<T>(change: (tx: Tx) => T | Promise<T>, context: Context, options?: CommitOptions): Promise<T> {
+		return this.#host.harness.commitWith(change, context, {
+			conversationId: this.id,
+			admission: options?.admission,
+		});
 	}
 
 	context(context: Context, options?: { readonly at?: EntryId }): Promise<ContextView> {

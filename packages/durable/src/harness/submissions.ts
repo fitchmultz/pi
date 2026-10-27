@@ -88,7 +88,7 @@ export class Submissions {
 					const { id, status } = await this.#session.commitWith(
 						(tx) => admitSubmission(tx, conversationId, draft, this.#now(), this.#queueModes(), span),
 						withTelemetry(span, context),
-						{ admission: draft.type === "input" },
+						{ admission: true },
 					);
 					span.setAttributes({ "submission.id": id, result: status });
 					return new SubmissionHandle(id, this);
@@ -197,7 +197,7 @@ function checkInputEntry(entry: InputEntry): void {
  * `pi.inbox`, or rejects `whenBusy: "reject"` input with `ConversationBusy`. An idle conversation with queued items
  * queues it behind them and runs a final boundary. Otherwise idle input places its entry (`pi.user`, or the input's
  * own) and starts a run, and an idle write appends its entry and settles `done`, or `stale` when its head reaches
- * before the active range.
+ * before the active range. `entryAdmission` is disabled for post-effect writes that must commit with their usage.
  */
 export async function admitSubmission(
 	tx: Tx,
@@ -206,6 +206,7 @@ export async function admitSubmission(
 	now: number,
 	queueModes: QueueModes,
 	span?: TelemetrySpan,
+	entryAdmission = true,
 ): Promise<Admission> {
 	if (draft.type === "input" && draft.entry !== undefined) checkInputEntry(draft.entry);
 	if (draft.requestId !== undefined) {
@@ -223,7 +224,7 @@ export async function admitSubmission(
 		isDisplayOnly(draft.entry) &&
 		!hasQueuedReset((await tx.doc(InboxDoc, conversationId)).items)
 	) {
-		const entry = await tx.appendEntry(conversationId, draft.entry);
+		const entry = await tx.appendEntry(conversationId, draft.entry, { admission: entryAdmission });
 		const write = { ...fields, type: "write", status: "done", entry: entry.id } as const;
 		return { id: (await tx.createSubmission(write)).id, status: "done" };
 	}
@@ -272,11 +273,11 @@ export async function admitSubmission(
 				status: "done",
 			};
 		}
-		const entry = await tx.appendEntry(conversationId, draft.entry);
+		const entry = await tx.appendEntry(conversationId, draft.entry, { admission: entryAdmission });
 		const write = { ...fields, type: "write", status: "done", entry: entry.id } as const;
 		return { id: (await tx.createSubmission(write)).id, status: "done" };
 	}
-	const entry = await appendInput(tx, conversationId, draft.content, draft.entry, now, true);
+	const entry = await appendInput(tx, conversationId, draft.content, draft.entry, now, entryAdmission);
 	const input = { ...fields, type: "input", status: "placed", entry: entry.id } as const;
 	const { id } = await tx.createSubmission(input);
 	await startRun(tx, conversationId, live, [id]);
