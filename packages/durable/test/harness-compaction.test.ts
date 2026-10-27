@@ -12,6 +12,7 @@ import {
 	Type,
 	type UserMessage,
 } from "@earendil-works/pi-ai";
+import { estimateMessageTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
 	type AgentEvent,
 	type CompactionPolicy,
@@ -369,7 +370,7 @@ describe("range selection", () => {
 });
 
 describe("serialization", () => {
-	it("writes a transcript, truncates tool results, and omits system messages and thinking", () => {
+	it("writes a transcript and omits system messages and thinking", () => {
 		const call = fauxToolCall("read", { path: "a.ts" }, { id: "c" });
 		const messages: Message[] = [
 			{ role: "system", content: "", sections: { s: "hidden" }, timestamp: 0 },
@@ -377,7 +378,7 @@ describe("serialization", () => {
 			{
 				...fauxAssistantMessage([{ type: "thinking", thinking: "hmm" }, { type: "text", text: "sure" }, call]),
 			},
-			toolResult("c", "y".repeat(2500)),
+			toolResult("c", "file contents"),
 		];
 		const serialized = serializeConversation(messages);
 		expect(serialized).not.toContain("hidden");
@@ -386,13 +387,56 @@ describe("serialization", () => {
 		expect(serialized).not.toContain("[Assistant thinking]");
 		expect(serialized).toContain("[Assistant]: sure");
 		expect(serialized).toContain('[Assistant tool calls]: read(path="a.ts")');
-		expect(serialized).toContain(`[Tool result]: ${"y".repeat(2000)}\n\n[... 500 more characters truncated]`);
+		expect(serialized).toContain("[Tool result]: file contents");
 	});
 });
 
 // ─── Manual compaction ────────────────────────────────────────────────────
 
 describe("manual compaction", () => {
+	it("keeps both output ends and recovery diagnostics in the summary source without changing raw history", async () => {
+		const chat = await open();
+		const beginning = "Scan started for workspace alpha.";
+		const ending = "Scan complete. Receipt: scan-7c92.";
+		const output = `${beginning}\n${"x".repeat(8000)}\n${ending}`;
+		const reference = "Full output: /tmp/scan-output.log";
+		addTool(
+			chat.setup.registry,
+			defineTool({
+				name: "scan",
+				description: "Scan the workspace",
+				parameters: Type.Object({}),
+				execute: async (_args, api) => {
+					api.diagnostic({ severity: "info", code: "full_output", message: reference });
+					return { output: [{ type: "text", text: output }] };
+				},
+			}),
+		);
+		await chat.root.configure({ tools: toolsNamed(chat.setup, "scan") }, context);
+		chat.faux.agent.push(fauxAssistantMessage([fauxToolCall("scan", {})], { stopReason: "toolUse" }));
+		chat.faux.agent.push(answer("Scan finished."));
+		const input = await chat.root.submit({ type: "input", content: "Scan the workspace." }, context);
+		expect((await input.wait(context)).status).toBe("done");
+		await turn(chat, text("recent", 100), text("answer", 100));
+		const before = await allEntries(chat.root);
+		const stored = before.flatMap((record) => record.model ?? []).find((message) => message.role === "toolResult")!;
+		const storedText = stored.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+		expect(storedText).toContain(output);
+		expect(storedText).toContain(reference);
+
+		chat.faux.summaries.push(summary());
+		expect((await result(chat, await chat.root.compact(undefined, context))).status).toBe("completed");
+		const source = userText(chat.faux.summaryRequests[0]?.messages[1]);
+		expect(source).toContain(beginning);
+		expect(source).toContain(ending);
+		expect(source).toContain(reference);
+		expect(source).toContain(
+			`[Tool result]: ${storedText.slice(0, 1000)}\n\n[... ${storedText.length - 2000} more characters truncated]\n\n${storedText.slice(-1000)}`,
+		);
+		expect((await allEntries(chat.root)).slice(0, before.length)).toEqual(before);
+		await chat.harness.close(context);
+	});
+
 	it("places the summary at once when idle and keeps raw history", async () => {
 		const chat = await open();
 		await history(chat);
@@ -1393,8 +1437,33 @@ describe("overflow compaction", () => {
 				);
 				return round.calls;
 			},
-			failure(OVERFLOW),
-			failure(OVERFLOW),
+			async () => {
+				const view = await chat.root.context(context);
+				const firstAssistant = view.contributions.findIndex((messages) => messages[0]?.role === "assistant");
+				expect(firstAssistant).toBeGreaterThan(0);
+				// Retain the complete round and steer, but allow the earlier input to be summarized.
+				chat.setup.settings.compaction = {
+					...ENABLED,
+					keepRecentTokens:
+						view.contributions
+							.slice(firstAssistant)
+							.flat()
+							.reduce((tokens, message) => tokens + estimateMessageTokens(message), 0) + 1,
+				};
+				return failure(OVERFLOW);
+			},
+			async () => {
+				const retained = await chat.root.context(context);
+				const kept = retained.entries.find((entry) => entry.id === retained.head?.head);
+				expect(kept?.model?.[0]).toMatchObject({
+					role: "assistant",
+					stopReason: "toolUse",
+					content: round.calls.content,
+				});
+				expect(retained.messages.filter((message) => message.role === "toolResult")).toHaveLength(2);
+				expect(userText(retained.messages.at(-1))).toBe("Keep this instruction verbatim");
+				return failure(OVERFLOW);
+			},
 		);
 		chat.faux.summaries.push(summary("FIRST"));
 		const input = await chat.root.submit({ type: "input", content: "Compare the files" }, context);
