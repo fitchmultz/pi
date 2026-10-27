@@ -119,8 +119,28 @@ const ProviderConfigSchema = Type.Object({
 	modelOverrides: Type.Optional(Type.Record(Type.String(), ModelOverrideSchema)),
 });
 
+const ContextWindowCapSchema = Type.Integer({
+	minimum: 1,
+	maximum: Number.MAX_SAFE_INTEGER,
+	description: "Maximum operational context window in tokens.",
+});
+
+const ContextWindowCapsSchema = Type.Object(
+	{
+		default: Type.Optional(ContextWindowCapSchema),
+		providers: Type.Optional(
+			Type.Record(Type.String({ pattern: "^[\\s\\S]+$" }), ContextWindowCapSchema, {
+				description: "Per-provider ceilings, replacing the default for those provider IDs.",
+				additionalProperties: false,
+			}),
+		),
+	},
+	{ additionalProperties: false },
+);
+
 const ModelsConfigProperties = {
-	providers: Type.Record(Type.String(), ProviderConfigSchema),
+	providers: Type.Optional(Type.Record(Type.String(), ProviderConfigSchema)),
+	contextWindowCaps: Type.Optional(ContextWindowCapsSchema),
 };
 
 export const ModelsConfigSchema = Type.Object({
@@ -133,6 +153,7 @@ export const ModelsJsonSchemas = {
 	provider: ProviderConfigSchema,
 	model: ModelDefinitionSchema,
 	modelOverride: ModelOverrideSchema,
+	contextWindowCaps: ContextWindowCapsSchema,
 };
 
 const validateModelsConfig = Compile(ModelsConfigSchema);
@@ -168,11 +189,17 @@ function deepFreeze<T>(value: T): T {
 /** One immutable load of models.json. */
 export class ModelConfig {
 	private readonly providers: ReadonlyMap<string, ModelsJsonProvider>;
+	private readonly contextWindowCaps: Static<typeof ContextWindowCapsSchema> | undefined;
 	private readonly error: string | undefined;
 
-	private constructor(providers: ReadonlyMap<string, ModelsJsonProvider>, error?: string) {
+	private constructor(
+		providers: ReadonlyMap<string, ModelsJsonProvider>,
+		error?: string,
+		contextWindowCaps?: Static<typeof ContextWindowCapsSchema>,
+	) {
 		this.providers = providers;
 		this.error = error;
+		this.contextWindowCaps = contextWindowCaps;
 	}
 
 	static async load(modelsJsonPath: string | undefined): Promise<ModelConfig> {
@@ -209,10 +236,10 @@ export class ModelConfig {
 		}
 
 		const providers = new Map<string, ModelsJsonProvider>();
-		for (const [providerId, provider] of Object.entries(parsed.providers)) {
+		for (const [providerId, provider] of Object.entries(parsed.providers ?? {})) {
 			providers.set(providerId, deepFreeze(provider));
 		}
-		return new ModelConfig(providers);
+		return new ModelConfig(providers, undefined, parsed.contextWindowCaps && deepFreeze(parsed.contextWindowCaps));
 	}
 
 	getProvider(providerId: string): ModelsJsonProvider | undefined {
@@ -221,6 +248,17 @@ export class ModelConfig {
 
 	getProviderIds(): readonly string[] {
 		return [...this.providers.keys()];
+	}
+
+	hasContextWindowCaps(): boolean {
+		return this.contextWindowCaps !== undefined;
+	}
+
+	getContextWindowCap(providerId: string): number | undefined {
+		const providers = this.contextWindowCaps?.providers;
+		return providers && Object.hasOwn(providers, providerId)
+			? providers[providerId]
+			: this.contextWindowCaps?.default;
 	}
 
 	getError(): string | undefined {

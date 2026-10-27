@@ -568,6 +568,7 @@ export function composeModelProvider(
 	modelConfig: ModelConfig,
 	extension: ProviderConfigInput | undefined,
 	fallback?: ProviderAuthFallback,
+	onModelOverride?: (model: Model<Api>, overridden: Model<Api>) => void,
 ): Provider {
 	const config = modelConfig.getProvider(providerId);
 	let extensionOAuthCredential: OAuthCredentials | undefined;
@@ -596,7 +597,10 @@ export function composeModelProvider(
 			if (!isModelType(model, "chat")) return [model];
 			const override = config?.modelOverrides?.[model.id];
 			if (!override) return [model];
-			return override.hidden ? [] : [applyModelOverride(model, override)];
+			if (override.hidden) return [];
+			const overridden = applyModelOverride(model, override);
+			onModelOverride?.(model, overridden);
+			return [overridden];
 		});
 	};
 	// Validate eagerly so registration/reload reports structural errors immediately.

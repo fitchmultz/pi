@@ -58,9 +58,14 @@ const referenceArtifacts: readonly ReferenceArtifact[] = [
 		title: "Models Configuration",
 		intro: [
 			"This reference lists the fields of `models.json`. See [Configure a compatible endpoint](models.md#configure-a-compatible-endpoint) for examples and [Configuration](configuration.md#agent-directory) for the file location.",
-			'Add `"$schema": "https://pi.dev/schemas/models.schema.json"` to `models.json` for editor validation and completion.',
+			'Add `"$schema": "https://pi.dev/schemas/models.schema.json"` to `models.json` for editor validation and completion of upstream fields. For fork-only fields, use the bundled `schemas/models.schema.json`.',
 		].join("\n\n"),
 		sections: [
+			{
+				heading: "Context window ceilings",
+				intro: "Optional `contextWindowCaps` sets operational ceilings for chat models. See [Limit operational context](models.md#limit-operational-context).",
+				schema: ModelsJsonSchemas.contextWindowCaps,
+			},
 			{
 				heading: "Providers",
 				intro: "Each key under `providers` is a provider ID. A built-in provider ID changes that provider. Any other ID adds a provider, which needs `baseUrl` and an `api` at provider or model level.",

@@ -4,7 +4,16 @@
 
 This reference lists the fields of `models.json`. See [Configure a compatible endpoint](models.md#configure-a-compatible-endpoint) for examples and [Configuration](configuration.md#agent-directory) for the file location.
 
-Add `"$schema": "https://pi.dev/schemas/models.schema.json"` to `models.json` for editor validation and completion.
+Add `"$schema": "https://pi.dev/schemas/models.schema.json"` to `models.json` for editor validation and completion of upstream fields. For fork-only fields, use the bundled `schemas/models.schema.json`.
+
+## Context window ceilings
+
+Optional `contextWindowCaps` sets operational ceilings for chat models. See [Limit operational context](models.md#limit-operational-context).
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `default` | integer |  | Maximum operational context window in tokens. |
+| `providers` | object |  | Per-provider ceilings, replacing the default for those provider IDs. |
 
 ## Providers
 

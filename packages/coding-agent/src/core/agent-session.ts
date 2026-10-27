@@ -1366,6 +1366,7 @@ export class AgentSession {
 	}
 
 	private async _compactBeforeNextAssistantResponse(context: AgentContext): Promise<AgentContext> {
+		this._syncContextWindowCap();
 		const projection = this.sessionManager.buildSessionProjection();
 		// A virtual selection is checked in prepareRequest, against the model the request is routed to.
 		const model = this.model;
@@ -1379,6 +1380,7 @@ export class AgentSession {
 	private _installAgentRequestProjection(): void {
 		const previousPrepareRequest = this.agent.prepareRequest;
 		this.agent.prepareRequest = async (request, signal) => {
+			this._syncContextWindowCap();
 			const failed = this._failedResponse;
 			this._failedResponse = undefined;
 			const prepare = async () => {
@@ -1393,7 +1395,7 @@ export class AgentSession {
 					{
 						...request,
 						context: canonicalContext,
-						model: this.agent.state.model,
+						model: this._modelRuntime.applyContextWindowCap(this.agent.state.model),
 						thinkingLevel: this.agent.state.thinkingLevel,
 					},
 					signal,
@@ -1401,7 +1403,7 @@ export class AgentSession {
 				return { previous, context: previous?.context ?? canonicalContext, projection };
 			};
 			let { previous, context, projection } = await prepare();
-			const model = previous?.model ?? this.agent.state.model;
+			const model = this._modelRuntime.applyContextWindowCap(previous?.model ?? this.agent.state.model);
 			const thinkingLevel = previous?.thinkingLevel ?? this.agent.state.thinkingLevel;
 			if (!isVirtualModel(model)) return { ...previous, context, model, thinkingLevel };
 
@@ -1513,7 +1515,7 @@ export class AgentSession {
 				messages: updateMessage
 					? [...(previousSnapshot?.messages ?? []), updateMessage]
 					: previousSnapshot?.messages,
-				model: this.agent.state.model,
+				model: this._modelRuntime.applyContextWindowCap(this.agent.state.model),
 				thinkingLevel: this.agent.state.thinkingLevel,
 			};
 		};
@@ -2078,7 +2080,15 @@ export class AgentSession {
 
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model<any> | undefined {
-		return this.agent.state.model;
+		const model = this.agent.state.model;
+		return model && this._modelRuntime.applyContextWindowCap(model);
+	}
+
+	private _syncContextWindowCap(): void {
+		const current = this.agent.state.model;
+		if (!current) return;
+		const effective = this._modelRuntime.applyContextWindowCap(current);
+		if (effective.contextWindow !== current.contextWindow) this.agent.state.model = effective;
 	}
 
 	/** Current thinking level */
@@ -2597,6 +2607,7 @@ export class AgentSession {
 	 * system patch first when the prompt changed.
 	 */
 	private async _prepareRun(trigger: BeforeAgentStartTrigger): Promise<AgentMessage[]> {
+		this._syncContextWindowCap();
 		// Check if we need to compact before sending (catches aborted responses).
 		// The starting message is sent below, so do not call agent.continue() here.
 		const lastAssistant = this._findLastAssistantMessage();
@@ -3553,6 +3564,7 @@ export class AgentSession {
 
 	private async _compact(customInstructions?: string): Promise<CompactionResult> {
 		await this.abort();
+		this._syncContextWindowCap();
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
 		let fromExtension = false;

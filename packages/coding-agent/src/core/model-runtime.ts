@@ -30,6 +30,7 @@ import {
 	type ImageModel,
 	type ImagesContext,
 	type ImagesOptions,
+	isModelType,
 	type LoginOptions,
 	lazyStream,
 	type Message,
@@ -200,6 +201,9 @@ export class ModelRuntime implements Models {
 	private readonly nativeExtensionProviders = new Map<string, Provider>();
 	private readonly extensionProviders = new Map<string, ProviderConfigInput>();
 	private readonly authFallbacks = new Map<string, { fallback: ProviderAuthFallback }>();
+	/** Source windows before models.json overrides, and unmodified models behind capped views. */
+	private readonly overriddenWindows = new WeakMap<Model<Api>, number>();
+	private readonly uncappedModels = new WeakMap<Model<Api>, Model<Api>>();
 	/** Virtual models by provider id, then model id. */
 	private readonly virtualModels = new Map<string, Map<string, RegisteredVirtualModel>>();
 	private readonly compositionErrors = new Map<string, string>();
@@ -355,7 +359,16 @@ export class ModelRuntime implements Models {
 			return base;
 		}
 		try {
-			const provider = composeModelProvider(providerId, base, this.config, extension, fallback);
+			const provider = composeModelProvider(
+				providerId,
+				base,
+				this.config,
+				extension,
+				fallback,
+				(model, overridden) => {
+					this.overriddenWindows.set(overridden, model.contextWindow);
+				},
+			);
 			this.compositionErrors.delete(providerId);
 			return provider;
 		} catch (error) {
@@ -511,20 +524,135 @@ export class ModelRuntime implements Models {
 		}
 	}
 
+	/**
+	 * Apply the policy after credential filtering, without changing provider catalogs or their
+	 * persisted data. Each provider's original catalog is read once for a list.
+	 */
+	private capModels<TModel extends AnyModel>(models: readonly TModel[]): readonly TModel[] {
+		if (!this.config.hasContextWindowCaps()) return models;
+		const sources = new Map<string, Map<string, number>>();
+		return models.map((entry) => {
+			if (!isModelType(entry, "chat")) return entry;
+			const model = this.uncappedModels.get(entry) ?? entry;
+			const cap = this.config.getContextWindowCap(model.provider);
+			if (cap === undefined || !Number.isFinite(model.contextWindow) || model.contextWindow <= 0) {
+				return model as TModel;
+			}
+			let sourceWindows = sources.get(model.provider);
+			if (!sourceWindows) {
+				sourceWindows = new Map();
+				const base = this.nativeExtensionProviders.get(model.provider) ?? this.builtins.get(model.provider);
+				try {
+					for (const source of base?.getModels() ?? []) sourceWindows.set(source.id, source.contextWindow);
+					if (this.config.getProvider(model.provider)?.modelOverrides) {
+						for (const source of this.models.getProvider(model.provider)?.getModels() ?? []) {
+							const beforeOverride = this.overriddenWindows.get(source);
+							if (beforeOverride !== undefined && Number.isFinite(beforeOverride) && beforeOverride >= 0) {
+								const baseWindow = sourceWindows.get(source.id);
+								sourceWindows.set(
+									source.id,
+									baseWindow !== undefined && Number.isFinite(baseWindow) && baseWindow >= 0
+										? Math.min(baseWindow, beforeOverride)
+										: beforeOverride,
+								);
+							}
+						}
+					}
+				} catch {
+					// A throwing provider is treated as an empty catalog by pi-ai.
+				}
+				sources.set(model.provider, sourceWindows);
+			}
+			const virtual = isVirtualModel(model);
+			const providerConfig = this.config.getProvider(model.provider);
+			const configured = virtual ? undefined : providerConfig?.models?.find((item) => item.id === model.id);
+			const reportedWindow = virtual ? undefined : sourceWindows.get(model.id);
+			if (reportedWindow === 0 || this.overriddenWindows.get(model) === 0) {
+				const effective = { ...model, contextWindow: 0 };
+				this.uncappedModels.set(effective, model);
+				return effective as TModel;
+			}
+			const limits = [
+				cap,
+				model.contextWindow,
+				this.overriddenWindows.get(model),
+				reportedWindow,
+				configured?.contextWindow,
+				virtual ? providerConfig?.modelOverrides?.[model.id]?.contextWindow : undefined,
+			].filter((value): value is number => value !== undefined && Number.isFinite(value) && value > 0);
+			const contextWindow = Math.min(...limits);
+			const effective = contextWindow === model.contextWindow ? model : { ...model, contextWindow };
+			this.uncappedModels.set(effective, model);
+			return effective as TModel;
+		});
+	}
+
+	/** Apply current limits to a retained selection or request without replacing its other metadata. */
+	applyContextWindowCap<TApi extends Api>(model: Model<TApi>): Model<TApi> {
+		const source = (this.uncappedModels.get(model) ?? model) as Model<TApi>;
+		if (this.config.getContextWindowCap(source.provider) === undefined) return source;
+		const effective = this.capModels([source])[0];
+		if (source.contextWindow <= 0) return effective;
+		const current = this.models.getModel(source.provider, source.id);
+		if (!current || !Number.isFinite(current.contextWindow) || current.contextWindow < 0) return effective;
+		const currentWindow = this.capModels([current])[0].contextWindow;
+		const contextWindow = Math.min(effective.contextWindow, currentWindow);
+		if (contextWindow === effective.contextWindow) return effective;
+		const result = { ...source, contextWindow };
+		this.uncappedModels.set(result, source);
+		return result;
+	}
+
 	getProviders(): readonly Provider[] {
-		return this.models.getProviders();
+		if (!this.config.hasContextWindowCaps()) return this.models.getProviders();
+		return this.models.getProviders().map((provider) => this.getProvider(provider.id) ?? provider);
 	}
 
 	getProvider(providerId: string): Provider | undefined {
-		return this.models.getProvider(providerId);
+		const provider = this.models.getProvider(providerId);
+		if (!provider || this.config.getContextWindowCap(providerId) === undefined) return provider;
+		return {
+			...provider,
+			getModels: () => this.capModels(provider.getModels()),
+			getAllModels: () => this.capModels(provider.getAllModels?.() ?? provider.getModels()),
+			refreshModels: provider.refreshModels?.bind(provider),
+			filterModels: provider.filterModels
+				? (models, credential) =>
+						this.capModels(
+							provider.filterModels!(
+								models.map((model) => this.uncappedModels.get(model) ?? model),
+								credential,
+							),
+						)
+				: undefined,
+			filterAllModels: provider.filterAllModels
+				? (models, credential) =>
+						this.capModels(
+							provider.filterAllModels!(
+								models.map((model) =>
+									isModelType(model, "chat") ? (this.uncappedModels.get(model) ?? model) : model,
+								),
+								credential,
+							),
+						)
+				: undefined,
+			stream: (model, context, options) => provider.stream(this.applyContextWindowCap(model), context, options),
+			streamSimple: (model, context, options) =>
+				provider.streamSimple(this.applyContextWindowCap(model), context, options),
+			fetchDeferred: provider.fetchDeferred?.bind(provider),
+			cancelDeferred: provider.cancelDeferred?.bind(provider),
+			generateImages: provider.generateImages?.bind(provider),
+			classify: provider.classify?.bind(provider),
+		};
 	}
 
 	getModels(providerId?: string): readonly Model<Api>[] {
-		return this.models.getModels(providerId);
+		return this.capModels(this.models.getModels(providerId));
 	}
 
 	getModel(providerId: string, modelId: string): Model<Api> | undefined {
-		return this.models.getModel(providerId, modelId);
+		const model = this.models.getModel(providerId, modelId);
+		return model && this.capModels([model])[0];
 	}
 
 	/**
@@ -606,7 +734,7 @@ export class ModelRuntime implements Models {
 	}
 
 	getModelsOfType<TType extends ModelType>(type: TType, providerId?: string): readonly ModelTypeMap[TType][] {
-		return this.models.getModelsOfType(type, providerId);
+		return this.capModels(this.models.getModelsOfType(type, providerId));
 	}
 
 	getModelOfType<TType extends ModelType>(
@@ -614,23 +742,24 @@ export class ModelRuntime implements Models {
 		providerId: string,
 		modelId: string,
 	): ModelTypeMap[TType] | undefined {
-		return this.models.getModelOfType(type, providerId, modelId);
+		const model = this.models.getModelOfType(type, providerId, modelId);
+		return model && this.capModels([model])[0];
 	}
 
 	getAllModels(providerId?: string): readonly AnyModel[] {
-		return this.models.getAllModels(providerId);
+		return this.capModels(this.models.getAllModels(providerId));
 	}
 
-	getAvailableOfType<TType extends ModelType>(
+	async getAvailableOfType<TType extends ModelType>(
 		type: TType,
 		providerId?: string,
 		options?: AuthOperationOptions,
 	): Promise<readonly ModelTypeMap[TType][]> {
-		return this.models.getAvailableOfType(type, providerId, options);
+		return this.capModels(await this.models.getAvailableOfType(type, providerId, options));
 	}
 
-	getAllAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly AnyModel[]> {
-		return this.models.getAllAvailable(providerId, options);
+	async getAllAvailable(providerId?: string, options?: AuthOperationOptions): Promise<readonly AnyModel[]> {
+		return this.capModels(await this.models.getAllAvailable(providerId, options));
 	}
 
 	async checkAuth(providerId: string, options?: AuthOperationOptions): Promise<AuthCheck | undefined> {
@@ -643,7 +772,7 @@ export class ModelRuntime implements Models {
 			try {
 				const available = await this.models.getAvailable(providerId, options);
 				if (errorSeq === this.availabilityErrorSeq) this.availabilityError = undefined;
-				return available;
+				return this.capModels(available);
 			} catch (error) {
 				if (errorSeq === this.availabilityErrorSeq && !options?.signal?.aborted) {
 					this.availabilityError = error instanceof Error ? error.message : String(error);
@@ -652,11 +781,11 @@ export class ModelRuntime implements Models {
 			}
 		}
 		await this.queueAvailabilityRefresh(options?.signal);
-		return this.snapshot.available;
+		return this.capModels(this.snapshot.available);
 	}
 
 	getAvailableSnapshot(): readonly Model<Api>[] {
-		return this.snapshot.available;
+		return this.capModels(this.snapshot.available);
 	}
 
 	getError(): string | undefined {
@@ -824,9 +953,10 @@ export class ModelRuntime implements Models {
 		model: TModel;
 		options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 	}> {
-		const provider = this.models.getProvider(model.provider);
+		const effective = (isModelType(model, "chat") ? this.applyContextWindowCap(model) : model) as TModel;
+		const provider = this.models.getProvider(effective.provider);
 		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
-		const resolution = await this.getAuth(model, {
+		const resolution = await this.getAuth(effective, {
 			apiKey: options?.apiKey,
 			env: options?.env,
 			signal: options?.signal,
@@ -835,7 +965,9 @@ export class ModelRuntime implements Models {
 
 		const { transformHeaders, ...rawProviderOptions } = options ?? {};
 		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
-		const requestModel: TModel = resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model;
+		const requestModel: TModel = resolution.auth.baseUrl
+			? { ...effective, baseUrl: resolution.auth.baseUrl }
+			: effective;
 		const sessionId =
 			"sessionId" in providerOptions && typeof providerOptions.sessionId === "string"
 				? providerOptions.sessionId
@@ -1355,7 +1487,7 @@ export class ModelRuntime implements Models {
 
 	/** A catalog chat model that is not virtual. */
 	getPhysicalModel(providerId: string, modelId: string): Model<Api> | undefined {
-		const model = this.models.getModel(providerId, modelId);
+		const model = this.getModel(providerId, modelId);
 		return model && !isVirtualModel(model) ? model : undefined;
 	}
 }

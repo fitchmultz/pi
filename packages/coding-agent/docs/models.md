@@ -104,6 +104,32 @@ To route a built-in provider through a proxy, set only its `baseUrl`. Its models
 
 [Models Configuration](models-configuration.md) lists every field.
 
+### Limit operational context
+
+The fork supports an optional `contextWindowCaps` policy in `models.json`. For example:
+
+```json
+{
+  "contextWindowCaps": {
+    "default": 335000,
+    "providers": {
+      "ds4": 262144,
+      "local-abliterated": 262144
+    }
+  }
+}
+```
+
+Each value must be a positive safe integer. `default` applies to chat models unless their exact provider ID has a value in `providers`; a provider value replaces the default. Either field may be omitted. Without this policy, existing model overrides behave as before.
+
+The effective window is the smallest of the ceiling, the provider's reported window, and any smaller configured model definition or override. The policy never increases a model's reported capacity: a 128,000-token model stays at 128,000 even if an existing `modelOverrides` entry raises it, and a provider-reported unknown window stays unknown. For a custom `models` entry without a stated `contextWindow`, Pi's existing 128,000 default remains in effect. Set a larger value only if you know the endpoint supports it. The policy also applies to models discovered later by providers and extensions; image and classifier models are unchanged.
+
+Pi reloads the file on a model registry refresh, such as opening `/model` or running `/reload`. The current selection is updated before the next compaction or request; a refresh does not change an in-flight request. A virtual model without a declared window stays unknown. Once it routes, Pi uses the physical model's provider ceiling and checks that model for automatic compaction; the virtual provider's own ceiling is not inherited by another provider.
+
+These are operational limits, not a guarantee of a backend's actual capacity or a hard request-size validator. Token counts are estimates, and disabled or unsuccessful compaction can still leave a request too large for a provider. Verify the endpoint's real limits separately.
+
+The fork's bundled `schemas/models.schema.json` includes this field. The upstream `https://pi.dev/schemas/models.schema.json` URL may not include fork-only fields.
+
 ### Describe model input and caching
 
 Use `inputLimits.images.resize` to control how Pi encodes new image attachments, `read` results, and tool-result images before storing them in conversation history:
