@@ -613,8 +613,13 @@ export class ModelRuntime implements Models {
 		if (!provider || this.config.getContextWindowCap(providerId) === undefined) return provider;
 		return {
 			...provider,
+			id: provider.id,
+			name: provider.name,
+			baseUrl: provider.baseUrl,
+			headers: provider.headers,
+			auth: provider.auth,
 			getModels: () => this.capModels(provider.getModels()),
-			getAllModels: () => this.capModels(provider.getAllModels?.() ?? provider.getModels()),
+			getAllModels: provider.getAllModels ? () => this.capModels(provider.getAllModels!()) : undefined,
 			refreshModels: provider.refreshModels?.bind(provider),
 			filterModels: provider.filterModels
 				? (models, credential) =>

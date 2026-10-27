@@ -143,10 +143,13 @@ const ModelsConfigProperties = {
 	contextWindowCaps: Type.Optional(ContextWindowCapsSchema),
 };
 
-export const ModelsConfigSchema = Type.Object({
-	$schema: Type.Optional(Type.String()),
-	...ModelsConfigProperties,
-});
+export const ModelsConfigSchema = Type.Object(
+	{
+		$schema: Type.Optional(Type.String()),
+		...ModelsConfigProperties,
+	},
+	{ anyOf: [{ required: ["providers"] }, { required: ["contextWindowCaps"] }] },
+);
 
 /** Entry schemas rendered into docs/models-configuration.md. */
 export const ModelsJsonSchemas = {

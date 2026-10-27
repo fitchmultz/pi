@@ -168,7 +168,8 @@ cursor mode draws only the focused terminal cursor, while unfocused fake cursors
 The generated schemas are under `packages/coding-agent/schemas/` and use upstream's
 `https://pi.dev/schemas/*.schema.json` IDs. They match the hosted files except for the fork's
 `compactView` setting, which the hosted settings schema accepts as an extra key, and
-`modelOverrides.hidden` in `models.schema.json` and `docs/models-configuration.md`.
+`modelOverrides.hidden` and `contextWindowCaps` in `models.schema.json` and
+`docs/models-configuration.md`. A models file with `contextWindowCaps` need not contain `providers`.
 
 Package production uses the maintained `scripts/package-artifacts.mjs` and local consumer helpers,
 including npm 12's expected-package-keyed pack metadata. Selected workspaces pack in one npm process;

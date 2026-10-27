@@ -114,6 +114,36 @@ describe("models.json context window ceilings", () => {
 		});
 	});
 
+	it("preserves a native provider's accessor metadata and optional methods", async () => {
+		const runtime = getModelRuntime(
+			await createModelRegistry(AuthStorage.inMemory(), modelsFile({ contextWindowCaps: { default: 335000 } })),
+		);
+		const fixture = fauxProvider({ provider: "native", models: [{ id: "large", contextWindow: 1000000 }] });
+		class NativeProvider {
+			get id() {
+				return fixture.provider.id;
+			}
+			get name() {
+				return fixture.provider.name;
+			}
+			get auth() {
+				return fixture.provider.auth;
+			}
+			getModels() {
+				return fixture.provider.getModels();
+			}
+			stream = fixture.provider.stream;
+			streamSimple = fixture.provider.streamSimple;
+		}
+		runtime.registerNativeProvider(new NativeProvider());
+		const provider = runtime.getProvider("native")!;
+		expect(provider.id).toBe("native");
+		expect(provider.name).toBe(fixture.provider.name);
+		expect(provider.auth).toBe(fixture.provider.auth);
+		expect(provider.getAllModels).toBeUndefined();
+		expect(provider.getModels()[0].contextWindow).toBe(335000);
+	});
+
 	it("caps dynamically refreshed extension models and preserves their pre-override limits", async () => {
 		const path = modelsFile({
 			contextWindowCaps: { default: 335000 },
@@ -228,6 +258,13 @@ describe("models.json context window ceilings", () => {
 		runtime.registerNativeProvider(fixture.provider);
 		await runtime.refresh({ allowNetwork: false });
 		expect(runtime.getModel("fixture", "small")?.contextWindow).toBe(335000);
+	});
+
+	it("still rejects a missing providers key when no policy is present", async () => {
+		const invalid = await ModelConfig.load(modelsFile({ provdiers: {} }));
+		expect(invalid.getError()).toContain("providers");
+		const policyOnly = await ModelConfig.load(modelsFile({ contextWindowCaps: { default: 335000 } }));
+		expect(policyOnly.getError()).toBeUndefined();
 	});
 
 	it("updates all providers when a scoped refresh reloads the global policy", async () => {

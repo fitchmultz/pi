@@ -406,6 +406,18 @@
       "additionalProperties": false
     }
   },
+  "anyOf": [
+    {
+      "required": [
+        "providers"
+      ]
+    },
+    {
+      "required": [
+        "contextWindowCaps"
+      ]
+    }
+  ],
   "$defs": {
     "ModelCost": {
       "type": "object",
