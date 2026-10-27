@@ -117,6 +117,20 @@ Dependency installs and packing use an isolated environment and an empty tempora
 npm global configuration, not the native Node prefix's registry credentials or
 ambient provider keys and `NODE_OPTIONS`.
 
+The updater and installer keep npm state in `~/.cache/pi-fork`; pass the installer
+`--cache-dir` to use another directory. The `npm-cache/` and `npm-logs/` directories
+must be private. Existing directories with broader permissions are rejected without
+changing them. `npm-cache/` is a shared npm cache, so a retry reuses packages that
+match the lockfile's integrity hashes instead of downloading them again. Each update
+or install attempt writes debug logs to its own `npm-logs/<attempt>` directory, so
+the log path npm prints after a failure stays readable. These logs are not rotated,
+so overlapping installs and nested build steps cannot delete each other's logs. A
+successful attempt removes its log directory, or warns if it cannot. Failed attempts
+keep theirs until you delete them. npm redacts secrets on a best-effort basis, so
+check logs for sensitive data before sharing them. Nothing prunes the cache automatically.
+When no update or installation is running, you can delete `npm-logs/` or the whole
+`~/.cache/pi-fork` directory; the next run recreates it and downloads packages again.
+
 ## 2. Start Pi
 
 Change to the folder you want Pi to work with, then start it:

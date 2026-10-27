@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-	existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
-	readdirSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync,
+	chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync,
+	readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
@@ -11,6 +11,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import lockfile from "proper-lockfile";
 import { createModelDataManifest } from "../packages/ai/scripts/model-data.ts";
+import { removeForkNpmLogs } from "../packages/coding-agent/src/utils/fork-npm-cache.ts";
 import { smokeTestCodingAgent } from "./coding-agent-smoke.mjs";
 import { produceArtifactSet } from "./package-artifacts.mjs";
 import {
@@ -43,7 +44,7 @@ function fixture(t) {
 	const root = mkdtempSync(join(tmpdir(), "pi-fork-selector-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const home = join(root, "home");
-	const env = isolatedEnvironment(home, tools);
+	const env = isolatedEnvironment(home, tools, join(root, "cache"));
 	const selector = join(root, "npm-global/lib/node_modules", name);
 	const oldPackage = join(root, "old-release");
 	mkdirSync(oldPackage);
@@ -325,6 +326,57 @@ test("rejects a CI archive for another commit before building or changing the se
 	assert.equal(existsSync(f.releases), false);
 });
 
+// #285: choosing a cache location must not change the permissions of an existing directory.
+test("keeps an existing cache parent unchanged while protecting npm state", { skip: process.platform === "win32" }, async (t) => {
+	const f = fixture(t);
+	const cache = join(f.root, "shared");
+	mkdirSync(cache);
+	chmodSync(cache, 0o755);
+	const archive = join(f.root, "source.tar.gz");
+	writeFileSync(archive, "must not be extracted");
+	writeFileSync(join(f.root, "source.commit"), `${"0".repeat(40)}\n`);
+	await assert.rejects(main(["--ref", "HEAD", "--source-archive", archive, "--cache-dir", cache,
+		"--releases", f.releases, "--selector", f.selector]), /Source archive commit .* does not match selected commit/);
+	assert.equal(statSync(cache).mode & 0o777, 0o755);
+	assert.equal(statSync(join(cache, "npm-cache")).mode & 0o777, 0o700);
+	assert.equal(statSync(join(cache, "npm-logs")).mode & 0o777, 0o700);
+	assertPreserved(f);
+});
+
+// #285: an existing shared npm directory must not expose the persisted cache.
+test("refuses a nonprivate existing npm cache without changing its permissions", { skip: process.platform === "win32" }, async (t) => {
+	const f = fixture(t);
+	const cache = join(f.root, "shared");
+	const npmCache = join(cache, "npm-cache");
+	mkdirSync(npmCache, { recursive: true });
+	chmodSync(npmCache, 0o755);
+	writeFileSync(join(f.root, "source.commit"), `${"0".repeat(40)}\n`);
+	await assert.rejects(main(["--cache-dir", cache, "--source-archive", join(f.root, "source.tar.gz"),
+		"--releases", f.releases, "--selector", f.selector]), /private.*npm-cache/);
+	assert.equal(statSync(npmCache).mode & 0o777, 0o755);
+	assertPreserved(f);
+	assert.equal(existsSync(f.releases), false);
+});
+
+// #285: an npm log cleanup error must not turn a successful installation into a reported failure.
+test("warns without failing when successful npm logs cannot be removed", {
+	skip: process.platform === "win32" || process.getuid?.() === 0,
+}, (t) => {
+	const root = mkdtempSync(join(tmpdir(), "pi-fork-npm-cleanup-test-"));
+	const logs = join(root, "logs");
+	mkdirSync(logs);
+	writeFileSync(join(logs, "npm-debug.log"), "npm log");
+	chmodSync(logs, 0o500);
+	t.after(() => {
+		chmodSync(logs, 0o700);
+		rmSync(root, { recursive: true, force: true });
+	});
+	const warn = t.mock.method(console, "warn", () => {});
+	assert.doesNotThrow(() => removeForkNpmLogs(logs));
+	assert.match(String(warn.mock.calls[0]?.arguments[0]), /Could not remove npm logs/);
+	assert.ok(existsSync(join(logs, "npm-debug.log")));
+});
+
 test("rejects changed or extra archive source despite a matching companion commit", async (t) => {
 	const f = fixture(t);
 	const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -361,11 +413,18 @@ test("a real child build failure cannot select or leave a reusable success recei
 	assert.deepEqual(readdirSync(f.releases), [".owner-selector"]);
 });
 
-test("a real npm install failure leaves the selector unchanged", async (t) => {
+test("a real npm install failure leaves the selector unchanged and keeps npm's private debug log", async (t) => {
 	const f = fixture(t);
 	await assert.rejects(installRelease({ ...f, receipt: receipt() }, installFixture(f, { brokenTarball: true })), /Command failed/);
 	assertPreserved(f);
 	assert.deepEqual(readdirSync(f.releases), [".owner-selector"]);
+	// #285: the installer deletes its isolated home, so npm's failure log must live in a private attempt directory.
+	rmSync(f.env.HOME, { recursive: true, force: true });
+	const cache = join(f.root, "cache");
+	const logs = existsSync(join(cache, "npm-logs")) ? readdirSync(join(cache, "npm-logs")).map((attempt) => join(cache, "npm-logs", attempt)) : [];
+	assert.deepEqual([cache, ...logs].map((path) => existsSync(path) && statSync(path).mode & 0o777), [0o700, 0o700]);
+	const contents = readdirSync(logs[0]).map((file) => readFileSync(join(logs[0], file), "utf8"));
+	assert.ok(contents.some((log) => log.includes("verbose title npm ci") && /^\d+ error /m.test(log)), "failed npm ci log is retained");
 });
 
 test("an installed CLI smoke failure leaves selector/config/journals intact", async (t) => {
@@ -661,7 +720,7 @@ test("keeps only Termux's exec wrapper, prefix and native shell in the isolated 
 		process.env.PREFIX = join(f.root, "termux-prefix");
 		process.env.LD_PRELOAD = join(f.root, "libtermux-exec.so");
 		Object.defineProperty(process, "platform", { value: "android", configurable: true });
-		const env = isolatedEnvironment(f.env.HOME, tools);
+		const env = isolatedEnvironment(f.env.HOME, tools, join(f.root, "cache"));
 		assert.equal(env.PREFIX, process.env.PREFIX);
 		assert.equal(env.LD_PRELOAD, process.env.LD_PRELOAD);
 		assert.equal(env.npm_config_script_shell, join(dirname(tools.node), "bash"));
