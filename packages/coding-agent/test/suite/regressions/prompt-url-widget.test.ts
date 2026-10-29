@@ -9,6 +9,7 @@ test("prompt URL widget keeps the user's target when a background message starts
 		stderr: "",
 		code: 0,
 		killed: false,
+		truncated: false,
 	}));
 	const onError = vi.fn();
 	const setWidget = vi.fn();

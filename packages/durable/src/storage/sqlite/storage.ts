@@ -185,7 +185,7 @@ export class SqliteStorage implements Storage {
 		}
 	}
 
-	async commit(writes: readonly StorageWrite[], _context: Context): Promise<Seq> {
+	async commit(writes: readonly StorageWrite[], adopt: (seq: Seq) => void, _context: Context): Promise<Seq> {
 		this.assertOpen();
 		const documentActions = this.prepareDocumentActions(writes);
 		const candidateNextId = this.candidateNextId(writes);
@@ -193,6 +193,8 @@ export class SqliteStorage implements Storage {
 			this.writeBatch(transaction, writes, documentActions, candidateNextId),
 		);
 		this.nextId = Math.max(this.nextId, candidateNextId);
+		// `COMMIT` returned: the batch is durable.
+		adopt(seq);
 		return seq;
 	}
 

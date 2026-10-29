@@ -160,7 +160,8 @@ export function createGrepToolDefinition(
 										}))
 										.sort((a, b) => a.start - b.start);
 									const lastLine = windows.reduce((last, window) => Math.max(last, window.end), 0);
-									const endings = /\r\n|\r|\n/g;
+									// ripgrep numbers lines only at LF; a lone CR stays in its line (#11398).
+									const endings = /\r\n|\n/g;
 									let start = 0;
 									let windowIndex = 0;
 									while (lineCount < lastLine) {

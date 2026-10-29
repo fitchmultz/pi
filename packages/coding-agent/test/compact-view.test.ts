@@ -340,6 +340,8 @@ describe("compact Activity and messages", () => {
 						undefined,
 						1,
 						[],
+						undefined,
+						undefined,
 						!!mode,
 					),
 			);
@@ -417,6 +419,8 @@ describe("compact Activity and messages", () => {
 					undefined,
 					0,
 					[(markdown) => (markdown === "transformed away" ? "" : markdown)],
+					undefined,
+					undefined,
 					true,
 				);
 				chat.addChild(assistant);
@@ -451,6 +455,8 @@ describe("compact Activity and messages", () => {
 			undefined,
 			0,
 			[],
+			undefined,
+			undefined,
 			true,
 		);
 		chat.addChild(assistant);
@@ -519,6 +525,8 @@ describe("compact Activity and messages", () => {
 			undefined,
 			0,
 			[],
+			undefined,
+			undefined,
 			true,
 		);
 		const shell = new BashExecutionComponent("echo shell", ui, false, 1, true);
@@ -580,6 +588,8 @@ describe("compact Activity and messages", () => {
 				undefined,
 				0,
 				[],
+				undefined,
+				undefined,
 				true,
 			);
 			expect(component.render(40)).toEqual([]);

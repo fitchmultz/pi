@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `RemoteWatcher` follows Durable's `FileWatcher`: `close(context)` is `stop(context)`, and its changes are tagged (`{ kind: "paths", paths }`, `{ kind: "overflow" }`, `{ kind: "failed", error }`). The daemon's `watch` protocol is unchanged. Migration: `await watcher.close(ctx)` becomes `await watcher.stop(ctx)`; test `change.kind` instead of `"overflow" in change` or `"error" in change`.
+
 ### Changed
 
 - Reduced daemon frame/scanner allocations, bounded client read-ahead and sorted directory listings with precomputed keys.
@@ -11,6 +15,8 @@
 - Fixed one oversized file-watch change stopping the daemon's output writer; the change is reported as `overflow` and the connection and watcher keep working ([#10516](https://github.com/earendil-works/pi/issues/10516)).
 - Fixed concurrent `acceptHostKey`/`forgetHostKey` calls through equivalent known-hosts path spellings losing updates, which could restore a removed host key ([#10517](https://github.com/earendil-works/pi/issues/10517)).
 - Fixed cancelled or timed-out daemon shell commands on macOS sometimes running later steps after the current step was killed; cancellation and timeouts now stop the whole command.
+- `exec` and `pty` fail with `spawn_error` instead of hanging when the daemon cannot start a helper thread (for example at a cgroup task limit); the started command is killed and reaped ([#11433](https://github.com/earendil-works/pi/issues/11433)).
+- `Connection.close()` on Unix no longer leaves running commands behind: the daemon used to die from the client's `SIGTERM` before killing its process groups. It now kills them on `SIGTERM`, `SIGINT` or `SIGHUP` before exiting.
 
 ## [1.4.0] - 2026-10-21
 

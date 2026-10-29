@@ -27,6 +27,31 @@ const MEDIUM_PNG_100x100 =
 const LARGE_PNG_200x200 =
 	"iVBORw0KGgoAAAANSUhEUgAAAMgAAADIEAIAAAByquWKAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGYktHRP///////wlY99wAAAAHdElNRQfqAQ4AMzqU03BFAAAEEElEQVR42u3dvWqUURSF4XXMRAyIhSAWQvwnWtjaWusFx9bW1kKD/wELESxEiBjDjJdwysOC57mCXW32+zGcGbtdACpsdi+T8Xz1GABzm91xMl6sHgNgblzcT/Y+rh4DYG6cv0/2H64eA2BOEgI1fHQHaoyzbXIwVo8BMCcJgRqSEKgxft9Lrn5aPQbA3Ph1klw7Wj0GwJwkBGpYWECN8fMiub63egyAORcWUMPCAmqMH3eTG59XjwEwN76/S24+Wj0GwJwkBGpYWECN8e1fcmuzegyAORcWUMPCAmqM09vJ4dfVYwDMjS9vkzuPV48BMCcJgRqeSAZqjA/nyYP91WMAzElCoIYkBGqMk8Pk6HT1GABzm+3L5JIkBApIQqCGj+5AjfHmb/Lk8uoxAOYkIVBDEgI1LCygxmZ7nFyShEABFxZQw8ICaozXf5KnV1aPATDnwgJqWFhADQsLqOFnDUANFxZQw8ICaoxXZ8mzg9VjAMy5sIAaFhZQw3tYQA1/QgHUkIRADUkI1JCEQA1JCNSQhEANFxZQwzcsoIYkBGpIQqCGJARqSEKghiQEalhYQA1/QgHUcGEBNSwsoIYkBGq4sIAaFhZQw8ICaviGBdRwYQE1LCyghiQEariwgBoWFlDDe1hADS+OAjUkIVBDEgI1JCFQQxICNSQhUMOFBdTwDQuoIQmBGpIQqCEJgRqSEKghCYEaFhZQw4ujQA0XFlDDwgJqSEKghgsLqGFhATUsLKCGb1hADRcWUMPCAmpIQqCGCwuoYWEBNbyHBdTw4ihQQxICNSQhUEMSAjUkIVBDEgI1XFhADd+wgBqSEKghCYEakhCoIQmBGpIQqGFhATW8OArUcGEBNSwsoIYkBGq4sIAaFhZQw8ICaviGBdRwYQE1LCyghiQEariwgBoWFlDDe1hADS+OAjUkIVBDEgI1JCFQQxICNSQhUMOFBdTwDQuoIQmBGpIQqCEJgRqSEKghCYEa49lB8ups9RgAc14cBWpIQqCGhQXUkIRADRcWUMPCAmqMp1eS139WjwEw5xsWUEMSAjUsLKCGJARquLCAGhYWUGM8uZy8+bt6DIA5L44CNSQhUMMTyUCNcXSanByuHgNgThICNSQhUGM82E8+nK8eA2DOzxqAGpIQqDHuPE6+vF09BsDcOPyanN5ePQbAnCQEavgdFlBj3Nok3/6tHgNgzoujQA1JCNQYNx8l39+tHgNgbtz4nPy4u3oMgDlJCNSwsIAa4/pe8vNi9RgAc37WANSQhECNce0o+XWyegyAuXH1U/L73uoxAOYkIVDDwgJqjIORnG1XjwEw508ogBqSEKgx9h8m5+9XjwEwN/Y+Jhf3V48BMCcJgRpjPE+2x6vHAJgbSbLbrR4DYO4/GqiSgXN+ksgAAAAldEVYdGRhdGU6Y3JlYXRlADIwMjYtMDEtMTRUMDA6NTE6NTcrMDA6MDDpysx4AAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI2LTAxLTE0VDAwOjUxOjU3KzAwOjAwmJd0xAAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAyNi0wMS0xNFQwMDo1MTo1NyswMDowMM+CVRsAAAAASUVORK5CYII=";
 
+/** Photo-like JPEG: smooth gradients with light deterministic noise, so PNG compresses it poorly. */
+async function photoLikeJpeg(width: number, height: number): Promise<Uint8Array> {
+	const photon = await loadPhoton();
+	if (!photon) throw new Error("Photon not available");
+	const pixels = new Uint8Array(width * height * 4);
+	let seed = 1;
+	for (let y = 0; y < height; y++) {
+		for (let x = 0; x < width; x++) {
+			seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+			const noise = seed % 6;
+			const i = (y * width + x) * 4;
+			pixels[i] = ((x / width) * 200 + noise) | 0;
+			pixels[i + 1] = ((y / height) * 200 + noise) | 0;
+			pixels[i + 2] = (128 + Math.sin(x / 30) * 60 + noise) | 0;
+			pixels[i + 3] = 255;
+		}
+	}
+	const image = new photon.PhotonImage(pixels, width, height);
+	try {
+		return image.get_bytes_jpeg(85);
+	} finally {
+		image.free();
+	}
+}
+
 function imageBytes(base64Data: string): Uint8Array {
 	return Buffer.from(base64Data, "base64");
 }
@@ -93,7 +118,7 @@ it("loadPngTranscoder converts synchronously to oriented PNG data", async () => 
 });
 
 describe("resizeImage", () => {
-	it("returns the first fitting encoding and rejects an exact encoded byte limit", async () => {
+	it("prefers the smaller format and rejects an exact encoded byte limit", async () => {
 		const photon = (await loadPhoton())!;
 		const pixels = new Uint8Array(64 * 64 * 4);
 		let seed = 1;
@@ -108,7 +133,7 @@ describe("resizeImage", () => {
 		const resized = photon.resize(original, 32, 32, photon.SamplingFilter.Lanczos3);
 		try {
 			const input = original.get_bytes();
-			// Independent encoder outputs distinguish first fit from smallest output.
+			// Prefer the configured quality even when a lower-quality encoding is smaller.
 			const png = Buffer.from(resized.get_bytes()).toString("base64");
 			const jpeg80 = Buffer.from(resized.get_bytes_jpeg(80)).toString("base64");
 			const jpeg85 = Buffer.from(resized.get_bytes_jpeg(85)).toString("base64");
@@ -120,8 +145,7 @@ describe("resizeImage", () => {
 			expect(jpeg70.length).toBeGreaterThan(jpeg40.length);
 
 			for (const [maxBytes, jpegQuality, data, mimeType] of [
-				[png.length + 1, 80, png, "image/png"],
-				[png.length, 80, jpeg80, "image/jpeg"],
+				[png.length + 1, 80, jpeg80, "image/jpeg"],
 				[jpeg80.length, 80, jpeg70, "image/jpeg"],
 				[jpeg80.length, 40, jpeg40, "image/jpeg"],
 			] as const) {
@@ -192,6 +216,7 @@ describe("resizeImage", () => {
 		expect(result!.originalHeight).toBe(100);
 		expect(result!.width).toBeLessThanOrEqual(50);
 		expect(result!.height).toBeLessThanOrEqual(50);
+		expect(result!.mimeType).toBe("image/png");
 	});
 
 	it("should resize image exceeding byte limit", async () => {
@@ -220,6 +245,18 @@ describe("resizeImage", () => {
 		});
 
 		expect(result).toBeNull();
+	});
+
+	// Regression test for #11551: PNG was returned whenever it fit, even when JPEG was much smaller.
+	it("should pick JPEG over a larger PNG when resizing a photo", async () => {
+		const input = await photoLikeJpeg(1200, 800);
+		const result = await resizeImageInProcess(input, "image/jpeg", { maxWidth: 1000, maxHeight: 1000 });
+
+		expect(result).not.toBeNull();
+		expect(result!.wasResized).toBe(true);
+		expect(result!.mimeType).toBe("image/jpeg");
+		expect(result!.width).toBe(1000);
+		expect(result!.data.length).toBeLessThan(Math.ceil(input.byteLength / 3) * 4 * 2);
 	});
 
 	it("should handle JPEG input", async () => {

@@ -39,6 +39,8 @@ export class AssistantMessageComponent extends Container {
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 	private isStreaming = false;
+	private messageId?: string;
+	private timestamp?: string;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
 	private contentRuns: ContentRun[] = [];
 
@@ -49,6 +51,8 @@ export class AssistantMessageComponent extends Container {
 		hiddenThinkingLabel = "Thinking...",
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		messageId?: string,
+		timestamp?: string,
 		compactView = false,
 	) {
 		super();
@@ -59,6 +63,8 @@ export class AssistantMessageComponent extends Container {
 		this.outputPad = outputPad;
 		this.compactView = compactView;
 		this.markdownTransformers = markdownTransformers;
+		this.messageId = messageId;
+		this.timestamp = timestamp;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -152,6 +158,8 @@ export class AssistantMessageComponent extends Container {
 									type === "thinking" ? "assistant-thinking" : "assistant",
 									this.isStreaming,
 									this.markdownTransformers,
+									this.messageId,
+									this.timestamp,
 								),
 							},
 						);
@@ -206,7 +214,8 @@ export class AssistantMessageComponent extends Container {
 
 				const runIndex = thinkingRunIndex++;
 				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
-				if (hidden && this.compactView) continue;
+				// A hidden run with an empty label renders nothing, including no spacing.
+				if (hidden && (this.compactView || !this.hiddenThinkingLabel.trim())) continue;
 				if (needsSpacer) this.contentContainer.addChild(new Spacer(1));
 				needsSpacer = true;
 				addRun(

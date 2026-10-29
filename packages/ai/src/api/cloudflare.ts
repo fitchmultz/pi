@@ -29,16 +29,13 @@ export function normalizeCloudflareModelId(provider: string, api: string, id: st
 }
 
 /**
- * Direct OpenAI models that accept developer messages and `additional_tools` items mid-conversation
- * (`OPENAI_MID_CONVO_SYSTEM_MESSAGE_MODEL_IDS` in generate-models.ts). Cloudflare's /openai route passes
- * both through unchanged. The defaults live here rather than in the generator because pi.dev overlays,
- * published upstream without them, replace generated entries. A parity test keeps this list in sync.
+ * Direct OpenAI models that accept `additional_tools` items, and those that accept developer messages
+ * mid-conversation (`OPENAI_TOOL_SEARCH_MODEL_IDS` and `OPENAI_MID_CONVO_MODEL_IDS` in
+ * catalog/families/openai.ts). Cloudflare's /openai route passes both through unchanged. The defaults
+ * live here rather than only in the catalog because pi.dev overlays, published upstream without them,
+ * replace generated entries. A parity test keeps these lists in sync.
  */
-const OPENAI_POSITIONAL_MODEL_IDS = new Set([
-	"gpt-5.4",
-	"gpt-5.4-mini",
-	"gpt-5.4-pro",
-	"gpt-5.5",
+const OPENAI_ADDITIONAL_TOOLS_MODEL_IDS = new Set([
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
@@ -46,6 +43,14 @@ const OPENAI_POSITIONAL_MODEL_IDS = new Set([
 	"gpt-6-sol",
 	"gpt-6-luna",
 	"gpt-6.1-sol",
+	"gpt-6.1-terra",
+]);
+const OPENAI_MID_CONVO_MODEL_IDS = new Set([
+	"gpt-5.4",
+	"gpt-5.4-mini",
+	"gpt-5.4-pro",
+	"gpt-5.5",
+	...OPENAI_ADDITIONAL_TOOLS_MODEL_IDS,
 ]);
 
 export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel): TModel {
@@ -55,11 +60,15 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 	if (
 		normalized.api === "openai-responses" &&
 		normalized.baseUrl === CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL &&
-		OPENAI_POSITIONAL_MODEL_IDS.has(normalized.id)
+		OPENAI_MID_CONVO_MODEL_IDS.has(normalized.id)
 	) {
 		return {
 			...normalized,
-			compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true, ...normalized.compat },
+			compat: {
+				supportsMidConvoSystemMessages: true,
+				...(OPENAI_ADDITIONAL_TOOLS_MODEL_IDS.has(normalized.id) ? { supportsAdditionalTools: true } : {}),
+				...normalized.compat,
+			},
 		};
 	}
 	if (

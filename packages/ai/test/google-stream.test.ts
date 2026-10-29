@@ -146,7 +146,7 @@ describe("Google SDK streaming protocol", () => {
 			cacheWrite: 0,
 			reasoning: 5,
 			totalTokens: 115,
-			cost: { input: 80, output: 30, cacheRead: 60, cacheWrite: 0, total: 170 },
+			cost: { input: 80, output: 30, cacheRead: 60, cacheWrite: 0, total: 170, totalFromProvider: false },
 		});
 		expect(fetch).toHaveBeenCalledOnce();
 

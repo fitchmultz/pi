@@ -12,7 +12,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, relative, resolve } from "node:path";
+import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -65,9 +65,13 @@ const BUDGETS = {
 			// replicatedState) reach its host runtime through the root barrel. Chord's context reaches pi-telemetry's root
 			// (index, noop, metrics, memory) for its NOOP telemetry default; harness/telemetry.ts is Durable's schema.
 			// The fork's target-model estimates replay signatures through ai/utils/transform-messages.ts.
-			// The Harness's request identity reaches pi-ai's utils/identity.ts and its version constant.
 			// Shared retry backoff reaches the lean ai/utils/sleep.ts and abort.ts helpers, not the AI barrel.
-			maxFiles: 76,
+			// The Harness's request identity reaches pi-ai's utils/identity.ts and its version constant. Partial commits
+			// parse streamed tool-call arguments with pi-ai's utils/streaming-json.ts (and its json-parse.ts) to append what
+			// argument strings grew by (harness/partial-changes.ts). Chord's watches fold pending ops with Delta's
+			// pending queue (delta/pending.ts). `registryReader` (harness/registry-reader.ts) reads a Chord v2 registry
+			// value through type-only imports.
+			maxFiles: 81,
 			forbid: [
 				"packages/ai/src/index.ts",
 				"packages/ai/src/utils/typebox-helpers.ts",
@@ -161,7 +165,7 @@ for (const [pkgDir, budgets] of Object.entries(BUDGETS)) {
 				failures += 1;
 				continue;
 			}
-			const graph = [...walk(source)].map((file) => relative(ROOT, file));
+			const graph = [...walk(source)].map((file) => relative(ROOT, file).split(sep).join("/"));
 			if (graph.length > budget.maxFiles) {
 				console.error(
 					`${pkgDir} export "${name}" reaches ${graph.length} files, budget ${budget.maxFiles}\n` +
