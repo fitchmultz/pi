@@ -1413,7 +1413,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		const output = renderAll(fakeThis.loadedResourcesContainer);
-		expect(output).toContain("[Skill conflicts]");
+		expect(output).toContain("[Skill warnings]");
 		expect(output).not.toContain("[Skills]");
 	});
 });

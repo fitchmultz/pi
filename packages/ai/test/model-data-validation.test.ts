@@ -163,7 +163,7 @@ describe("published model catalog hydration", () => {
 	});
 
 	it.each(["k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed"])(
-		"migrates published Kimi Coding %s to its native protocol without changing model metadata",
+		"migrates published Kimi Coding %s to its native protocol and cache-write metadata",
 		(id) => {
 			const { dataDir, packageRoot, values } = createFixture("kimi-coding");
 			const catalogPath = join(packageRoot, "catalog.json");
@@ -213,7 +213,7 @@ describe("published model catalog hydration", () => {
 						: {}),
 				},
 				thinkingLevelMap: { ...model.thinkingLevelMap, off: null },
-				cost: { ...model.cost, cacheWrite: id === "k3" ? 3 : 0 },
+				cost: { ...model.cost, cacheWrite: id === "k3" || id === "k3-256k" ? 3 : 0 },
 			});
 			expect(() => validateModelDataDirectory(readModelDataStructure(packageRoot), dataDir)).not.toThrow();
 		},
@@ -245,6 +245,7 @@ describe("published model catalog hydration", () => {
 
 	it.each([
 		["kimi-coding", "k3", "https://api.kimi.com/coding/v1"],
+		["kimi-coding", "k3-256k", "https://api.kimi.com/coding/v1"],
 		["moonshotai", "kimi-k3", "https://api.moonshot.ai/v1"],
 		["moonshotai-cn", "kimi-k3", "https://api.moonshot.cn/v1"],
 	])("restores Kimi K3 $3/M cacheWrite rate for canonical %s/%s during hydration", (provider, id, baseUrl) => {

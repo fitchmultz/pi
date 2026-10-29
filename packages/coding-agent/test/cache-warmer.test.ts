@@ -555,7 +555,7 @@ describe("cache warming", () => {
 			expect(JSON.stringify(calls[2].body.messages)).toContain("offline-signature-0");
 			expect(calls[2].body).toMatchObject({
 				thinking: { type: "adaptive", block_binding: { prefix_mismatch_behavior: "drop_block" } },
-				output_config: { effort: "high" },
+				output_config: { effort: "low" },
 				messages: expect.arrayContaining([{ role: "system", content: [], output_config: { effort: "max" } }]),
 			});
 			expect((calls[2].body.system as Array<{ cache_control: unknown }>)[0].cache_control).toEqual(

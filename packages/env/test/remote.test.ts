@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
-import { getOrThrow, type ShellOutputInfo, type WatchChange } from "@earendil-works/pi-durable/env";
+import { type FileChange, getOrThrow, type ShellOutputInfo } from "@earendil-works/pi-durable/env";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { Connection, nodePlatform } from "../src/connection.ts";
 import { RemoteExecutionEnv } from "../src/remote-env.ts";
@@ -112,7 +112,7 @@ describe("RemoteExecutionEnv", () => {
 		if (!windows) {
 			expect(paths.reduce((bytes, path) => bytes + Buffer.byteLength(path), 0)).toBeLessThan(frameLimit);
 		}
-		const changes: WatchChange[] = [];
+		const changes: FileChange[] = [];
 		const watcher = getOrThrow(
 			await env.watch([{ path: watched, recursive: true }], (change) => changes.push(change), context),
 		);
@@ -120,23 +120,21 @@ describe("RemoteExecutionEnv", () => {
 		try {
 			renameSync(join(staged, directory), join(watched, directory));
 			getOrThrow(await env.fileInfo(sample, withAbortSignal(AbortSignal.timeout(5000), context)));
-			await expect
-				.poll(() => changes.some((change) => "overflow" in change && change.overflow), { timeout: 15_000 })
-				.toBe(true);
+			await expect.poll(() => changes.some((change) => change.kind === "overflow"), { timeout: 15_000 }).toBe(true);
 			expect(watcher.mode).toBe("polling");
 			getOrThrow(await env.fileInfo(watched, withAbortSignal(AbortSignal.timeout(5000), context)));
 			expect((await connection.info()).pid).toBe(pid);
 			const followup = join(watched, "followup.txt");
 			writeFileSync(followup, "still watching");
 			await expect
-				.poll(() => changes.some((change) => "paths" in change && change.paths.includes(followup)), {
+				.poll(() => changes.some((change) => change.kind === "paths" && change.paths.includes(followup)), {
 					timeout: 15_000,
 				})
 				.toBe(true);
 		} finally {
 			// Closing the transport also releases a stalled pre-fix watch request.
 			connection.close();
-			await watcher.close(context);
+			await watcher.stop(context);
 		}
 	}, 60_000);
 
@@ -230,6 +228,31 @@ describe("RemoteExecutionEnv", () => {
 		const result = await env.exec(["sleep", "5"], { timeout: 0.3 }, context);
 		expect(result.ok ? "ok" : result.error.code).toBe("timeout");
 		expect(Date.now() - started).toBeLessThan(3000);
+	});
+
+	// The daemon used to die on Connection.close()'s SIGTERM before killing its commands.
+	it.skipIf(process.platform === "win32")("kills running commands when the connection closes", async () => {
+		const { env, connection } = environment();
+		const pid = Promise.withResolvers<number>();
+		const running = env.exec(
+			["sh", "-c", "echo $$; exec sleep 30"],
+			{ onOutput: (text: string) => pid.resolve(Number.parseInt(text, 10)) },
+			context,
+		);
+		const command = await pid.promise;
+		connection.close();
+		await running;
+		const alive = () => {
+			try {
+				process.kill(command, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		const deadline = Date.now() + 5000;
+		while (alive() && Date.now() < deadline) await new Promise((done) => setTimeout(done, 50));
+		expect(alive()).toBe(false);
 	});
 
 	it("fails requests on handles of a lost connection instead of reaching the new daemon", async () => {

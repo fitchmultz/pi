@@ -41,10 +41,10 @@ export function getKimiCodingMetadata(id: string, thinkingLevelMap?: ThinkingLev
 }
 
 // Canonical OpenAI-compatible endpoints whose published catalogs omit Kimi K3's 5m cache-write rate.
-const KIMI_K3_CANONICAL_ENDPOINTS: Record<string, { id: string; baseUrl: string }> = {
-	"kimi-coding": { id: "k3", baseUrl: "https://api.kimi.com/coding/v1" },
-	moonshotai: { id: "kimi-k3", baseUrl: "https://api.moonshot.ai/v1" },
-	"moonshotai-cn": { id: "kimi-k3", baseUrl: "https://api.moonshot.cn/v1" },
+const KIMI_K3_CANONICAL_ENDPOINTS: Record<string, { ids: readonly string[]; baseUrl: string }> = {
+	"kimi-coding": { ids: ["k3", "k3-256k"], baseUrl: "https://api.kimi.com/coding/v1" },
+	moonshotai: { ids: ["kimi-k3"], baseUrl: "https://api.moonshot.ai/v1" },
+	"moonshotai-cn": { ids: ["kimi-k3"], baseUrl: "https://api.moonshot.cn/v1" },
 };
 
 /** Adapt canonical published entries that predate Kimi Coding's native protocol migration. */
@@ -52,6 +52,8 @@ export function normalizeKimiCodingModel(model: AnyModel): AnyModel {
 	if (!isModelType(model, "chat")) {
 		return model;
 	}
+	const canonicalK3 = KIMI_K3_CANONICAL_ENDPOINTS[model.provider];
+	const missingK3CacheWrite = canonicalK3?.ids.includes(model.id) && model.cost?.cacheWrite === 0;
 	if (
 		model.provider === "kimi-coding" &&
 		model.api === "anthropic-messages" &&
@@ -60,19 +62,14 @@ export function normalizeKimiCodingModel(model: AnyModel): AnyModel {
 		return {
 			...model,
 			...getKimiCodingMetadata(model.id, model.thinkingLevelMap),
-			cost:
-				model.id === "k3" && model.cost?.cacheWrite === 0
-					? { ...model.cost, cacheWrite: KIMI_K3_COST.cacheWrite }
-					: model.cost,
+			cost: missingK3CacheWrite ? { ...model.cost, cacheWrite: KIMI_K3_COST.cacheWrite } : model.cost,
 		};
 	}
-	const canonicalK3 = KIMI_K3_CANONICAL_ENDPOINTS[model.provider];
 	if (
 		canonicalK3 &&
-		model.id === canonicalK3.id &&
+		missingK3CacheWrite &&
 		model.api === "openai-completions" &&
-		model.baseUrl === canonicalK3.baseUrl &&
-		model.cost?.cacheWrite === 0
+		model.baseUrl === canonicalK3.baseUrl
 	) {
 		return {
 			...model,

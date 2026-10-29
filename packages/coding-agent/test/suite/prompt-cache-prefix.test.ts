@@ -679,7 +679,7 @@ it.each([
 					removed.messages.findIndex((message) => message.content.some((block) => block.text === "redefined")),
 				);
 				for (const [index, payload] of captures.entries()) {
-					expect(payload.output_config).toEqual({ effort: "high" });
+					expect(payload.output_config).toEqual({ effort: "low" });
 					expect(payload.thinking).toMatchObject({
 						type: "adaptive",
 						block_binding: { prefix_mismatch_behavior: "drop_block" },

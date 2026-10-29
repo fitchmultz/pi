@@ -58,15 +58,21 @@ for (const scenario of ["Session/Harness", "Conversation", "default", "no capabi
 			try {
 				const root = await harness.root(context, { agent: { model: { provider: "faux", modelId: "faux-1" } } });
 				await harness.commit((tx) => tx.doc(OperationDoc, "retained", null), context);
-				const retained = (await harness.documentState(OperationDoc, "retained", context))!;
-				const view = await root.viewState(context);
+				const retainedChanged = vi.fn();
+				const retained = (await harness.observeDoc(
+					OperationDoc,
+					"retained",
+					{ advance: retainedChanged, end: () => {} },
+					context,
+				))!;
+				const viewChanged = vi.fn();
+				const view = await harness.observeConversation(root.id, { advance: viewChanged, end: () => {} }, context);
 				try {
-					const before = view.value;
 					const inspection = await harness.inspect(context);
 					const commits = vi.spyOn(storage, "commit");
 					const published = vi.fn();
 					const closed = vi.fn();
-					const unsubscribeCommit = harness.subscribeCommits(published);
+					const commitObservation = harness.observeCommits({ advance: published, end: () => {} });
 					const unsubscribeClose = harness.subscribeClose(closed);
 					let calls = 0;
 					const options: CommitOptions | undefined = scenario === "default" ? undefined : { admission: true };
@@ -103,7 +109,7 @@ for (const scenario of ["Session/Harness", "Conversation", "default", "no capabi
 						expect(calls).toBe(1);
 						expect(commits).toHaveBeenCalledTimes(1);
 						expect(published).not.toHaveBeenCalled();
-						expect(await harness.closed).toMatchObject({ reason: "failed" });
+						expect(await harness.closed).toMatchObject({ kind: "failed" });
 						await expect(root.submit({ type: "input", content: "valid" }, context)).rejects.toMatchObject({
 							name: "SessionFailed",
 						});
@@ -114,8 +120,11 @@ for (const scenario of ["Session/Harness", "Conversation", "default", "no capabi
 					expect(commits).not.toHaveBeenCalled();
 					expect(published).not.toHaveBeenCalled();
 					expect(closed).not.toHaveBeenCalled();
-					expect(retained.value).toEqual({ input: { type: "none", content: "kept" } });
-					expect(view.value).toEqual(before);
+					expect(retainedChanged).not.toHaveBeenCalled();
+					expect(viewChanged).not.toHaveBeenCalled();
+					expect(await harness.snapshot(OperationDoc, "retained", context)).toEqual({
+						input: { type: "none", content: "kept" },
+					});
 					expect(await harness.inspect(context)).toEqual(inspection);
 					expect(await harness.snapshot(OperationDoc, "created", context)).toBeUndefined();
 					const stored = await storage.scanDocuments(
@@ -143,19 +152,19 @@ for (const scenario of ["Session/Harness", "Conversation", "default", "no capabi
 						tasks: [],
 						receipt: undefined,
 					});
-					unsubscribeCommit();
+					commitObservation.detach();
 					unsubscribeClose();
 					input.content = "corrected";
 					const accepted = await commit();
 					expect(calls).toBe(2);
 					expect((await harness.getTask(accepted.task, context))?.conversationId).toBe(root.id);
-					expect(retained.value).toEqual({ input });
+					expect(await harness.snapshot(OperationDoc, "retained", context)).toEqual({ input });
 					const valid = await root.submit({ type: "input", content: "valid" }, context);
 					expect((await valid.wait(context)).status).toBe("done");
 					expect(faux.state.callCount).toBe(1);
 				} finally {
-					retained.dispose();
-					view.dispose();
+					retained.detach();
+					view.detach();
 				}
 			} finally {
 				await harness.close(context);

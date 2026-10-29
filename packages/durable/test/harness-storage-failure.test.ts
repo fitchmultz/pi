@@ -13,13 +13,12 @@ import {
 	StorageRequestError,
 	type StorageWrite,
 	type TaskId,
-	watchEvents,
 } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { safeNow } from "../src/harness/harness.ts";
 import { conversationViews } from "../src/harness/view.ts";
 import { contained } from "../src/session/session.ts";
-import { ControlledStorage, context } from "./session-support.ts";
+import { ControlledStorage, context, onValue } from "./session-support.ts";
 import { aborted, deferred, openTasks } from "./task-support.ts";
 
 /** Waits for its signal, records that it saw it, and ends `aborted` through its abort handler. */
@@ -117,8 +116,8 @@ describe("a failed Storage call", () => {
 		const task = harness.waitForTask(id, context);
 		const idle = harness.waitForIdle(context);
 		const watch = (await harness.watchDoc(LiveDoc, root.id, context))!;
-		const stream = await watchEvents(harness, root.id, context);
-		stream.start(async () => {});
+		const view = await root.watch(context);
+		view.start(async () => {});
 
 		if (source === "commit") storage.failNextCommit(failure);
 		else storage.failing.add("checkAdmission");
@@ -132,13 +131,13 @@ describe("a failed Storage call", () => {
 		const failed = { name: "SessionFailed", cause: failure };
 		await expect(task).rejects.toMatchObject(failed);
 		await expect(idle).rejects.toMatchObject(failed);
-		expect(await watch.closed).toEqual({ reason: "session_failed", error: failure });
-		expect(await stream.closed).toEqual({ reason: "session_failed", error: failure });
+		expect(await watch.closed).toEqual({ kind: "failed", error: failure });
+		expect(await view.closed).toEqual({ kind: "failed", error: failure });
 		// Every later call, and a wait that starts now.
 		await expect(harness.getTask(id, context)).rejects.toMatchObject(failed);
 		await expect(harness.waitForIdle(context)).rejects.toMatchObject(failed);
 		await expect(root.submit({ type: "input", content: "x" }, context)).rejects.toMatchObject(failed);
-		expect(await harness.closed).toEqual({ reason: "failed", error: failure });
+		expect(await harness.closed).toEqual({ kind: "failed", error: failure });
 		expect(signals).toEqual(["aborted"]);
 		expect(reports).toEqual([failure]);
 		await harness.close(context);
@@ -150,7 +149,7 @@ describe("a failed Storage call", () => {
 		await root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context);
 		storage.failing.add("scanRange");
 		await expect(root.context(context)).rejects.toBe(storage.error);
-		expect(await harness.closed).toEqual({ reason: "failed", error: storage.error });
+		expect(await harness.closed).toEqual({ kind: "failed", error: storage.error });
 		expect(reports).toEqual([storage.error]);
 		await harness.close(context);
 	});
@@ -175,7 +174,7 @@ describe("a failed Storage call", () => {
 		// The read succeeds at the backend, yet its caller gets the failure: nothing it read is used.
 		release.resolve();
 		await expect(reading).rejects.toMatchObject({ name: "SessionFailed", cause: storage.error });
-		expect(await harness.closed).toEqual({ reason: "failed", error: storage.error });
+		expect(await harness.closed).toEqual({ kind: "failed", error: storage.error });
 		await harness.close(context);
 	});
 
@@ -212,7 +211,7 @@ describe("a failed Storage call", () => {
 		await expect(reading).rejects.toThrow("is closed");
 		await closing;
 		expect(pages).toEqual(["first", "close"]);
-		expect(await harness.closed).toEqual({ reason: "closed" });
+		expect(await harness.closed).toEqual({ kind: "closed" });
 	});
 
 	it("fails it when Storage cannot close; an earlier failure stays the cause", async () => {
@@ -225,7 +224,7 @@ describe("a failed Storage call", () => {
 		}
 		const healthy = await started(new FailingClose());
 		await expect(healthy.harness.close(context)).rejects.toBe(closeError);
-		expect(await healthy.harness.closed).toEqual({ reason: "failed", error: closeError });
+		expect(await healthy.harness.closed).toEqual({ kind: "failed", error: closeError });
 		expect(healthy.reports).toEqual([closeError]);
 
 		const storage = new FailingClose();
@@ -235,7 +234,7 @@ describe("a failed Storage call", () => {
 		await expect(failed.root.commit((tx) => tx.appendEntry(failed.root.id, { kind: "note" }), context)).rejects.toBe(
 			failure,
 		);
-		expect(await failed.harness.closed).toEqual({ reason: "failed", error: failure });
+		expect(await failed.harness.closed).toEqual({ kind: "failed", error: failure });
 		expect(failed.reports).toEqual([failure]);
 	});
 
@@ -255,7 +254,7 @@ describe("a failed Storage call", () => {
 		await harness.close(context);
 	});
 
-	it("ends what a task holds with session_failed, not as cancelled by its signal", async () => {
+	it("ends what a task holds as failed, not as cancelled by its signal", async () => {
 		const ends: unknown[] = [];
 		const watching = deferred();
 		const Watcher = defineTask<null, { phase: "work" }, null>({
@@ -286,7 +285,7 @@ describe("a failed Storage call", () => {
 		storage.failNextCommit(failure);
 		await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context)).rejects.toBe(failure);
 		await opened.harness.closed;
-		expect(ends).toEqual([{ reason: "session_failed", error: failure }, "SessionFailed"]);
+		expect(ends).toEqual([{ kind: "failed", error: failure }, "SessionFailed"]);
 		await opened.harness.close(context);
 	});
 
@@ -295,7 +294,7 @@ describe("a failed Storage call", () => {
 		const { harness, root } = await started(storage);
 		storage.failing.add("mintId");
 		await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context)).rejects.toBe(storage.error);
-		expect(await harness.closed).toEqual({ reason: "failed", error: storage.error });
+		expect(await harness.closed).toEqual({ kind: "failed", error: storage.error });
 		await harness.close(context);
 	});
 
@@ -334,7 +333,7 @@ describe("a failed Storage call", () => {
 			name: "SessionFailed",
 			cause: rejection,
 		});
-		expect(await harness.closed).toEqual({ reason: "failed", error: rejection });
+		expect(await harness.closed).toEqual({ kind: "failed", error: rejection });
 		await harness.close(context);
 	});
 
@@ -369,12 +368,12 @@ describe("a failed Storage call", () => {
 		const storage = new ControlledStorage();
 		const { harness, root, reports } = await started(storage);
 		const bug = new Error("listener bug");
-		(harness as unknown as { observeCommits(listener: () => void): void }).observeCommits(() => {
+		(harness as unknown as { followCommits(listener: () => void): void }).followCommits(() => {
 			throw bug;
 		});
 		// The commit itself is durable and resolves; the Session fails behind it.
 		await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context)).resolves.toBeDefined();
-		expect(await harness.closed).toEqual({ reason: "failed", error: bug });
+		expect(await harness.closed).toEqual({ kind: "failed", error: bug });
 		expect(reports).toEqual([bug]);
 		await harness.close(context);
 	});
@@ -391,7 +390,7 @@ describe("a failed Storage call", () => {
 		held.release();
 		await expect(committing).rejects.toBe(failure);
 		await closing;
-		expect(await harness.closed).toEqual({ reason: "failed", error: failure });
+		expect(await harness.closed).toEqual({ kind: "failed", error: failure });
 		expect(reports).toEqual([failure]);
 	});
 
@@ -477,7 +476,7 @@ describe("listener and report errors", () => {
 			const asyncThrow = async () => {
 				throw new Error("async listener");
 			};
-			harness.subscribeCommits(asyncThrow);
+			harness.observeCommits({ advance: asyncThrow, end: () => {} });
 			harness.subscribeClose(asyncThrow);
 			await root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context);
 			await harness.close(context);
@@ -490,8 +489,11 @@ describe("listener and report errors", () => {
 				{ models: createModels(), registry, onReport: asyncThrow },
 				context,
 			);
-			rejecting.subscribeCommits(() => {
-				throw new Error("sync listener");
+			rejecting.observeCommits({
+				advance: () => {
+					throw new Error("sync listener");
+				},
+				end: () => {},
 			});
 			const again = await rejecting.root(context);
 			await again.commit((tx) => tx.appendEntry(again.id, { kind: "note" }), context);
@@ -507,10 +509,13 @@ describe("listener and report errors", () => {
 		const storage = new MemoryStorage();
 		const { harness, root, reports } = await started(storage);
 		const seen: string[] = [];
-		harness.subscribeCommits(() => {
-			throw new Error("commit listener");
+		harness.observeCommits({
+			advance: () => {
+				throw new Error("commit listener");
+			},
+			end: () => {},
 		});
-		harness.subscribeCommits(() => seen.push("commit"));
+		harness.observeCommits({ advance: () => seen.push("commit"), end: () => {} });
 		harness.subscribeClose(() => {
 			throw new Error("close listener");
 		});
@@ -527,24 +532,27 @@ describe("listener and report errors", () => {
 		const failure = new Error("observer broke");
 		await views.attach(
 			root.id,
-			async () => ({
-				publication: () => {
+			undefined,
+			() => ({
+				advance: () => {
 					throw failure;
 				},
-				closeSession: () => {},
+				end: () => {},
 			}),
 			context,
 		);
 		const watch = await root.watch(context);
 		const seen: unknown[] = [];
-		watch.start(async (value) => {
-			seen.push(value);
-		});
+		watch.start(
+			onValue(async ({ value }) => {
+				seen.push(value);
+			}),
+		);
 		await root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context);
 		while (seen.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
 		expect(reports).toEqual([failure]);
 		await harness.close(context);
-		expect(await watch.closed).toEqual({ reason: "session_closed" });
+		expect(await watch.closed).toEqual({ kind: "ended" });
 	});
 
 	it("contains a fulfilled thenable that calls only its fulfillment handler", async () => {
@@ -599,7 +607,7 @@ describe("listener and report errors", () => {
 		await root.commit(async (tx) => {
 			(await tx.doc(LiveDoc, root.id)).compactions = [];
 		}, context);
-		expect(await watch.closed).toEqual({ reason: "listener_error", error: failure });
+		expect(await watch.closed).toEqual({ kind: "listener_error", error: failure });
 		expect(reports).toEqual([failure]);
 		await harness.close(context);
 	});
@@ -635,7 +643,7 @@ describe("listener and report errors", () => {
 		await root.commit(async (tx) => {
 			(await tx.doc(LiveDoc, root.id)).compactions = [];
 		}, context);
-		expect(await watch.closed).toMatchObject({ reason: "listener_error" });
+		expect(await watch.closed).toMatchObject({ kind: "listener_error" });
 		await expect(root.commit((tx) => tx.appendEntry(root.id, { kind: "note" }), context)).resolves.toBeDefined();
 		await opened.harness.close(context);
 	});

@@ -4,7 +4,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, type SubmissionDraft } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -112,13 +112,13 @@ for (const scenario of [
 							},
 						}
 					: { type: "input", ...input };
-				const view = await root.viewState(context);
+				const viewChanged = vi.fn();
+				const view = await harness.observeConversation(root.id, { advance: viewChanged, end: () => {} }, context);
 				try {
-					const before = view.value;
 					await expect(root.submit({ ...draft, requestId: "correctable" }, context)).rejects.toMatchObject({
 						name: "StorageCapacityError",
 					});
-					expect(view.value).toEqual(before);
+					expect(viewChanged).not.toHaveBeenCalled();
 					expect(
 						await root.commit((tx) => tx.submissionByRequest(root.id, "correctable"), context),
 					).toBeUndefined();
@@ -131,7 +131,7 @@ for (const scenario of [
 					expect((await next.wait(context)).status).toBe("done");
 					expect(faux.state.callCount).toBe((busy ? 1 : 0) + (write ? 0 : 1));
 				} finally {
-					view.dispose();
+					view.detach();
 				}
 			} finally {
 				release.resolve();

@@ -2,8 +2,20 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `appendGrammarToolInputJsonDelta()` (`api/constrained-sampling`) takes the input delta instead of the whole input so far and no longer closes the input; close it with the new `closeGrammarToolInputJson()` ([#9265](https://github.com/earendil-works/pi/issues/9265))
+
+### Added
+
+- Added optional `openBrowserOnConfirm` and `copyCodeOnConfirm` to `device_code` auth events and `OAuthDeviceCodeInfo`. Both default to `true`; set them to `false` to stop clients from offering to open the verification page or copy the code ([#9282](https://github.com/earendil-works/pi/issues/9282), [#9301](https://github.com/earendil-works/pi/pull/9301))
+- Added `StreamingJsonParser`, an incremental, tolerant parser for JSON text that arrives in pieces (each piece is read once; snapshots of the partial value never change once returned), and `ToolCallArgumentsStream`, which every provider now uses for streamed tool-call arguments; its `append()` also returns the changes each piece made (`JsonChange`: a value set at a path, or text appended to a string), for writers that keep their own copy ([#9265](https://github.com/earendil-works/pi/issues/9265))
+- Added GPT-6.1 Terra to the OpenAI, Azure OpenAI Responses, and OpenAI Codex providers with official pricing ($1 input, $0.05 cached input, $1.25 cache writes, $5 output, long-context tier above 272k), tool search, and mid-conversation effort changes. Unlike GPT-6.1 Sol it supports `off` (reasoning effort `none`); Codex serves it with a 500K context window
+
 ### Changed
 
+- The faux provider streams partial tool-call arguments, so `toolcall_delta` partials show growing arguments as real providers do ([#9265](https://github.com/earendil-works/pi/issues/9265))
+- The built-in model catalog is generated from models.dev's v2 catalog, and its per-provider rules moved from `scripts/generate-models.ts` into one TypeScript definition per provider under `catalog/`. Models that models.dev types as realtime or image models (`gpt-realtime-2.1`, `gemini-3.1-flash-live-preview`, `gemini-3.1-flash-lite-image`) are no longer offered as chat models, and models.dev's newer OpenAI and Google chat models (`chat-latest`, `gpt-5.6-cyber`, `gemini-robotics-er-2-preview`) are now included
 - Reused the shared cancellation-aware sleep helper for retry backoff, preserving aborted results, callback ordering and completed-listener cleanup.
 - Added lossless request-body compression for direct Anthropic Messages (gzip) and public OpenAI Responses (zstd), with runtime/size guards and explicit encoding opt-out. Restricted existing Codex SSE zstd to its canonical endpoint rather than arbitrary custom URLs. See [support boundaries and measurement](../../docs/compression.md).
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
@@ -11,8 +23,21 @@
 
 ### Fixed
 
+- Fixed Claude models that accept mid-conversation system messages rejecting a session with a 400 (`role 'system' must precede an 'assistant' message`) when a system update was followed by an assistant reply with nothing to send to Anthropic, such as an empty reply or another model's reasoning-only reply ([#11091](https://github.com/earendil-works/pi/issues/11091))
+- Fixed Claude models with mid-conversation effort failing with `Invalid effort level` on accounts whose organization caps effort below `high`, even at `low` or `medium` thinking, by sending a fixed `low` top-level effort ([#10063](https://github.com/earendil-works/pi/issues/10063))
+- Fixed streamed tool-call arguments being re-parsed in full on every delta, which made CPU time and memory grow quadratically with the size of a tool call (a 90 KB `write` on Anthropic peaked at about 140 MB of heap; a 500 KB one took minutes). Every provider and the pi-messages client now read each delta once, and keep the raw argument text and their other stream state (`partialJson`, `partialArgs`, `index`, `customInput`, `streamIndex`, Bedrock's encrypted reasoning bytes) off the content blocks, so it no longer reaches partial messages or transcripts of failed streams ([#9265](https://github.com/earendil-works/pi/issues/9265))
+- Fixed grammar (custom) tool input streaming copying the whole input so far on every delta ([#9265](https://github.com/earendil-works/pi/issues/9265))
+- Fixed bounded error texts (telemetry span messages, truncated provider error bodies, pi-messages diagnostics, Radius gateway errors) keeping the whole text they were cut from alive ([#9265](https://github.com/earendil-works/pi/issues/9265))
+- Fixed Kimi K3.1 Pro and K3.1 Pro Highspeed on Kimi Coding, Moonshot, and OpenCode Go using Kimi K2 request settings. They now send `reasoning_effort` (low/high/max), return earlier reasoning, accept tools added mid-conversation, and report Moonshot rates on Kimi Coding. Kimi Coding `k3-256k` now reports Kimi K3 rates.
+- Fixed OAuth logins opening server-supplied URLs that are not `http:` or `https:` URLs. Radius now checks its browser authorization endpoint and device verification URI, and GitHub Copilot, Kimi Coding, and Meta share one check
+- Fixed pi-messages streams accepting a `contentIndex` that is not the next or an existing content block, such as `__proto__` or a huge index
+- Fixed `pi-ai` CLI auth file being readable by other users. It is now written with mode `0600`
+- Fixed OpenCode DeepSeek V4.1 Flash sending `prompt_cache_retention`, which the OpenCode gateway rejects, with long cache retention
+- Fixed GPT-5.4 and GPT-5.5 failing with `Missing namespace for function_call` after switching from another model that called tools. On the OpenAI and OpenCode providers they now declare their tools in the top-level tool list instead of loading them through `additional_tools` or tool search ([#11415](https://github.com/earendil-works/pi/issues/11415))
+- Fixed Bedrock requests failing when `strict: "prefer"` tools exceed Claude's strict tool limits, such as more than 16 optional parameters across all strict tools; requests now retry once with preferred tools non-strict while keeping `strict: "require"` tools strict, as the Anthropic provider already does ([#11416](https://github.com/earendil-works/pi/issues/11416))
+- Fixed OpenRouter's `~anthropic/claude-*-latest` aliases losing Claude's earlier thinking after each tool call. They used the Chat Completions API, where pi dropped the thinking signature, and OpenRouter then ignored the unsigned thinking. They now use the Anthropic Messages API with adaptive thinking, like the versioned Claude models ([#9534](https://github.com/earendil-works/pi/issues/9534))
 - Fixed successful retry backoffs retaining abort listeners ([#10506](https://github.com/earendil-works/pi/issues/10506)).
-- Fixed Kimi K3 fallback, canonical Kimi/Moonshot catalog overlays, and Kimi Coding implied estimates omitting the default five-minute cache-write price.
+- Fixed Kimi K3 fallback, canonical Kimi/Moonshot catalog overlays, and Kimi Coding implied estimates, including `k3-256k`, omitting the default five-minute cache-write price.
 - Fixed offline builds from published catalogs still containing legacy Kimi Coding Anthropic entries; hydration now applies the native OpenAI protocol and compatibility metadata without changing custom endpoints.
 - Fixed Radius gateway catalogs accepting incomplete pricing that produces `NaN` cost estimates ([#10507](https://github.com/earendil-works/pi/issues/10507)).
 - Fixed the abort-test helper returning before checking the aborted result and follow-up; added an offline regression ([#10508](https://github.com/earendil-works/pi/issues/10508)).
@@ -31,6 +56,7 @@
 - Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
 - Fixed canonical Cloudflare AI Gateway Opus 5.5 catalog defaults omitting positional system, tool and effort controls and five-minute/one-hour cache lifetimes, including pinned catalog hydration; explicit metadata, compatibility opt-outs and catalog entries with a non-canonical `baseUrl` remain unchanged.
 - Fixed Cloudflare AI Gateway GPT models on the `/openai` Responses route rewriting the cached prompt prefix after every mid-session system update or tool load. Models that accept mid-conversation developer messages and `additional_tools` at OpenAI now default to both on Cloudflare, including fetched and restored catalog overlays; explicit metadata and catalog entries with a non-canonical `baseUrl` remain unchanged.
+- Cloudflare AI Gateway `/openai` GPT-5.4 and GPT-5.5 entries no longer default `supportsAdditionalTools`, matching direct OpenAI, and GPT-6.1 Terra gets both positional defaults.
 
 ### Removed
 

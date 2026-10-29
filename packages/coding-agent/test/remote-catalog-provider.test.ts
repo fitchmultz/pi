@@ -81,16 +81,21 @@ afterEach(() => vi.restoreAllMocks());
 describe("remote catalog provider", () => {
 	it("migrates fetched and restored legacy Kimi Coding catalogs over an offline-hydrated baseline", async () => {
 		const baseline = kimiCodingProvider().getModels();
-		const legacy = baseline.map((entry) => ({
-			...entry,
-			name: `Published ${entry.id}`,
-			api: "anthropic-messages",
-			baseUrl: "https://api.kimi.com/coding",
-			compat: { allowEmptySignature: true, forceAdaptiveThinking: true },
-			thinkingLevelMap: entry.id === "kimi-for-coding-highspeed" ? undefined : entry.thinkingLevelMap,
-			cost: { ...entry.cost, cacheWrite: 0 },
-		}));
-		const expected = baseline.map((entry) => ({ ...entry, name: `Published ${entry.id}` }));
+		const legacyIds = new Set(["k3", "kimi-for-coding", "kimi-for-coding-highspeed"]);
+		const legacy = baseline
+			.filter((entry) => legacyIds.has(entry.id))
+			.map((entry) => ({
+				...entry,
+				name: `Published ${entry.id}`,
+				api: "anthropic-messages",
+				baseUrl: "https://api.kimi.com/coding",
+				compat: { allowEmptySignature: true, forceAdaptiveThinking: true },
+				thinkingLevelMap: entry.id === "kimi-for-coding-highspeed" ? undefined : entry.thinkingLevelMap,
+				cost: { ...entry.cost, cacheWrite: 0 },
+			}));
+		const expected = baseline.map((entry) =>
+			legacyIds.has(entry.id) ? { ...entry, name: `Published ${entry.id}` } : entry,
+		);
 		const fetchSpy = vi
 			.spyOn(globalThis, "fetch")
 			.mockResolvedValue(
@@ -111,6 +116,7 @@ describe("remote catalog provider", () => {
 
 	it.each([
 		["kimi-coding", "k3", "https://api.kimi.com/coding/v1"],
+		["kimi-coding", "k3-256k", "https://api.kimi.com/coding/v1"],
 		["moonshotai", "kimi-k3", "https://api.moonshot.ai/v1"],
 		["moonshotai-cn", "kimi-k3", "https://api.moonshot.cn/v1"],
 	])(

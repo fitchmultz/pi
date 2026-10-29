@@ -3,9 +3,12 @@ import { CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL, normalizeCloudflareModel } from 
 import { getBuiltinModels } from "../src/providers/all.ts";
 import type { OpenAIResponsesCompat } from "../src/types.ts";
 
-function positional(model: { compat?: unknown }): boolean {
+function positional(model: { compat?: unknown }) {
 	const compat = model.compat as OpenAIResponsesCompat | undefined;
-	return compat?.supportsMidConvoSystemMessages === true && compat.supportsAdditionalTools === true;
+	return {
+		systemMessages: compat?.supportsMidConvoSystemMessages === true,
+		additionalTools: compat?.supportsAdditionalTools === true,
+	};
 }
 
 const routed = getBuiltinModels("cloudflare-ai-gateway").filter(
@@ -17,9 +20,9 @@ describe("Cloudflare OpenAI positional defaults", () => {
 	// /openai passthrough re-sent the whole prompt after every system update or tool load.
 	it("match direct OpenAI for every Cloudflare /openai Responses model", () => {
 		const direct = new Map(getBuiltinModels("openai").map((model) => [model.id, positional(model)]));
-		const actual = routed.map((model) => [model.id, positional(normalizeCloudflareModel(model))]);
-		expect(actual).toEqual(routed.map((model) => [model.id, direct.get(model.id) ?? false]));
-		expect(actual.filter(([, enabled]) => enabled).length).toBeGreaterThan(0);
+		const actual = routed.map((model) => ({ id: model.id, ...positional(normalizeCloudflareModel(model)) }));
+		expect(actual).toEqual(routed.map((model) => ({ id: model.id, ...(direct.get(model.id) ?? positional({})) })));
+		expect(actual.some((model) => model.additionalTools)).toBe(true);
 	});
 
 	it("keeps explicit values and leaves custom endpoints alone", () => {

@@ -1,13 +1,14 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through official v1.4.0 at
-`4a080252f06caf63a525d7873c5d94d3c23887e0` (2026-10-21).
+v1.0.0 and synchronized through upstream main at
+`0d23d53457a6b9a660c4cbbae061ba277e0fad11` (2026-10-29), following official v1.4.0.
 It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
-The [v1.4.0 integration record](docs/upstream-sync-1.4.0.md) documents the current
-baseline and release-specific verification. The
+The [2026-10-29 integration record](docs/upstream-sync-2026-10-29.md) documents the current
+baseline and verification. The [v1.4.0 integration record](docs/upstream-sync-1.4.0.md)
+records the previous release integration. The
 [2026-10-21 consolidation record](docs/upstream-consolidation-2026-10-21.md)
 records the previous native replacements, retained differences and consumer inspection. The [v1.3.0 integration record](docs/upstream-sync-1.3.0.md)
 records the previous integration's callers, regressions and commands. The
@@ -38,9 +39,8 @@ all-platform qualification.
 | Public model-reference resolution: extensions need native thinking-suffix and exact-ID selection without constructing a second model runtime | `index.ts` re-export of `core/model-resolver.ts` | `model-resolver.test.ts` through the public entrypoint | [SDK](packages/coding-agent/docs/sdk.md#resolve-a-model-reference-without-creating-a-runtime) |
 | Opt-in slow diagnostics: native synchronous handlers and footer frames need dispatch attribution | `core/extensions/{runner,wrapper}.ts`; `PI_EXTENSION_PERFORMANCE=1` | `extensions-performance.test.ts` | [Extensions](packages/coding-agent/docs/extensions.md#opt-in-performance-warnings) |
 | Temporary passive tracing: public hooks do not yet cover final serialization/consumed attempts | `packages/ai/src/utils/cache-trace.ts`, native adapter hooks, `core/cache-trace-context.ts`, `scripts/cache-trace-report.mjs` | `packages/ai/test/cache-trace.test.ts`, `sdk-stream-options.test.ts`, `scripts/cache-trace-report.test.mjs` | [Fidelity and retirement](packages/coding-agent/docs/cache-tracing.md) |
-| Cloudflare catalogs: canonical Claude IDs, qualified Opus 5.5 positional controls/cache lifetimes, and direct-OpenAI positional defaults for `/openai` Responses models | `packages/ai/src/api/cloudflare.ts`, generator/provider, `packages/ai/scripts/hydrate-model-catalog.ts` and `core/remote-catalog-provider.ts` | `packages/ai/test/{model-data-validation,cloudflare-openai-positional}.test.ts`, `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Providers](packages/coding-agent/docs/providers.md), [Cache lifetimes](packages/coding-agent/docs/models.md#prompt-cache-lifetimes) |
+| Cloudflare catalogs: canonical Claude IDs, qualified Opus 5.5 positional controls/cache lifetimes, and direct-OpenAI positional defaults for `/openai` Responses models | `packages/ai/src/api/cloudflare.ts`, `packages/ai/catalog/providers/cloudflare-ai-gateway.ts`, `packages/ai/scripts/hydrate-model-catalog.ts` and `core/remote-catalog-provider.ts` | `packages/ai/test/{model-data-validation,cloudflare-openai-positional}.test.ts`, `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Providers](packages/coding-agent/docs/providers.md), [Cache lifetimes](packages/coding-agent/docs/models.md#prompt-cache-lifetimes) |
 | Path hyperlinks: prose paths and inline-code paths/URLs stay clickable after wrapping; terminals only regex-match one row and the source-transform seam cannot preserve literal codespan rendering | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` | [Terminal setup](packages/coding-agent/docs/terminal-setup.md#override-detected-capabilities) |
-| Source-conditioned resolution: the telemetry root export names only `dist`, so Chord/Durable source tests fail on a checkout without a prior build (upstream's `./render` export already carries `source`) | `packages/telemetry/package.json` | `packages/chord/test/context.test.ts`, `packages/durable/test/harness-telemetry.test.ts` | - |
 
 Complete working state also depends on the queue/admission APIs in
 `packages/agent/src/agent.ts`, resource/settings capture, and bounded artifact I/O in
@@ -52,6 +52,9 @@ These fixes remain until upstream supplies equivalent behavior, not merely close
 Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in the v1.1.0 sync); the fork keeps `private-spill.test.ts` as a regression guard.
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
 Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
+Managed npm extension installs now use upstream's `--no-audit --no-fund` flags, so the fork-only audit suppression is retired.
+The main shell helper now uses upstream's macOS process-group pause before killing; the fork's extra Linux pause is retired there. Sandbox and other environment helpers retain their listed adaptations.
+HTML export now uses upstream's iterative tree traversal, replacing the fork's `activeFirst` traversal. The long-tree regression remains.
 Empty quoted prompt-template arguments now follow upstream's token parser and positional-default regression coverage ([#10867](https://github.com/earendil-works/pi/issues/10867)); the equivalent fork implementation and tests are retired.
 Transcript resume uses upstream's branch-wide recorded active-tool loadout, activates eligible never-mentioned extension tools, and applies `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785), [#11062](https://github.com/earendil-works/pi/issues/11062)). The fork counts historical instruction-group deferrals as mentioned, so internal deferral does not make a tool newly registered. Other selections follow upstream's recorded additions and removals, without a separate selection protocol or legacy-session policy. The fork reconciles temporarily deferred discovery tools when discovery is disabled or absent; explicit selections, exclusions and later deselection remain authoritative across subsequent resumes. Native complete working-session restore retains its exact saved current loadout and modifier policy.
 Claude 5.5 catalog entries now use upstream's models.dev metadata rather than the removed fallback definitions.
@@ -65,20 +68,18 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
-| Managed npm extension installs must not wait on unsolicited audit requests before lifecycle scripts can run; explicit audits and CI security checks remain separate | `core/package-manager.ts` | `package-manager.test.ts` |
-| Legacy published Kimi Coding catalogs must not break offline builds or revert the native OpenAI protocol on fetched/cached overlays; preserve effort/tool constraints and K3 cache-write pricing | `packages/ai/src/api/kimi.ts`, `packages/ai/scripts/{generate-models,hydrate-model-catalog}.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts` |
+| Legacy published Kimi Coding catalogs must not break offline builds or revert the native OpenAI protocol on fetched/cached overlays; preserve effort/tool constraints and K3 cache-write pricing | `packages/ai/src/api/kimi.ts`, `packages/ai/catalog/{families/kimi,providers/kimi-coding,providers/moonshotai}.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts` |
 | Git footers must catch branch changes missed while native watchers and polling baselines start | `core/footer-data-provider.ts` | `footer-data-provider.test.ts` |
 | Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates | `core/{cache-warmer,model-runtime,sdk}.ts`, `modes/interactive/interactive-mode.ts` | `cache-warmer.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
 | WebSocket text frames must not decode object-transport packing markers and bypass untrusted-client compression restrictions | `packages/chord/src/link.ts` | `packages/chord/test/websocket.test.ts` |
 | Oversized public Durable input/write admissions must not fail the Session; host commits can opt into assembled-batch checks including document revisions. Queued input entry-size refusal settles only that input and preserves answers, tool work and valid siblings. SQLite checks exact rows with confirmed rollback, not an aggregate queue cap; post-effect compactions and real commit failures keep their fatal-storage semantics | `packages/durable/src/{storage/sqlite/storage,session/session,session/transaction,harness/harness,harness/inbox,harness/submissions,harness/compaction}.ts` | `packages/durable/test-workers/{input-admission,commit-admission,storage}.test.ts`, `packages/durable/test/harness-storage-failure.test.ts` |
 | Releasing the last state view during hydration must not strand a shared method-only reference | `packages/chord/src/remote.ts` | `packages/chord/test/bindings.test.ts` |
-| Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `utils/shell.ts`, `packages/coding-agent/examples/extensions/sandbox/index.ts`, `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
+| Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `packages/coding-agent/examples/extensions/sandbox/index.ts`, `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
 | File forks must migrate legacy entries before replacing the source header, preserving indexed history and model context | `core/session-manager.ts` | `session-manager/fork-migration.test.ts` |
 | After a failed append to an existing journal, the next append or save must rewrite the journal from accepted memory so reopened history keeps its ancestry without duplicate or partial records; a new session starts without the old failure ([#257](https://github.com/fitchmultz/pi/issues/257)) | `core/session-manager.ts` | `session-manager/file-operations.test.ts`, `suite/regressions/257-journal-write-failure.test.ts` |
 | Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
 | HTML export must not replace the journal through any alias | `core/export-html/index.ts` | `file-safety.test.ts` |
-| Long HTML exports must render and navigate without exhausting the browser's call stack | `core/export-html/template.js` | `export-html-tree.test.ts` |
 | Edits must preserve UTF-8 and untouched original text/boundaries | Shared policy in `packages/durable/src/tools/edit-diff.ts`; byte I/O in `packages/durable/src/tools/edit.ts`, `core/tools/{edit,edit-diff}.ts`, `utils/text.ts` | `packages/durable/test/tools.test.ts`, `edit-byte-safety.test.ts` |
 | One auth-check failure must not hide healthy providers or replace saved/scoped selections | `packages/ai/src/models.ts`, `core/{model-runtime,model-resolver,sdk}.ts` | `packages/ai/test/models-runtime.test.ts`, `model-runtime-auth-options.test.ts`, `model-resolver.test.ts`, `agent-session-dynamic-provider.test.ts` |
 | Refresh admission must precede config I/O: awaited scopes follow current per-provider catalog/auth readiness, global availability reads cannot discard credential synchronization or make it join unrelated work, and full-pass auth failures retain provider-local diagnostics and sibling credential filters under scoped overlap. Scoped snapshot updates read only their own catalogs, so a refresh stays linear in the number of providers | `core/model-runtime.ts` | `model-runtime-refresh-order.test.ts`, `agent-session-dynamic-provider.test.ts`, `model-runtime-credential-sync.test.ts` |
@@ -139,12 +140,14 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Build ready workspaces two at a time, batch selected npm packs, avoid unused native-path Biome WASM loading, and retain every startup worker profile | `scripts/{build,package-artifacts,pack-nix-packages,biome-check,profile-coding-agent-node}.mjs`, `nix/package.nix` | `scripts/{workspace-build,package-artifacts,package-artifact-cli,profile-coding-agent-node}.test.mjs` |
 
 Upstream's rewritten in-memory telemetry adapter copies only incoming attribute values, so the
-fork's retained-array optimization and its changelog entry are retired.
+fork's retained-array optimization and its changelog entry are retired. Telemetry's root export
+now supplies upstream's `source` condition, so the fork-only export correction is also retired.
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
 `background_command`, and no upstream publishing, binary (including Android APK) or
-issue-analysis workflows. Upstream's local `scripts/issues` triage tool is kept but unused. Nix builds
+issue-analysis workflows. Upstream's local `scripts/issues` triage tool and
+`scripts/preview-packages.mjs` are kept but unused; the preview script's tests still run. Nix builds
 retain upstream's derivation and locks with the batched install-phase packing above; automatic
 catalog-pin commits and stable-branch promotion are upstream-only. The
 Nix install check now follows upstream's removal of esbuild from the installer dependencies. Env's upstream platform check accepts the
@@ -219,8 +222,9 @@ Google adapters apply identity during client/header setup while sharing the exis
 Upstream's unused SQLite replication scaffold is removed; Durable's IndexedDB storage is additive,
 not a replacement for the fork's memory/SQLite storage or scheduler semantics.
 
-Streaming tool-call JSON now follows upstream's invalid `\u` repair without losing later fields,
-while retaining span-based repair and the original partial-parser fallback order. Anthropic and
+Streamed tool-call arguments now follow upstream's incremental `StreamingJsonParser` and
+`ToolCallArgumentsStream`. Providers keep scratch state off emitted content blocks. Final arguments
+still use the fork's span-based repair and existing fallback order, including native invalid `\u` repair. Anthropic and
 Bedrock Claude error-result images follow all tool results of the turn; error text and successful
 result images retain their native placement.
 These behaviors have offline parser/payload regression coverage, not a live provider qualification.
@@ -239,13 +243,15 @@ Claude-ID generation already produces canonical IDs upstream. The shared helper 
 provider inputs, remote overlays and pinned catalog hydration. For canonical Cloudflare Opus 5.5 it
 restores positional system/tool/effort controls and defaults absent cache metadata to five-minute
 and one-hour lifetimes. Cloudflare `/openai` Responses entries for the GPT models whose direct
-OpenAI entries accept mid-conversation developer messages and `additional_tools` get both flags too:
-the published catalog lists only OpenCode and Copilot as Responses proxies, so without them every
-system update or tool load rewrote the cached prompt prefix. A parity test keeps that model list
-aligned with the generator's. Explicit compatibility flags and whole cache metadata objects are preserved;
+OpenAI entries accept mid-conversation developer messages or `additional_tools` get the corresponding
+flags too. The published catalog lists only OpenCode and Copilot as Responses proxies, so these
+defaults preserve Cloudflare's cached prefix after supported system updates and tool additions.
+GPT-5.5 and older now follow upstream's top-level tool declarations after its replay-namespace fix
+([#11415](https://github.com/earendil-works/pi/issues/11415)); GPT-6.1 Terra gets both defaults.
+A parity test keeps both lists aligned with `catalog/families/openai.ts`. Explicit compatibility flags and whole cache metadata objects are preserved;
 catalog entries with a non-canonical `baseUrl` do not receive these defaults.
 
-Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3 keeps
+Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3, including Kimi Coding's `k3-256k`, keeps
 the published $3/M five-minute cache-write rate across canonical Kimi Coding and
 Moonshot OpenAI entries and Kimi Coding's implied estimate
 ([pricing](https://platform.kimi.ai/docs/pricing/chat)). Kimi Coding's shared
