@@ -770,8 +770,9 @@ describe("the restart limit on the normal path (#11139)", () => {
 		for (let round = 0; round < rounds; round++) {
 			await (await root.submit({ type: "input", content: `round ${round}` }, context)).wait(context);
 		}
-		// Upstream's ceiling before the restart limit applied to every kind (#11327); retained idle-context caching reads less.
-		expect(resolutions / rounds).toBeLessThanOrEqual(49);
+		// Upstream counts 49 (#11327). The fork's idle-context expiry reads `contextRetentionMs` only while a context is
+		// idle, which leaves 34. Fewer reads pass; an added one, such as reading the restart limit for every task, fails.
+		expect(resolutions / rounds).toBeLessThanOrEqual(34);
 		await harness.close(context);
 	});
 });

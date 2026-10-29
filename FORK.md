@@ -2,7 +2,7 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`0d23d53457a6b9a660c4cbbae061ba277e0fad11` (2026-10-29), following official v1.4.0.
+`e7a0df27c09d11bf4161d3605246cbf57a129cb2` (2026-10-29), following official v1.4.0.
 It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
@@ -130,7 +130,7 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Stream long-token wrapping, use native grapheme endpoints, reuse only the current editor layout after comparing text, width and paste membership, and reuse unchanged same-index rows in unstyled Boxes after child changes | `packages/tui/src/{utils,components/editor,components/input,components/box}.ts` | `packages/tui/test/{wrap-ansi,editor,input,layout,mouse-components}.test.ts` |
 | Reuse unchanged assistant runs, avoid rendering assistants to query emptiness in compact/hybrid grouping, reject plain prose before Mermaid lexing, and compute visible tree ancestry in one pass | `modes/interactive/components/{activity,assistant-message,mermaid,tree-selector}.ts` | `{compact-view,assistant-message,mermaid,tree-selector}.test.ts` |
 | Normalize edit text once and scan only requested read, grep and head-truncation ranges | `packages/durable/src/tools/edit-diff.ts`, `core/tools/{read,grep,truncate}.ts` | `packages/durable/test/tools.test.ts`, `edit-byte-safety.test.ts`, `tools.test.ts` |
-| Stop image encoding at the first fitting candidate without changing candidate order | `utils/image-resize-core.ts` | `image-processing.test.ts` |
+| Compare PNG with the requested-quality JPEG as upstream does, then encode fallback qualities only until one fits | `utils/image-resize-core.ts` | `image-processing.test.ts` |
 | Bound native Bash spill queues and wait for complete private files; push-only custom producers retain their existing callback contract | `core/{bash-executor,tools/bash,tools/output-accumulator}.ts`, `utils/{output-files,child-process}.ts` | `bash-spill.test.ts`, `private-spill.test.ts`, `streaming-file.test.ts` |
 | Skip disk reads only for acknowledged, confirmed-terminal background jobs during monitoring; explicit tools remain fresh | `extensions/background-command/{index,jobs}.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
 | Compile upstream's single Chord frame schema once, drain publications by cursor, and accumulate MCP lines and error prefixes without repeated copying | `packages/chord/src/{wire,publish}.ts`, `packages/mcp/src/transports/{stdio,streamable-http}.ts` | `packages/chord/test/{links-review,state}.test.ts`, `packages/mcp/test/{stdio,streamable-http}.test.ts` |

@@ -62,8 +62,8 @@ function encodeCandidate(buffer: Uint8Array, mimeType: string): EncodedCandidate
  *
  * Strategy for staying under maxBytes:
  * 1. First resize to maxWidth/maxHeight
- * 2. Try PNG, then JPEG at the requested quality followed by 85, 70, 55, 40 (deduplicated)
- * 3. Return the first encoding below maxBytes
+ * 2. Prefer the smaller of PNG and JPEG at the requested quality
+ * 3. If neither fits, try JPEG at 85, 70, 55, 40 (deduplicated), stopping below maxBytes
  * 4. If none fit, progressively reduce dimensions until 1x1
  */
 export async function resizeImageInProcess(
@@ -120,10 +120,12 @@ export async function resizeImageInProcess(
 
 			try {
 				const png = encodeCandidate(resized.get_bytes(), "image/png");
-				if (png.encodedSize < opts.maxBytes) return png;
-				for (const quality of jpegQualities) {
-					const jpeg = encodeCandidate(resized.get_bytes_jpeg(quality), "image/jpeg");
-					if (jpeg.encodedSize < opts.maxBytes) return jpeg;
+				const jpeg = encodeCandidate(resized.get_bytes_jpeg(opts.jpegQuality), "image/jpeg");
+				const preferred = png.encodedSize <= jpeg.encodedSize ? png : jpeg;
+				if (preferred.encodedSize < opts.maxBytes) return preferred;
+				for (const quality of jpegQualities.slice(1)) {
+					const fallback = encodeCandidate(resized.get_bytes_jpeg(quality), "image/jpeg");
+					if (fallback.encodedSize < opts.maxBytes) return fallback;
 				}
 				return null;
 			} finally {

@@ -6,10 +6,10 @@ Keep Mitch's fork current with upstream without losing the approved capabilities
 [FORK.md](../FORK.md). Adopt equivalent native behavior instead of preserving old mechanisms.
 
 - Fork baseline is `581b5c1874ad2dcd42ea37d37a35a0539b6cf3b6`.
-- Upstream target is `0d23d53457a6b9a660c4cbbae061ba277e0fad11`.
+- Upstream target is `e7a0df27c09d11bf4161d3605246cbf57a129cb2`.
 - The previous upstream baseline is official v1.4.0,
   `4a080252f06caf63a525d7873c5d94d3c23887e0`.
-- The incoming range contains 210 commits. This is a merge, not a squash, so upstream ancestry
+- The incoming range contains 211 commits. This is a merge, not a squash, so upstream ancestry
   remains available for the next synchronization.
 
 ## Integration decisions
@@ -25,6 +25,7 @@ Keep Mitch's fork current with upstream without losing the approved capabilities
 | Durable admission and persistence | Merge `admission` into native `CommitOptions`, removing the duplicate transaction-scope flag. Run admission before native deferred-state holding or consumption. It checks the current commit's own writes, not earlier held progress; actual persistence errors retain native fatal semantics. Keep per-input refusal, corrected resubmission, exact SQLite rollback and post-effect compaction behavior. Adopt native observers, tagged watch/end values and Storage's adoption callback. |
 | Coding-agent | Keep accepted journal entries in memory after an append failure and rewrite on the next write, as required by #257, rather than adopt upstream's incompatible rollback. Keep private file-fork creation. Adapt compact cards to native constructor and pending-argument changes, retain saved working-state cwd priority, and guard the new extension-changelog setter during working-state capture. |
 | Retired coding-agent paths | Use native npm `--no-audit --no-fund`, iterative HTML tree traversal and macOS shell cancellation. Remove the redundant fork traversal and extra Linux pause in the main shell helper. Keep the existing public behavior and regressions. |
+| Image resizing | Adopt upstream's smaller-of-PNG-and-requested-quality-JPEG choice for photos. Keep lazy lower-quality fallback encoding. The native photo regression fails on the fork's old PNG-first path and passes with this adaptation. |
 | Telemetry exports | Retire the fork-only source-condition correction. Upstream now supplies the same root `source` export. |
 | Fork delivery policy | Keep fork-local contributor approvals and authorization. Do not import upstream publishing or preview-release workflows. Keep the isolated test runner, package-consumer verification, compiled extension regression and macOS restart/background coverage while adopting native split CI jobs. |
 | Dependencies | Preserve the fork's reviewed exact pins. The refreshed root lock only removes `autoevals` and its now-unused dependency graph. No new dependency version or lifecycle script is introduced. The coding-agent install lock is unchanged. |
@@ -46,7 +47,8 @@ isolated `./test.sh` suite. It also completed a real interactive terminal conver
 Pi's faux provider, the actual `read` tool and a final response, then opened the model selector.
 This uses an isolated home without credentials or paid model calls.
 
-The candidate passed these checks on macOS arm64 with Node 24.22.1:
+The initial integration, before the final photo and counter updates, passed these checks on
+macOS arm64 with Node 24.22.1:
 
 - `npm run generate:models` ran the package's strict generator. Public catalog hydration produced
   1,597 tool-capable chat models.
@@ -74,6 +76,15 @@ The integration also aligned retained fixtures with native behavior. Google usag
 retain the selected effort. The prompt-widget exec fixture supplies the required `truncated` field.
 The Chord-next validator case now checks the escaped JSON Pointer that pinned TypeBox 1.3.37 returns.
 None of these alignments changes the provider or dependency behavior to satisfy a test.
+
+The final photo and counter updates passed their focused tests, the full check, and the offline
+build. An independent baseline-versus-candidate run completed a terminal conversation and
+verified selector paging. It also exercised the public SDK read tool and actual image worker,
+returning the requested-quality JPEG instead of the larger PNG at the same dimensions.
+
+Four packages exceeded their existing deadlines during the final full local rerun on the shared
+host. That run was not counted as a pass. Product and test time limits were unchanged. The PR
+records the hosted checks for the final head separately.
 
 ### Terminal comparison
 
