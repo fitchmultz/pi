@@ -712,21 +712,36 @@ test("isolated npm cannot read registry credentials or settings from the native 
 	assert.equal(registry(), "https://credential-fixture.invalid/");
 });
 
-test("keeps only Termux's exec wrapper, prefix and native shell in the isolated environment", (t) => {
+// #284: mise's Node/npm prefix need not contain Termux's native Bash.
+test("isolated Termux npm scripts use PREFIX Bash independently of Node", { skip: process.platform === "win32" }, (t) => {
 	const f = fixture(t);
 	const platform = process.platform;
 	const inherited = { PREFIX: process.env.PREFIX, LD_PRELOAD: process.env.LD_PRELOAD };
 	try {
-		process.env.PREFIX = join(f.root, "termux-prefix");
-		process.env.LD_PRELOAD = join(f.root, "libtermux-exec.so");
+		const prefix = join(f.root, "termux prefix");
+		mkdirSync(join(prefix, "bin"), { recursive: true });
+		const bash = join(prefix, "bin/bash");
+		symlinkSync(execFileSync("bash", ["-c", "command -v bash"], { encoding: "utf8" }).trim(), bash);
+		process.env.PREFIX = prefix;
 		Object.defineProperty(process, "platform", { value: "android", configurable: true });
 		const env = isolatedEnvironment(f.env.HOME, tools, join(f.root, "cache"));
-		assert.equal(env.PREFIX, process.env.PREFIX);
-		assert.equal(env.LD_PRELOAD, process.env.LD_PRELOAD);
-		assert.equal(env.npm_config_script_shell, join(dirname(tools.node), "bash"));
+		assert.equal(env.PREFIX, prefix);
+		assert.equal(env.LD_PRELOAD, inherited.LD_PRELOAD);
+		assert.equal(env.npm_config_script_shell, bash);
 		assert.equal(env.PI_RESTART_SOCKET, undefined);
 		assert.equal(env.NODE_OPTIONS, undefined);
 		assert.equal(env.ANTHROPIC_API_KEY, undefined);
+		const bin = join(f.root, "node_modules/.bin");
+		mkdirSync(bin, { recursive: true });
+		writeFileSync(join(bin, "fixture-executable"), '#!/usr/bin/env node\nconsole.log("package executable");\n', { mode: 0o755 });
+		writeFileSync(join(f.root, "package.json"), JSON.stringify({
+			private: true,
+			scripts: { probe: "npm --version && fixture-executable" },
+		}));
+		const output = execFileSync(tools.node, [tools.npm, "run", "--silent", "probe"], {
+			cwd: f.root, env, encoding: "utf8",
+		});
+		assert.deepEqual(output.trim().split(/\r?\n/), [tools.npmVersion, "package executable"]);
 	} finally {
 		Object.defineProperty(process, "platform", { value: platform, configurable: true });
 		for (const [name, value] of Object.entries(inherited)) {
@@ -736,19 +751,22 @@ test("keeps only Termux's exec wrapper, prefix and native shell in the isolated 
 	}
 });
 
-test("isolated npm scripts can invoke npm and package executables on Termux", { skip: process.platform === "win32" }, (t) => {
+test("Termux isolation rejects missing PREFIX or Bash before running npm", (t) => {
 	const f = fixture(t);
-	const bin = join(f.root, "node_modules/.bin");
-	mkdirSync(bin, { recursive: true });
-	writeFileSync(join(bin, "fixture-executable"), '#!/usr/bin/env node\nconsole.log("package executable");\n', { mode: 0o755 });
-	writeFileSync(join(f.root, "package.json"), JSON.stringify({
-		private: true,
-		scripts: { probe: "npm --version && fixture-executable" },
-	}));
-	const output = execFileSync(tools.node, [tools.npm, "run", "--silent", "probe"], {
-		cwd: f.root, env: f.env, encoding: "utf8",
-	});
-	assert.deepEqual(output.trim().split(/\r?\n/), [tools.npmVersion, "package executable"]);
+	const platform = process.platform;
+	const prefix = process.env.PREFIX;
+	try {
+		Object.defineProperty(process, "platform", { value: "android", configurable: true });
+		const cache = join(f.root, "cache");
+		delete process.env.PREFIX;
+		assert.throws(() => isolatedEnvironment(f.env.HOME, tools, cache), /Termux requires an absolute PREFIX/);
+		process.env.PREFIX = join(f.root, "missing-prefix");
+		assert.throws(() => isolatedEnvironment(f.env.HOME, tools, cache), /Termux requires executable Bash at .*pkg install bash/);
+	} finally {
+		Object.defineProperty(process, "platform", { value: platform, configurable: true });
+		if (prefix === undefined) delete process.env.PREFIX;
+		else process.env.PREFIX = prefix;
+	}
 });
 
 for (const blocked of [false, true]) {

@@ -95,7 +95,16 @@ if [[ "$($real_node -p 'process.platform')" == android ]]; then
 		value="${!name-}"
 		[[ -z "$value" ]] || test_env+=("$name=$value")
 	done
-	test_env+=("npm_config_script_shell=$node_bin/bash")
+	if [[ "${PREFIX-}" != /* ]]; then
+		echo "Termux requires an absolute PREFIX pointing to its native installation." >&2
+		exit 1
+	fi
+	termux_bash="$PREFIX/bin/bash"
+	if [[ ! -x "$termux_bash" ]]; then
+		echo "Termux requires executable Bash at $termux_bash; run pkg install bash and check PREFIX." >&2
+		exit 1
+	fi
+	test_env+=("npm_config_script_shell=$termux_bash")
 fi
 
 # Trust extra certificates of proxies that inspect HTTPS (corporate proxies, sandboxes).

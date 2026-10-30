@@ -78,7 +78,9 @@ for staging and rollback.
 
 Builds, consumer smoke tests, and `test.sh` retain Termux's `PREFIX` and
 `LD_PRELOAD` exec wrapper while isolating home/configuration. npm scripts use the
-native Termux bash rather than `/bin/sh`. The installer selects the prepared
+native Termux Bash at `$PREFIX/bin/bash` rather than `/bin/sh` or a shell beside
+Node. This also supports version-managed Node installations such as mise; keep
+`PREFIX` set to the absolute native Termux installation path. The installer selects the prepared
 compiler before `build:offline`; TypeScript API checks also use that compiler.
 
 ## Access Android shared storage

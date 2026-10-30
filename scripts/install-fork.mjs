@@ -14,6 +14,7 @@ import lockfile from "proper-lockfile";
 import { validateModelDataDirectory } from "../packages/ai/scripts/model-data.ts";
 import { forkNpmEnvironment, removeForkNpmLogs } from "../packages/coding-agent/src/utils/fork-npm-cache.ts";
 import { claimForkReleaseStore } from "../packages/coding-agent/src/utils/fork-release-store.ts";
+import { getTermuxBash } from "../packages/coding-agent/src/utils/termux.ts";
 import { codingAgentName, smokeTestCodingAgent } from "./coding-agent-smoke.mjs";
 import { wireConsumer } from "./local-package-install.mjs";
 import { produceArtifactSet } from "./package-artifacts.mjs";
@@ -68,7 +69,7 @@ export function isolatedEnvironment(home, tools, cacheDir) {
 		...(process.platform === "android" ? {
 			PREFIX: process.env.PREFIX,
 			LD_PRELOAD: process.env.LD_PRELOAD,
-			npm_config_script_shell: join(dirname(tools.node), "bash"),
+			npm_config_script_shell: getTermuxBash(),
 		} : {}),
 	};
 }

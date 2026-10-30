@@ -16,6 +16,7 @@ import { getPackageDir, isBunRuntime, PACKAGE_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./child-process.ts";
 import { forkNpmEnvironment, removeForkNpmLogs } from "./fork-npm-cache.ts";
 import { claimForkReleaseStore } from "./fork-release-store.ts";
+import { getTermuxBash } from "./termux.ts";
 
 /** Bootstrap a pinned fork checkout; the fork installer owns validation and atomic selection. */
 export async function runForkUpdate(): Promise<void> {
@@ -27,6 +28,7 @@ export async function runForkUpdate(): Promise<void> {
 	if (isBunRuntime || major < 22 || (major === 22 && minor < 19)) {
 		throw new Error("pi update --fork requires Node.js >=22.19 with npm installed alongside Node (not Bun).");
 	}
+	const bash = termux ? getTermuxBash() : "bash";
 	const node = realpathSync(process.execPath);
 	const npm = join(dirname(node), "../lib/node_modules/npm/bin/npm-cli.js");
 	try {
@@ -80,7 +82,7 @@ export async function runForkUpdate(): Promise<void> {
 	validateSelector();
 	for (const [command, args] of [
 		["git", ["--version"]],
-		["bash", ["--version"]],
+		[bash, ["--version"]],
 		["tar", ["--version"]],
 		["gzip", ["--version"]],
 		["tmux", ["-V"]],
@@ -127,7 +129,7 @@ export async function runForkUpdate(): Promise<void> {
 				? {
 						PREFIX: process.env.PREFIX,
 						LD_PRELOAD: process.env.LD_PRELOAD,
-						npm_config_script_shell: join(dirname(node), "bash"),
+						npm_config_script_shell: bash,
 					}
 				: {}),
 		};
