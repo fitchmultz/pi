@@ -323,7 +323,14 @@ afterEach(async () => {
 // Real terminal, private tmux socket, isolated HOME and faux provider: no network or paid requests.
 describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_CLI)", () => {
 	it("preserves fullscreen and primary working-session ownership across restart and completed exit", async () => {
-		const f = fixture(process.platform === "android" ? resolve(dirname(process.execPath), "../tmp") : "/tmp");
+		// #297: exercise a long TMPDIR with Node outside Termux's prefix.
+		const shortTmp =
+			process.platform === "android"
+				? join(process.env.PREFIX || resolve(dirname(process.execPath), ".."), "tmp")
+				: "/tmp";
+		const f = fixture(shortTmp);
+		const longTmp = join(f.root, "nested-".repeat(16));
+		mkdirSync(longTmp);
 		const socketPath = join(f.root, "working.sock");
 		const exitPath = join(f.root, "completed.json");
 		const probe = join(f.root, "child-env.mjs");
@@ -362,11 +369,17 @@ export default function(pi) {
 			.join(" ");
 		const command = `${childArgs} -p 'nested text' && ${childArgs} --mode json 'nested json'`;
 		f.start(f.extension("v1", { nested: { probe, command, exitPath } }), {
-			env: { PI_WORKING_SESSION_SOCKET: socketPath, PI_WORKING_SESSION_EXIT_PATH: exitPath },
+			env: {
+				PI_WORKING_SESSION_SOCKET: socketPath,
+				PI_WORKING_SESSION_EXIT_PATH: exitPath,
+				TMPDIR: longTmp,
+				...(process.platform === "android" && process.env.PREFIX ? { PREFIX: process.env.PREFIX } : {}),
+			},
 			tuiMode: "fullscreen",
 		});
 		await f.wait((rows) => rows.some((row) => row.event === "settled"));
 		const first = f.read().find((row) => row.event === "start")!;
+		expect(f.read().find((row) => row.event === "prompt")?.endpoint).toBeTruthy();
 		const journal = readFileSync(first.sessionFile, "utf8");
 		expect({
 			factoryEnvironment: f.read().find((row) => row.event === "factory-child")?.environment,

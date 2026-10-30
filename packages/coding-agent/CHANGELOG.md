@@ -48,6 +48,7 @@
 
 ### Fixed
 
+- Fixed restart control with long temporary paths and the fork installer’s restart validation on Termux with version-managed Node by using `$PREFIX/tmp` instead of a directory beside Node ([#297](https://github.com/fitchmultz/pi/issues/297)).
 - Fixed fork updates, installs and isolated tests on Termux with version-managed Node by using native `$PREFIX/bin/bash` instead of assuming Bash is next to Node ([#284](https://github.com/fitchmultz/pi/issues/284)).
 - Fixed forking legacy sessions skipping migration and losing earlier model context, compaction references, and legacy custom-message roles ([#256](https://github.com/fitchmultz/pi/issues/256)).
 - Fixed a failed session journal write, such as a temporary permission error, disconnecting earlier history on reopen once writes recovered. After a failed append to an existing journal, the next append or save rewrites it from accepted history, replacing any partial record; new sessions no longer report an earlier session's write failure ([#257](https://github.com/fitchmultz/pi/issues/257)).

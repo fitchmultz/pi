@@ -58,7 +58,7 @@ export interface ManagedRestart {
 
 let install: ((pi: ExtensionAPI) => void) | undefined;
 
-/** Unix socket limits include the directory; Android's writable short temp root is next to its runtime. */
+/** Unix socket limits include the directory; Termux's short temp root is under its prefix. */
 export function getRestartSocketFallback(
 	directory: string,
 	platform = process.platform,
@@ -66,7 +66,11 @@ export function getRestartSocketFallback(
 ): string | undefined {
 	const maxBytes = platform === "linux" || platform === "android" ? 107 : 103;
 	if (platform === "win32" || Buffer.byteLength(join(directory, "s")) <= maxBytes) return undefined;
-	return platform === "android" ? posix.resolve(posix.dirname(execPath), "../tmp") : "/tmp";
+	if (platform === "android") {
+		const prefix = process.env.PREFIX || posix.resolve(posix.dirname(execPath), "..");
+		return posix.join(prefix, "tmp");
+	}
+	return "/tmp";
 }
 
 /** Builtin factory; SDK, non-interactive modes and standalone binaries never initialize control. */
