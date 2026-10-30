@@ -1,5 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	collapseSystemMessages,
 	fauxAssistantMessage,
@@ -27,7 +28,11 @@ import { createHarness, getMessageText, getToolResult, type Harness } from "./ha
 
 const full = "Full browser safety instructions: inspect before acting. Preserve all owner guidance.";
 const later = "Full later instructions";
-function owner(pi: ExtensionAPI, browseExposure: "direct" | "codemode" = "direct") {
+function owner(
+	pi: ExtensionAPI,
+	browseExposure: "direct" | "codemode" = "direct",
+	instructions: () => string = () => full,
+) {
 	let managed = () => false;
 	pi.events.on("pi:instruction-groups", (data) => {
 		const collector = data as InstructionGroupCollector;
@@ -35,7 +40,7 @@ function owner(pi: ExtensionAPI, browseExposure: "direct" | "codemode" = "direct
 			name: "browser",
 			description: "Browser actions",
 			tools: ["browse", "optional", "hidden"],
-			instructions: () => full,
+			instructions,
 		});
 		managed = collector.isManaged;
 	});
@@ -684,6 +689,194 @@ describe("on-demand instruction groups", () => {
 		},
 	);
 
+	it.each(["direct", "discarded script", "failed script"] as const)(
+		"keeps one full copy per enabled group on a subsequent run after %s",
+		async (path) => {
+			const harness = await setup({
+				initialActiveToolNames: ["codemode"],
+				extensionFactories: [...selectedOwners, createCodemodeExtension()],
+			});
+			const requests: TranscriptContext[] = [];
+			const enable = { enable: ["browser", "other"] };
+			const first =
+				path === "direct"
+					? discover(enable.enable)
+					: script(
+							`await tools.discover_tools(${JSON.stringify(enable)}); ${
+								path === "failed script" ? 'throw new Error("after discovery");' : 'return "discarded";'
+							}`,
+						);
+			const act = (context: TranscriptContext) => {
+				requests.push(structuredClone(context));
+				return fauxAssistantMessage([fauxToolCall("browse", {}), fauxToolCall("deselected", {})], {
+					stopReason: "toolUse",
+				});
+			};
+			harness.setResponses([first, act, done()]);
+			await harness.session.prompt("enable both groups");
+			expect(getToolResult(harness, "browse").isError).toBe(false);
+			expect(getToolResult(harness, "deselected").isError).toBe(false);
+			harness.setResponses([act, done()]);
+			await harness.session.prompt("use both groups again");
+			expect(getToolResult(harness, "browse").isError).toBe(false);
+			expect(getToolResult(harness, "deselected").isError).toBe(false);
+			for (const request of requests) {
+				const body = JSON.stringify(request.messages);
+				expect(body.split(full)).toHaveLength(2);
+				expect(body.split(later)).toHaveLength(2);
+			}
+			if (path === "direct") {
+				harness.setResponses([
+					discover(enable.enable),
+					(context) => {
+						const body = JSON.stringify(context.messages);
+						expect(body.split(full)).toHaveLength(3);
+						expect(body.split(later)).toHaveLength(3);
+						return done();
+					},
+				]);
+				await harness.session.prompt("explicitly rediscover both groups");
+				expect(getToolResult(harness, "discover_tools").content).toEqual([
+					{ type: "text", text: `## browser\n\n${full}\n\n## other\n\n${later}` },
+				]);
+			}
+		},
+	);
+
+	it.each(["direct", "codemode"] as const)(
+		"delivers the latest complete %s instructions when project guidance is added, removed, or restored",
+		async (path) => {
+			const withProject = `${full}\n\nProject browser config: use this profile.`;
+			let current = withProject;
+			const requests: TranscriptContext[] = [];
+			const harness = await setup({
+				...(path === "codemode" ? { initialActiveToolNames: ["codemode"] } : {}),
+				extensionFactories: [
+					instructionGroupsExtension,
+					(pi) => owner(pi, "direct", () => current),
+					...(path === "codemode" ? [createCodemodeExtension()] : []),
+				],
+			});
+			harness.setResponses([discoverVia(path), done()]);
+			await harness.session.prompt("enable browser with project config");
+			for (const text of [full, withProject, full]) {
+				current = text;
+				harness.setResponses([
+					(context) => {
+						requests.push(structuredClone(context));
+						return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
+					},
+					done(),
+				]);
+				await harness.session.prompt("use browser after configuration changed");
+				expect(getToolResult(harness, "browse").isError).toBe(false);
+				const deliveries = harness.sessionManager
+					.getBranch()
+					.filter(
+						(entry) =>
+							entry.type === "custom_message" && entry.customType === "pi:instruction-groups:instructions",
+					);
+				expect(getMessageText(deliveries.at(-1))).toBe(`## browser\n\n${text}`);
+				expect(requests.at(-1)!.messages.some((message) => getMessageText(message).includes(text))).toBe(true);
+			}
+			const deliveriesBefore = harness.sessionManager
+				.getBranch()
+				.filter(
+					(entry) => entry.type === "custom_message" && entry.customType === "pi:instruction-groups:instructions",
+				);
+			harness.setResponses([done()]);
+			await harness.session.prompt("unchanged configuration");
+			const deliveriesAfter = harness.sessionManager
+				.getBranch()
+				.filter(
+					(entry) => entry.type === "custom_message" && entry.customType === "pi:instruction-groups:instructions",
+				);
+			expect(deliveriesAfter).toHaveLength(deliveriesBefore.length);
+		},
+	);
+
+	it("keeps separate group sections intact when owner instructions contain another group heading", async () => {
+		const browserText = `${full}\n\n## other\n\nA browser owner's own heading.`;
+		const harness = await setup({
+			extensionFactories: [
+				instructionGroupsExtension,
+				(pi) => owner(pi, "direct", () => browserText),
+				(pi) =>
+					pi.events.on("pi:instruction-groups", (data) =>
+						(data as InstructionGroupCollector).register({
+							name: "other",
+							description: "Other",
+							tools: ["plain"],
+							instructions: () => later,
+						}),
+					),
+			],
+		});
+		harness.setResponses([discover(["browser", "other"]), done()]);
+		await harness.session.prompt("enable groups");
+		let request: TranscriptContext | undefined;
+		harness.setResponses([
+			(context) => {
+				request = structuredClone(context);
+				return fauxAssistantMessage([fauxToolCall("browse", {}), fauxToolCall("plain", {})], {
+					stopReason: "toolUse",
+				});
+			},
+			done(),
+		]);
+		await harness.session.prompt("use groups");
+		expect(getToolResult(harness, "browse").isError).toBe(false);
+		expect(getToolResult(harness, "plain").isError).toBe(false);
+		expect(JSON.stringify(request!.messages).split(full)).toHaveLength(2);
+		expect(JSON.stringify(request!.messages).split(later)).toHaveLength(2);
+	});
+
+	it.each(["direct", "codemode"] as const)(
+		"reuses old %s discovery anchors without section metadata after resume",
+		async (path) => {
+			const options = {
+				initialActiveToolNames: ["codemode"],
+				extensionFactories: [...selectedOwners, createCodemodeExtension()],
+			};
+			const original = await setup(options);
+			original.setResponses([discoverVia(path, ["browser", "other"]), done()]);
+			await original.session.prompt("enable groups");
+			const entries = structuredClone([
+				original.sessionManager.getHeader()!,
+				...original.sessionManager.getBranch(),
+			]);
+			for (const entry of entries) {
+				if (
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolName === "discover_tools"
+				)
+					delete entry.message.details;
+				if (entry.type === "custom_message" && entry.customType === "pi:instruction-groups:instructions")
+					delete entry.details;
+			}
+			const resumed = await setup({
+				...options,
+				sessionManager: SessionManager.inMemory(original.tempDir, undefined, entries),
+			});
+			let request: TranscriptContext | undefined;
+			resumed.setResponses([
+				(context) => {
+					request = structuredClone(context);
+					return fauxAssistantMessage([fauxToolCall("browse", {}), fauxToolCall("deselected", {})], {
+						stopReason: "toolUse",
+					});
+				},
+				done(),
+			]);
+			await resumed.session.prompt("use groups after resume");
+			expect(getToolResult(resumed, "browse").isError).toBe(false);
+			expect(getToolResult(resumed, "deselected").isError).toBe(false);
+			expect(JSON.stringify(request!.messages).split(full)).toHaveLength(2);
+			expect(JSON.stringify(request!.messages).split(later)).toHaveLength(2);
+		},
+	);
+
 	const codemodeOptions = {
 		initialActiveToolNames: ["codemode"],
 		extensionFactories: [instructionGroupsExtension, owner, createCodemodeExtension()],
@@ -976,7 +1169,7 @@ describe("on-demand instruction groups", () => {
 		restored.setResponses([
 			(context) => {
 				expect(getCurrentTools(context.messages).map((tool) => tool.name)).toContain("browse");
-				expect(restored.session.systemPrompt).toContain(full);
+				expect(JSON.stringify(context.messages).split(full)).toHaveLength(2);
 				return fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" });
 			},
 			done(),
@@ -1059,11 +1252,64 @@ describe("on-demand instruction groups", () => {
 		},
 	);
 
+	it.each(["unchanged", "changed"] as const)(
+		"does not repair a %s instruction anchor retained by compaction",
+		async (state) => {
+			let current = full;
+			let firstKeptEntryId = "";
+			const requests: AgentMessage[][] = [];
+			const harness = await setup({
+				settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+				extensionFactories: [
+					instructionGroupsExtension,
+					(pi) => owner(pi, "direct", () => current),
+					(pi) => {
+						pi.on("session_before_compact", (event) => ({
+							compaction: {
+								summary: "earlier context",
+								firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+							},
+						}));
+						pi.on("context_with_system", (event) => {
+							if (event.messages.some((message) => message.role === "compactionSummary"))
+								requests.push(structuredClone(event.messages));
+						});
+					},
+				],
+			});
+			harness.setResponses([done(), discover(), done()]);
+			await harness.session.prompt("earlier");
+			await harness.session.prompt("enable browser");
+			firstKeptEntryId = harness.sessionManager
+				.getBranch()
+				.find((entry) => entry.type === "message" && getMessageText(entry.message) === "enable browser")!.id;
+			await harness.session.compact();
+			if (state === "changed") current = `${full}\n\nProject browser config: use this profile.`;
+			harness.setResponses([fauxAssistantMessage([fauxToolCall("browse", {})], { stopReason: "toolUse" }), done()]);
+			await harness.session.prompt("use retained instructions");
+			expect(getToolResult(harness, "browse").isError).toBe(false);
+			const messages = requests[0];
+			expect(
+				messages.some(
+					(message) => message.role === "custom" && message.customType === "pi:instruction-groups:compaction",
+				),
+			).toBe(false);
+			const anchors = messages.filter(
+				(message) =>
+					(message.role === "toolResult" && message.toolName === "discover_tools") ||
+					(message.role === "custom" && message.customType === "pi:instruction-groups:instructions"),
+			);
+			expect(anchors).toHaveLength(state === "changed" ? 2 : 1);
+			expect(getMessageText(anchors.at(-1))).toBe(`## browser\n\n${current}`);
+		},
+	);
+
 	it.each(["direct", "codemode"] as const)(
-		"repairs %s discovery immediately when automatic compaction removes its instructions mid-run",
+		"keeps %s discovery available through automatic compaction mid-run",
 		async (path) => {
 			const large = full + " guidance".repeat(1800);
-			const repairs: { headRole: string; message: unknown }[] = [];
+			const compactedRequests: { headRole: string; copies: number }[] = [];
 			const harness = await setup({
 				models: [{ id: "faux-1", contextWindow: 12000, maxTokens: 100 }],
 				settings: { compaction: { enabled: true, reserveTokens: 6000, keepRecentTokens: 1 } },
@@ -1097,7 +1343,8 @@ describe("on-demand instruction groups", () => {
 						pi.on("context_with_system", (event) => {
 							const index = event.messages.findLastIndex((message) => message.role === "compactionSummary");
 							if (index < 0) return;
-							repairs.push({ headRole: event.messages[0].role, message: event.messages[index + 1] });
+							const copies = JSON.stringify(event.messages).split(large).length - 1;
+							if (copies) compactedRequests.push({ headRole: event.messages[0].role, copies });
 						});
 					},
 				],
@@ -1111,15 +1358,8 @@ describe("on-demand instruction groups", () => {
 			]);
 			await harness.session.prompt("discover then act");
 			expect(harness.eventsOfType("compaction_end").length).toBeGreaterThan(0);
-			expect(repairs.length).toBeGreaterThan(0);
-			for (const repair of repairs) {
-				expect(repair.headRole).toBe("system");
-				expect(repair.message).toMatchObject({
-					role: "custom",
-					display: false,
-					content: `## browser\n\n${large}`,
-				});
-			}
+			expect(compactedRequests.length).toBeGreaterThan(0);
+			for (const request of compactedRequests) expect(request).toEqual({ headRole: "system", copies: 1 });
 			expect(getToolResult(harness, "browse").isError).toBe(false);
 		},
 	);

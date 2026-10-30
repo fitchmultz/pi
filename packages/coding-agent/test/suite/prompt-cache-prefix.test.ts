@@ -208,6 +208,8 @@ it.each([
 			if (scriptOnly) expect(JSON.stringify(before)).not.toContain("discover_tools: ");
 			expect(JSON.stringify(before)).not.toContain("Inspect before acting.");
 			expect(JSON.stringify(enabled)).toContain("Inspect before acting.");
+			for (const payload of [enabled, continued, reconnected])
+				expect(JSON.stringify(payload).split("Inspect before acting.")).toHaveLength(2);
 			expect(JSON.stringify(before)).not.toContain('"name":"browse"');
 			expect(JSON.stringify(listed)).not.toContain('"name":"browse"');
 			expect(JSON.stringify(continued)).not.toContain("- later: Late connection");
@@ -598,6 +600,8 @@ it.each([
 			expect(JSON.stringify(prime.system)).toContain("discover_tools: ");
 			expect(JSON.stringify(prime)).not.toContain("Inspect before acting.");
 			expect(JSON.stringify(listed)).not.toContain("Inspect before acting.");
+			for (const payload of [discovered, redefined, removed, low, reconnected])
+				expect(JSON.stringify(payload).split("Inspect before acting.")).toHaveLength(2);
 			expect(JSON.stringify(low)).not.toContain("- later: Late connection");
 			expect(JSON.stringify(reconnected)).toContain("- later: Late connection");
 			expect(h.session.getActiveToolNames()).not.toContain("late");
@@ -698,7 +702,7 @@ it.each([
 					properties: { selector: { type: "string" } },
 				});
 				expect(removed.tools?.some((tool) => tool.name === "browse")).toBe(false);
-				expect(redefined.system).not.toEqual(prime.system);
+				expect(redefined.system).toEqual(prime.system);
 				for (const payload of captures) {
 					expect(payload.tools?.some((tool) => tool.defer_loading)).toBe(false);
 					expect(

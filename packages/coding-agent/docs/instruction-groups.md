@@ -118,26 +118,39 @@ otherwise owners remain eager.
 Enabled names and the temporarily inactive selected tools are stored in custom
 `pi:instruction-groups` session entries.
 Direct discovery returns full text; nested discovery stores it in a hidden context
-message. Both paths append full instructions to the system prompt on subsequent
-runs. Startup, resume, reload, and tree navigation replay the selected raw branch,
-not compacted context or abandoned branches. Requests consume only newly appended
-entries through public session APIs, without a full-history walk on every request.
-Replaying this state restores the same selection without activating optional tools.
+message. Later runs reuse those instructions rather than adding a second copy to the
+system prompt. If the current owner text changes or the instruction anchor is absent,
+the next run delivers the full current section in a new hidden message. Existing
+history is not rewritten, preserving the serialized prefix. A deliberate re-enable
+still returns the full instructions.
+
+Sessions created with the older system-prompt append can retain that historical
+copy in the prefix on providers that support positional system messages, until
+compaction removes it. Providers that collapse system messages use the current
+prompt instead.
+
+Startup, resume, reload, and tree navigation replay the selected raw branch,
+not abandoned branches. State replay consumes newly appended entries through public
+session APIs. When a group is enabled, prompt start checks its anchors in the
+compaction-aware projection; sessions with no enabled groups skip that check.
+Replaying state restores the same selection without activating optional tools.
 
 After compaction, a request-local hidden custom message is inserted immediately
-after the latest compaction summary. It restores full instructions for groups enabled
-**at that boundary**, in name order, with the compaction timestamp. Later discoveries
-keep their later tool-result or instruction-message anchor. The system message and
-tool state are untouched.
-This also repairs automatic compaction following discovery in the same run.
+after the latest compaction summary only for groups enabled **at that boundary**
+whose instruction anchors are no longer present. It restores their current full
+instructions in name order, with the compaction timestamp. A surviving anchor is
+not duplicated; a surviving stale anchor is followed by the updated section at the
+next run start. Later discoveries keep their later tool-result or instruction-message
+anchor. The system message and tool state are untouched. This also repairs automatic
+compaction following discovery in the same run.
 
-Readiness clears at each turn and requires the full current instruction section in
-the request's effective system prompt, a successful discovery result, a nested discovery
-instruction message, or the repair message. Same-assistant discovery and action calls
-are blocked, even in sequential execution. If an owner's text changes and no current
-instruction anchor survives,
-rediscover it. Later `context_with_system` handlers must preserve these instructions;
-the builtin cannot validate transformations made after its own handler.
+Readiness clears at each turn and requires the latest visible instruction section to
+equal the owner's current section. It can come from a successful discovery result,
+a nested or run-start instruction message, or the repair message. Same-assistant
+discovery and action calls are blocked, even in sequential execution. If an owner's
+text changes mid-run, rediscover it before using that group's tools. Later
+`context_with_system` handlers must preserve these instructions; the builtin cannot
+validate transformations made after its own handler.
 
 See [Extensions](extensions.md) for public loadout and lifecycle APIs and
 [Message Types](message-types.md) for request-local custom messages.
