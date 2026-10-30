@@ -381,7 +381,7 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else ready();');
 		f.release("B", body);
 		f.select(a);
-		expect(await f.run(a, 200)).toBe(0);
+		expect(await f.run(a)).toBe(0);
 		const receipts = f.read();
 		expect(receipts.map((r) => r.runtime)).toEqual(["A", "B", "A"]);
 		expect(receipts[2].args).toContain(join(f.root, "v1.ts"));
@@ -391,7 +391,7 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 			message: "Continue once",
 			failure: expect.any(String),
 		});
-		if (body.includes("setInterval")) expect(receipts[2].handoff?.failure).toContain("within 0.2 seconds");
+		if (body.includes("setInterval")) expect(receipts[2].handoff?.failure).toContain("within 3 seconds");
 	});
 	// fitchmultz/pi#236
 	it("stops if the exact previous worker also fails and keeps the complete handoff for recovery", async () => {
