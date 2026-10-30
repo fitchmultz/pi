@@ -81,7 +81,12 @@ describe.skipIf(process.platform === "win32").each(platforms)("fork update boots
 		vi.stubEnv("PI_RESTART_SOCKET", "must-not-leak");
 		vi.stubEnv("NODE_OPTIONS", "");
 		vi.stubEnv("NPM_CONFIG_GLOBALCONFIG", join(root, "ambient-npmrc"));
-		vi.stubEnv("PREFIX", join(root, "termux-prefix"));
+		vi.stubEnv("PREFIX", join(root, "termux prefix"));
+		mkdirSync(join(process.env.PREFIX!, "bin"), { recursive: true });
+		symlinkSync(
+			execFileSync("bash", ["-c", "command -v bash"], { encoding: "utf8" }).trim(),
+			join(process.env.PREFIX!, "bin/bash"),
+		);
 		// An empty preload avoids loading a real Android library on the host.
 		vi.stubEnv("LD_PRELOAD", "");
 		vi.spyOn(console, "log").mockImplementation(() => {});
@@ -98,6 +103,11 @@ describe.skipIf(process.platform === "win32").each(platforms)("fork update boots
 		source = join(root, "remote");
 		mkdirSync(join(source, "scripts"), { recursive: true });
 		writeFileSync(join(source, "marker"), "pinned main");
+		writeFileSync(
+			join(source, "package.json"),
+			JSON.stringify({ private: true, scripts: { "hydrate:model-data": "node hydrate.cjs" } }),
+		);
+		writeFileSync(join(source, "hydrate.cjs"), "require('node:fs').writeFileSync('hydrated', 'ready');");
 		// Observe the bootstrap boundary. Installer validation, atomic activation and
 		// retention safeguards are exercised by scripts/install-fork.test.mjs.
 		writeFileSync(
@@ -178,7 +188,8 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 					"advance",
 					"--quiet",
 				]);
-				return spawn(process.execPath, ["-e", "require('node:fs').writeFileSync('hydrated', 'ready')"], options);
+				// #284: real npm must launch its configured shell, not bypass it with Node.
+				return spawn(command, args, options);
 			}
 			if (failInstall && args[0]?.endsWith("install-fork.mjs")) {
 				return spawn(process.execPath, ["-e", "process.exit(23)"], options);
@@ -224,7 +235,7 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		expect(observed.env.PREFIX).toBe(platform === "android" ? process.env.PREFIX : undefined);
 		expect(observed.env.LD_PRELOAD ?? "").toBe(platform === "android" ? process.env.LD_PRELOAD : "");
 		expect(observed.env.npm_config_script_shell).toBe(
-			platform === "android" ? join(dirname(process.execPath), "bash") : undefined,
+			platform === "android" ? join(process.env.PREFIX!, "bin/bash") : undefined,
 		);
 		expect(fetched).toBe(1);
 		expect(readFileSync(join(root, "real-home/.local/share/pi-fork/releases/.owner-selector"), "utf8")).toBe(
@@ -465,6 +476,14 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 			expect(existsSync(invocationsFile)).toBe(false);
 		},
 	);
+
+	it.skipIf(platform !== "android")("rejects missing native Bash before downloading or changing selection", async () => {
+		rmSync(join(process.env.PREFIX!, "bin/bash"));
+		await expect(runForkUpdate()).rejects.toThrow(/Termux requires executable Bash at .*pkg install bash/);
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+		expect(readlinkSync(selector)).toBe(oldPackage);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
 
 	it("fails missing prerequisites before downloads", async () => {
 		vi.mocked(childProcess.spawnProcessSync).mockImplementation((command, _args, options) => {
