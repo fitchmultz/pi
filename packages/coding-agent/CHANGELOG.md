@@ -120,6 +120,7 @@
 - Fixed the login dialog opening sign-in URLs that are not web URLs, and printing control characters from sign-in, device-code, and info URLs, which could end a terminal hyperlink and send escape sequences to the terminal
 - Fixed `tui.select.pageUp` and `tui.select.pageDown` being ignored in slash command and file autocomplete, `/settings`, and the model, scoped models, login, fork, `/mcp`, and llama.cpp selectors. In fullscreen mode, PageUp/PageDown now move an open list or autocomplete menu instead of scrolling the transcript, and a page key bound to Ctrl+V pages autocomplete instead of pasting an image ([#7629](https://github.com/earendil-works/pi/issues/7629), based on [#7680](https://github.com/earendil-works/pi/pull/7680) by [@muyiyr](https://github.com/muyiyr))
 - Fixed tool output and `!` command output showing the parameters of control sequences with a `<`, `=` or `>` prefix as text, for example `35;59;1M` from a mouse report `ESC[<35;59;1M` or `0;276;0c` from a terminal reply `ESC[>0;276;0c`. Text after the keypad-mode sequences `ESC=` and `ESC>` is still kept ([#11377](https://github.com/earendil-works/pi/issues/11377))
+- Fixed full instruction groups being duplicated in later prompts and after compaction when their discovery result was still present. Changed owner instructions are delivered once without rewriting prior context; tool-selection and read-before-use checks remain in effect.
 
 ## [1.4.0] - 2026-10-21
 

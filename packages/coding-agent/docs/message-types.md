@@ -237,9 +237,14 @@ Pi converts its content to a user message for model requests. `display` controls
 The [Instruction Groups](instruction-groups.md) builtin persists a hidden custom message
 (`customType: "pi:instruction-groups:instructions"`) when a nested discovery call enables
 groups. It carries the full instructions before the next model request, independently
-of the calling tool's output.
+of the calling tool's output. It also persists this message at run start when the
+enabled group's current instructions have changed or their anchor is missing, except
+when the request-local compaction repair supplies it.
 
-The [Instruction Groups](instruction-groups.md) builtin also inserts a request-local hidden custom message (`customType: "pi:instruction-groups:compaction"`) immediately after a compaction summary. It restores full instructions enabled at that boundary without adding a persisted message entry.
+The builtin inserts a request-local hidden custom message
+(`customType: "pi:instruction-groups:compaction"`) immediately after a compaction
+summary only when an instruction anchor enabled at that boundary is missing. It
+restores the full instructions without adding a persisted message entry.
 
 ### BranchSummaryMessage
 

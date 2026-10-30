@@ -1,4 +1,4 @@
-import { getCurrentSystemPrompt } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "../../core/extensions/types.ts";
 import type { SessionEntry } from "../../core/session-manager.ts";
@@ -21,6 +21,34 @@ const repairType = "pi:instruction-groups:compaction";
 const deliveryType = "pi:instruction-groups:instructions";
 const instructionTypes = new Set([repairType, deliveryType]);
 
+interface InstructionSpan {
+	name: string;
+	start: number;
+	end: number;
+}
+
+interface InstructionSection {
+	name: string;
+	text: string;
+}
+
+function instructionAnchor(message: AgentMessage): { text: string; legacyText: string; details: unknown } | undefined {
+	if (
+		!(message.role === "toolResult" && message.toolName === "discover_tools" && !message.isError) &&
+		!(message.role === "custom" && instructionTypes.has(message.customType))
+	)
+		return undefined;
+	const parts =
+		typeof message.content === "string"
+			? [message.content]
+			: message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
+	return {
+		text: parts.join("\n"),
+		legacyText: parts[0] ?? "",
+		details: message.details,
+	};
+}
+
 export default function instructionGroups(pi: ExtensionAPI): void {
 	const groups = new Map<string, InstructionGroup>();
 	const enabled = new Set<string>();
@@ -38,6 +66,55 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 		const text = group.instructions(ctx);
 		if (!text.trim()) throw new Error(`Instruction group ${group.name} returned empty instructions`);
 		return `## ${group.name}\n\n${text}`;
+	};
+	const sections = (selected: InstructionSection[]) => {
+		const spans: InstructionSpan[] = [];
+		let text = "";
+		for (const entry of selected) {
+			if (text) text += "\n\n";
+			const start = text.length;
+			text += entry.text;
+			spans.push({ name: entry.name, start, end: text.length });
+		}
+		return { text, details: { instructionSections: spans } };
+	};
+	const latestSections = (messages: AgentMessage[]) => {
+		const latest = new Map<string, string>();
+		for (const message of messages) {
+			const anchor = instructionAnchor(message);
+			if (!anchor) continue;
+			const spans = (anchor.details as { instructionSections?: unknown } | null)?.instructionSections;
+			if (Array.isArray(spans)) {
+				for (const span of spans as Partial<InstructionSpan>[])
+					if (typeof span?.name === "string" && groups.has(span.name))
+						latest.set(
+							span.name,
+							typeof span.start === "number" && typeof span.end === "number"
+								? anchor.text.slice(span.start, span.end)
+								: "",
+						);
+				continue;
+			}
+			// Older sessions stored all sections in the first text block without boundaries.
+			const starts: { name: string; index: number }[] = [];
+			for (const name of groups.keys()) {
+				const heading = `## ${name}\n\n`;
+				for (
+					let index = anchor.legacyText.indexOf(heading);
+					index >= 0;
+					index = anchor.legacyText.indexOf(heading, index + 1)
+				) {
+					if (index === 0 || anchor.legacyText.slice(index - 2, index) === "\n\n") starts.push({ name, index });
+				}
+			}
+			starts.sort((a, b) => a.index - b.index);
+			for (let index = 0; index < starts.length; index++) {
+				const start = starts[index];
+				const end = starts[index + 1]?.index;
+				latest.set(start.name, anchor.legacyText.slice(start.index, end === undefined ? undefined : end - 2));
+			}
+		}
+		return latest;
 	};
 
 	// Only startup/tree restore walks the whole branch. Requests consume newly appended entries.
@@ -101,7 +178,7 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 					throw new Error(`Unavailable instruction group: ${name}`);
 			}
 			const selected = candidates.filter((group) => requested.has(group.name));
-			const text = selected.map((group) => section(group, ctx)).join("\n\n");
+			const { text, details } = sections(selected.map((group) => ({ name: group.name, text: section(group, ctx) })));
 			if (selected.length) {
 				const restored = selected.flatMap((group) => group.tools.filter((name) => inactive.has(name)));
 				for (const name of restored) inactive.delete(name);
@@ -119,7 +196,7 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 							"No instruction groups available.",
 					},
 				],
-				details: undefined,
+				details: selected.length ? details : undefined,
 			};
 		},
 	});
@@ -153,7 +230,10 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 	pi.on("tool_result", (event) => {
 		const names = (event.input.enable as string[] | undefined) ?? [];
 		if (event.toolName !== "discover_tools" || !event.parentToolCallId || event.isError || !names.length) return;
-		pi.sendMessage({ customType: deliveryType, content: event.content, display: false }, { triggerTurn: false });
+		pi.sendMessage(
+			{ customType: deliveryType, content: event.content, display: false, details: event.details },
+			{ triggerTurn: false },
+		);
 		return {
 			content: [
 				{
@@ -189,57 +269,51 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 			pi.setActiveTools(active.filter((name) => !pending.has(name)));
 			event.systemPromptOptions.selectedTools = pi.getActiveTools();
 		}
-		const text = available()
-			.filter((group) => enabled.has(group.name))
-			.map((group) => section(group, ctx))
-			.join("\n\n");
-		if (text) event.systemPromptOptions.appendSystemPrompt += `\n\n${text}`;
+		const selected = available().filter((group) => enabled.has(group.name));
+		if (!selected.length) return;
+		const messages = ctx.sessionManager.buildSessionProjection().messages;
+		const latest = latestSections(messages);
+		const compacted = messages.some((message) => message.role === "compactionSummary");
+		const current = selected.map((group) => ({ name: group.name, text: section(group, ctx) }));
+		const missing = current.filter((entry) => {
+			const last = latest.get(entry.name);
+			if (last === entry.text) return false;
+			// A missing pre-compaction anchor is restored at the summary, not appended here.
+			return !(last === undefined && compacted && boundary?.names.has(entry.name));
+		});
+		if (missing.length) {
+			const { text, details } = sections(missing);
+			return { message: { customType: deliveryType, content: text, details, display: false } };
+		}
 	});
 	pi.on("context_with_system", (event, ctx) => {
 		ready.clear();
 		if (!isManaged()) return;
 		replay(ctx);
+		const selected = available().filter((group) => enabled.has(group.name));
+		if (!selected.length) return;
 		let messages = event.messages;
+		const latest = latestSections(messages);
+		const current = selected.map((group) => ({ name: group.name, text: section(group, ctx) }));
 		const summaryIndex = messages.findLastIndex((message) => message.role === "compactionSummary");
 		if (boundary && summaryIndex >= 0) {
-			const names = boundary.names;
-			const text = available()
-				.filter((group) => names.has(group.name))
-				.map((group) => section(group, ctx))
-				.join("\n\n");
-			if (text) {
+			const missing = current.filter((entry) => boundary?.names.has(entry.name) && !latest.has(entry.name));
+			if (missing.length) {
+				const { text, details } = sections(missing);
 				messages = [...messages];
 				messages.splice(summaryIndex + 1, 0, {
 					role: "custom",
 					customType: repairType,
 					content: text,
+					details,
 					display: false,
 					timestamp: boundary.timestamp,
 				});
+				for (const entry of missing) latest.set(entry.name, entry.text);
 			}
 		}
-		const instructionText = messages
-			.flatMap((message) => {
-				if (
-					!(message.role === "toolResult" && message.toolName === "discover_tools" && !message.isError) &&
-					!(message.role === "custom" && instructionTypes.has(message.customType))
-				)
-					return [];
-				return [
-					typeof message.content === "string"
-						? message.content
-						: message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n"),
-				];
-			})
-			.join("\n");
-		// 1.0 projects forced prompts after this event; both prompt views must retain the section.
-		const transcriptPrompt = getCurrentSystemPrompt(messages);
-		const effectivePrompt = ctx.getSystemPrompt();
-		for (const group of available()) {
-			if (!enabled.has(group.name)) continue;
-			const text = section(group, ctx);
-			if (instructionText.includes(text) || (transcriptPrompt.includes(text) && effectivePrompt.includes(text)))
-				ready.add(group.name);
+		for (const entry of current) {
+			if (latest.get(entry.name) === entry.text) ready.add(entry.name);
 		}
 		return { messages };
 	});
