@@ -477,13 +477,16 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		},
 	);
 
-	it.skipIf(platform !== "android")("rejects missing native Bash before downloading or changing selection", async () => {
-		rmSync(join(process.env.PREFIX!, "bin/bash"));
-		await expect(runForkUpdate()).rejects.toThrow(/Termux requires executable Bash at .*pkg install bash/);
-		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
-		expect(readlinkSync(selector)).toBe(oldPackage);
-		expect(existsSync(`${selector}.lock`)).toBe(false);
-	});
+	it.skipIf(platform !== "android")(
+		"rejects missing native Bash before downloading or changing selection",
+		async () => {
+			rmSync(join(process.env.PREFIX!, "bin/bash"));
+			await expect(runForkUpdate()).rejects.toThrow(/Termux requires executable Bash at .*pkg install bash/);
+			expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+			expect(readlinkSync(selector)).toBe(oldPackage);
+			expect(existsSync(`${selector}.lock`)).toBe(false);
+		},
+	);
 
 	it("fails missing prerequisites before downloads", async () => {
 		vi.mocked(childProcess.spawnProcessSync).mockImplementation((command, _args, options) => {
