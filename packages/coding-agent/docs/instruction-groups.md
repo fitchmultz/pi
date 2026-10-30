@@ -119,10 +119,11 @@ Enabled names and the temporarily inactive selected tools are stored in custom
 `pi:instruction-groups` session entries.
 Direct discovery returns full text; nested discovery stores it in a hidden context
 message. Later runs reuse those instructions rather than adding a second copy to the
-system prompt. If the current owner text changes or the instruction anchor is absent,
-the next run delivers the full current section in a new hidden message. Existing
-history is not rewritten, preserving the serialized prefix. A deliberate re-enable
-still returns the full instructions.
+system prompt. When a current section is missing or out of date, the next run
+delivers it in a new hidden message, except when compaction removed its anchor:
+the request-local repair described below handles that case. Existing history is not
+rewritten, preserving the serialized prefix. A deliberate re-enable still returns the
+full instructions.
 
 Sessions created with the older system-prompt append can retain that historical
 copy in the prefix on providers that support positional system messages, until

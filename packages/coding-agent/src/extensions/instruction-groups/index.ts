@@ -32,17 +32,19 @@ interface InstructionSection {
 	text: string;
 }
 
-function instructionAnchor(message: AgentMessage): { text: string; details: unknown } | undefined {
+function instructionAnchor(message: AgentMessage): { text: string; legacyText: string; details: unknown } | undefined {
 	if (
 		!(message.role === "toolResult" && message.toolName === "discover_tools" && !message.isError) &&
 		!(message.role === "custom" && instructionTypes.has(message.customType))
 	)
 		return undefined;
+	const parts =
+		typeof message.content === "string"
+			? [message.content]
+			: message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
 	return {
-		text:
-			typeof message.content === "string"
-				? message.content
-				: message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n"),
+		text: parts.join("\n"),
+		legacyText: parts[0] ?? "",
 		details: message.details,
 	};
 }
@@ -83,54 +85,33 @@ export default function instructionGroups(pi: ExtensionAPI): void {
 			if (!anchor) continue;
 			const spans = (anchor.details as { instructionSections?: unknown } | null)?.instructionSections;
 			if (Array.isArray(spans)) {
-				let end = 0;
-				let valid = true;
-				const names = new Set<string>();
-				for (const span of spans) {
-					if (typeof span?.name !== "string") {
-						valid = false;
-						continue;
-					}
-					const { name, start } = span;
-					const nextEnd: unknown = span.end;
-					if (
-						names.has(name) ||
-						!Number.isInteger(start) ||
-						!Number.isInteger(nextEnd) ||
-						start !== (names.size ? end + 2 : 0) ||
-						(names.size > 0 && anchor.text.slice(end, start) !== "\n\n") ||
-						typeof nextEnd !== "number" ||
-						nextEnd <= start ||
-						nextEnd > anchor.text.length ||
-						!anchor.text.startsWith(`## ${name}\n\n`, start)
-					)
-						valid = false;
-					names.add(name);
-					end = typeof nextEnd === "number" ? nextEnd : end;
-				}
-				if (end !== anchor.text.length) valid = false;
-				for (const span of spans)
+				for (const span of spans as Partial<InstructionSpan>[])
 					if (typeof span?.name === "string" && groups.has(span.name))
-						latest.set(span.name, valid ? anchor.text.slice(span.start, span.end) : "");
+						latest.set(
+							span.name,
+							typeof span.start === "number" && typeof span.end === "number"
+								? anchor.text.slice(span.start, span.end)
+								: "",
+						);
 				continue;
 			}
-			// Older sessions stored several sections in one text block without their boundaries.
+			// Older sessions stored all sections in the first text block without boundaries.
 			const starts: { name: string; index: number }[] = [];
 			for (const name of groups.keys()) {
 				const heading = `## ${name}\n\n`;
 				for (
-					let index = anchor.text.indexOf(heading);
+					let index = anchor.legacyText.indexOf(heading);
 					index >= 0;
-					index = anchor.text.indexOf(heading, index + 1)
+					index = anchor.legacyText.indexOf(heading, index + 1)
 				) {
-					if (index === 0 || anchor.text.slice(index - 2, index) === "\n\n") starts.push({ name, index });
+					if (index === 0 || anchor.legacyText.slice(index - 2, index) === "\n\n") starts.push({ name, index });
 				}
 			}
 			starts.sort((a, b) => a.index - b.index);
 			for (let index = 0; index < starts.length; index++) {
 				const start = starts[index];
 				const end = starts[index + 1]?.index;
-				latest.set(start.name, anchor.text.slice(start.index, end === undefined ? undefined : end - 2));
+				latest.set(start.name, anchor.legacyText.slice(start.index, end === undefined ? undefined : end - 2));
 			}
 		}
 		return latest;

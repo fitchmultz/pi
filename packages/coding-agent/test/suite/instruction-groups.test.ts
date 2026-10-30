@@ -79,6 +79,18 @@ const script = (code: string) => fauxAssistantMessage([fauxToolCall("codemode", 
 const discoverVia = (path: "direct" | "codemode", enable = ["browser"]) =>
 	path === "direct" ? discover(enable) : script(`return await tools.discover_tools(${JSON.stringify({ enable })});`);
 const done = () => fauxAssistantMessage("done");
+function annotateTiming(pi: ExtensionAPI) {
+	pi.on("context_with_system", (event) => ({
+		messages: event.messages.map((message) =>
+			message.role === "toolResult" && message.toolName === "discover_tools"
+				? {
+						...message,
+						content: [...message.content, { type: "text" as const, text: "[host tool-call elapsed: 0.1s]" }],
+					}
+				: message,
+		),
+	}));
+}
 
 // These exercise the real request, nested-call, branch, and compaction boundaries with no provider traffic.
 describe("on-demand instruction groups", () => {
@@ -743,6 +755,27 @@ describe("on-demand instruction groups", () => {
 		},
 	);
 
+	it("keeps directly discovered groups usable when another extension appends tool-result timing", async () => {
+		const harness = await setup({ extensionFactories: [annotateTiming, ...selectedOwners] });
+		harness.setResponses([discover(["browser", "other"]), done()]);
+		await harness.session.prompt("enable both groups");
+		harness.setResponses([
+			(context) => {
+				const body = JSON.stringify(context.messages);
+				expect(body).toContain("[host tool-call elapsed: 0.1s]");
+				expect(body.split(full)).toHaveLength(2);
+				expect(body.split(later)).toHaveLength(2);
+				return fauxAssistantMessage([fauxToolCall("browse", {}), fauxToolCall("deselected", {})], {
+					stopReason: "toolUse",
+				});
+			},
+			done(),
+		]);
+		await harness.session.prompt("use both groups");
+		expect(getToolResult(harness, "browse").isError).toBe(false);
+		expect(getToolResult(harness, "deselected").isError).toBe(false);
+	});
+
 	it.each(["direct", "codemode"] as const)(
 		"delivers the latest complete %s instructions when project guidance is added, removed, or restored",
 		async (path) => {
@@ -836,7 +869,7 @@ describe("on-demand instruction groups", () => {
 		async (path) => {
 			const options = {
 				initialActiveToolNames: ["codemode"],
-				extensionFactories: [...selectedOwners, createCodemodeExtension()],
+				extensionFactories: [annotateTiming, ...selectedOwners, createCodemodeExtension()],
 			};
 			const original = await setup(options);
 			original.setResponses([discoverVia(path, ["browser", "other"]), done()]);
