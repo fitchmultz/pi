@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Fixed fullscreen Kitty images disappearing after a terminal resize when the terminal clears cached image data during a screen erase.
 - Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
 - Fixed regular-mode `TUI` writing OSC 133 prompt markers from rendered lines to the terminal. Terminals treat `133;A` as a new shell prompt and drop the OSC 7501 program status, so the working indicator disappeared during runs. Fullscreen still uses the markers for prompt navigation and already stripped them ([#11519](https://github.com/earendil-works/pi/issues/11519))
 - Fixed fullscreen double-click selection splitting paths and tokens at `~`, `.`, `\`, and `+`. Word characters now match iTerm2's defaults ([#10980](https://github.com/earendil-works/pi/issues/10980))
