@@ -297,15 +297,14 @@ describe("copyToClipboard", () => {
 		});
 		expect(osc52Writes).toHaveLength(0);
 	});
-	test("reports the Termux:API requirement on Android", async () => {
-		// Regression test for #10391: Termux reports platform "android".
+	test("Termux on Android falls back to OSC 52 when its command cannot write", async () => {
 		mocks.platform.mockReturnValue("android");
 		vi.stubEnv("TERMUX_VERSION", "0.119");
 		mocks.getNativeClipboard.mockReturnValue(undefined);
 		mocks.command.mockResolvedValue(undefined);
-		await expect(copyToClipboard("hello")).rejects.toThrow(
-			"Clipboard unavailable: install the Termux:API app and `termux-api` package",
-		);
+		const text = "héllo\nFold clipboard\n";
+		await copyToClipboard(text);
+		expect(osc52Writes).toEqual([`\x1b]52;c;${Buffer.from(text).toString("base64")}\x07`]);
 	});
 	test("uses OSC 52 when native and command writes fail in a remote session", async () => {
 		vi.stubEnv("SSH_CONNECTION", "client server");
@@ -314,8 +313,13 @@ describe("copyToClipboard", () => {
 		await copyToClipboard("hello");
 		expect(osc52Writes).toHaveLength(1);
 	});
-	test("does not emit oversized OSC 52 payloads", async () => {
-		vi.stubEnv("SSH_CONNECTION", "client server");
+	test.each(["remote", "termux"])("does not emit oversized OSC 52 payloads in %s sessions", async (session) => {
+		if (session === "termux") {
+			mocks.platform.mockReturnValue("android");
+			vi.stubEnv("TERMUX_VERSION", "0.119");
+		} else {
+			vi.stubEnv("SSH_CONNECTION", "client server");
+		}
 		mocks.clipboard.setText.mockRejectedValue(new Error("native failed"));
 		mocks.command.mockResolvedValue(undefined);
 		await expect(copyToClipboard("x".repeat(80_000))).rejects.toThrow(
