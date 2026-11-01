@@ -1,12 +1,12 @@
 # Run Pi on Android with Termux
 
-Pi runs on Android through [Termux](https://termux.dev/), a terminal emulator and Linux environment. Text input, file tools, and shell commands are supported. Pi can copy and paste text through the Android clipboard with Termux:API. Clipboard image paste is not supported.
+Pi runs on Android through [Termux](https://termux.dev/), a terminal emulator and Linux environment. Text input, file tools, and shell commands are supported. Pi can copy text through the terminal's OSC 52 clipboard support. Reading clipboard text requires Termux:API. Clipboard image paste is not supported.
 
 ## Before you begin
 
 Install Termux from [GitHub or F-Droid](https://github.com/termux/termux-app#installation). Do not use the deprecated Google Play build.
 
-[Termux:API](https://github.com/termux/termux-api#installation) is optional. Install it only when you want Pi to copy or paste Android clipboard text, or when shell commands need Android device APIs.
+[Termux:API](https://github.com/termux/termux-api#installation) is optional. Install it when you want Pi's clipboard-paste shortcut, clipboard readback, or shell access to Android device APIs.
 
 ## Install Pi
 
@@ -97,7 +97,9 @@ Only grant this permission when Pi should be able to access those files. Command
 
 ## Use clipboard commands
 
-Pi uses `termux-clipboard-set` to copy text and `termux-clipboard-get` for its clipboard-paste shortcut. Shell commands can use both commands directly. Install the Termux:API app and its command-line package:
+Pi tries `termux-clipboard-set` to copy text, then falls back to OSC 52 through its own terminal output if that command fails. Copying does not require Termux:API. OSC 52 delivery has no acknowledgement, so paste into another app to verify the copy.
+
+Pi uses `termux-clipboard-get` for its clipboard-paste shortcut. Clipboard readback and direct shell use of the API commands require the Termux:API app and its command-line package:
 
 ```bash
 pkg install termux-api
@@ -139,7 +141,7 @@ Confirm that you installed both components:
 1. The Termux:API Android app from the same source as Termux
 2. The `termux-api` command-line package
 
-Then run the clipboard verification commands above outside Pi. If they fail there, fix the Termux:API installation before retrying Pi's copy command.
+Then run the clipboard verification commands above outside Pi. If they fail there, fix the Termux:API installation before retrying clipboard reads. Pi's copy command can still use OSC 52 without the API.
 
 ### Shared storage reports permission denied
 

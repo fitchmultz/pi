@@ -125,19 +125,16 @@ export async function copyToClipboard(text: string): Promise<void> {
 		copied = osc52Emitted || (await copyViaWindowsClipboard(text));
 	}
 	// OSC 52 cannot be verified, so a desktop session with a display reports the failure
-	// instead (#9618). Without a display the terminal is the only clipboard route (containers,
-	// WSL without WSLg), and remote sessions always emit it to reach the client clipboard.
-	const headless = p === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY && !env.TERMUX_VERSION;
+	// instead (#9618). Termux and display-less Linux can use the terminal clipboard;
+	// remote sessions always emit it to reach the client clipboard.
+	const terminalFallback = Boolean(env.TERMUX_VERSION) || (p === "linux" && !env.DISPLAY && !env.WAYLAND_DISPLAY);
 	let oversized = false;
-	if (!osc52Emitted && (isRemoteSession(env) || (!copied && headless))) {
+	if (!osc52Emitted && (isRemoteSession(env) || (!copied && terminalFallback))) {
 		if (emitOsc52(text)) copied = true;
 		else oversized = true;
 	}
 	if (copied) return;
 	if (oversized) throw new Error("Clipboard unavailable: text exceeds the OSC 52 size limit");
-	if (env.TERMUX_VERSION) {
-		throw new Error("Clipboard unavailable: install the Termux:API app and `termux-api` package");
-	}
 	if (p === "linux") {
 		if (env.WAYLAND_DISPLAY) {
 			throw new Error("Clipboard unavailable: install `wl-clipboard` (`wl-copy`) or check Wayland access");
