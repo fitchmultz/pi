@@ -146,6 +146,16 @@ export class GatedStorage implements Storage {
 		return this.#storage.commit(batches, receive, context);
 	}
 
+	/**
+	 * The backend's admission check (`Storage.checkAdmission`), when it has one, once every admitted write is published:
+	 * the check stages the writes on the stored state, so it must include the commits still in the writer.
+	 */
+	get checkAdmission(): Storage["checkAdmission"] {
+		const storage = this.#storage;
+		if (storage.checkAdmission === undefined) return undefined;
+		return (writes, context) => this.#after(ALL_KEYS, () => storage.checkAdmission!(writes, context));
+	}
+
 	mintId<I extends Id<string>>(): Promise<I> {
 		return this.#storage.mintId<I>();
 	}

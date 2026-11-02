@@ -1120,7 +1120,7 @@ export class SessionImpl implements Session {
 		// Before holding or taking held changes: a refusal must leave earlier deferred commits held.
 		if (admission) {
 			try {
-				if ((await this.#storage.checkAdmission?.(writes, withoutAbortSignal(context))) === false) {
+				if ((await this.#gated.checkAdmission?.(writes, withoutAbortSignal(context))) === false) {
 					throw new StorageCapacityError();
 				}
 			} catch (error) {
@@ -1971,8 +1971,11 @@ class GuardedStorage implements Storage {
 		}
 	}
 
-	checkAdmission(writes: readonly StorageWrite[], context: Context): Promise<boolean> {
-		return this.#call(undefined, () => this.#storage.checkAdmission?.(writes, context) ?? Promise.resolve(true));
+	/** The backend's admission check, guarded like every call, when the backend has one. */
+	get checkAdmission(): Storage["checkAdmission"] {
+		const storage = this.#storage;
+		if (storage.checkAdmission === undefined) return undefined;
+		return (writes, context) => this.#call(undefined, () => storage.checkAdmission!(writes, context));
 	}
 
 	mintId<I extends Id<string>>(): Promise<I> {
