@@ -14,6 +14,7 @@ import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { ensurePngTranscoder } from "../../../utils/image-convert.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { keyHint, keyText } from "./keybinding-hints.ts";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -127,7 +128,7 @@ export class CustomMessageComponent extends Container {
 			try {
 				const component = this.customRenderer(
 					this.message,
-					{ expanded: this._expanded, outputPad: this.outputPad, compactView: this.compactView },
+					{ expanded: this._expanded, outputPad: this.outputPad, compactView: this.compactView, keyText, keyHint },
 					theme,
 				);
 				if (component) {

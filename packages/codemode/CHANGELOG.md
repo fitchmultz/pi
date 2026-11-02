@@ -6,6 +6,12 @@
 
 - Added a `background` source option and an optional `CodemodeSourceCapabilities` argument to `parseCodemodeSource()`. A caller that can report a result after the tool call returns passes `{ background: true }`; every other caller keeps rejecting the field with the existing error text.
 
+## [1.5.0] - 2026-11-02
+
+### Changed
+
+- README: the codemode tool example builds its parameters with `@earendil-works/pi-schema` instead of TypeBox.
+
 ## [1.4.0] - 2026-10-21
 
 ## [1.3.0] - 2026-10-15
@@ -61,7 +67,6 @@
 
 ### Fixed
 
-- Fixed `__proto__` store keys being lost on input and changing the result writes-map prototype instead of reporting an own entry ([#10510](https://github.com/earendil-works/pi/issues/10510)).
 - Fixed a script that patched built-ins crashing the host process and leaving `execute()` unsettled. Malformed payloads from the worker now fail the execution with a `sandbox` error ([#10444](https://github.com/earendil-works/pi/issues/10444))
 
 ## [1.0.3] - 2026-10-05

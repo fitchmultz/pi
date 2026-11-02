@@ -2,12 +2,14 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`e7a0df27c09d11bf4161d3605246cbf57a129cb2` (2026-10-29), following official v1.4.0.
+`3e0eec29f50e7861e9db91f2d12723267411b4f3` (2026-11-02), following official v1.5.0.
 It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
-The [2026-10-29 integration record](docs/upstream-sync-2026-10-29.md) documents the current
-baseline and verification. The [v1.4.0 integration record](docs/upstream-sync-1.4.0.md)
+The [v1.5.0 integration record](docs/upstream-sync-1.5.0.md) documents the current baseline,
+the decision for each overlapping fork path and verification. The
+[2026-10-29 integration record](docs/upstream-sync-2026-10-29.md) records the previous
+integration. The [v1.4.0 integration record](docs/upstream-sync-1.4.0.md)
 records the previous release integration. The
 [2026-10-21 consolidation record](docs/upstream-consolidation-2026-10-21.md)
 records the previous native replacements, retained differences and consumer inspection. The [v1.3.0 integration record](docs/upstream-sync-1.3.0.md)
@@ -53,7 +55,10 @@ Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
 Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
 Managed npm extension installs now use upstream's `--no-audit --no-fund` flags, so the fork-only audit suppression is retired.
-The main shell helper now uses upstream's macOS process-group pause before killing; the fork's extra Linux pause is retired there. Sandbox and other environment helpers retain their listed adaptations.
+The main shell helper now uses upstream's macOS process-group pause before killing; the fork's extra Linux pause is retired there. Other environment helpers retain their listed adaptations; upstream removed the sandbox example together with its adaptation.
+An oversized Env watch change now reports `overflow` through upstream's frame-limit check ([#10516](https://github.com/earendil-works/pi/issues/10516)), so the fork's daemon change is retired; `packages/env/test/remote.test.ts` keeps the regression.
+Chord frames, Chord v2 data and tool arguments now validate with upstream's pi-schema, compiled once per schema. The fork's compiled TypeBox frame validator is retired: upstream's checks the same frames about three times faster ([v1.5.0 record](docs/upstream-sync-1.5.0.md)). The fork keeps its malformed-frame and extra-field cases in `packages/chord/test/links-review.test.ts`.
+Durable's retained-context scheduling now follows upstream's idle scopes and wake handling; the fork's scheduler change and its two `harness-context.test.ts` cases are retired.
 HTML export now uses upstream's iterative tree traversal, replacing the fork's `activeFirst` traversal. The long-tree regression remains.
 Empty quoted prompt-template arguments now follow upstream's token parser and positional-default regression coverage ([#10867](https://github.com/earendil-works/pi/issues/10867)); the equivalent fork implementation and tests are retired.
 Transcript resume uses upstream's branch-wide recorded active-tool loadout, activates eligible never-mentioned extension tools, and applies `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785), [#11062](https://github.com/earendil-works/pi/issues/11062)). The fork counts historical instruction-group deferrals as mentioned, so internal deferral does not make a tool newly registered. Other selections follow upstream's recorded additions and removals, without a separate selection protocol or legacy-session policy. The fork reconciles temporarily deferred discovery tools when discovery is disabled or absent; explicit selections, exclusions and later deselection remain authoritative across subsequent resumes. Native complete working-session restore retains its exact saved current loadout and modifier policy.
@@ -73,9 +78,9 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates | `core/{cache-warmer,model-runtime,sdk}.ts`, `modes/interactive/interactive-mode.ts` | `cache-warmer.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
 | WebSocket text frames must not decode object-transport packing markers and bypass untrusted-client compression restrictions | `packages/chord/src/link.ts` | `packages/chord/test/websocket.test.ts` |
-| Oversized public Durable input/write admissions must not fail the Session; host commits can opt into assembled-batch checks including document revisions. Queued input entry-size refusal settles only that input and preserves answers, tool work and valid siblings. SQLite checks exact rows with confirmed rollback, not an aggregate queue cap; post-effect compactions and real commit failures keep their fatal-storage semantics | `packages/durable/src/{storage/sqlite/storage,session/session,session/transaction,harness/harness,harness/inbox,harness/submissions,harness/compaction}.ts` | `packages/durable/test-workers/{input-admission,commit-admission,storage}.test.ts`, `packages/durable/test/harness-storage-failure.test.ts` |
+| Oversized public Durable input/write admissions must not fail the Session; host commits can opt into assembled-batch checks including document revisions. Queued input entry-size refusal settles only that input and preserves answers, tool work and valid siblings. SQLite checks exact rows with confirmed rollback, not an aggregate queue cap; post-effect compactions and real commit failures keep their fatal-storage semantics. Upstream's group commit fails the Session on any refused batch, so the check runs before a commit joins the writer's group, once every admitted write is published; the Session's storage cache and gated storage forward it | `packages/durable/src/{storage/sqlite/storage,session/session,session/cached-storage,session/keys,session/transaction,harness/harness,harness/inbox,harness/submissions,harness/compaction}.ts` | `packages/durable/test-workers/{input-admission,commit-admission,storage}.test.ts`, `packages/durable/test/harness-storage-failure.test.ts` |
 | Releasing the last state view during hydration must not strand a shared method-only reference | `packages/chord/src/remote.ts` | `packages/chord/test/bindings.test.ts` |
-| Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `packages/coding-agent/examples/extensions/sandbox/index.ts`, `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
+| Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
 | File forks must migrate legacy entries before replacing the source header, preserving indexed history and model context | `core/session-manager.ts` | `session-manager/fork-migration.test.ts` |
 | After a failed append to an existing journal, the next append or save must rewrite the journal from accepted memory so reopened history keeps its ancestry without duplicate or partial records; a new session starts without the old failure ([#257](https://github.com/fitchmultz/pi/issues/257)) | `core/session-manager.ts` | `session-manager/file-operations.test.ts`, `suite/regressions/257-journal-write-failure.test.ts` |
 | Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
@@ -89,13 +94,12 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Failed terminal responses must preserve consumed numeric usage and error details | `packages/ai/src/api/{openai-responses-shared,openai-codex-responses}.ts` | `packages/ai/test/{openai-responses-terminal-event,openai-codex-stream}.test.ts` |
 | Astra Ultrafast and legacy Codex Fast estimates need correct tier/confirmation rules | `packages/ai/src/api/{openai-responses,openai-codex-responses}.ts` | `packages/ai/test/openai-ultrafast-pricing.test.ts` |
 | Anthropic strict limits apply across initial and inline definitions, including required schemas. Upstream's one-time fallback after a rejected request stays for limits a count cannot predict, such as compiled grammar size; alone it would spend a rejected request on every over-limit turn and drop strict mode for all preferred tools | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/anthropic-strict-tool-{schema,fallback}.test.ts` |
-| Optional nulls inside schema unions must not be coerced into fabricated values | `packages/ai/src/utils/validation.ts` | `packages/ai/test/validation.test.ts` |
+| Optional nulls inside schema unions must not be coerced into fabricated values. Upstream's pi-schema drops optional nulls only through properties and items; inside an `anyOf`/`oneOf` branch its conversion pass turns them into values (`"null"` for a string) | `packages/schema/src/coerce.ts` (pass 1) | `packages/ai/test/validation.test.ts`, `packages/schema/test/coerce.test.ts` |
 | DNS root dots must not bypass `NO_PROXY` | `packages/ai/src/utils/node-http-proxy.ts` | `packages/ai/test/node-http-proxy.test.ts` |
 | Fractional/overflowed zero retry delays must not become a minute; retry cancellation keeps its normalized assistant-result shape. Timer cancellation/listener cleanup now reuse native `utils/sleep.ts` rather than a private retry timer ([#10506](https://github.com/earendil-works/pi/issues/10506)) | `packages/ai/src/utils/retry.ts` | `packages/ai/test/retry.test.ts` |
 | Radius gateway pricing must have finite rates and tiers before cost estimation ([#10507](https://github.com/earendil-works/pi/issues/10507)) | `packages/ai/src/providers/radius-config.ts` | `packages/ai/test/radius-provider.test.ts` |
 | Abort tests must check the terminal result and follow-up rather than pass early ([#10508](https://github.com/earendil-works/pi/issues/10508)); this is test-only, not a provider cancellation fix | `packages/ai/test/abort.test.ts` | Offline faux-provider case in the same file |
 | Codemode string store keys must round-trip as own data properties, including `__proto__`, on every sandbox backend ([#10510](https://github.com/earendil-works/pi/issues/10510)) | `packages/codemode/src/runtime/execution.ts` | `packages/codemode/test/sandbox.test.ts` |
-| An oversized Env watch change must report `overflow` instead of stopping the daemon's output writer ([#10516](https://github.com/earendil-works/pi/issues/10516)) | `packages/env/daemon/src/watch.rs` | `packages/env/test/remote.test.ts` |
 | Equivalent known-hosts path spellings must serialize accept/forget rewrites ([#10517](https://github.com/earendil-works/pi/issues/10517)) | `packages/env/src/ssh.ts`, `packages/env/test/ssh.test.ts` | `packages/env/test/ssh.test.ts` |
 | Replayed signatures count toward context estimates | `packages/ai/src/utils/estimate.ts` | `packages/ai/test/context-estimate.test.ts` |
 | Model-switch output limits must use target-model usage and native replay, not charge reasoning dropped from the request | `packages/ai/src/{utils/estimate,utils/transform-messages,api/simple-options}.ts`; the existing public `api/transform-messages` entry re-exports the shared implementation | `packages/ai/test/context-estimate.test.ts` |
@@ -128,13 +132,13 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Lossless upload compression on qualified Anthropic Messages and public OpenAI Responses endpoints; existing Codex zstd stays canonical-endpoint-only. See [support boundaries and measurement](docs/compression.md) | `packages/ai/src/utils/request-compression.ts`, `packages/ai/src/api/{anthropic-messages,openai-responses,openai-codex-responses}.ts` | `packages/ai/test/{anthropic-request-compression,openai-request-compression,openai-codex-stream}.test.ts` |
 | Normalize tool declarations once per comparison, index model overlays per read, repair JSON by spans, and drain Codex events without repeated array shifts | `packages/agent/src/agent-loop.ts`, `packages/ai/src/{utils/transcript,utils/json-parse,models,api/openai-codex-responses}.ts` | `packages/agent/test/agent.test.ts`, `packages/ai/test/{system-message-replay,json-parse,model-types,openai-codex-websocket-queue}.test.ts` |
 | Stream long-token wrapping, use native grapheme endpoints, reuse only the current editor layout after comparing text, width and paste membership, and reuse unchanged same-index rows in unstyled Boxes after child changes | `packages/tui/src/{utils,components/editor,components/input,components/box}.ts` | `packages/tui/test/{wrap-ansi,editor,input,layout,mouse-components}.test.ts` |
-| Reuse unchanged assistant runs, avoid rendering assistants to query emptiness in compact/hybrid grouping, reject plain prose before Mermaid lexing, and compute visible tree ancestry in one pass | `modes/interactive/components/{activity,assistant-message,mermaid,tree-selector}.ts` | `{compact-view,assistant-message,mermaid,tree-selector}.test.ts` |
+| Keep the rendered lines of assistant Markdown blocks a stream has not changed, avoid rendering assistants to query emptiness in compact/hybrid grouping, reject plain prose before Mermaid lexing, and compute visible tree ancestry in one pass. Upstream reuses the blocks but re-runs every Markdown transformer on each streamed update; skipping unchanged blocks made streamed updates 2.7-3.6 times faster with a long thinking block ([v1.5.0 record](docs/upstream-sync-1.5.0.md)) | `modes/interactive/components/{activity,assistant-message,mermaid,tree-selector}.ts` | `{compact-view,assistant-message,mermaid,tree-selector}.test.ts` |
 | Normalize edit text once and scan only requested read, grep and head-truncation ranges | `packages/durable/src/tools/edit-diff.ts`, `core/tools/{read,grep,truncate}.ts` | `packages/durable/test/tools.test.ts`, `edit-byte-safety.test.ts`, `tools.test.ts` |
 | Compare PNG with the requested-quality JPEG as upstream does, then encode fallback qualities only until one fits | `utils/image-resize-core.ts` | `image-processing.test.ts` |
 | Bound native Bash spill queues and wait for complete private files; push-only custom producers retain their existing callback contract | `core/{bash-executor,tools/bash,tools/output-accumulator}.ts`, `utils/{output-files,child-process}.ts` | `bash-spill.test.ts`, `private-spill.test.ts`, `streaming-file.test.ts` |
 | Skip disk reads only for acknowledged, confirmed-terminal background jobs during monitoring; explicit tools remain fresh | `extensions/background-command/{index,jobs}.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
-| Compile upstream's single Chord frame schema once, drain publications by cursor, and accumulate MCP lines and error prefixes without repeated copying | `packages/chord/src/{wire,publish}.ts`, `packages/mcp/src/transports/{stdio,streamable-http}.ts` | `packages/chord/test/{links-review,state}.test.ts`, `packages/mcp/test/{stdio,streamable-http}.test.ts` |
-| Limit retained-context scheduler work, binary-search historical revisions, avoid redundant SQLite writes, and join long lines at their boundary | `packages/durable/src/{harness/scheduler,storage/memory,storage/sqlite/storage,env/node}.ts` | `packages/durable/test/{harness-context,memory-storage,sqlite-storage,env-node}.test.ts` |
+| Drain Chord publications by cursor, and accumulate MCP lines and error prefixes without repeated copying | `packages/chord/src/publish.ts`, `packages/mcp/src/transports/{stdio,streamable-http}.ts` | `packages/chord/test/state.test.ts`, `packages/mcp/test/{stdio,streamable-http}.test.ts` |
+| Binary-search historical revisions, avoid redundant SQLite writes (a batch claims each new record ID once, inside upstream's batched commit), and join long lines at their boundary | `packages/durable/src/{storage/memory,storage/sqlite/storage,env/node}.ts` | `packages/durable/test/{memory-storage,sqlite-storage,env-node}.test.ts` |
 | Count decoded lengths with scratch storage, reuse frame payload allocation without retaining large metadata, bound read-ahead, and precompute directory sort keys | `packages/env/daemon/src/{decode,scan,frame}.rs`, `packages/env/src/remote-env.ts` | Native daemon tests, `packages/env/test/{connection,remote,differential}.test.ts` |
 | Append native eval journals and validate reports once | `packages/evals/src/{cli,report}.ts` | `packages/evals/test/{cli,report}.test.ts` |
 | Build ready workspaces two at a time, batch selected npm packs, avoid unused native-path Biome WASM loading, and retain every startup worker profile | `scripts/{build,package-artifacts,pack-nix-packages,biome-check,profile-coding-agent-node}.mjs`, `nix/package.nix` | `scripts/{workspace-build,package-artifacts,package-artifact-cli,profile-coding-agent-node}.test.mjs` |
@@ -175,7 +179,9 @@ The generated schemas are under `packages/coding-agent/schemas/` and use upstrea
 
 Package production uses the maintained `scripts/package-artifacts.mjs` and local consumer helpers,
 including npm 12's expected-package-keyed pack metadata. Selected workspaces pack in one npm process;
-Nix retains its nine raw named archives. Pinned fleet automation has migrated to the artifact API,
+Nix retains its ten raw named archives. Upstream's derivation has no source override for pi-schema,
+which its install lock lists without an integrity hash, so its Nix build fails to evaluate; the fork
+packs pi-schema and overrides it. Pinned fleet automation has migrated to the artifact API,
 and the obsolete `scripts/coding-agent-consumer.mjs` shim has been removed.
 Retained offline comparison fixtures are documented in [Performance reproduction](docs/performance.md).
 
@@ -189,10 +195,18 @@ Cloudflare drivers, and migration runner now come from `@earendil-works/chord/sq
 keeps its storage implementations and schema migrations and re-exports the moved public names.
 It also follows upstream's schema-derived frame types, stricter contract tokens and error codes,
 large-payload deflation, acknowledgement-based state flow control, and optional per-link call limits.
-`Link.send` reports encoded sizes when available; call results may overtake waiting state. The fork
-retains one compiled frame validator, the cursor-based publication drain, strict-JSON container hooks
-and public exports. Coding-agent uses Chord's JSON helpers, not its host/link transport; this sync
-establishes no current TUI or tool-performance improvement from those transport features.
+`Link.send` reports encoded sizes when available; call results may overtake waiting state. Frames
+validate with upstream's compiled pi-schema validator. The fork retains the cursor-based publication
+drain, strict-JSON container hooks and public exports. Coding-agent uses Chord's JSON helpers, not its
+host/link transport; this sync establishes no current TUI or tool-performance improvement from those
+transport features.
+
+Tool arguments validate with upstream's pi-schema, which replaces TypeBox validation. Built-in
+coding-agent tools keep their TypeBox schemas, as upstream's do; pi-schema checks them as plain JSON
+Schema. pi-ai's package no longer exports `Type`, `Static` or `TSchema`; the extension loader still
+resolves `typebox` and pi-ai's former TypeBox exports for extensions. Durable commits
+use upstream's group commit and batched `Storage.commit`; the fork's admission check and SQLite
+record-ID claims run on that path.
 
 System One classifier images follow upstream's TypeSafe assets, Cloudflare images/assets
 and OpenRouter state-image serialization, including native limits and opt-in headers.

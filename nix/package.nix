@@ -53,7 +53,7 @@ let
       runHook preInstall
 
       node scripts/pack-nix-packages.mjs "$out" \
-        chord telemetry ai tui agent codemode mcp durable coding-agent
+        chord telemetry schema ai tui agent codemode mcp durable coding-agent
 
       runHook postInstall
     '';
@@ -71,6 +71,7 @@ let
       "node_modules/@earendil-works/pi-coding-agent" = workspacePackages + "/coding-agent.tgz";
       "node_modules/@earendil-works/pi-durable" = workspacePackages + "/durable.tgz";
       "node_modules/@earendil-works/pi-mcp" = workspacePackages + "/mcp.tgz";
+      "node_modules/@earendil-works/pi-schema" = workspacePackages + "/schema.tgz";
       "node_modules/@earendil-works/pi-telemetry" = workspacePackages + "/telemetry.tgz";
       "node_modules/@earendil-works/pi-tui" = workspacePackages + "/tui.tgz";
     };

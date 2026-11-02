@@ -38,7 +38,9 @@ import {
 	type FacetSelf,
 	type Host,
 	type HostError,
+	type PluginFailure,
 	type RefState,
+	type RouteHandle,
 	type Self,
 	type StoreSelf,
 } from "../../src/next/host/index.ts";
@@ -240,12 +242,13 @@ export async function loaded(
 		readonly readyTimeout?: number;
 		readonly store?: Store;
 	} = {},
-): Promise<{ readonly host: Host; readonly errors: HostError[] }> {
+): Promise<{ readonly host: Host; readonly errors: HostError[]; readonly failed: readonly PluginFailure[] }> {
 	const errors: HostError[] = [];
 	const { telemetry, closeTimeout, readyTimeout, store } = options;
 	const host = createHost({ telemetry, closeTimeout, readyTimeout, store, onError: (error) => errors.push(error) });
-	await host.load([{ name: "@test/app", facet: defineFacet(setup) }], options.context ?? BACKGROUND_CONTEXT);
-	return { host, errors };
+	const facets = [{ name: "@test/app", facet: defineFacet(setup) }];
+	const { failed } = await host.load(facets, options.context ?? BACKGROUND_CONTEXT);
+	return { host, errors, failed };
 }
 
 /**
@@ -255,12 +258,12 @@ export async function loaded(
 export async function loadedPlugins(
 	setups: Readonly<Record<string, (host: FacetHost, self: FacetSelf) => void>>,
 	options: { readonly telemetry?: InMemoryTelemetryContext; readonly readyTimeout?: number } = {},
-): Promise<{ readonly host: Host; readonly errors: HostError[] }> {
+): Promise<{ readonly host: Host; readonly errors: HostError[]; readonly failed: readonly PluginFailure[] }> {
 	const errors: HostError[] = [];
 	const host = createHost({ ...options, onError: (error) => errors.push(error) });
 	const facets = Object.entries(setups).map(([name, setup]) => ({ name, facet: defineFacet(setup) }));
-	await host.load(facets, BACKGROUND_CONTEXT);
-	return { host, errors };
+	const { failed } = await host.load(facets, BACKGROUND_CONTEXT);
+	return { host, errors, failed };
 }
 
 /** A store on a fresh SQLite `:memory:` database, as Chord's layers see it. */
@@ -768,6 +771,8 @@ export type Resolved = {
 export type Relayed = {
 	readonly tab: Host<TestPrincipal>;
 	readonly server: Host<TestPrincipal>;
+	/** The server's route to `Session`'s addresses. */
+	readonly route: RouteHandle<typeof Session>;
 	/** The worker of each resolved session address, the latest one per key. */
 	readonly workers: Map<string, Host<TestPrincipal>>;
 	/** The server's end of each resolved route link, in order. */
@@ -849,7 +854,7 @@ export async function relayed(
 		return { link: a, principal, trusted: options.trusted, codec };
 	};
 	const resolve = options.resolve ?? (async (_address, made) => made());
-	server.route(
+	const route = server.route(
 		Session,
 		{
 			authorize: options.authorize ?? (() => true),
@@ -868,7 +873,7 @@ export async function relayed(
 	const accepted = { principal: options.tab ?? { kind: "owner" }, codec: tabCodec, limits: options.limits } as const;
 	server.accept(a, accepted, context);
 	tab.connect(b, { principal: { kind: "server" }, codec: tabCodec }, context);
-	return { tab, server, workers, routeLinks, tabLink: a, resolves, errors };
+	return { tab, server, route, workers, routeLinks, tabLink: a, resolves, errors };
 }
 
 /**

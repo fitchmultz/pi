@@ -18,6 +18,7 @@ import {
 	listBackgroundCommands,
 } from "../../../src/extensions/background-command/jobs.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
+import { keyHint, keyText } from "../../../src/modes/interactive/components/keybinding-hints.ts";
 import type { SettingsSelectorComponent } from "../../../src/modes/interactive/components/settings-selector.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { initTheme, theme } from "../../../src/modes/interactive/theme/theme.ts";
@@ -350,7 +351,11 @@ describe("compact view settings and native event lifecycle", () => {
 		const renderer = harness.session.extensionRunner.getMessageRenderer(BACKGROUND_COMMAND_NOTICE);
 		expect(renderer, "background notices have a compact renderer").toBeTypeOf("function");
 		const compactRow = (message: CustomMessage, width: number) => {
-			const lines = renderer!(message, { compactView: true, expanded: false, outputPad: 1 }, theme)!.render(width);
+			const lines = renderer!(
+				message,
+				{ compactView: true, expanded: false, outputPad: 1, keyText, keyHint },
+				theme,
+			)!.render(width);
 			expect(lines).toHaveLength(1);
 			expect(visibleWidth(lines[0])).toBeLessThanOrEqual(width);
 			return stripAnsi(lines[0]).trim();
