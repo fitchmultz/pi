@@ -1668,3 +1668,4 @@ attempt id, one message kind (`probe`, tagged `search` or `check`). Unchanged: w
 6. **Cycles across hosts** (§7): (B) the probe, with (B1) a re-search backoff for probes only (recommended) or (B2) a
    full search lifecycle without any timer; or (A) the slice 4b decision narrowed to one deadline, which polls chains
    across hosts again, misses a ring of `waiting` attempts, and retries in lockstep without finding the cycle it is for.
+

@@ -8,7 +8,7 @@ import {
 	toToolDeclaration,
 	type UserMessage,
 } from "@earendil-works/pi-ai/compat";
-import { Type } from "typebox";
+import { obj } from "@earendil-works/pi-schema";
 import { describe, expect, it } from "vitest";
 import {
 	Agent,
@@ -50,7 +50,7 @@ function createTool(name: string): AgentTool {
 		name,
 		label: name,
 		description: `${name} tool`,
-		parameters: Type.Object({}),
+		parameters: obj({}),
 		execute: async () => ({ content: [{ type: "text", text: name }], details: {} }),
 	};
 }
@@ -147,7 +147,7 @@ describe("Agent", () => {
 			name: "echo",
 			label: "Echo",
 			description: "Echo input",
-			parameters: Type.Object({}),
+			parameters: obj({}),
 			execute: async () => ({ content: [{ type: "text", text: "echo" }], details: {} }),
 		};
 		const agent = new Agent({
@@ -201,7 +201,7 @@ describe("Agent", () => {
 		expect(update).toEqual({
 			role: "system",
 			content: "",
-			toolsAdded: [{ name: "second", description: "second tool", parameters: Type.Object({}) }],
+			toolsAdded: [{ name: "second", description: "second tool", parameters: obj({}) }],
 			toolsRemoved: [{ name: "first" }],
 			timestamp: expect.any(Number),
 		});
@@ -211,8 +211,8 @@ describe("Agent", () => {
 	});
 
 	it("observes nested in-place schema changes without mutating earlier transcript declarations", async () => {
-		const path = Object.assign(Type.String(), { description: "original" });
-		const parameters = Type.Object({ options: Type.Object({ path }) });
+		const path = { type: "string", description: "original" };
+		const parameters = obj({ options: obj({ path }) });
 		const tool = { ...createTool("mutable"), parameters };
 		const requests: Tool[][] = [];
 		const agent = new Agent({
@@ -254,7 +254,7 @@ describe("Agent", () => {
 			name: "echo",
 			label: "Echo",
 			description: "Echo input",
-			parameters: Type.Object({}),
+			parameters: obj({}),
 			execute: async () => ({ content: [{ type: "text", text: "echo" }], details: {} }),
 		};
 		const agent = new Agent({
@@ -279,7 +279,7 @@ describe("Agent", () => {
 			role: "system",
 			content: "",
 			sections: { skills: "<skills>x</skills>" },
-			toolsAdded: [{ name: "echo", description: "Echo input", parameters: Type.Object({}) }],
+			toolsAdded: [{ name: "echo", description: "Echo input", parameters: obj({}) }],
 			timestamp: 1,
 		});
 	});
@@ -324,7 +324,7 @@ describe("Agent", () => {
 			name: "echo",
 			label: "Echo",
 			description: "Echo input",
-			parameters: Type.Object({}),
+			parameters: obj({}),
 			execute: async () => ({ content: [{ type: "text", text: "echo" }], details: {} }),
 		};
 		const agent = new Agent({
@@ -511,7 +511,7 @@ describe("Agent", () => {
 	});
 
 	it("should ignore tool updates after the tool execution settles", async () => {
-		const toolSchema = Type.Object({});
+		const toolSchema = obj({});
 		let delayedUpdate: AgentToolUpdateCallback<{ status: string }> | undefined;
 		const events: AgentEvent[] = [];
 		const unhandledRejections: unknown[] = [];
@@ -576,7 +576,7 @@ describe("Agent", () => {
 	});
 
 	it("should ignore a settled parallel tool update while another tool is still running", async () => {
-		const toolSchema = Type.Object({});
+		const toolSchema = obj({});
 		const slowStarted = createDeferred();
 		const settledToolEnded = createDeferred();
 		const releaseSlow = createDeferred();
@@ -898,7 +898,7 @@ describe("Agent", () => {
 	});
 
 	it("keeps legacy prepareNextTurn signal callback behavior", async () => {
-		const schema = Type.Object({});
+		const schema = obj({});
 		const tool: AgentTool<typeof schema> = {
 			name: "noop",
 			label: "Noop",
@@ -939,7 +939,7 @@ describe("Agent", () => {
 	});
 
 	it("forwards finishTurn through AgentOptions with the active abort signal", async () => {
-		const schema = Type.Object({});
+		const schema = obj({});
 		const tool: AgentTool<typeof schema> = {
 			name: "noop",
 			label: "Noop",

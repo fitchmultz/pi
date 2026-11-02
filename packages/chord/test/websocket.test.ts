@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { IncomingMessage } from "node:http";
 import { deflateRawSync } from "node:zlib";
-import { Type } from "typebox";
+import { arr, obj, str, unknown } from "@earendil-works/pi-schema";
 import { describe, it } from "vitest";
 import { WebSocketServer } from "ws";
 import {
@@ -19,12 +19,12 @@ import {
 
 const Board = remote("t.board", {
 	version: 1,
-	input: Type.Object({}),
+	input: obj({}, { open: true }),
 	host: hostNamed("server"),
 	variants: {
 		main: {
-			state: { notes: Type.Array(Type.String()) },
-			methods: { add: method(Type.String()), who: method(undefined, Type.Unknown()) },
+			state: { notes: arr(str()) },
+			methods: { add: method(str()), who: method(undefined, unknown()) },
 		},
 	},
 });
@@ -33,7 +33,7 @@ describe("WebSocket links", () => {
 	it("serves a browser-style client over a real socket, stamped by the authenticator", async () => {
 		const server = createHost({ self: { kind: "host" }, name: "server", onError: () => {} });
 		server.serve(Board, (_input, principal, self) => {
-			const notes = self.state("notes", Type.Array(Type.String()), []);
+			const notes = self.state("notes", arr(str()), []);
 			return {
 				variant: "main",
 				notes,
@@ -115,7 +115,7 @@ describe("WebSocket links: packed payloads", () => {
 		const server = createHost({ self: { kind: "host" }, name: "server", onError: () => {} });
 		server.serve(Board, (_input, _principal, self) => ({
 			variant: "main",
-			notes: self.state("notes", Type.Array(Type.String()), []),
+			notes: self.state("notes", arr(str()), []),
 			add: (text) => {
 				calls.push(text);
 			},
@@ -164,7 +164,7 @@ describe("WebSocket links: packed payloads", () => {
 		const notes = Array.from({ length: 40 }, (_, i) => `${i}:${"x".repeat(4000)}`);
 		const server = createHost({ self: { kind: "host" }, name: "server", onError: () => {} });
 		server.serve(Board, (_input, _principal, self) => {
-			const state = self.state("notes", Type.Array(Type.String()), notes);
+			const state = self.state("notes", arr(str()), notes);
 			return { variant: "main", notes: state, add: () => {}, who: () => notes };
 		});
 		const wss = new WebSocketServer({ port: 0, host: "127.0.0.1" });

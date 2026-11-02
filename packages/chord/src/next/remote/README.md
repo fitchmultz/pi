@@ -14,7 +14,9 @@ within each link's limits, compression at the origin, activation chains and revo
   `call`, `abort`, `retry` and `ack` to the provider side of their `origin` (0 when absent; a `hold` makes it, other
   messages for an origin without one are ignored), `closed { origin }` ends that provider side; `bound`, `state`,
   `failed`, `loading`, `result`, `error` and `gone` to the consumer side; `revoke` to the host, from a parent link only
-  (`host.revoke` with this host's own `revokedBy`; anywhere else it is ignored). `origin` is honoured on every link.
+  (`host.revoke` with this host's own `revokedBy`; anywhere else it is ignored). `origin` is honoured only on parent and route links, where a relay's messages arrive; on a child link a message
+  carrying one is a protocol error (decision "Origins only from relays"). A provider side (one per origin) goes once it
+  has no holds, no calls and nothing in flight; its origin's next hold makes a new one (origins are never reused).
   Closing it, from either end, ends both sides: the provider sides release the peer's holds and abort their calls, the
   consumer side's calls reject and its path tells the holders. It makes the parts this host originates (`part`:
   deflated above 16 KiB with the host's compressor) and opens the parts it owns (`openPart`: within the limits its
@@ -91,9 +93,11 @@ within each link's limits, compression at the origin, activation chains and revo
   as `failed` (with `retryIn`, the rest of the object's backoff window, for a transient one; absent for broken and
   waiting), each new cause of an object parked on a failed dependency too, the current one at once when the object is
   failed already; the next attempt (or the parked object's next `loading`) is announced with `loading`; the hold stays,
-  so a `retry` (from any holder) renews even a broken object for every holder (a parked object passes it on, one retry
-  operation of this host). Live, it binds through the window (`boundEntry`: the variant and each member's value as a part,
-  names as indexes into the bound version). Its members' frames arrive as `Subscriber` calls inside the batch; at its
+  so a `retry` (from any holder) renews even a broken object for every holder (a parked object passes it on, one walk
+  of this host with one hop less of the message's budget). After a swap in place it gets a fresh `bound` once the new
+  instance is live, answering calls by the names it was bound with until that is sent (the window may hold it). Live,
+  it binds through the window (`boundEntry`: the variant and each member's value as a part, names as indexes into the
+  bound version). Its members' frames arrive as `Subscriber` calls inside the batch; at its
   end the hold's entry lists the members that changed with their ops, each encoded with that member's own Delta
   encoder (`entry`), or queues them (`queue`, later `pendingEntry`). Each entry counts one `chord.link.encodes`. A
   call's method is an index into the bound variant's methods; one outside them is a protocol error, its arguments are
@@ -137,7 +141,9 @@ within each link's limits, compression at the origin, activation chains and revo
   waiting when its hold gets `loading` is rejected `unavailable` (it may name a method of the old variant).
 - `Path` (the parent, or one route address): its current link and its holders (`RemoteObject`s and `RelayedHold`s),
   held on that link and again on every next one; when the link drops, every holder is told (`dropped`). `changed`
-  tells its owner (a route) when it needs a link or lost its last holder.
+  tells its owner (a route) what happened without a link: a holder `attached`, the link `dropped`, the last holder
+  `released`. `unreachable(error)` fails every holder `failed { waiting }` (a route's `resolve` failed, a suspension):
+  a `RemoteObject` moves there, a `RelayedHold` sends `failed` downstream; the next link binds them again.
 - `RemoteObject` (one per remote reference, owned by its host across the links of its path): its `state` (`loading`
   until a link's hold is bound and again on every drop or `loading`, `failed` from `failed` with `retryAt = now +
   retryIn` for a transient cause, `retryAt` undefined for a broken or waiting one, `live` on `bound`, `released`;

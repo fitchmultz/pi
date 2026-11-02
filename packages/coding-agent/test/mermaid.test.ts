@@ -67,7 +67,7 @@ describe("Mermaid rendering", () => {
 		},
 	])("matches baseline lexer reconstruction without a Mermaid marker: $name", ({ source, expected }) => {
 		let downstreamSource: string | undefined;
-		const transform = createMarkdownTransform("assistant", true, [
+		const transform = createMarkdownTransform("assistant", () => true, [
 			createMermaidMarkdownTransformer({ getMode: () => "streaming" }),
 			(markdown) => {
 				downstreamSource = markdown;

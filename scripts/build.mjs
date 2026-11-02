@@ -25,7 +25,7 @@ if (args.some((arg) => arg !== "--offline")) {
 
 const root = realpathSync.native(fileURLToPath(new URL("../", import.meta.url)));
 const packages = new Map([
-	"chord", "tui", "telemetry", "codemode", "mcp", "ai", "durable",
+	"schema", "chord", "tui", "telemetry", "codemode", "mcp", "ai", "durable",
 	"env", "agent", "coding-agent",
 ].map((name) => [name, JSON.parse(readFileSync(join(root, "packages", name, "package.json"), "utf8"))]));
 const localNames = new Set([...packages.values()].map((pkg) => pkg.name));

@@ -5,6 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ToolRenderContext } from "../src/core/extensions/types.ts";
 import { codemodeBackgroundMessageRenderer, codemodeRenderers } from "../src/extensions/codemode/renderer.ts";
 import type { CodemodeToolDetails } from "../src/extensions/codemode/tool.ts";
+import { keyHint, keyText } from "../src/modes/interactive/components/keybinding-hints.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 
@@ -29,6 +30,8 @@ function render(
 		isError,
 		durationMs: undefined,
 		outputPad: 1,
+		keyText,
+		keyHint,
 	} satisfies ToolRenderContext;
 	const component = codemodeRenderers.renderResult?.(
 		result,
@@ -146,7 +149,11 @@ describe("codemode renderer", () => {
 				resultDetails: { calls },
 			},
 		};
-		const component = codemodeBackgroundMessageRenderer(message, { expanded: true, outputPad: 1 }, theme);
+		const component = codemodeBackgroundMessageRenderer(
+			message,
+			{ expanded: true, outputPad: 1, keyText, keyHint },
+			theme,
+		);
 		const text = stripVTControlCharacters(component.render(200).join("\n"))
 			.split("\n")
 			.map((line) => line.trimEnd())
