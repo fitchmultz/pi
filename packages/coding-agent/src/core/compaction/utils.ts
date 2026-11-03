@@ -167,6 +167,30 @@ export function serializeConversation(messages: Message[]): string {
 }
 
 // ============================================================================
+// Checkpoint Prompt Format
+// ============================================================================
+
+/** Per-section guidance for a checkpoint summary; headers, order and the closing rule are shared. */
+export interface CheckpointPromptSections {
+	goal: string;
+	constraints: string;
+	done: string;
+	inProgress: string;
+	blocked: string;
+	keyDecisions: string;
+	nextSteps: string;
+	/** Renders no `## Critical Context` section when omitted. */
+	criticalContext?: string;
+}
+
+/** Render the checkpoint format shared by every summarization prompt. */
+export function formatCheckpointPrompt(sections: CheckpointPromptSections): string {
+	const criticalContext =
+		sections.criticalContext === undefined ? "" : `\n\n## Critical Context\n${sections.criticalContext}`;
+	return `## Goal\n${sections.goal}\n\n## Constraints & Preferences\n${sections.constraints}\n\n## Progress\n### Done\n${sections.done}\n\n### In Progress\n${sections.inProgress}\n\n### Blocked\n${sections.blocked}\n\n## Key Decisions\n${sections.keyDecisions}\n\n## Next Steps\n${sections.nextSteps}${criticalContext}\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.`;
+}
+
+// ============================================================================
 // Summarization System Prompt
 // ============================================================================
 

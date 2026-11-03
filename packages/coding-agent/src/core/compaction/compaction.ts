@@ -24,6 +24,7 @@ import type {
 	Usage,
 } from "@earendil-works/pi-ai/compat";
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import { type ContextUsageEstimate, calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { convertToLlm } from "../messages.ts";
 import {
 	buildSessionProjection,
@@ -33,12 +34,14 @@ import {
 	type SessionProjection,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
+import { SETTINGS_DEFAULTS } from "../settings-defaults.ts";
 import { combineUsage } from "../usage-totals.ts";
 import {
 	computeFileLists,
 	createFileOps,
 	extractFileOpsFromMessage,
 	type FileOperations,
+	formatCheckpointPrompt,
 	formatFileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
@@ -123,23 +126,16 @@ export interface CompactionSettings {
 	keepRecentTokens: number;
 }
 
-export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
-	enabled: true,
-	reserveTokens: 16384,
-	keepRecentTokens: 20000,
-};
+/** The default compaction budget, shared with the settings schema through `SETTINGS_DEFAULTS`. */
+export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = { ...SETTINGS_DEFAULTS.compaction };
+
+// The token-usage rule lives in pi-ai's `utils/estimate`; re-exported for the public API.
+export { calculateContextTokens };
+export type { ContextUsageEstimate };
 
 // ============================================================================
 // Token calculation
 // ============================================================================
-
-/**
- * Calculate total context tokens from usage.
- * Uses the native totalTokens field when available, falls back to computing from components.
- */
-export function calculateContextTokens(usage: Usage): number {
-	return usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-}
 
 /**
  * Get usage from an assistant message if available.
@@ -172,13 +168,6 @@ export function getLastAssistantUsage(entries: SessionEntry[]): Usage | undefine
 		}
 	}
 	return undefined;
-}
-
-export interface ContextUsageEstimate {
-	tokens: number;
-	usageTokens: number;
-	trailingTokens: number;
-	lastUsageIndex: number | null;
 }
 
 function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
@@ -514,34 +503,18 @@ const SUMMARIZATION_PROMPT = `The messages above are a conversation to summarize
 
 Use this EXACT format:
 
-## Goal
-[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]
-
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned by user]
-- [Or "(none)" if none were mentioned]
-
-## Progress
-### Done
-- [x] [Completed tasks/changes]
-
-### In Progress
-- [ ] [Current work]
-
-### Blocked
-- [Issues preventing progress, if any]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale]
-
-## Next Steps
-1. [Ordered list of what should happen next]
-
-## Critical Context
-- [Any data, examples, or references needed to continue]
-- [Or "(none)" if not applicable]
-
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+${formatCheckpointPrompt({
+	goal: `[What is the user trying to accomplish? Can be multiple items if the session covers different tasks.]`,
+	constraints: `- [Any constraints, preferences, or requirements mentioned by user]
+- [Or "(none)" if none were mentioned]`,
+	done: `- [x] [Completed tasks/changes]`,
+	inProgress: `- [ ] [Current work]`,
+	blocked: `- [Issues preventing progress, if any]`,
+	keyDecisions: `- **[Decision]**: [Brief rationale]`,
+	nextSteps: `1. [Ordered list of what should happen next]`,
+	criticalContext: `- [Any data, examples, or references needed to continue]
+- [Or "(none)" if not applicable]`,
+})}`;
 
 const UPDATE_SUMMARIZATION_INSTRUCTIONS = `Update the existing structured summary with new information. RULES:
 - PRESERVE all existing information from the previous summary
@@ -553,32 +526,16 @@ const UPDATE_SUMMARIZATION_INSTRUCTIONS = `Update the existing structured summar
 
 Use this EXACT format:
 
-## Goal
-[Preserve existing goals, add new ones if the task expanded]
-
-## Constraints & Preferences
-- [Preserve existing, add new ones discovered]
-
-## Progress
-### Done
-- [x] [Include previously done items AND newly completed items]
-
-### In Progress
-- [ ] [Current work - update based on progress]
-
-### Blocked
-- [Current blockers - remove if resolved]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale] (preserve all previous, add new)
-
-## Next Steps
-1. [Update based on current state]
-
-## Critical Context
-- [Preserve important context, add new if needed]
-
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+${formatCheckpointPrompt({
+	goal: `[Preserve existing goals, add new ones if the task expanded]`,
+	constraints: `- [Preserve existing, add new ones discovered]`,
+	done: `- [x] [Include previously done items AND newly completed items]`,
+	inProgress: `- [ ] [Current work - update based on progress]`,
+	blocked: `- [Current blockers - remove if resolved]`,
+	keyDecisions: `- **[Decision]**: [Brief rationale] (preserve all previous, add new)`,
+	nextSteps: `1. [Update based on current state]`,
+	criticalContext: `- [Preserve important context, add new if needed]`,
+})}`;
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
 
