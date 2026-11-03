@@ -1,3 +1,5 @@
+import { sleep } from "./sleep.ts";
+
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 
 interface ProviderRetryOptions {
@@ -74,26 +76,17 @@ function createAbortError(): Error {
 	return error;
 }
 
-function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
-	return new Promise((resolve, reject) => {
-		if (signal?.aborted) {
-			reject(createAbortError());
-			return;
-		}
-
-		const onAbort = () => {
-			clearTimeout(timeout);
-			reject(createAbortError());
-		};
-		const timeout = setTimeout(
-			() => {
-				signal?.removeEventListener("abort", onAbort);
-				resolve();
-			},
-			Math.max(0, ms),
-		);
-		signal?.addEventListener("abort", onAbort, { once: true });
-	});
+/** Backoff sleep that stays interruptible; keeps the abort rejection shape callers see today. */
+async function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+	if (signal === undefined) {
+		await new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
+		return;
+	}
+	try {
+		await sleep(Math.max(0, ms), signal);
+	} catch {
+		throw createAbortError();
+	}
 }
 
 /**

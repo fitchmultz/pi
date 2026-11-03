@@ -21,12 +21,14 @@ import {
 	type ReadonlySessionManager,
 	type SessionEntry,
 } from "../session-manager.ts";
+import { SETTINGS_DEFAULTS } from "../settings-defaults.ts";
 import { completeSummarization, getSummarizationFailure } from "./compaction.ts";
 import {
 	computeFileLists,
 	createFileOps,
 	extractFileOpsFromMessage,
 	type FileOperations,
+	formatCheckpointPrompt,
 	formatFileOperations,
 	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
@@ -86,7 +88,7 @@ export interface GenerateBranchSummaryOptions {
 	customInstructions?: string;
 	/** If true, customInstructions replaces the default prompt instead of being appended */
 	replaceInstructions?: boolean;
-	/** Tokens reserved when selecting branch history (default 16384) */
+	/** Tokens reserved when selecting branch history; defaults to the branchSummary settings default. */
 	reserveTokens?: number;
 	/** Optional session stream function. Used to preserve SDK request behavior without mutating agent state. */
 	streamFn?: StreamFn;
@@ -274,30 +276,16 @@ const BRANCH_SUMMARY_PROMPT = `Create a structured summary of this conversation 
 
 Use this EXACT format:
 
-## Goal
-[What was the user trying to accomplish in this branch?]
-
-## Constraints & Preferences
-- [Any constraints, preferences, or requirements mentioned]
-- [Or "(none)" if none were mentioned]
-
-## Progress
-### Done
-- [x] [Completed tasks/changes]
-
-### In Progress
-- [ ] [Work that was started but not finished]
-
-### Blocked
-- [Issues preventing progress, if any]
-
-## Key Decisions
-- **[Decision]**: [Brief rationale]
-
-## Next Steps
-1. [What should happen next to continue this work]
-
-Keep each section concise. Preserve exact file paths, function names, and error messages.`;
+${formatCheckpointPrompt({
+	goal: `[What was the user trying to accomplish in this branch?]`,
+	constraints: `- [Any constraints, preferences, or requirements mentioned]
+- [Or "(none)" if none were mentioned]`,
+	done: `- [x] [Completed tasks/changes]`,
+	inProgress: `- [ ] [Work that was started but not finished]`,
+	blocked: `- [Issues preventing progress, if any]`,
+	keyDecisions: `- **[Decision]**: [Brief rationale]`,
+	nextSteps: `1. [What should happen next to continue this work]`,
+})}`;
 
 /**
  * Generate a summary of abandoned branch entries.
@@ -318,7 +306,7 @@ export async function generateBranchSummary(
 		thinkingLevel,
 		customInstructions,
 		replaceInstructions,
-		reserveTokens = 16384,
+		reserveTokens = SETTINGS_DEFAULTS.branchSummary.reserveTokens,
 		streamFn,
 		retry,
 		callbacks,
