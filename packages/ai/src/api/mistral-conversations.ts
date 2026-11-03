@@ -14,10 +14,12 @@ import type {
 	TranscriptContext,
 } from "../types.ts";
 import { truncateErrorText } from "../utils/error-body.ts";
+import { calculateContextTokens } from "../utils/estimate.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
+import { createPendingAssistantMessage } from "../utils/pending-assistant.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
@@ -131,7 +133,7 @@ export const stream: StreamFunction<"mistral-conversations", MistralOptions> = (
 	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
 
 	(async () => {
-		const output = createOutput(model);
+		const output = createPendingAssistantMessage(model.api, model);
 
 		try {
 			const apiKey = options?.apiKey;
@@ -210,26 +212,6 @@ export const streamSimple: StreamFunction<"mistral-conversations", SimpleStreamO
 		reasoningEffort: reasoningEffort as MistralReasoningEffort | undefined,
 	} satisfies MistralOptions);
 };
-
-function createOutput(model: Model<"mistral-conversations">): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "pending",
-		timestamp: Date.now(),
-	};
-}
 
 function createMistralToolCallIdNormalizer(): (id: string) => string {
 	const idMap = new Map<string, string>();
@@ -620,9 +602,10 @@ async function consumeChatStream(
 			output.usage.output = chunk.usage.completion_tokens || 0;
 			output.usage.cacheRead = cachedPromptTokens;
 			output.usage.cacheWrite = 0;
-			output.usage.totalTokens =
-				chunk.usage.total_tokens ||
-				output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
+			output.usage.totalTokens = calculateContextTokens({
+				...output.usage,
+				totalTokens: chunk.usage.total_tokens ?? 0,
+			});
 			calculateCost(model, output.usage);
 		}
 
