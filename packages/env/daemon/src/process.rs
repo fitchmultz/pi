@@ -4,7 +4,7 @@
 
 use crate::errors::Failure;
 use crate::exec::{
-    Control, Ending, Groups, Launch, Message, kill_group, running, spawn, spawn_reader,
+    Control, Ending, Groups, Launch, Message, StdioGrace, kill_group, running, spawn, spawn_reader,
     start_waiter,
 };
 use crate::frame::{EVENT, Frame};
@@ -18,10 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
-
-/// After the program exits, output still arriving is collected until this much silence, as for `exec`.
-const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
+use std::time::Duration;
 
 /// Input for a program's stdin, in arrival order.
 enum Input {
@@ -192,7 +189,7 @@ pub fn run(
     let names = ["stdout", "stderr"];
     let mut ended = [false, false];
     let mut status: Option<Result<ExitStatus, String>> = None;
-    let mut idle_until: Option<Instant> = None;
+    let mut grace = StdioGrace::default();
     let mut aborted = false;
     let mut killed = false;
     let kill = |killed: &mut bool| {
@@ -212,18 +209,12 @@ pub fn run(
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
-        let wait = match idle_until {
-            Some(idle) => {
-                let now = Instant::now();
-                if now >= idle {
-                    // A descendant may hold the pipes open after the program exited; stop waiting for it.
-                    break;
-                }
-                idle - now
-            }
-            None => Duration::from_secs(3600),
-        };
-        match receiver.recv_timeout(wait) {
+        let wait = grace.remaining().unwrap_or(Duration::from_secs(3600));
+        let message = receiver.recv_timeout(wait);
+        if let Ok(message) = &message {
+            grace.observe(message);
+        }
+        match message {
             Ok(Message::Data(stream, bytes)) => {
                 output.bulk(
                     Frame::with_payload(
@@ -234,27 +225,31 @@ pub fn run(
                     ),
                     None,
                 );
-                if status.is_some() {
-                    idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
-                }
             }
             Ok(Message::Eof(stream)) => ended[stream] = true,
             Ok(Message::Exit(exit)) => {
                 // The waiter already ended the group; nothing is left to kill.
                 killed = true;
                 status = Some(Ok(exit));
-                idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
             }
             Ok(Message::WaitFailed(error)) => {
                 status = Some(Err(error));
-                idle_until = Some(Instant::now());
+                break;
             }
             Ok(Message::Cancel) => {
                 aborted = true;
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
-            Err(RecvTimeoutError::Timeout) => {}
+            Ok(Message::OutputPaused | Message::OutputResumed) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                if grace
+                    .remaining()
+                    .is_some_and(|remaining| remaining.is_zero())
+                {
+                    break;
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }

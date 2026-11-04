@@ -75,6 +75,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
+| Command output must drain after process exit without counting link backpressure as silence | `packages/env/daemon/src/{exec,output,process,pty}.rs` | `packages/env/test/{process,terminal,conformance,remote}.test.ts` |
 | Errored HTTP WebSockets seal their scope while `ws` completes its close handshake, delivering code 1009 for oversized frames | `packages/chord/src/node/http/upgrades.ts` | `packages/chord/test/node/http/upgrades.test.ts` |
 | Legacy published Kimi Coding catalogs must not break offline builds or revert the native OpenAI protocol on fetched/cached overlays; preserve effort/tool constraints and K3 cache-write pricing | `packages/ai/src/api/kimi.ts`, `packages/ai/catalog/{families/kimi,providers/kimi-coding,providers/moonshotai}.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts` |
 | Git footers must catch branch changes missed while native watchers and polling baselines start | `core/footer-data-provider.ts` | `footer-data-provider.test.ts` |
