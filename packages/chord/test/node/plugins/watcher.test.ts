@@ -82,6 +82,21 @@ describe("the watcher's marks", () => {
 		watcher.close();
 	});
 
+	it("marks base for a base file given one by one, not for its siblings; never under node_modules", async () => {
+		const { base, watcher } = await watched();
+		const elsewhere = await realpath(await tempRoot());
+		await writeFiles(elsewhere, { "entry.ts": "", "sibling.ts": "", "node_modules/react/index.js": "" });
+		watcher.baseFiles([join(elsewhere, "entry.ts"), join(elsewhere, "node_modules", "react", "index.js")]);
+		watcher.mark(join(elsewhere, "sibling.ts"));
+		watcher.mark(join(elsewhere, "node_modules", "react", "index.js"));
+		expect(watcher.value).toMatchObject({ base: false });
+		// A real event on the file: its directory is watched.
+		await writeFile(join(elsewhere, "entry.ts"), "export {};");
+		await vi.waitFor(() => expect(watcher.value).toMatchObject({ base: true }), { timeout: 5_000 });
+		expect(base).not.toBe(elsewhere);
+		watcher.close();
+	});
+
 	it("ignores node_modules and .git", async () => {
 		const { root, watcher } = await watched();
 		watcher.mark(join(root, "a", "node_modules", "x", "index.js"));
@@ -126,9 +141,12 @@ describe("the watcher and single-file plugins (slice 12 §4)", () => {
 		await writeFiles(root, { "hello.server.ts": "" });
 		watcher.mark(join(root, "hello.server.ts"));
 		expect(watcher.value).toMatchObject({ set: true, dirty: [] });
-		const seen = watcher.discoverySnapshot();
-		watcher.know(await discoverPlugins([root], { kinds: KINDS }, context), seen);
-		expect(watcher.value).toMatchObject({ set: false, dirty: [] });
+		// The write's native event may arrive during discovery and correctly keep its newer mark.
+		await vi.waitFor(async () => {
+			const seen = watcher.discoverySnapshot();
+			watcher.know(await discoverPlugins([root], { kinds: KINDS }, context), seen);
+			expect(watcher.value).toMatchObject({ set: false });
+		});
 		// Its own file: only it is dirty (not every plugin of the root its directory is).
 		watcher.mark(join(root, "hello.server.ts"));
 		expect(watcher.value).toMatchObject({ set: false, dirty: ["hello"] });

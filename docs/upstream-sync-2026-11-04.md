@@ -2,9 +2,11 @@
 
 ## Baseline
 
-The fork integrates upstream `fcebc099565d8f30c15b321ff6a1af5f34d89400` from
-`earendil-works/pi` main. Before integration, fork main
+The fork integrates upstream `d6339fb09739851e4165a38e45bd97a0348ea727` from
+`earendil-works/pi` main. At the initial fetch, fork main
 `d2c3b2f8f685b62274e9c499e5955300575292b4` was 134 commits behind and 885 ahead.
+Two more upstream commits arrived during verification, bringing the total to 136.
+They add Chord reload fixes and p2's terminal side panel and merge without conflicts.
 The histories diverged from `3e0eec29f50e7861e9db91f2d12723267411b4f3`.
 The merge preserves both histories, without rebasing or force-pushing.
 
@@ -46,8 +48,34 @@ No extension configuration is changed by this integration.
 - Focused MCP suites: 38 tests passed. Focused AI suites: 201 tests passed.
 - Focused coding-agent suites: 195 tests passed before the quit conflict was resolved;
   the two affected runtime suites then passed all 25 tests with the final resolution.
-- Full offline package suite and p2 suite: running. CI, immutable installation and runtime
-  activation remain pending.
+- `./test.sh`: passed in an isolated Linux container for the initial integration. Later
+  runs exposed a watcher-test race: the file write's native event can arrive during discovery,
+  which correctly preserves its newer mark. The test now waits for discovery to catch up
+  before asserting that the mark cleared. Production code and real-event tests are unchanged.
+- Chord's new reload suite with Chromium: eight suites passed, with 28 passing tests and
+  two upstream expected failures.
+- Separate p2 suite: 644 passed, four failed, one skipped, plus an `ENOTEMPTY` cleanup-hook
+  failure. All three browser timeouts passed on rerun. The MCP placement assertion at
+  `apps/p2/test/p2/mcp.test.ts:587` and sheet cleanup failure reproduce on untouched upstream
+  `fcebc0995` with its own dependencies. The reply timeout also reproduced there. No tests
+  were weakened or disabled. The 15 p2 TUI P11 tests, including the new side panel, passed.
+- Real terminal inspection verified custom-message Markdown transformers alongside the
+  retained compact view. Before and after screenshots are included below.
+
+The Linux run uses Node 26.9.0, the native Env daemon, Chromium and fd 10.5.1. Initial
+macOS attempts exposed upstream Chord path and platform assumptions. Linux verification
+avoids changing upstream tests to fit this host. Missing Linux Go and an older fd binary
+were corrected in the disposable test container, without product changes.
+
+## UI evidence
+
+The same isolated slash command emits a custom message before and after integration.
+The compact view remains available; the expanded message now applies its Markdown transformer.
+These captures use no provider calls or user session data.
+
+| Before | After |
+| --- | --- |
+| ![Custom message before integration](assets/upstream-sync-2026-11-04/before.png) | ![Custom message after integration](assets/upstream-sync-2026-11-04/after.png) |
 
 The local evidence directory is `/tmp/pi-upstream-sync-2026-11-04/`. It contains the
 conflict list, decision log, dependency diff and active-consumer references. Background-command
