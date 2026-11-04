@@ -5,13 +5,14 @@
 	"workspaces": [
 		"packages/*",
 		"apps/*",
+		"packages/chord/test/examples/61-tutorial",
 		"packages/coding-agent/examples/extensions/with-deps",
 		"packages/coding-agent/examples/extensions/custom-provider-anthropic",
 		"packages/coding-agent/examples/extensions/custom-provider-gitlab-duo",
 		"packages/coding-agent/examples/extensions/gondolin"
 	],
 	"scripts": {
-		"clean": "npm run clean --workspaces",
+		"clean": "npm run clean --workspaces --if-present",
 		"build": "node scripts/build.mjs",
 		"build:offline": "node scripts/build.mjs --offline",
 		"build:native:darwin": "npm --prefix packages/tui run build:native:darwin",

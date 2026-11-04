@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, writeFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { isDeepStrictEqual, types } from "node:util";
-import { copyJson, isJsonValue } from "@earendil-works/chord";
+import { copyJson, isJsonValue } from "@earendil-works/chord/json";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
 import { resolvePath } from "../utils/paths.ts";

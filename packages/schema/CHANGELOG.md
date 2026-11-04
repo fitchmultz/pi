@@ -6,6 +6,8 @@
 
 - Fixed `coerce` and `parse` converting an optional `null` inside an `anyOf`/`oneOf` branch into a value (`"null"` for a string) instead of dropping it. A union that accepts the value as it is keeps its nulls.
 
+- Fixed local `$ref`s in schemas whose root `$id` is a relative path with a directory, such as `schemas/tool.json`: the `$id` was applied twice, so `compile` threw and `unresolvedRefs: "reject"` rejected valid tool arguments. Relative `$id`s are now also applied once with `unevaluatedProperties`/`unevaluatedItems`, when explaining errors under nested resources, and on the first coercion of a schema with `$dynamicRef` ([#11697](https://github.com/earendil-works/pi/issues/11697))
+
 ## [1.5.0] - 2026-11-02
 
 ### Added

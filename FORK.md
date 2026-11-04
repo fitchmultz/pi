@@ -2,12 +2,12 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`3e0eec29f50e7861e9db91f2d12723267411b4f3` (2026-11-02), following official v1.5.0.
+`4d72d05bcd1ea9d26f36f6567be10d00ae6bb5f7` (2026-11-04), following official v1.5.0.
 It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
-The [v1.5.0 integration record](docs/upstream-sync-1.5.0.md) documents the current baseline,
-the decision for each overlapping fork path and verification. The
+The [2026-11-04 integration record](docs/upstream-sync-2026-11-04.md) documents the current baseline,
+conflict decisions and verification. The [v1.5.0 integration record](docs/upstream-sync-1.5.0.md) records the preceding release integration. The
 [2026-10-29 integration record](docs/upstream-sync-2026-10-29.md) records the previous
 integration. The [v1.4.0 integration record](docs/upstream-sync-1.4.0.md)
 records the previous release integration. The
@@ -50,6 +50,11 @@ Complete working state also depends on the queue/admission APIs in
 
 ### Retained correctness deltas
 
+Ordinary quit does not wait for tools that ignore cancellation. Strict shutdown for certified
+working-session exits waits for `session.abort()` before disconnecting persistence. This retains
+the fork's nonblocking quit behavior rather than upstream's unconditional wait from #9124;
+an ordinary quit can leave an interrupted tool call without its final result.
+
 These fixes remain until upstream supplies equivalent behavior, not merely closes a report.
 Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in the v1.1.0 sync); the fork keeps `private-spill.test.ts` as a regression guard.
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
@@ -57,17 +62,14 @@ Literal and modified `+` key bindings now use upstream's modifier parser; the fo
 Managed npm extension installs now use upstream's `--no-audit --no-fund` flags, so the fork-only audit suppression is retired.
 The main shell helper now uses upstream's macOS process-group pause before killing; the fork's extra Linux pause is retired there. Other environment helpers retain their listed adaptations; upstream removed the sandbox example together with its adaptation.
 An oversized Env watch change now reports `overflow` through upstream's frame-limit check ([#10516](https://github.com/earendil-works/pi/issues/10516)), so the fork's daemon change is retired; `packages/env/test/remote.test.ts` keeps the regression.
-Chord frames, Chord v2 data and tool arguments now validate with upstream's pi-schema, compiled once per schema. The fork's compiled TypeBox frame validator is retired: upstream's checks the same frames about three times faster ([v1.5.0 record](docs/upstream-sync-1.5.0.md)). The fork keeps its malformed-frame and extra-field cases in `packages/chord/test/links-review.test.ts`.
+Chord v2 data, frames and tool arguments validate with upstream's pi-schema, compiled once per schema. Chord's transport and validation tests follow the v2 runtime.
 Durable's retained-context scheduling now follows upstream's idle scopes and wake handling; the fork's scheduler change and its two `harness-context.test.ts` cases are retired.
 HTML export now uses upstream's iterative tree traversal, replacing the fork's `activeFirst` traversal. The long-tree regression remains.
 Empty quoted prompt-template arguments now follow upstream's token parser and positional-default regression coverage ([#10867](https://github.com/earendil-works/pi/issues/10867)); the equivalent fork implementation and tests are retired.
 Transcript resume uses upstream's branch-wide recorded active-tool loadout, activates eligible never-mentioned extension tools, and applies `--tools +name/-name` modifiers ([#10785](https://github.com/earendil-works/pi/issues/10785), [#11062](https://github.com/earendil-works/pi/issues/11062)). The fork counts historical instruction-group deferrals as mentioned, so internal deferral does not make a tool newly registered. Other selections follow upstream's recorded additions and removals, without a separate selection protocol or legacy-session policy. The fork reconciles temporarily deferred discovery tools when discovery is disabled or absent; explicit selections, exclusions and later deselection remain authoritative across subsequent resumes. Native complete working-session restore retains its exact saved current loadout and modifier policy.
 Claude 5.5 catalog entries now use upstream's models.dev metadata rather than the removed fallback definitions.
 OpenCode Go's Google adapter and inference endpoints now follow upstream; `packages/ai/test/opencode-provider-headers.test.ts` retains the Gemini routing regression guard.
-The Chord service-hydration array check ([#10509](https://github.com/earendil-works/pi/issues/10509)) was retired with upstream's Chord 2 runtime: the service runtime is gone, and every link, including the in-memory one, JSON-round-trips frames.
-Chord reference admission now follows upstream's foreign-context checks and root handling.
-The fork's shared admission helper and supporting type changes are retired; the local/client/host
-regression matrix remains in `packages/chord/test/review.test.ts`.
+Chord's host, reference admission and link lifecycle follow upstream v2. The active extensions inspected for this integration do not import Chord. Coding-agent uses its `/json` helpers, while Durable uses its explicit foundation entry points and v2 store.
 See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),
 [Codemode](packages/codemode/CHANGELOG.md) and [TUI](packages/tui/CHANGELOG.md#unreleased) changelogs for user-facing details.
 
@@ -77,9 +79,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Git footers must catch branch changes missed while native watchers and polling baselines start | `core/footer-data-provider.ts` | `footer-data-provider.test.ts` |
 | Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates | `core/{cache-warmer,model-runtime,sdk}.ts`, `modes/interactive/interactive-mode.ts` | `cache-warmer.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
-| WebSocket text frames must not decode object-transport packing markers and bypass untrusted-client compression restrictions | `packages/chord/src/link.ts` | `packages/chord/test/websocket.test.ts` |
 | Oversized public Durable input/write admissions must not fail the Session; host commits can opt into assembled-batch checks including document revisions. Queued input entry-size refusal settles only that input and preserves answers, tool work and valid siblings. SQLite checks exact rows with confirmed rollback, not an aggregate queue cap; post-effect compactions and real commit failures keep their fatal-storage semantics. Upstream's group commit fails the Session on any refused batch, so the check runs before a commit joins the writer's group, once every admitted write is published; the Session's storage cache and gated storage forward it | `packages/durable/src/{storage/sqlite/storage,session/session,session/cached-storage,session/keys,session/transaction,harness/harness,harness/inbox,harness/submissions,harness/compaction}.ts` | `packages/durable/test-workers/{input-admission,commit-admission,storage}.test.ts`, `packages/durable/test/harness-storage-failure.test.ts` |
-| Releasing the last state view during hydration must not strand a shared method-only reference | `packages/chord/src/remote.ts` | `packages/chord/test/bindings.test.ts` |
 | Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
 | File forks must migrate legacy entries before replacing the source header, preserving indexed history and model context | `core/session-manager.ts` | `session-manager/fork-migration.test.ts` |
 | After a failed append to an existing journal, the next append or save must rewrite the journal from accepted memory so reopened history keeps its ancestry without duplicate or partial records; a new session starts without the old failure ([#257](https://github.com/fitchmultz/pi/issues/257)) | `core/session-manager.ts` | `session-manager/file-operations.test.ts`, `suite/regressions/257-journal-write-failure.test.ts` |
@@ -137,7 +137,7 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Compare PNG with the requested-quality JPEG as upstream does, then encode fallback qualities only until one fits | `utils/image-resize-core.ts` | `image-processing.test.ts` |
 | Bound native Bash spill queues and wait for complete private files; push-only custom producers retain their existing callback contract | `core/{bash-executor,tools/bash,tools/output-accumulator}.ts`, `utils/{output-files,child-process}.ts` | `bash-spill.test.ts`, `private-spill.test.ts`, `streaming-file.test.ts` |
 | Skip disk reads only for acknowledged, confirmed-terminal background jobs during monitoring; explicit tools remain fresh | `extensions/background-command/{index,jobs}.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
-| Drain Chord publications by cursor, and accumulate MCP lines and error prefixes without repeated copying | `packages/chord/src/publish.ts`, `packages/mcp/src/transports/{stdio,streamable-http}.ts` | `packages/chord/test/state.test.ts`, `packages/mcp/test/{stdio,streamable-http}.test.ts` |
+| Accumulate SSE lines without repeatedly copying long partial lines; stdio framing and byte-bounded HTTP errors use upstream's shared implementations | `packages/mcp/src/transports/{lines,stdio,streamable-http}.ts` | `packages/mcp/test/{lines,stdio,streamable-http}.test.ts` |
 | Binary-search historical revisions, avoid redundant SQLite writes (a batch claims each new record ID once, inside upstream's batched commit), and join long lines at their boundary | `packages/durable/src/{storage/memory,storage/sqlite/storage,env/node}.ts` | `packages/durable/test/{memory-storage,sqlite-storage,env-node}.test.ts` |
 | Count decoded lengths with scratch storage, reuse frame payload allocation without retaining large metadata, bound read-ahead, and precompute directory sort keys | `packages/env/daemon/src/{decode,scan,frame}.rs`, `packages/env/src/remote-env.ts` | Native daemon tests, `packages/env/test/{connection,remote,differential}.test.ts` |
 | Append native eval journals and validate reports once | `packages/evals/src/{cli,report}.ts` | `packages/evals/test/{cli,report}.test.ts` |
@@ -185,21 +185,13 @@ packs pi-schema and overrides it. Pinned fleet automation has migrated to the ar
 and the obsolete `scripts/coding-agent-consumer.mjs` shim has been removed.
 Retained offline comparison fixtures are documented in [Performance reproduction](docs/performance.md).
 
-Chord follows upstream's protocol 4, contract-owned placement, typed principals, named declarations,
-per-cell versions and initialization, host lifetimes, and reload/code-generation retirement.
-`host.get` and `ctx.get` await readiness and state hydration; `host.hold` is the synchronous
-acquisition API. Protocol peers must upgrade together. Durable uses upstream's shared
-`@earendil-works/chord/output` implementation; its public `utf8ByteLength` helper also
-backs Durable's internal truncation utilities. Durable's portable SQLite interfaces, Node and
-Cloudflare drivers, and migration runner now come from `@earendil-works/chord/sqlite`, while Durable
-keeps its storage implementations and schema migrations and re-exports the moved public names.
-It also follows upstream's schema-derived frame types, stricter contract tokens and error codes,
-large-payload deflation, acknowledgement-based state flow control, and optional per-link call limits.
-`Link.send` reports encoded sizes when available; call results may overtake waiting state. Frames
-validate with upstream's compiled pi-schema validator. The fork retains the cursor-based publication
-drain, strict-JSON container hooks and public exports. Coding-agent uses Chord's JSON helpers, not its
-host/link transport; this sync establishes no current TUI or tool-performance improvement from those
-transport features.
+Chord v2 is the root package and supplies the host, links, store, plugins and app kit.
+The fork keeps `CheckJsonOptions` and its container hook in `@earendil-works/chord/json`
+for native working-session validation. Coding-agent imports JSON helpers from `/json`,
+not the host runtime. Durable imports context, draft and JSON types from `/context`,
+`/delta` and `/json`, and uses the v2 store at the root. Shared output and SQLite APIs
+remain at `/output` and `/sqlite`, including Node and Cloudflare drivers. No Chord v1
+host or transport implementation remains.
 
 Tool arguments validate with upstream's pi-schema, which replaces TypeBox validation. Built-in
 coding-agent tools keep their TypeBox schemas, as upstream's do; pi-schema checks them as plain JSON
@@ -210,7 +202,7 @@ record-ID claims run on that path.
 
 System One classifier images follow upstream's TypeSafe assets, Cloudflare images/assets
 and OpenRouter state-image serialization, including native limits and opt-in headers.
-Grep uses upstream's `rg --no-config`. Truncated-response recovery uses upstream's
+Grep uses upstream's `rg --no-config` and ripgrep-provided context lines, with no matched-file reread. Truncated-response recovery uses upstream's
 projected-context scan to omit the failed assistant and its matching tool results together.
 These are release integrations, not additional fork mechanisms.
 
@@ -238,7 +230,8 @@ not a replacement for the fork's memory/SQLite storage or scheduler semantics.
 
 Streamed tool-call arguments now follow upstream's incremental `StreamingJsonParser` and
 `ToolCallArgumentsStream`. Providers keep scratch state off emitted content blocks. Final arguments
-still use the fork's span-based repair and existing fallback order, including native invalid `\u` repair. Anthropic and
+still use the fork's span-based repair and existing fallback order, including native invalid `\u` repair. Anthropic requests use upstream message threads where supported;
+cache warming sets `disableContinuation` and retains the fork's prepared-auth timing and trace hooks. Anthropic and
 Bedrock Claude error-result images follow all tool results of the turn; error text and successful
 result images retain their native placement.
 These behaviors have offline parser/payload regression coverage, not a live provider qualification.

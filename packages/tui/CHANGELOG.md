@@ -16,6 +16,8 @@
 - Fixed fullscreen Kitty images disappearing after a terminal resize when the terminal clears cached image data during a screen erase.
 - Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
 
+- Fixed Markdown rendering HTML comments (`<!-- ... -->`) as visible text ([#11710](https://github.com/earendil-works/pi/issues/11710))
+
 ## [1.5.0] - 2026-11-02
 
 ### Added

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Anthropic requests with a `sessionId` (and `cacheRetention` not `"none"`) now use message threads (`message-threads-2026-08-12` beta): the server continues from the previous reply and pi sends only the new messages instead of the whole conversation. When anything earlier in the request changed, or the server can't continue the thread, the full request is sent. Token counts and prompt caching are unchanged. On by default only for the `anthropic` provider on `api.anthropic.com`; set `compat.supportsMessageThreads` to change that, for example for gateways that forward the `thread` field. Call `cleanupSessionResources(sessionId)` when a session ends to free the per-session state ([#11545](https://github.com/earendil-works/pi/pull/11545))
+- Added `StreamOptions.disableContinuation`, which keeps a request from using or replacing server-side continuation state such as Anthropic message threads. Set it on requests that repeat an earlier one, such as cache warming ([#11545](https://github.com/earendil-works/pi/pull/11545))
+
 ### Changed
 
 - Consolidated the initial pending assistant-message scaffold across streaming transports, delegated provider-retry backoff sleep to the shared helper, and routed Mistral's stream total-token fallback through `calculateContextTokens`.
@@ -35,6 +40,9 @@
 - Fixed canonical Cloudflare AI Gateway Opus 5.5 catalog defaults omitting positional system, tool and effort controls and five-minute/one-hour cache lifetimes, including pinned catalog hydration; explicit metadata, compatibility opt-outs and catalog entries with a non-canonical `baseUrl` remain unchanged.
 - Fixed Cloudflare AI Gateway GPT models on the `/openai` Responses route rewriting the cached prompt prefix after every mid-session system update or tool load. Models that accept mid-conversation developer messages and `additional_tools` at OpenAI now default to both on Cloudflare, including fetched and restored catalog overlays; explicit metadata and catalog entries with a non-canonical `baseUrl` remain unchanged.
 - Cloudflare AI Gateway `/openai` GPT-5.4 and GPT-5.5 entries no longer default `supportsAdditionalTools`, matching direct OpenAI, and GPT-6.1 Terra gets both positional defaults.
+
+- Fixed OpenRouter rejecting requests with a 400 (`This endpoint's maximum context length is ...`) for models whose output limit is close to the context window, such as DeepSeek flash. OpenRouter counts the input with its own tokenizer, which can be several percent higher than the provider's count, and pi left only 4,096 tokens spare. pi then treated the 400 as a context overflow and compacted the session, even at around 20% of the window. The default output limit now leaves 15% of the estimated input unused, and near a full window at most 32,768 output tokens are requested ([#10497](https://github.com/earendil-works/pi/issues/10497))
+- Fixed Azure GPT-6 Astra, Luna, Sol, GPT-6.1 Sol, and GPT-6.1 Terra using a 272K context window instead of the 1,050,000 tokens Azure Foundry deploys them with ([#11742](https://github.com/earendil-works/pi/issues/11742))
 
 ### Removed
 

@@ -126,5 +126,5 @@ if [[ ${#command[@]} -gt 0 ]]; then
 	env -i "${test_env[@]}" "${command[@]}"
 else
 	env -i "${test_env[@]}" "$real_npm" run test:scripts
-	env -i "${test_env[@]}" "$real_npm" run test --workspaces --if-present
+	env -i "${test_env[@]}" "$real_npm" run test --workspace packages --if-present
 fi

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The daemon's `process` operation runs a program with plain pipes for stdin, stdout and stderr, for programs that speak a protocol on stdin and stdout such as MCP servers: `processWrite` and `processCloseStdin` feed its stdin in arrival order, output arrives as raw bytes per stream, and cancelling, a lost connection or the program's own exit kills its process group (on Windows, its job object), so a wrapper such as `npx` that exits leaves nothing running. `hello` reports it in `features`. `openProcess()` returns a `RemoteProcess`; daemons released before it fail the open with `not_supported`. Unlike terminals, it works on Windows too.
+
 ### Changed
 
 - Reduced daemon frame/scanner allocations, bounded client read-ahead and sorted directory listings with precomputed keys.
@@ -11,6 +15,8 @@
 - Fixed one oversized file-watch change stopping the daemon's output writer; the change is reported as `overflow` and the connection and watcher keep working ([#10516](https://github.com/earendil-works/pi/issues/10516)).
 - Fixed concurrent `acceptHostKey`/`forgetHostKey` calls through equivalent known-hosts path spellings losing updates, which could restore a removed host key ([#10517](https://github.com/earendil-works/pi/issues/10517)).
 - Fixed cancelled or timed-out daemon shell commands on macOS sometimes running later steps after the current step was killed; cancellation and timeouts now stop the whole command.
+
+- On Windows, an `exec` command's output readers stop once the command has settled, also while a descendant keeps a pipe open without writing; they stayed blocked until it exited, because cancelling a blocked read did not reach the standard library's overlapped pipe I/O.
 
 ## [1.5.0] - 2026-11-02
 
