@@ -31,10 +31,47 @@ pub enum Message {
     Eof(usize),
     Exit(ExitStatus),
     WaitFailed(String),
+    OutputPaused,
+    OutputResumed,
     /// Abort: the command settles as `aborted`.
     Cancel,
     /// Kill without aborting, as `cleanup()` does: the command settles with the killed process's status.
     Kill,
+}
+
+/// Post-exit silence excludes time a reader spends waiting for the output link to drain.
+#[derive(Default)]
+pub struct StdioGrace {
+    deadline: Option<Instant>,
+    paused_readers: usize,
+}
+
+impl StdioGrace {
+    pub fn observe(&mut self, message: &Message) {
+        match message {
+            Message::OutputPaused => self.paused_readers += 1,
+            Message::OutputResumed => {
+                self.paused_readers -= 1;
+                if self.deadline.is_some() {
+                    self.deadline = Some(Instant::now() + EXIT_STDIO_GRACE);
+                }
+            }
+            Message::Exit(_) => self.deadline = Some(Instant::now() + EXIT_STDIO_GRACE),
+            Message::Data(_, _) if self.deadline.is_some() => {
+                self.deadline = Some(Instant::now() + EXIT_STDIO_GRACE);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn remaining(&self) -> Option<Duration> {
+        if self.paused_readers > 0 {
+            None
+        } else {
+            self.deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        }
+    }
 }
 
 /// Cancellation of one request, registered before the request runs so a cancel that arrives first is not lost.
@@ -310,7 +347,13 @@ pub fn spawn_reader(
         sys::read_pipe(pipe, &stop, |bytes| {
             let delivered = sender.send(Message::Data(stream, bytes.to_vec())).is_ok();
             if let Some(output) = &output {
-                output.wait_for_room(&stop);
+                output.wait_for_room(&stop, |paused| {
+                    let _ = sender.send(if paused {
+                        Message::OutputPaused
+                    } else {
+                        Message::OutputResumed
+                    });
+                });
             }
             delivered
         });
@@ -453,7 +496,7 @@ pub fn run(
     };
     let mut ended = [false, false];
     let mut status: Option<Result<ExitStatus, String>> = None;
-    let mut idle_until: Option<Instant> = None;
+    let mut grace = StdioGrace::default();
     let mut timed_out = false;
     let mut aborted = false;
     let mut killed = false;
@@ -476,10 +519,6 @@ pub fn run(
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
-        if idle_until.is_some_and(|idle| now >= idle) {
-            // A descendant may hold the pipes open after the process exited; stop waiting for it.
-            break;
-        }
         if let Some(pending) = &mut pending
             && !pending.is_empty()
             && now >= pending.next_send()
@@ -491,8 +530,8 @@ pub fn run(
         if let Some(deadline) = deadline.filter(|_| !timed_out) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
-        if let Some(idle) = idle_until {
-            wait = wait.min(idle.saturating_duration_since(now));
+        if let Some(remaining) = grace.remaining() {
+            wait = wait.min(remaining);
         }
         if let Some(pending) = pending.as_ref().filter(|pending| !pending.is_empty()) {
             wait = wait.min(if unsent.load(Ordering::SeqCst) > 0 {
@@ -501,7 +540,11 @@ pub fn run(
                 pending.next_send().saturating_duration_since(now)
             });
         }
-        match receiver.recv_timeout(wait) {
+        let message = receiver.recv_timeout(wait);
+        if let Ok(message) = &message {
+            grace.observe(message);
+        }
+        match message {
             Ok(Message::Data(stream, bytes)) => {
                 emit(&mut pending, stream, decoders[stream].decode(&bytes, false));
                 if let Some(spill) = &mut spill {
@@ -510,25 +553,29 @@ pub fn run(
                         kill(&mut killed);
                     }
                 }
-                if status.is_some() {
-                    idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
-                }
             }
             Ok(Message::Eof(stream)) => ended[stream] = true,
             Ok(Message::Exit(exit)) => {
                 status = Some(Ok(exit));
-                idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
             }
             Ok(Message::WaitFailed(error)) => {
                 status = Some(Err(error));
-                idle_until = Some(Instant::now());
+                break;
             }
             Ok(Message::Cancel) => {
                 aborted = true;
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
-            Err(RecvTimeoutError::Timeout) => {}
+            Ok(Message::OutputPaused | Message::OutputResumed) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                if grace
+                    .remaining()
+                    .is_some_and(|remaining| remaining.is_zero())
+                {
+                    break;
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
