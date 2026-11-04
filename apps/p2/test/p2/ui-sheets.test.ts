@@ -84,6 +84,7 @@ describe("sheet parity", { skip: !browserTests }, () => {
 			chromium,
 			[
 				...(termux ? [`--browser-subprocess-path=${chromium}`] : []),
+				...(globalThis.process.platform === "darwin" ? ["--use-mock-keychain"] : []),
 				"--headless=new",
 				"--no-sandbox",
 				"--no-zygote",
@@ -98,8 +99,12 @@ describe("sheet parity", { skip: !browserTests }, () => {
 		);
 		await poll(() => existsSync(join(profile, "DevToolsActivePort")), 20_000, "Chromium debugging port");
 		const port = readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0];
-		const pages = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()) as { webSocketDebuggerUrl: string }[];
-		socket = new WebSocket(pages[0].webSocketDebuggerUrl);
+		const pages = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()) as {
+			type: string;
+			webSocketDebuggerUrl: string;
+		}[];
+		const page = pages.find((target) => target.type === "page") ?? pages[0]!;
+		socket = new WebSocket(page.webSocketDebuggerUrl);
 		await new Promise<void>((resolve, reject) => {
 			socket.once("open", resolve);
 			socket.once("error", reject);

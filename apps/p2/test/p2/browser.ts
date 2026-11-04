@@ -55,6 +55,7 @@ export class Browser {
 			chromium,
 			[
 				...(globalThis.process.env.PREFIX ? [`--browser-subprocess-path=${chromium}`] : []),
+				...(globalThis.process.platform === "darwin" ? ["--use-mock-keychain"] : []),
 				"--headless=new",
 				"--no-sandbox",
 				"--no-zygote",
