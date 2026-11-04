@@ -2,11 +2,12 @@
 
 ## Baseline
 
-The fork integrates upstream `d6339fb09739851e4165a38e45bd97a0348ea727` from
+The fork integrates upstream `4d72d05bcd1ea9d26f36f6567be10d00ae6bb5f7` from
 `earendil-works/pi` main. At the initial fetch, fork main
 `d2c3b2f8f685b62274e9c499e5955300575292b4` was 134 commits behind and 885 ahead.
-Two more upstream commits arrived during verification, bringing the total to 136.
-They add Chord reload fixes and p2's terminal side panel and merge without conflicts.
+Three more upstream commits arrived during verification, bringing the total to 137.
+They add Chord reload fixes, p2's terminal side panel and provider-token authentication
+for `pi mcp list`. All three merge without conflicts.
 The histories diverged from `3e0eec29f50e7861e9db91f2d12723267411b4f3`.
 The merge preserves both histories, without rebasing or force-pushing.
 
@@ -48,8 +49,8 @@ No extension configuration is changed by this integration.
 - Focused MCP suites: 38 tests passed. Focused AI suites: 201 tests passed.
 - Focused coding-agent suites: 195 tests passed before the quit conflict was resolved;
   the two affected runtime suites then passed all 25 tests with the final resolution.
-- `./test.sh`: passed in an isolated Linux container for the initial integration. Later
-  runs exposed a watcher-test race: the file write's native event can arrive during discovery,
+- `./test.sh`: passed in an isolated Linux container on the final integration, including
+  the latest MCP fix. Earlier runs exposed a watcher-test race: the file write's native event can arrive during discovery,
   which correctly preserves its newer mark. The test now waits for discovery to catch up
   before asserting that the mark cleared. Production code and real-event tests are unchanged.
 - Chord's new reload suite with Chromium: eight suites passed, with 28 passing tests and

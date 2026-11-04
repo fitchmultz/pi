@@ -2,7 +2,7 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`d6339fb09739851e4165a38e45bd97a0348ea727` (2026-11-04), following official v1.5.0.
+`4d72d05bcd1ea9d26f36f6567be10d00ae6bb5f7` (2026-11-04), following official v1.5.0.
 It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
