@@ -24,6 +24,8 @@ describe("voice mode in the browser", { skip: !browserTests }, () => {
 		browser = await Browser.start([
 			"--use-fake-ui-for-media-stream",
 			"--use-fake-device-for-media-stream",
+			// Run WebAudio's clock on Chromium's fake output, not a physical audio device.
+			"--disable-audio-output",
 			"--autoplay-policy=no-user-gesture-required",
 		]);
 	});

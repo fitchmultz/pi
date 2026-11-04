@@ -103,7 +103,9 @@ test(
 			await mkdir(join(root, "a/b"), { recursive: true });
 			await mkdir(join(root, "home/private"), { recursive: true });
 			await mkdir(join(root, "home/other"), { recursive: true });
-			const workspace = new Workspace(new NodeExecutionEnv({ cwd: root }), [join(root, "home/private")]);
+			// Native FileChange notifications may be spurious; snapshots isolate which paths the workspace covers.
+			const watch = { mode: "polling" as const, pollIntervalMs: 100 };
+			const workspace = new Workspace(new NodeExecutionEnv({ cwd: root, watch }), [join(root, "home/private")]);
 			let changes = 0;
 			const watcher = await workspace.watch(() => changes++, context);
 			assert(watcher);
@@ -122,7 +124,7 @@ test(
 
 			const large = join(directory, "large");
 			for (let index = 0; index <= 2000; index++) await mkdir(join(large, `d${index}`), { recursive: true });
-			const big = new Workspace(new NodeExecutionEnv({ cwd: large }), []);
+			const big = new Workspace(new NodeExecutionEnv({ cwd: large, watch }), []);
 			let bigChanges = 0;
 			const bigWatcher = await big.watch(() => bigChanges++, context);
 			assert(bigWatcher);

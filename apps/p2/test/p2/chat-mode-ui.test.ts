@@ -92,8 +92,14 @@ describe("chat mode in the browser", { skip: !browserTests }, () => {
 		// Phone: a long press on Pi's answer starts a reply to it.
 		await browser.metrics(390, 844);
 		await browser.call("Emulation.setTouchEmulationEnabled", { enabled: true });
+		const lastAnswer = `[...document.querySelectorAll('.assistant[data-entry]')].at(-1)`;
+		await browser.evaluate(`${lastAnswer}.scrollIntoView({block:'center'})`);
+		// The desktop drawer slides out after the resize; touch must reach the answer, not that overlay.
+		await browser.wait(
+			`(()=>{const e=${lastAnswer},r=e.getBoundingClientRect();return e.contains(document.elementFromPoint(r.left+r.width/2,r.top+Math.min(r.height/2,20)))})()`,
+		);
 		const answer = await browser.evaluate<{ x: number; y: number }>(
-			`(()=>{const e=[...document.querySelectorAll('.assistant[data-entry]')].at(-1);e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+Math.min(r.height/2,20)}})()`,
+			`(()=>{const r=${lastAnswer}.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+Math.min(r.height/2,20)}})()`,
 		);
 		await browser.call("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [answer] });
 		await new Promise((resolve) => setTimeout(resolve, 1000)); // the long press needs 500 ms; leave room under load

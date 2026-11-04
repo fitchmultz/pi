@@ -18,7 +18,7 @@ Object.assign(window, {
 		root.render(
 			createElement(
 				FillGap.Provider,
-				{ value: (gap) => filled.push(`${gap.after}-${gap.upTo}`) },
+				{ value: (gap) => void filled.push(`${gap.after}-${gap.upTo}`) },
 				createElement(TranscriptFixture, { transcript }),
 			),
 		);
