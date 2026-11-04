@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Fixed trailing command output being discarded after process exit while the output link was backpressured.
 - Fixed one oversized file-watch change stopping the daemon's output writer; the change is reported as `overflow` and the connection and watcher keep working ([#10516](https://github.com/earendil-works/pi/issues/10516)).
 - Fixed concurrent `acceptHostKey`/`forgetHostKey` calls through equivalent known-hosts path spellings losing updates, which could restore a removed host key ([#10517](https://github.com/earendil-works/pi/issues/10517)).
 - Fixed cancelled or timed-out daemon shell commands on macOS sometimes running later steps after the current step was killed; cancellation and timeouts now stop the whole command.
