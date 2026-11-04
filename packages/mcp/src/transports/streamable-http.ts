@@ -17,7 +17,7 @@ import {
 	TransportEvents,
 } from "./transport.ts";
 
-const MAX_ERROR_BODY_CHARS = 8 * 1024;
+const MAX_ERROR_BODY_BYTES = 8 * 1024;
 const ERROR_MESSAGE_BODY_CHARS = 500;
 const DEFAULT_RECONNECT_INITIAL_DELAY_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
@@ -65,8 +65,7 @@ export async function consumeSseStream(stream: ReadableStream<Uint8Array>, optio
 		dataBytes = 0;
 	};
 
-	const processLine = (rawLine: string) => {
-		const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+	const processLine = (line: string) => {
 		if (line === "") {
 			dispatch();
 			return;
@@ -87,20 +86,34 @@ export async function consumeSseStream(stream: ReadableStream<Uint8Array>, optio
 		} else if (field === "retry" && /^\d+$/.test(value)) options.onRetry?.(Number(value));
 	};
 
+	// SSE lines end with CRLF, LF, or a lone CR, including CRLF split across chunks.
+	let skipLeadingLf = false;
 	const append = (text: string) => {
-		let offset = 0;
-		while (true) {
-			const newline = text.indexOf("\n", offset);
-			const fragment = text.slice(offset, newline < 0 ? text.length : newline);
-			if (fragment) lineFragments.push(fragment);
-			lineBytes += Buffer.byteLength(fragment);
-			if (newline < 0) return;
+		let start = 0;
+		if (skipLeadingLf && text.length > 0) {
+			if (text.startsWith("\n")) start = 1;
+			skipLeadingLf = false;
+		}
+		for (let i = start; i < text.length; i++) {
+			const char = text[i];
+			if (char !== "\r" && char !== "\n") continue;
+			lineFragments.push(text.slice(start, i));
 			const line = lineFragments.join("");
 			lineFragments = [];
 			lineBytes = 0;
 			processLine(line);
-			offset = newline + 1;
+			if (char === "\r") {
+				if (i + 1 < text.length) {
+					if (text[i + 1] === "\n") i++;
+				} else {
+					skipLeadingLf = true;
+				}
+			}
+			start = i + 1;
 		}
+		const fragment = text.slice(start);
+		if (fragment) lineFragments.push(fragment);
+		lineBytes += Buffer.byteLength(fragment);
 	};
 
 	try {
@@ -113,6 +126,10 @@ export async function consumeSseStream(stream: ReadableStream<Uint8Array>, optio
 		append(decoder.decode());
 		if (lineFragments.length > 0) processLine(lineFragments.join(""));
 		dispatch();
+	} catch (error) {
+		// Releasing the lock alone leaves the response open; the original error wins over a failed cancel.
+		await reader.cancel().catch(() => {});
+		throw error;
 	} finally {
 		reader.releaseLock();
 	}
@@ -186,6 +203,33 @@ function isTransientStatus(status: number): boolean {
 
 function discard(response: Response): Promise<void> {
 	return response.body?.cancel().catch(() => {}) ?? Promise.resolve();
+}
+
+/**
+ * Reads a response body as text, decoding chunks as they arrive. Once the body exceeds `maxBytes`, the rest is
+ * cancelled and the text holds only the first `maxBytes` bytes.
+ */
+async function readBodyText(response: Response, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+	if (!response.body) return { text: "", truncated: false };
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let text = "";
+	let remaining = maxBytes;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) return { text: text + decoder.decode(), truncated: false };
+			if (value.byteLength > remaining) {
+				await reader.cancel().catch(() => {});
+				// Decoding a subarray copies only the kept bytes, so the result never references the dropped rest.
+				return { text: text + decoder.decode(value.subarray(0, remaining), { stream: true }), truncated: true };
+			}
+			remaining -= value.byteLength;
+			text += decoder.decode(value, { stream: true });
+		}
+	} finally {
+		reader.releaseLock();
+	}
 }
 
 function describeHttpFailure(status: number, body: string): string {
@@ -263,7 +307,10 @@ export class StreamableHttpTransport extends TransportEvents implements McpTrans
 		}
 		const type = contentType(response);
 		if (type === "application/json") {
-			const body: unknown = await response.json();
+			const maxBytes = this.options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
+			const { text, truncated } = await readBodyText(response, maxBytes);
+			if (truncated) throw new Error(`MCP JSON response exceeds ${maxBytes} bytes`);
+			const body: unknown = JSON.parse(text);
 			for (const item of Array.isArray(body) ? body : [body]) this.emitMessage(parseJsonRpcMessage(item));
 			return;
 		}
@@ -348,27 +395,8 @@ export class StreamableHttpTransport extends TransportEvents implements McpTrans
 
 	private async checkResponse(response: Response): Promise<void> {
 		if (response.ok) return;
-		let body = "";
-		if (response.body) {
-			let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
-			try {
-				reader = response.body.getReader();
-				const decoder = new TextDecoder();
-				while (body.length < MAX_ERROR_BODY_CHARS) {
-					const { done, value } = await reader.read();
-					const text = done ? decoder.decode() : decoder.decode(value, { stream: true });
-					body += text.slice(0, MAX_ERROR_BODY_CHARS - body.length);
-					if (done) break;
-				}
-			} catch {
-				body = "";
-			} finally {
-				if (reader) {
-					await reader.cancel().catch(() => {});
-					reader.releaseLock();
-				}
-			}
-		}
+		// Reads only the excerpt the error keeps and cancels the rest, so a huge error body is never buffered.
+		const body = (await readBodyText(response, MAX_ERROR_BODY_BYTES).catch(() => ({ text: "" }))).text;
 		if (response.status === 401) throw new McpAuthRequiredError(response, body);
 		if (response.status === 404 && this.sessionIdValue) throw new McpSessionExpiredError(body);
 		throw new McpHttpError(response.status, describeHttpFailure(response.status, body), body);

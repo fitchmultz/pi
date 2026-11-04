@@ -1,6 +1,6 @@
 import { createHash, type Hash } from "node:crypto";
 import { closeSync, openSync, readSync } from "node:fs";
-import { isJsonValue } from "@earendil-works/chord";
+import { isJsonValue } from "@earendil-works/chord/json";
 import { getManyValues, type Many, none } from "stream-chain/core";
 import { Assembler } from "stream-json/core/assembler.js";
 import type { ParserOptions, Token } from "stream-json/core/parser.js";

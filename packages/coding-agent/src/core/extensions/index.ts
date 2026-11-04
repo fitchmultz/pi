@@ -117,8 +117,11 @@ export type {
 	LsToolCallEvent,
 	LsToolResultEvent,
 	ManagedHost,
+	MarkdownMessageType,
 	MarkdownTransformContext,
 	MarkdownTransformer,
+	MarkdownTransformerOptions,
+	MarkdownTransformerRegistration,
 	McpServersChangeEvent,
 	// Events - Message
 	MessageEndEvent,

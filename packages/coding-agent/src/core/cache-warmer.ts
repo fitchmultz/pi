@@ -365,6 +365,8 @@ export class CacheWarmer {
 							? { cacheTraceContext: { ...run.options.cacheTraceContext, purpose: "warming" as const } }
 							: {}),
 						maxTokens: 1,
+						// Replaying a request must not replace the conversation's thread state.
+						disableContinuation: true,
 						maxRetries: 0,
 						signal: run.controller.signal,
 					},
