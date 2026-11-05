@@ -2,17 +2,19 @@
 
 ## Baseline
 
-The fork integrates upstream `36142c1c7eab1d756e977b5f39149a634cc472ac` from
+The fork integrates upstream `80d4d3c869016ed9c61d16a88e5eb5e0e56186a9` from
 `earendil-works/pi` main into fork main `f5e3dbe5f93db38f40da65fa2378d28b778835bf`,
-bringing in 58 upstream commits. The merge base is the previous integration's
+bringing in 60 upstream commits. The merge base is the previous integration's
 upstream commit, `4d72d05bcd1ea9d26f36f6567be10d00ae6bb5f7`.
-Two merges preserve both histories, without rebasing or force-pushing. The first integrates
+Three merges preserve both histories, without rebasing or force-pushing. The first integrates
 56 commits through `d9af3d73a`. The second adds two commits published during verification:
 a README link correction and the OpenAI Codex provider display-name correction.
+The third adds upstream's overlay blocked-status and reload cleanup fixes through `80d4d3c86`.
 
 ## Conflict decisions
 
 The first merge had 11 conflicted paths. The second conflicted only in the AI changelog.
+The third conflicted in interactive mode and its status test, for 13 distinct paths overall.
 All changelog resolutions combine unreleased entries without changing released sections.
 
 | Conflicted path | Resolution |
@@ -24,11 +26,12 @@ All changelog resolutions combine unreleased entries without changing released s
 | `packages/coding-agent/src/core/compaction/utils.ts` | Keep `NestedToolCalls` and add upstream's `sliceHead`. |
 | `packages/coding-agent/src/core/tools/read.ts` | Adopt upstream text streaming. Preserve whole-document JSON selection, selection-specific paging, and image refusal. |
 | `packages/coding-agent/src/extensions/mcp/index.ts` | Keep `WorkingSessionSaveEvent` and add upstream's `sliceHead`. |
-| `packages/coding-agent/src/modes/interactive/interactive-mode.ts` | Keep `ManagedRestart`, add upstream's `addMcpServerConfig`, and adopt cumulative cache-warm notices through compact-view activity grouping. |
+| `packages/coding-agent/src/modes/interactive/interactive-mode.ts` | Keep `ManagedRestart`, add upstream's `addMcpServerConfig`, and adopt cumulative cache-warm notices through compact-view activity grouping. In the third merge, use upstream's overlay tracking, blocked status, and reset cleanup. Retain the fork's working-session admission, late-component disposal after early completion, and draft capture at mount. |
 | `packages/durable/CHANGELOG.md` | Combine both unreleased sections. |
 | `packages/durable/src/storage/sqlite/storage.ts` | Adopt upstream batched statements. Preserve admission checks through the same writes with confirmed rollback, refusing only `SQLITE_TOOBIG`. |
 | `packages/schema/CHANGELOG.md` | Combine both unreleased sections. |
 | `packages/ai/CHANGELOG.md` | Add the upstream provider rename under the existing unreleased Changed heading. |
+| `packages/coding-agent/test/interactive-mode-status.test.ts` | Keep both sets of behavioral tests. Run upstream's overlay-reset case through the fork's existing typed fixture with native working-session admission and overlay state. |
 
 The fork also excludes upstream's new `p2-cloud-bundle.yml`, which uploads to upstream's
 R2 bucket. The local cloud-bundle script remains available.

@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { type AutocompleteProvider, CombinedAutocompleteProvider } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { CancellableLoader } from "../../tui/src/components/cancellable-loader.ts";
-import { type Component, Container, type Focusable, type TUI } from "../../tui/src/tui.ts";
+import { type Component, Container, type Focusable, type OverlayHandle, type TUI } from "../../tui/src/tui.ts";
 import { TuiMainScreen } from "../../tui/src/tui-main-screen.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AutocompleteProviderFactory, ExtensionUIContext } from "../src/core/extensions/types.ts";
@@ -240,6 +240,7 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			pushExtensionDialog(component: Component): void;
 			removeExtensionDialog(component: Component): void;
 			showTopExtensionDialog(): void;
+			resetExtensionUI(): void;
 		};
 		const terminal = new VirtualTerminal(80, 24);
 		const ui: TUI = new TuiMainScreen(terminal);
@@ -253,6 +254,8 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			ui,
 			disposeActiveSelector: vi.fn(),
 			extensionDialogs: [],
+			extensionOverlays: new Map<OverlayHandle, () => void>(),
+			nextBlockingOverlayId: 0,
 			programStatus: { setBlocked: vi.fn() },
 			pushExtensionDialog: prototype.pushExtensionDialog,
 			removeExtensionDialog: prototype.removeExtensionDialog,
@@ -264,7 +267,7 @@ describe("InteractiveMode.showExtensionCustom", () => {
 		editorContainer.addChild(editor);
 		ui.addChild(editorContainer);
 		ui.setFocus(editor);
-		return { terminal, ui, editor, custom };
+		return { terminal, ui, editor, custom, host, reset: prototype.resetExtensionUI.bind(host) };
 	}
 
 	test("overlay custom UI reclaims input after non-overlay custom UI closes", async () => {
@@ -436,6 +439,63 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			}
 		},
 	);
+
+	// Regression for #11853: reset hid only the topmost overlay, so lower extension overlays stayed and kept input.
+	test("resetExtensionUI removes every extension overlay but keeps pi's own overlays", async () => {
+		const { terminal, ui, editor, custom, host, reset } = createCustomUIFixture();
+		const internal = new TestFocusableComponent("INTERNAL");
+		const lower = Object.assign(new TestFocusableComponent("LOWER"), { dispose: vi.fn() });
+		const hidden = Object.assign(new TestFocusableComponent("HIDDEN"), { dispose: vi.fn() });
+		const upper = Object.assign(new TestFocusableComponent("UPPER"), { dispose: vi.fn() });
+		Object.assign(host, {
+			// The rest of resetExtensionUI is not under test here.
+			clearExtensionTerminalInputListeners: vi.fn(),
+			setExtensionFooter: vi.fn(),
+			setExtensionHeader: vi.fn(),
+			clearExtensionWidgets: vi.fn(),
+			footerDataProvider: { clearExtensionStatuses: vi.fn() },
+			footer: { invalidate: vi.fn() },
+			setCustomEditorComponent: vi.fn(),
+			setupAutocompleteProvider: vi.fn(),
+			defaultEditor: {},
+			updateTerminalTitle: vi.fn(),
+			setWorkingIndicator: vi.fn(),
+			setHiddenThinkingLabel: vi.fn(),
+		});
+		const showOverlay = (component: Component, onHandle?: (handle: OverlayHandle) => void) =>
+			custom(() => component, { overlay: true, onHandle });
+		ui.start();
+		try {
+			// A pi-internal overlay (for example the header easter egg) opened below the extension overlays.
+			ui.showOverlay(internal);
+			void showOverlay(lower);
+			void showOverlay(hidden, (handle) => handle.setHidden(true));
+			void showOverlay(upper);
+			await flushTui(ui, terminal);
+			expect(upper.focused).toBe(true);
+
+			reset();
+			await flushTui(ui, terminal);
+
+			const viewport = terminal.getViewport().join("\n");
+			expect(viewport).toContain("INTERNAL");
+			expect(viewport).not.toContain("LOWER");
+			expect(viewport).not.toContain("UPPER");
+			expect(lower.dispose).toHaveBeenCalledOnce();
+			expect(hidden.dispose).toHaveBeenCalledOnce();
+			expect(upper.dispose).toHaveBeenCalledOnce();
+			terminal.sendInput("x");
+			await flushTui(ui, terminal);
+			expect(internal.inputs).toEqual(["x"]);
+			expect(lower.inputs).toEqual([]);
+
+			ui.hideOverlay();
+			expect(ui.hasOverlay()).toBe(false);
+			expect(editor.focused).toBe(true);
+		} finally {
+			ui.stop();
+		}
+	});
 });
 
 describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () => {
