@@ -420,7 +420,12 @@ export class AgentSessionRuntime {
 		});
 	}
 
-	/** `disposition` is read when the quit event is built; see {@link SessionShutdownEvent.disposition}. */
+	/**
+	 * Dispose the session for process exit. Also waits for credential writes in progress: an OAuth
+	 * refresh may already have spent the old single-use refresh token, so exiting before the new one
+	 * is saved would lose the login (#11692). `disposition` is read when the quit event is built; see
+	 * {@link SessionShutdownEvent.disposition}.
+	 */
 	async dispose(options: { disposition?: () => ShutdownDisposition | undefined } = {}): Promise<void> {
 		const session = this.session;
 		await session.workingSessionGate.finalExit(async () => {
@@ -440,6 +445,7 @@ export class AgentSessionRuntime {
 			await this.finalization?.(session);
 			this.beforeSessionInvalidate?.();
 			session.dispose();
+			await this.services.modelRuntime.settleCredentialWrites();
 		});
 	}
 }

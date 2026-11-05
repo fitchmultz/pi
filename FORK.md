@@ -2,12 +2,13 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`4d72d05bcd1ea9d26f36f6567be10d00ae6bb5f7` (2026-11-04), following official v1.5.0.
+`d9af3d73afb3b2c02c7a833d7ca9f3875e5fff6e` (2026-11-05), following official v1.5.0.
 It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
-The [2026-11-04 integration record](docs/upstream-sync-2026-11-04.md) documents the current baseline,
-conflict decisions and verification. The [v1.5.0 integration record](docs/upstream-sync-1.5.0.md) records the preceding release integration. The
+The [2026-11-05 integration record](docs/upstream-sync-2026-11-05.md) documents the current baseline,
+conflict decisions and verification. The [2026-11-04 integration record](docs/upstream-sync-2026-11-04.md)
+records the previous integration. The [v1.5.0 integration record](docs/upstream-sync-1.5.0.md) records the preceding release integration. The
 [2026-10-29 integration record](docs/upstream-sync-2026-10-29.md) records the previous
 integration. The [v1.4.0 integration record](docs/upstream-sync-1.4.0.md)
 records the previous release integration. The
@@ -135,12 +136,12 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Normalize tool declarations once per comparison, index model overlays per read, repair JSON by spans, and drain Codex events without repeated array shifts | `packages/agent/src/agent-loop.ts`, `packages/ai/src/{utils/transcript,utils/json-parse,models,api/openai-codex-responses}.ts` | `packages/agent/test/agent.test.ts`, `packages/ai/test/{system-message-replay,json-parse,model-types,openai-codex-websocket-queue}.test.ts` |
 | Stream long-token wrapping, use native grapheme endpoints, reuse only the current editor layout after comparing text, width and paste membership, and reuse unchanged same-index rows in unstyled Boxes after child changes | `packages/tui/src/{utils,components/editor,components/input,components/box}.ts` | `packages/tui/test/{wrap-ansi,editor,input,layout,mouse-components}.test.ts` |
 | Keep the rendered lines of assistant Markdown blocks a stream has not changed, avoid rendering assistants to query emptiness in compact/hybrid grouping, reject plain prose before Mermaid lexing, and compute visible tree ancestry in one pass. Upstream reuses the blocks but re-runs every Markdown transformer on each streamed update; skipping unchanged blocks made streamed updates 2.7-3.6 times faster with a long thinking block ([v1.5.0 record](docs/upstream-sync-1.5.0.md)) | `modes/interactive/components/{activity,assistant-message,mermaid,tree-selector}.ts` | `{compact-view,assistant-message,mermaid,tree-selector}.test.ts` |
-| Normalize edit text once and scan only requested read, grep and head-truncation ranges | `packages/durable/src/tools/edit-diff.ts`, `core/tools/{read,grep,truncate}.ts` | `packages/durable/test/tools.test.ts`, `edit-byte-safety.test.ts`, `tools.test.ts` |
+| Normalize edit text once and scan only requested head-truncation ranges | `packages/durable/src/tools/edit-diff.ts`, `core/tools/truncate.ts` | `packages/durable/test/tools.test.ts`, `edit-byte-safety.test.ts`, `tools.test.ts` |
 | Compare PNG with the requested-quality JPEG as upstream does, then encode fallback qualities only until one fits | `utils/image-resize-core.ts` | `image-processing.test.ts` |
 | Bound native Bash spill queues and wait for complete private files; push-only custom producers retain their existing callback contract | `core/{bash-executor,tools/bash,tools/output-accumulator}.ts`, `utils/{output-files,child-process}.ts` | `bash-spill.test.ts`, `private-spill.test.ts`, `streaming-file.test.ts` |
 | Skip disk reads only for acknowledged, confirmed-terminal background jobs during monitoring; explicit tools remain fresh | `extensions/background-command/{index,jobs}.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
 | Accumulate SSE lines without repeatedly copying long partial lines; stdio framing and byte-bounded HTTP errors use upstream's shared implementations | `packages/mcp/src/transports/{lines,stdio,streamable-http}.ts` | `packages/mcp/test/{lines,stdio,streamable-http}.test.ts` |
-| Binary-search historical revisions, avoid redundant SQLite writes (a batch claims each new record ID once, inside upstream's batched commit), and join long lines at their boundary | `packages/durable/src/{storage/memory,storage/sqlite/storage,env/node}.ts` | `packages/durable/test/{memory-storage,sqlite-storage,env-node}.test.ts` |
+| Binary-search historical revisions, write no SQLite record-ID claim that storage already holds, and join long lines at their boundary | `packages/durable/src/{storage/memory,storage/sqlite/commit,env/node}.ts` | `packages/durable/test/{memory-storage,sqlite-storage,sqlite-commit,env-node}.test.ts` |
 | Count decoded lengths with scratch storage, reuse frame payload allocation without retaining large metadata, bound read-ahead, and precompute directory sort keys | `packages/env/daemon/src/{decode,scan,frame}.rs`, `packages/env/src/remote-env.ts` | Native daemon tests, `packages/env/test/{connection,remote,differential}.test.ts` |
 | Append native eval journals and validate reports once | `packages/evals/src/{cli,report}.ts` | `packages/evals/test/{cli,report}.test.ts` |
 | Build ready workspaces two at a time, batch selected npm packs, avoid unused native-path Biome WASM loading, and retain every startup worker profile | `scripts/{build,package-artifacts,pack-nix-packages,biome-check,profile-coding-agent-node}.mjs`, `nix/package.nix` | `scripts/{workspace-build,package-artifacts,package-artifact-cli,profile-coding-agent-node}.test.mjs` |
@@ -148,6 +149,11 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 Upstream's rewritten in-memory telemetry adapter copies only incoming attribute values, so the
 fork's retained-array optimization and its changelog entry are retired. Telemetry's root export
 now supplies upstream's `source` condition, so the fork-only export correction is also retired.
+Upstream's streaming `read` keeps only the shown lines of a text file in memory, so the fork's
+whole-file read range scan is retired; JSON selections still read the whole file. Upstream's
+batched SQLite commit keeps checked records in memory, retiring the fork's record reuse, but it
+re-claimed stored record IDs on every update, so the fork keeps that filter. The
+[2026-11-05 record](docs/upstream-sync-2026-11-05.md#performance) has the measurements.
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
@@ -199,8 +205,8 @@ Tool arguments validate with upstream's pi-schema, which replaces TypeBox valida
 coding-agent tools keep their TypeBox schemas, as upstream's do; pi-schema checks them as plain JSON
 Schema. pi-ai's package no longer exports `Type`, `Static` or `TSchema`; the extension loader still
 resolves `typebox` and pi-ai's former TypeBox exports for extensions. Durable commits
-use upstream's group commit and batched `Storage.commit`; the fork's admission check and SQLite
-record-ID claims run on that path.
+use upstream's group commit and batched `Storage.commit` statements; the fork's admission check
+and stored-claim filter run on that path.
 
 System One classifier images follow upstream's TypeSafe assets, Cloudflare images/assets
 and OpenRouter state-image serialization, including native limits and opt-in headers.

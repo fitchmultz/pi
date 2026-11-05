@@ -234,6 +234,10 @@ export class Coercer {
 				return orValue(tryBoolean(value), value);
 			case "null":
 				return orValue(tryNull(value), value);
+			case "bigint":
+				return orValue(tryBigInt(value), value);
+			case "undefined":
+				return orValue(tryUndefined(value), value);
 			case "array":
 				return this.convertArray(node, b, value);
 			case "object":
@@ -452,7 +456,9 @@ function convertLiteral(literal: unknown, value: unknown): unknown {
 				? tryNumber(value)
 				: typeof literal === "boolean"
 					? tryBoolean(value)
-					: undefined;
+					: typeof literal === "bigint"
+						? tryBigInt(value)
+						: undefined;
 	return result !== undefined && result.value === literal ? result.value : value;
 }
 
@@ -490,6 +496,30 @@ function bigIntOfString(value: string): bigint | undefined {
 	if (/^-?(0|[1-9]\d*)\.\d+$/.test(value)) return BigInt(value.split(".")[0]);
 	if (/^-?(0|[1-9]\d*)$/.test(value)) return BigInt(value);
 	return undefined;
+}
+
+/** TypeBox's TryBigInt: booleans to 1n/0n, numbers truncated, null and undefined to 0n, bigint-like strings. */
+function tryBigInt(value: unknown): Converted<bigint> {
+	if (typeof value === "bigint") return { value };
+	if (typeof value === "boolean") return { value: value ? 1n : 0n };
+	if (isFiniteNumber(value)) return { value: BigInt(Math.trunc(value)) };
+	if (value === null || value === undefined) return { value: 0n };
+	if (typeof value !== "string") return undefined;
+	const big = bigIntOfString(value);
+	if (big !== undefined) return { value: big };
+	const lowercase = value.toLowerCase();
+	return lowercase === "false" ? { value: 0n } : lowercase === "true" ? { value: 1n } : undefined;
+}
+
+/** TypeBox's TryUndefined: 0n, false, 0, null, `"undefined"`, `"null"`, `""` and `"0"` to undefined. */
+function tryUndefined(value: unknown): Converted<undefined> {
+	if (value === undefined || value === null || value === 0n || value === false || value === 0)
+		return { value: undefined };
+	if (typeof value !== "string") return undefined;
+	const lowercase = value.toLowerCase();
+	return lowercase === "undefined" || lowercase === "null" || value === "" || value === "0"
+		? { value: undefined }
+		: undefined;
 }
 
 function tryBoolean(value: unknown): Converted<boolean> {
@@ -533,7 +563,7 @@ function typesOf(schema: SchemaObject): string[] {
 function matchesType(value: unknown, type: string): boolean {
 	switch (type) {
 		case "number":
-			return typeof value === "number";
+			return Number.isFinite(value);
 		case "integer":
 			return typeof value === "number" && Number.isInteger(value);
 		case "boolean":
@@ -542,6 +572,10 @@ function matchesType(value: unknown, type: string): boolean {
 			return typeof value === "string";
 		case "null":
 			return value === null;
+		case "bigint":
+			return typeof value === "bigint";
+		case "undefined":
+			return value === undefined;
 		case "array":
 			return Array.isArray(value);
 		case "object":

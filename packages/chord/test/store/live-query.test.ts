@@ -1,7 +1,8 @@
 // Tests of live queries (decision "Live queries over an object's own tables"): `self.query(table, q, limit)` runs
 // before its object goes live, again in the commit step of every commit of the object that writes its table, and
-// publishes the diff in that commit's batch; a commit writing another table runs none; a reload swaps the object;
-// the limit is required; a failing run is a failed member; an ended attempt's query is collected.
+// publishes the diff in that commit's batch; a commit writing another table runs none; a reload restarts the object;
+// the limit is required; a failing run is a failed member; an ended attempt's query is collected; a refresh applied
+// again adopts only its last runs.
 
 import { describe, expect, it } from "vitest";
 import { BACKGROUND_CONTEXT as context } from "../../src/context/index.ts";
@@ -10,8 +11,9 @@ import type { ChordError } from "../../src/data/index.ts";
 import { createHost, defineFacet, type FacetHost, type HostError, type StoreSelf } from "../../src/host/index.ts";
 import { eq } from "../../src/store/expression.ts";
 import { json } from "../../src/store/json-column.ts";
-import { LiveQuery } from "../../src/store/live-query.ts";
+import { LiveQuery, QueryRefresh } from "../../src/store/live-query.ts";
 import { query } from "../../src/store/query.ts";
+import type { Step } from "../../src/store/step.ts";
 import type { ChordStore } from "../../src/store/store.ts";
 import { defineTable } from "../../src/store/table.ts";
 import {
@@ -219,12 +221,12 @@ describe("publication", () => {
 });
 
 describe("reload", () => {
-	it("swaps the object (no restart): the new attempt's query runs at its activation and takes over", async () => {
+	it("restarts the object: the new attempt's query runs at its activation and takes over", async () => {
 		const store = await memoryStore();
 		const { board: b, host, context: counting, counts } = await board(store);
 		for (const id of [1, 2, 3]) await b.put({ id, text: `t${id}` }, context);
 		const report = await host.reload([{ name: "@test/app", facet: defineFacet((h) => serveBoard(h, 2)) }], context);
-		expect(report.objects).toEqual([{ object: "app.board", kind: "swapped" }]);
+		expect(report.objects).toEqual([{ object: "app.board", kind: "restarted" }]);
 		await flushed();
 		expect(ids(b.items.value)).toEqual([3, 2]);
 		const runs = counts()["chord.query.runs"] ?? 0;
@@ -322,7 +324,7 @@ describe("failure", () => {
 });
 
 describe("memory", () => {
-	it("collects a swapped-out attempt's query: no commit re-runs it", async () => {
+	it("collects a restarted attempt's query: no commit re-runs it", async () => {
 		const store = await memoryStore();
 		const { host } = await board(store);
 		const from = queries.length - 1;
@@ -331,5 +333,22 @@ describe("memory", () => {
 		await expectCollected(queries[from]!);
 		await host.close(context);
 		await store.close(context);
+	});
+});
+
+describe("a refresh applied again", () => {
+	it("adopts its last application's runs only: a grouped commit that rolled back applies again alone", async () => {
+		const adopted: unknown[] = [];
+		let runs = 0;
+		// Stubs: the refresh only calls a query's rerun and adopt, and hands the step through.
+		const stub = {
+			rerun: async () => ({ kind: "rows", rows: ++runs }),
+			adopt: (run: unknown) => void adopted.push(run),
+		} as unknown as LiveQuery;
+		const refresh = new QueryRefresh([stub], context);
+		await refresh.write.apply({} as Step);
+		await refresh.write.apply({} as Step);
+		refresh.adopt();
+		expect(adopted).toEqual([{ kind: "rows", rows: 2 }]);
 	});
 });

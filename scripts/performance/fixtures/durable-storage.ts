@@ -15,6 +15,7 @@ import { openNodeSqliteDatabase } from "/pi-performance-source/packages/durable/
 import { SqliteStorage } from "/pi-performance-source/packages/durable/src/storage/sqlite/storage.ts";
 import {
 	ROOT_CONVERSATION_ID,
+	type StorageWrite,
 	type TaskId,
 	type TaskRecord,
 } from "/pi-performance-source/packages/durable/src/types.ts";
@@ -108,7 +109,10 @@ try {
 		});
 		assert.equal(noops.calls, 0);
 		assert.equal(noops.walGrowthBytes, 0);
-		await storage.commit([{ type: "conversation", value: { id: ROOT_CONVERSATION_ID } }], context);
+		// A refused batch is returned, not thrown: every write here must be stored.
+		const commit = async (write: StorageWrite) =>
+			assert.deepEqual(await storage.commit([[write]], () => {}, context), { stored: 1 });
+		await commit({ type: "conversation", value: { id: ROOT_CONVERSATION_ID } });
 		const id = await storage.mintId<TaskId<null>>();
 		const task: TaskRecord<{ blob: string }, { phase: string; count: number }, null> = {
 			id,
@@ -120,21 +124,13 @@ try {
 			background: false,
 			abortRequested: false,
 		};
-		await storage.commit([{ type: "task", value: task }], context);
+		await commit({ type: "task", value: task });
 		await phase("task-checkpoint-replacement", async () => {
 			for (let i = 1; i <= writes; i++)
-				await storage.commit(
-					[
-						{
-							type: "task",
-							value: {
-								...task,
-								state: { status: "pending", checkpoint: { phase: "run", count: i } },
-							},
-						},
-					],
-					context,
-				);
+				await commit({
+					type: "task",
+					value: { ...task, state: { status: "pending", checkpoint: { phase: "run", count: i } } },
+				});
 		});
 		const finalTask = (await storage.task(id, context))?.state;
 		assert.deepEqual(finalTask, { status: "pending", checkpoint: { phase: "run", count: writes } });
