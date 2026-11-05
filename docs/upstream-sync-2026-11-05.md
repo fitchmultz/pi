@@ -48,6 +48,9 @@ Supporting adaptations:
 - `packages/durable/src/storage/sqlite/commit.ts` and its native SQLite test preserve the
   fork's suppression of redundant stored record-ID claims on upstream's batched path.
   The new test fails without the filter and passes with it.
+- `apps/p2/test/p2/plugin-layout.test.ts`: include the documented `react-dom` host package
+  in the web-facet fixture. Upstream chat now imports `createPortal`; the real app already
+  supplies it. The unchanged test fails on both trees, and the corrected file passes all three tests.
 
 ## Performance
 
@@ -107,8 +110,16 @@ stayed under 13 MiB.
 - Compatibility required two test-only repairs in external extension repositories: the native
   session-header rename and exclusive execution of tests that temporarily modify shared lint
   configuration. No extension runtime changes were needed.
-- p2's complete suite is still running; remote CI is pending. The private per-package record names
-  exact revisions, exercised behavior, reruns and external-service limits.
+- Separate p2 suite: 725 passed, six failed, one skipped. The six failures count four
+  failed cases and their two parent tests. The plugin-layout fixture is corrected above.
+  Three terminal assertions still fail: initial command output includes a shell prompt,
+  and the immediate post-archive terminal list remains populated. All three reproduce
+  on untouched upstream `80d4d3c86`, built with its own dependencies and native Env daemon
+  in a second Linux container. No assertions were weakened, skips added, or runtime behavior
+  changed to conceal them. This is not an all-green p2 suite.
+- CI and review results are attached to [PR #314](https://github.com/fitchmultz/pi/pull/314).
+  The private per-package record names exact revisions, exercised behavior, reruns and
+  external-service limits.
 
 ## UI evidence
 
