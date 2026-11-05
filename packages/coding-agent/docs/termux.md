@@ -10,6 +10,9 @@ Install Termux from [GitHub or F-Droid](https://github.com/termux/termux-app#ins
 
 ## Install Pi
 
+For fitchmultz/pi, follow [Install the fork](#install-the-fork). The steps below
+install the official upstream npm package.
+
 1. Update Termux packages:
 
    ```bash
@@ -45,7 +48,7 @@ Continue with the main [Quickstart](quickstart.md#3-choose-a-model) to connect a
 
 ### Install the fork
 
-The fork's immutable installer and `pi update --fork` support Termux arm64/x64.
+The fork's immutable installer and updater support Termux arm64/x64.
 Install the build and validation tools:
 
 ```bash
@@ -61,6 +64,8 @@ or runs dependency lifecycle scripts.
 From a fork checkout, with unused selector and executable locations:
 
 ```bash
+git clone https://github.com/fitchmultz/pi.git
+cd pi
 npm ci --ignore-scripts
 npm run hydrate:model-data
 selector="$HOME/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent"
@@ -72,9 +77,11 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Keep `~/.local/bin` on your shell's `PATH`. Do not replace the selector with a real
 directory or point `pi` directly at a release. Once installed, run
-`pi update --fork` to fetch, pin, build, validate, and select latest fork main
+`pi update` to fetch, pin, build, validate, and select latest fork main
 without a local checkout. See [fork installation](quickstart.md#fork-installation)
-for staging and rollback.
+for staging, rollback, and recovery after an npm replacement. `pi --build-info`
+shows the exact fork commit and running package path. `pi update --fork` explicitly
+selects the fork updater when a custom self-update command is configured.
 
 Builds, consumer smoke tests, and `test.sh` retain Termux's `PREFIX` and
 `LD_PRELOAD` exec wrapper while isolating home/configuration. npm scripts use the

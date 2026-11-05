@@ -2,6 +2,8 @@ import { accessSync, constants, existsSync, openSync, readFileSync, realpathSync
 import { createRequire } from "module";
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
+import { Type } from "typebox";
+import { Value } from "typebox/value";
 import { fileURLToPath, pathToFileURL } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
@@ -429,13 +431,43 @@ export function getPackageDir(): string {
 	return findNodePackageDir(__dirname);
 }
 
-if (!isBunBinary) {
-	const receipt = resolve(realpathSync(findNodePackageDir(__dirname)), "../../../fork-release.json");
-	if (existsSync(receipt)) {
-		// JavaScript-only CLI and SDK hosts may have no visible release path.
-		// Keep the receipt open so pruning sees this runtime until the process exits.
-		openSync(receipt, "r");
+const runtimePackageDir = isBunBinary ? dirname(process.execPath) : realpathSync(findNodePackageDir(__dirname));
+const forkReleasePath = isBunBinary ? undefined : resolve(runtimePackageDir, "../../../fork-release.json");
+if (forkReleasePath && existsSync(forkReleasePath)) {
+	// JavaScript-only CLI and SDK hosts may have no visible release path.
+	// Keep the receipt open so pruning sees this runtime until the process exits.
+	openSync(forkReleasePath, "r");
+}
+
+const ForkReleaseReceiptSchema = Type.Object({
+	commit: Type.String(),
+	catalogSha256: Type.String(),
+	archiveSha256: Type.String(),
+	node: Type.String(),
+	npm: Type.String(),
+	platform: Type.String(),
+	arch: Type.String(),
+	validated: Type.Literal(true),
+	ownerSelector: Type.Optional(Type.String()),
+});
+
+/** Read the installer receipt belonging to this runtime, independently of PI_PACKAGE_DIR. */
+export function getForkRelease() {
+	if (!forkReleasePath || !existsSync(forkReleasePath)) return undefined;
+	const receipt: unknown = JSON.parse(readFileSync(forkReleasePath, "utf8"));
+	if (!Value.Check(ForkReleaseReceiptSchema, receipt)) {
+		throw new Error(`Invalid fork release receipt: ${forkReleasePath}`);
 	}
+	return receipt;
+}
+
+/** Describe the running package and its existing fork build receipt without starting a session. */
+export function getBuildInfo() {
+	return {
+		package: { name: PACKAGE_NAME, version: VERSION, path: runtimePackageDir },
+		runtime: { node: process.versions.node, platform: process.platform, arch: process.arch },
+		fork: getForkRelease() ?? null,
+	};
 }
 
 /**

@@ -21,6 +21,7 @@ import {
 	detectInstallMethod,
 	getAgentDir,
 	getConfiguredSelfUpdateArgv,
+	getForkRelease,
 	getPackageDir,
 	getSelfUpdateCommand,
 	getSelfUpdateUnavailableInstruction,
@@ -390,6 +391,9 @@ Short forms:
   ${APP_NAME} update --models       Refresh model catalogs only
   ${APP_NAME} update <source>       Update one package
   ${APP_NAME} update pi             Update pi only (self works as alias to pi)
+
+On an immutable fork installation, self-updates use the fork updater unless
+PI_SELF_UPDATE_COMMAND or selfUpdateCommand selects a custom updater.
 
 --fork requires an existing immutable fork selector in the active npm global prefix
 (or Termux's ~/.local/share/npm-global with ~/.local/bin/pi), Node >=22.19 with
@@ -1177,6 +1181,10 @@ export async function handlePackageCommand(
 					const configuredSelfUpdateArgv = getConfiguredSelfUpdateArgv(
 						settingsManager.getGlobalSettings().selfUpdateCommand,
 					);
+					if (!configuredSelfUpdateArgv && getForkRelease()) {
+						await runForkUpdate();
+						return true;
+					}
 					// A configured command is explicit user intent, so it replaces the managed install path too.
 					const managedInstallRoot = configuredSelfUpdateArgv ? undefined : getActiveManagedInstallRoot();
 					if (managedInstallRoot && options.force) {

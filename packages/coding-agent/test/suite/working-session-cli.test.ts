@@ -162,6 +162,7 @@ export default function(pi) {
 
 	it.each([
 		{ args: ["--version"], output: /^\d+\.\d+\.\d+/ },
+		{ args: ["--build-info"], output: /"fork": null/ },
 		{ args: ["config", "--help"], output: /config/ },
 		{ args: ["update", "--help"], output: /update/ },
 		{ args: ["--print", "--no-extensions", "--no-session"], output: undefined },

@@ -20,7 +20,9 @@ import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PACKAGE_NAME } from "../src/config.ts";
+import * as config from "../src/config.ts";
+import { PACKAGE_NAME, VERSION } from "../src/config.ts";
+import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
 import * as childProcess from "../src/utils/child-process.ts";
 import { runForkUpdate } from "../src/utils/fork-update.ts";
@@ -205,8 +207,41 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		vi.restoreAllMocks();
 		vi.unstubAllEnvs();
+		vi.unstubAllGlobals();
 		process.exitCode = originalExitCode;
 		rmSync(root, { recursive: true, force: true });
+	});
+
+	it.skipIf(platform !== originalPlatform).each([
+		{ name: "default", args: [] },
+		{ name: "--self", args: ["--self"] },
+		{ name: "self", args: ["self"] },
+		{ name: "pi", args: ["pi"] },
+		{ name: "--all", args: ["--all"] },
+	])("updates the installed fork through $name when upstream's version is unchanged", async ({ args }) => {
+		vi.spyOn(config, "getForkRelease").mockReturnValue({
+			commit: expectedCommit,
+			catalogSha256: "catalog",
+			archiveSha256: "archive",
+			node: process.versions.node,
+			npm: "11.19.1",
+			platform,
+			arch: process.arch,
+			validated: true,
+			ownerSelector: selector,
+		});
+		vi.stubEnv("PI_OFFLINE", "");
+		const upstream = vi.fn(async () => Response.json({ packageName: PACKAGE_NAME, version: VERSION }));
+		vi.stubGlobal("fetch", upstream);
+		const updateExtensions = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue();
+
+		await handlePackageCommand(["update", ...args]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(fetched).toBe(1);
+		expect(readInvocations()[0].commit).toBe(expectedCommit);
+		expect(upstream).not.toHaveBeenCalled();
+		expect(updateExtensions).toHaveBeenCalledTimes(args.includes("--all") ? 1 : 0);
 	});
 
 	it("routes --fork without settings writes, pins fetched main, isolates the build, prunes and cleans up", async () => {

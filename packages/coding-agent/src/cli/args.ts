@@ -21,6 +21,7 @@ export interface Args {
 	resume?: boolean;
 	help?: boolean;
 	version?: boolean;
+	buildInfo?: boolean;
 	mode?: Mode;
 	name?: string;
 	noSession?: boolean;
@@ -95,6 +96,8 @@ export function parseArgs(args: string[], onOption?: (option: string, tokens: st
 			result.help = true;
 		} else if (arg === "--version" || arg === "-v") {
 			result.version = true;
+		} else if (arg === "--build-info") {
+			result.buildInfo = true;
 		} else if (arg === "--mode") {
 			const mode = args[i + 1];
 			if (mode === undefined || mode.startsWith("-")) {
@@ -354,6 +357,7 @@ ${chalk.bold("Options:")}
   --                             End option parsing; treat remaining arguments as messages/files
   --help, -h                     Show this help
   --version, -v                  Show version number
+  --build-info                   Show runtime path and fork build receipt as JSON
 
 Extensions can register additional flags (e.g., --plan from plan-mode extension).${extensionFlagsText}
 
