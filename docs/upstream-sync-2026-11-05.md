@@ -89,8 +89,36 @@ stayed under 13 MiB.
 - Durable: 15 files, 429 tests passed; with `PI_DURABLE_DOCUMENT_RETENTION_MS=0`, 8 files,
   285 tests; the Workers suite, 4 files, 51 tests.
 - Schema: 8,746 passed, 9 expected failures, 2 skipped. AI validation: 181 tests passed.
-- Not yet run for this integration: the full `./test.sh`, p2's checks and suite, CI and the
-  active-consumer inspection.
+- Full `./test.sh`: passed on Linux arm64 at `e8e86ee1c`, using Node 26.13.0, the native
+  Env daemon, Go 1.27.3 and fd 10.5.1. Its credential-gated and platform-gated skips remain.
+  The initial macOS run hit 13 upstream Chord path/watcher assumptions and one example
+  timing failure. The example passed all 18 tests on rerun. As in the previous integration,
+  Linux supplies full-suite proof without platform-specific rewrites of upstream tests.
+- Final overlay integration: six native UI and working-session files, 155 tests passed.
+  Root `npm run check`, its browser smoke, and p2's type/lint check passed.
+- All 26 maintained code packages and the embedded device-export extension loaded on the
+  synced fork and vanilla upstream `80d4d3c86`. Native SDK/CLI exercises, installed-set co-loading,
+  real headless Chrome operations, read-only macOS accessibility, and local transport probes passed.
+  Official stable 1.5.0 was independently exercised too. Model-evaluation trials require the
+  fork's complete working-session IPC; vanilla supports loading and the other commands, not trials.
+  The fork's full native trial suite passed all 18 cases.
+- Retired-history archive CLI: 18 tests passed in a separate privileged Linux test container.
+  Those checks could not run on the Mac without sudo. No host privilege settings were changed.
+- Compatibility required two test-only repairs in external extension repositories: the native
+  session-header rename and exclusive execution of tests that temporarily modify shared lint
+  configuration. No extension runtime changes were needed.
+- p2's complete suite is still running; remote CI is pending. The private per-package record names
+  exact revisions, exercised behavior, reruns and external-service limits.
+
+## UI evidence
+
+A seeded journal shows two consecutive cache-warm usage entries. The initial fork renders
+two notices; the integrated code renders one cumulative notice. These are real TUI captures
+without provider calls or a billing claim. The later overlay integration leaves this code unchanged.
+
+| Before | After |
+| --- | --- |
+| ![Separate cache-warm notices](assets/upstream-sync-2026-11-05/cache-warm-before.png) | ![Cumulative cache-warm notice](assets/upstream-sync-2026-11-05/cache-warm-after.png) |
 
 The local evidence directory is `/tmp/pi-upstream-sync-2026-11-05/`. It contains the logs and
 performance output. These offline checks do not claim live-provider or all-device qualification.
