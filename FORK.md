@@ -378,14 +378,20 @@ All release mutations share `<selector>.lock`. A release store belongs to one se
 in its `.owner-selector`; other selectors must use their own `--releases` directory. `--prune` only
 removes releases installed by the owning selector. Legacy releases are kept until removed by hand.
 
-Do not run `pi update` (self) on a fork installation: it installs the official npm package over the
-selector. If that happens, `--activate` a fork release again.
+`pi update`, its self-update aliases, and the Pi update in `--all` follow fork main
+when the running installation has a fork receipt. Explicit custom update commands
+take precedence. `pi --build-info` prints the actual runtime path and existing
+receipt, so builds with the same upstream version remain distinguishable.
+
+An explicit npm installation of the upstream package can replace the selector
+with a real directory. Move that directory aside before native activation.
+See [Restore the fork after an npm replacement](packages/coding-agent/docs/quickstart.md#restore-the-fork-after-an-npm-replacement).
 
 Running sessions keep their runtime. To load a newly selected release, fully relaunch Pi, or run
 `pi restart` from a session that follows the selector. `pi restart --runtime <package dir>` tries
 a staged release without selecting it. See [restart.md](packages/coding-agent/docs/restart.md).
 
-`pi update --fork` does the fetch, build, stage and activate steps for you from the latest
+The fork updater does the fetch, build, stage and activate steps for you from the latest
 `fitchmultz/pi` main. It only updates an existing selector installation and leaves the previous
 release selectable at `<selector>.previous`. Unlike the manual installer's default, this
 owner-authorized updater accepts routine catalog removals and prints every removed ID;

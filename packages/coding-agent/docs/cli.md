@@ -249,6 +249,13 @@ See [Configuration](configuration.md) for saved configuration, [Security](securi
   Shows help, including flags registered by loaded extensions, then exits.
 - `-v`, `--version`<br>
   Shows the Pi version, then exits.
+- `--build-info`<br>
+  Prints JSON describing the running package, Node runtime, and fork build receipt, then exits.
+  `package` contains `name`, `version`, and the resolved package `path`.
+  `runtime` contains the current `node` version, `platform`, and `arch`.
+  `fork` contains the existing installer receipt, or `null` outside an immutable fork release.
+  Its `commit`, `catalogSha256`, and `archiveSha256` identify the frozen build;
+  its `node` and `npm` fields describe the build tools. This command does not start a session.
 
 Extensions may register additional long-form options. Unknown short options are rejected.
 
@@ -279,7 +286,11 @@ Add `--local` or `-l` to `install`, `remove`, `uninstall`, or `config` to use pr
 
 ### Update Pi or packages
 
-Running `pi update` without a target updates Pi itself.
+Running `pi update` without a target updates Pi itself. On an immutable fork
+installation, it fetches, builds, validates, and selects fork main through the
+existing fork updater. This also applies to `--self`, positional `self` or `pi`,
+and the Pi update in `--all`. An explicitly configured custom updater takes
+precedence.
 
 | Task | Command |
 |---|---|
@@ -290,10 +301,13 @@ Running `pi update` without a target updates Pi itself.
 | Refresh model catalogs | `pi update --models` |
 | Update Pi and all installed packages | `pi update --all` |
 
-Add `--force` to reinstall Pi when the selected update includes Pi.
+Add `--force` to reinstall an ordinary package-manager installation when the
+selected update includes Pi. The fork updater reuses validated immutable releases;
+`--force` does not rebuild them.
 
-`--fork` is a separate update path for [immutable fork installations](quickstart.md#fork-installation),
-not an alias for `--self` or `--all`. It requires macOS/Linux/Termux arm64/x64,
+`--fork` explicitly selects the fork updater for
+[immutable fork installations](quickstart.md#fork-installation), including when
+a custom updater is configured. The fork updater requires macOS/Linux/Termux arm64/x64,
 Node.js >=22.19 (not Bun) with adjacent npm, Git, bash, tar, gzip, tmux, and network
 access. macOS/Linux use the active npm global prefix; Termux uses
 `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` and
@@ -317,7 +331,11 @@ If a wrapper or another package manager provides Pi, set `PI_SELF_UPDATE_COMMAND
 export PI_SELF_UPDATE_COMMAND="mise use -g npm:{packageName}@{version}"
 ```
 
-`pi update` runs it only when pi.dev has a newer release, replacing `{packageName}`, `{version}`, and `{installSpec}` (`{packageName}@{version}`) with that release. The value is split on spaces. For arguments with spaces, use the `selfUpdateCommand` setting in `~/.pi/agent/settings.json` instead, an argv array such as `["nix", "profile", "upgrade", "pi"]`.
+The custom command takes precedence over automatic fork detection. `pi update` runs
+it only when pi.dev has a newer release, replacing `{packageName}`, `{version}`,
+and `{installSpec}` (`{packageName}@{version}`) with that release. The value is split
+on spaces. For arguments with spaces, use the `selfUpdateCommand` setting in
+`~/.pi/agent/settings.json` instead, an argv array such as `["nix", "profile", "upgrade", "pi"]`.
 
 ### Aliases and command options
 

@@ -12,6 +12,7 @@
 
 ### Added
 
+- Added `pi --build-info` to print the resolved runtime path, runtime versions, and existing immutable fork release receipt as JSON.
 - Added `ctx.managedHost` and `session_shutdown` `disposition` so extensions can keep owned work across managed restarts and stop it only on exit. See [Work that outlives a worker](docs/restart.md#work-that-outlives-a-worker).
 - Added a sorted, permission-filtered instruction-group capability index to initial prompts and a static `discover_tools` hint. Listing and enabling groups leave the index and discovery declaration unchanged.
 - Added complete native working-session save and restore through the SDK and `--working-session`, with private local control and completed-exit receipts. See [Native working sessions](docs/working-session.md).
@@ -50,6 +51,7 @@
 
 ### Fixed
 
+- Fixed ordinary self-update commands on immutable fork installations checking upstream's version instead of updating fork main. Explicit custom update commands retain precedence.
 - Fixed `/copy` and extension clipboard writes failing on Termux without a working Termux:API writer by falling back to the terminal's OSC 52 support.
 - Fixed restart control with long temporary paths and the fork installer’s restart validation on Termux with version-managed Node by using `$PREFIX/tmp` instead of a directory beside Node ([#297](https://github.com/fitchmultz/pi/issues/297)).
 - Fixed fork updates, installs and isolated tests on Termux with version-managed Node by using native `$PREFIX/bin/bash` instead of assuming Bash is next to Node ([#284](https://github.com/fitchmultz/pi/issues/284)).

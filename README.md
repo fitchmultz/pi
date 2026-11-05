@@ -12,6 +12,11 @@
 
 # Pi
 
+This is the [fitchmultz/pi](https://github.com/fitchmultz/pi) fork of
+[earendil-works/pi](https://github.com/earendil-works/pi). See [FORK.md](FORK.md)
+for its changes. Package names retain the upstream scope for compatibility;
+the registry packages are upstream builds.
+
 Pi is a minimal, extensible agent harness that you can make your own.
 
 Adapt Pi to your workflows, not the other way around. Customize Pi with [extensions](packages/coding-agent/docs/extensions.md), [skills](packages/coding-agent/docs/skills.md), [prompt templates](packages/coding-agent/docs/prompt-templates.md), and [themes](packages/coding-agent/docs/themes.md). Bundle them as [Pi packages](packages/coding-agent/docs/packages.md) and share via npm or git.
@@ -22,7 +27,24 @@ Use Pi [interactively](packages/coding-agent/docs/usage.md), automate it in [pri
 
 ## Getting started
 
-Install the command-line interface:
+Follow [fork installation](packages/coding-agent/docs/quickstart.md#fork-installation)
+for macOS or Linux, or [Termux setup](packages/coding-agent/docs/termux.md#install-the-fork)
+for Android. The installer builds an exact fork commit with frozen dependencies
+and keeps the previous release available for rollback.
+
+After installation:
+
+```bash
+pi update
+pi --build-info
+```
+
+`pi update` follows fork main. `pi --build-info` prints the running package path
+and fork receipt, including its commit and model-catalog hash.
+
+### Install upstream Pi instead
+
+The following commands install the official upstream distribution:
 
 ```bash
 curl -fsSL https://pi.dev/install.sh | sh
@@ -42,6 +64,8 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 
 Pi requires Node.js 22.19 or newer. The macOS, Linux, and Windows installers can install it if needed. Pi does not require dependency lifecycle scripts for a normal npm installation.
 
+### Start Pi
+
 Start Pi in the directory where you want it to work:
 
 ```bash
@@ -53,7 +77,7 @@ For a built-in AI provider, run `/login` inside Pi to connect a subscription or 
 
 See the [documentation](https://pi.dev/docs/latest) for full setup and usage instructions, or [visit pi.dev](https://pi.dev) for demos.
 
-## Run with Nix
+## Run upstream Pi with Nix
 
 ```bash
 nix run github:earendil-works/pi/stable

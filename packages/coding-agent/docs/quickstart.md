@@ -6,37 +6,9 @@ For native Windows setup, read [Windows Setup](windows.md). For Android, read [T
 
 ## 1. Install Pi
 
-Install Pi with the installer on macOS, Linux, or Windows:
-
-```bash tab="macOS / Linux"
-curl -fsSL https://pi.dev/install.sh | sh
-```
-
-```powershell tab="Windows"
-powershell -c "irm https://pi.dev/install.ps1 | iex"
-```
-
-Both installers pin all dependencies and update Pi with `pi update`. Alternatively, install Pi from npm, which does not pin transitive dependencies. This requires Node.js 22.19 or newer:
-
-```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-```
-
-Pi does not require dependency lifecycle scripts for a normal npm installation.
-
-With Nix on macOS or Linux, install the latest release from Pi's flake. Nix builds Pi from source:
-
-```bash
-nix profile add github:earendil-works/pi/stable
-```
-
-Older Nix versions use `nix profile install` instead. Update with `nix profile upgrade pi`; `pi update` cannot update a Nix installation. To pin a release, use a tag such as `github:earendil-works/pi/v1.0.0`.
-
-Verify the installation:
-
-```bash
-pi --version
-```
+This checkout is the fitchmultz/pi fork. Use the immutable fork installer below
+or the [Termux fork instructions](termux.md#install-the-fork). For the official
+distribution, see [Upstream installation](#upstream-installation).
 
 ### Fork installation
 
@@ -49,6 +21,8 @@ From a fork checkout, install dependencies without lifecycle scripts, hydrate th
 model-data snapshot, then build and validate an exact commit:
 
 ```bash
+git clone https://github.com/fitchmultz/pi.git
+cd pi
 npm ci --ignore-scripts
 npm run hydrate:model-data
 selector="$(npm root -g)/@earendil-works/pi-coding-agent"
@@ -61,11 +35,16 @@ initial setup with unused locations: the installer refuses to replace a real
 package directory, and `ln -s` refuses to overwrite an existing executable.
 Do not point `pi` directly at a release; it must follow the package selector.
 
-After setup, update without keeping a checkout:
+After setup, update without keeping a checkout and inspect the selected build:
 
 ```bash
-pi update --fork
+pi update
+pi --build-info
 ```
+
+Self-update commands recognize the fork receipt and follow fork main. An explicit
+`PI_SELF_UPDATE_COMMAND` or `selfUpdateCommand` takes precedence. Use
+`pi update --fork` to select the fork updater explicitly.
 
 The updater fetches and pins fork main, hydrates model data in an isolated home,
 then uses the installer to build, validate, and atomically select the release
@@ -134,6 +113,82 @@ keep theirs until you delete them. npm redacts secrets on a best-effort basis, s
 check logs for sensitive data before sharing them. Nothing prunes the cache automatically.
 When no update or installation is running, you can delete `npm-logs/` or the whole
 `~/.cache/pi-fork` directory; the next run recreates it and downloads packages again.
+
+### Restore the fork after an npm replacement
+
+An explicit npm installation of `@earendil-works/pi-coding-agent` can replace the
+fork selector with a real package directory. The immutable releases remain in
+`~/.local/share/pi-fork/releases`. Native activation requires a symlink or an unused
+selector path, so move the replacement directory aside first.
+
+1. Find the selector and an existing validated release. On Termux, use the selector
+   from [Termux setup](termux.md#install-the-fork). For a custom release store, use
+   its original path.
+
+   ```bash
+   selector="$(npm root -g)/@earendil-works/pi-coding-agent"
+   releases="$HOME/.local/share/pi-fork/releases"
+   ls -ld "$selector"
+   ls "$releases"
+   ```
+
+2. Confirm that the selector is now a directory, not a symlink. Set `identity` to
+   the directory name of the release you want to restore, then run these commands
+   from a fork checkout with dependencies installed:
+
+   ```bash
+   identity="<existing-release-identity>"
+   backup="$(mktemp -d "${TMPDIR:-/tmp}/pi-upstream-recovery.XXXXXX")"
+   mv "$selector" "$backup/package"
+   node scripts/install-fork.mjs --activate "$identity" \
+     --selector "$selector" --releases "$releases"
+   printf 'Replacement package kept at %s\n' "$backup/package"
+   readlink "$selector"
+   node -p 'JSON.stringify(require(process.argv[1]), null, 2)' \
+     "$releases/$identity/fork-release.json"
+   ```
+
+3. Verify that the selector points into the chosen release and that the receipt's
+   `commit` is the one you intended to restore, then relaunch Pi. Releases that
+   support `pi --build-info` also report this receipt and the running package path.
+   Keep the replacement package until verification succeeds. Configuration,
+   credentials, and sessions stay in `~/.pi/agent/`.
+
+### Upstream installation
+
+The following commands install official upstream Pi rather than this fork.
+
+Install Pi with the installer on macOS, Linux, or Windows:
+
+```bash tab="macOS / Linux"
+curl -fsSL https://pi.dev/install.sh | sh
+```
+
+```powershell tab="Windows"
+powershell -c "irm https://pi.dev/install.ps1 | iex"
+```
+
+Both installers pin all dependencies and update Pi with `pi update`. Alternatively, install Pi from npm, which does not pin transitive dependencies. This requires Node.js 22.19 or newer:
+
+```bash
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+```
+
+Pi does not require dependency lifecycle scripts for a normal npm installation.
+
+With Nix on macOS or Linux, install the latest release from Pi's flake. Nix builds Pi from source:
+
+```bash
+nix profile add github:earendil-works/pi/stable
+```
+
+Older Nix versions use `nix profile install` instead. Update with `nix profile upgrade pi`; `pi update` cannot update a Nix installation. To pin a release, use a tag such as `github:earendil-works/pi/v1.0.0`.
+
+Verify the installation:
+
+```bash
+pi --version
+```
 
 ## 2. Start Pi
 

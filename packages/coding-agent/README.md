@@ -8,9 +8,14 @@
   <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square&logo=npm&logoColor=white" /></a>
 </p>
 
-> New issues and PRs from new contributors are closed automatically. Maintainers review closed submissions daily. See [CONTRIBUTING.md](https://github.com/earendil-works/pi/blob/main/CONTRIBUTING.md).
+> New issues and PRs from new contributors are closed automatically. Maintainers review closed submissions daily. See [CONTRIBUTING.md](https://github.com/fitchmultz/pi/blob/main/CONTRIBUTING.md).
 
 # Pi
+
+This package is built from [fitchmultz/pi](https://github.com/fitchmultz/pi),
+a fork of [earendil-works/pi](https://github.com/earendil-works/pi).
+See the [fork changes](https://github.com/fitchmultz/pi/blob/main/FORK.md).
+Package names retain the upstream scope; registry releases are upstream builds.
 
 Pi is a minimal, extensible agent harness that you can make your own.
 
@@ -22,7 +27,20 @@ Use Pi [interactively](docs/usage.md), automate it in [print or JSON mode](docs/
 
 ## Getting started
 
-Install the command-line interface:
+Use [fork installation](docs/quickstart.md#fork-installation) on macOS or Linux,
+or [Termux setup](docs/termux.md#install-the-fork) on Android. After installation:
+
+```bash
+pi update
+pi --build-info
+```
+
+`pi update` follows fork main. `pi --build-info` prints the running package path
+and the existing fork receipt, including the exact source commit.
+
+### Install upstream Pi instead
+
+The following commands install the official upstream distribution:
 
 ```bash
 curl -fsSL https://pi.dev/install.sh | sh
@@ -43,6 +61,8 @@ npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 Pi requires Node.js 22.19 or newer. The macOS, Linux, and Windows installers can install it if needed. Pi does not require dependency lifecycle scripts for a normal npm installation.
 
 On macOS and Linux, Nix users can install the latest release with `nix profile add github:earendil-works/pi/stable`. See the [quickstart](docs/quickstart.md#1-install-pi) for updating and pinning releases.
+
+### Start Pi
 
 Start Pi in the directory where you want it to work:
 
@@ -73,7 +93,7 @@ To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi
 Clone the repository, install its dependencies, and run Pi from source:
 
 ```bash
-git clone https://github.com/earendil-works/pi
+git clone https://github.com/fitchmultz/pi
 cd pi
 npm install --ignore-scripts
 ./pi-test.sh
@@ -88,7 +108,7 @@ npm run check
 ./test.sh
 ```
 
-Read [CONTRIBUTING.md](https://github.com/earendil-works/pi/blob/main/CONTRIBUTING.md) before opening an issue or pull request. It defines the contribution gate, issue quality bar, and required checks. Read [AGENTS.md](https://github.com/earendil-works/pi/blob/main/AGENTS.md) for repository-specific implementation, testing, dependency, and release rules.
+Read [CONTRIBUTING.md](https://github.com/fitchmultz/pi/blob/main/CONTRIBUTING.md) before opening an issue or pull request. It defines the contribution gate, issue quality bar, and required checks. Read [AGENTS.md](https://github.com/fitchmultz/pi/blob/main/AGENTS.md) for repository-specific implementation, testing, dependency, and release rules.
 
 ## License
 
