@@ -518,17 +518,16 @@ describe("SqliteStorage batch commit statements", () => {
 		const database = await openDatabase();
 		const recording = recordStatements(database);
 		const storage = await openStorage(recording.db);
-		const task = async () =>
-			({
-				id: await storage.mintId<TaskId<JsonValue>>(),
-				conversationId: ROOT_CONVERSATION_ID,
-				kind: "t.one",
-				version: 1,
-				input: {},
-				state: TASK_STATES[0],
-				background: false,
-				abortRequested: false,
-			}) as TaskRecord<JsonValue, JsonValue, JsonValue>;
+		const task = async (): Promise<TaskRecord<JsonValue, JsonValue, JsonValue>> => ({
+			id: await storage.mintId<TaskId<JsonValue>>(),
+			conversationId: ROOT_CONVERSATION_ID,
+			kind: "t.one",
+			version: 1,
+			input: {},
+			state: TASK_STATES[0],
+			background: false,
+			abortRequested: false,
+		});
 		const stored = await task();
 		await storage.commit(
 			[

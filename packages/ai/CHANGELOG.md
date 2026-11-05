@@ -16,6 +16,8 @@
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
 - Extended temporary opt-in Anthropic cache tracing with payload-pass and attempt identities, validated `request-id` headers and exact-session filtering. Native stream behavior is unchanged.
 
+- Renamed the "OpenAI Codex (legacy)" provider back to "OpenAI Codex"
+
 ### Fixed
 
 - Fixed tool arguments for `Type.BigInt()` and `Type.Undefined()` parameters being rejected: they convert as TypeBox converted them (`"42"` and `42` to `42n`, `null` to `undefined`), now that pi-schema supports both types. `Type.Void()` still rejects every JSON argument.

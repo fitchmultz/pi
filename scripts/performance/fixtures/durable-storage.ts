@@ -52,6 +52,10 @@ function wrap(executor: SqliteExecutor): SqliteExecutor {
 			count(sql, params);
 			return executor.run(sql, ...params);
 		},
+		runCounted: (sql, ...params) => {
+			count(sql, params);
+			return executor.runCounted(sql, ...params);
+		},
 		get: <T extends object>(sql: string, ...params: SqliteValue[]) => {
 			count(sql, params);
 			return executor.get<T>(sql, ...params);

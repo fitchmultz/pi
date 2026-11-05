@@ -2,7 +2,7 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`d9af3d73afb3b2c02c7a833d7ca9f3875e5fff6e` (2026-11-05), following official v1.5.0.
+`36142c1c7eab1d756e977b5f39149a634cc472ac` (2026-11-05), following official v1.5.0.
 It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
@@ -158,8 +158,8 @@ re-claimed stored record IDs on every update, so the fork keeps that filter. The
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
 `background_command`, and no upstream publishing, binary (including Android APK) or
-issue-analysis workflows. Upstream's local `scripts/issues` triage tool and
-`scripts/preview-packages.mjs` are kept but unused; the preview script's tests still run. Nix builds
+issue-analysis workflows. Upstream's `scripts/preview-packages.mjs` is kept but unused;
+the preview script's tests still run. Nix builds
 retain upstream's derivation and locks with the batched install-phase packing above; automatic
 catalog-pin commits and stable-branch promotion are upstream-only. The
 Nix install check now follows upstream's removal of esbuild from the installer dependencies. Env's upstream platform check accepts the
