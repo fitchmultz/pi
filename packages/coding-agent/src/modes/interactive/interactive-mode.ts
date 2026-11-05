@@ -90,7 +90,6 @@ import type {
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import type { McpHttpServerConfig } from "../../core/mcp-servers.ts";
 import { createCompactionSummaryMessage, createCustomMessage } from "../../core/messages.ts";
 import {
 	defaultModelPerProvider,
@@ -99,7 +98,9 @@ import {
 } from "../../core/model-resolver.ts";
 import { CredentialSynchronizationError } from "../../core/model-runtime.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
-import { RADIUS_MCP_URL, RADIUS_PROVIDER_ID } from "../../core/radius.ts";
+import { findMatchingProviders } from "../../core/provider-matching.ts";
+import { RADIUS_PROVIDER_ID } from "../../core/radius.ts";
+import { planRadiusMcpServer } from "../../core/radius-mcp.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
@@ -116,7 +117,7 @@ import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
-import { addMcpServerConfig, loadMcpConfig } from "../../extensions/mcp/config.ts";
+import { addMcpServerConfig } from "../../extensions/mcp/config.ts";
 import type { ManagedRestart } from "../../extensions/restart/index.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardFilePaths, readClipboardText } from "../../utils/clipboard.ts";
@@ -524,6 +525,8 @@ export class InteractiveMode {
 	private changelogMarkdown: string | undefined = undefined;
 	private extensionChangelogUpdates: ExtensionChangelogUpdate[] = [];
 	private startupNoticesShown = false;
+	/** Last cache-warming notice, extended in place while it is the last chat line. */
+	private cacheWarmingNotice: { component: ThemedText; total: { cost: number }; note: string | undefined } | undefined;
 	private anthropicSubscriptionWarningShown = false;
 
 	// Status line tracking (for mutating immediately-sequential status updates)
@@ -594,6 +597,13 @@ export class InteractiveMode {
 	// Extension dialogs shown in the editor slot (select, confirm, input, editor, inline custom).
 	// The last entry is visible; see pushExtensionDialog().
 	private extensionDialogs: Array<{ component: ExtensionDialogComponent; blocked: BlockedStatus | undefined }> = [];
+	/** Numbers the program status sources of blocking overlays, so closing one keeps the others. */
+	private nextBlockingOverlayId = 0;
+	/**
+	 * Open extension overlays (custom with overlay: true) and the function that removes each, in opening
+	 * order. Reset removes only these, not pi's own overlays.
+	 */
+	private readonly extensionOverlays = new Map<OverlayHandle, () => void>();
 	private extensionTerminalInputSubscriptions = new Set<{
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
 		unsubscribe: () => void;
@@ -2719,7 +2729,9 @@ export class InteractiveMode {
 			this.extensionDialogs = [];
 			this.showTopExtensionDialog();
 		}
-		this.ui.hideOverlay();
+		// Reload and session switches replace every extension without calling done(): remove their overlays,
+		// newest first, the same way done() does, but leave the promises pending as for inline dialogs.
+		for (const removeOverlay of [...this.extensionOverlays.values()].reverse()) removeOverlay();
 		this.clearExtensionTerminalInputListeners();
 		this.setExtensionFooter(undefined);
 		this.setExtensionHeader(undefined);
@@ -3208,6 +3220,9 @@ export class InteractiveMode {
 		return new Promise((resolve, reject) => {
 			let component: ExtensionDialogComponent | undefined;
 			let overlayHandle: OverlayHandle | undefined;
+			// An overlay stays blocked until its interaction ends, also while setHidden() hides it.
+			const overlayStatusSource =
+				isOverlay && options?.blocked ? `extension-overlay:${this.nextBlockingOverlayId++}` : undefined;
 			let closed = false;
 			const disposeComponent = () => {
 				try {
@@ -3224,15 +3239,26 @@ export class InteractiveMode {
 				this.ui.requestRender();
 			};
 
+			// Shared by done() and resetExtensionUI(). Removing the map entry first makes a second call a no-op.
+			const removeOverlay = () => {
+				if (!overlayHandle || !this.extensionOverlays.delete(overlayHandle)) return;
+				// Remove this overlay, not the topmost one: another overlay may have opened above it.
+				overlayHandle.hide();
+				if (overlayStatusSource) this.programStatus.setBlocked(overlayStatusSource, undefined);
+				disposeComponent();
+			};
+
 			const close = (result: T) => {
 				if (closed) return;
 				closed = true;
-				// Remove this overlay, not the topmost one: another overlay may have opened above it.
-				if (isOverlay) overlayHandle?.hide();
-				else restoreEditor();
-				// Note: both branches above already call requestRender
-				resolve(result);
-				disposeComponent();
+				if (isOverlay) {
+					removeOverlay();
+					resolve(result);
+				} else {
+					restoreEditor();
+					resolve(result);
+					disposeComponent();
+				}
 			};
 
 			this.session.workingSessionGate
@@ -3258,6 +3284,8 @@ export class InteractiveMode {
 							return w ? { width: w } : undefined;
 						};
 						overlayHandle = this.ui.showOverlay(c, resolveOptions());
+						this.extensionOverlays.set(overlayHandle, removeOverlay);
+						if (overlayStatusSource) this.programStatus.setBlocked(overlayStatusSource, options?.blocked);
 						// Expose handle to caller for visibility control
 						options?.onHandle?.(overlayHandle);
 					} else {
@@ -4427,9 +4455,18 @@ export class InteractiveMode {
 
 	private addCacheWarmingUsage(entry: UsageEntry): void {
 		if (!this.settingsManager.getShowCacheMissNotices()) return;
+		// Back-to-back warms collapse into one line with the cumulative cost.
+		const previous = this.cacheWarmingNotice;
+		if (previous && this.chatContainer.children.at(-1) === previous.component && previous.note === entry.note) {
+			previous.total.cost += entry.usage.cost.total;
+			previous.component.invalidate();
+			return;
+		}
+		const total = { cost: entry.usage.cost.total };
+		const component = new ThemedText(() => theme.fg("dim", formatCacheWarmingUsage(total.cost, entry.note)), 1, 0);
+		this.cacheWarmingNotice = { component, total, note: entry.note };
 		this.chatContainer.addChild(new Spacer(1));
-		const usage = formatCacheWarmingUsage(entry);
-		addChatActivity(this.chatContainer, new ThemedText(() => theme.fg("dim", usage), 1, 0));
+		addChatActivity(this.chatContainer, component);
 	}
 
 	/**
@@ -6207,26 +6244,13 @@ export class InteractiveMode {
 			.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
-	private findLoginProviderOptions(providerRef: string): AuthSelectorProvider[] {
-		const normalizedProviderRef = providerRef.trim().toLowerCase();
-		if (!normalizedProviderRef) {
-			return [];
-		}
-
-		return this.getLoginProviderOptions().filter(
-			(provider) =>
-				provider.id.toLowerCase() === normalizedProviderRef ||
-				provider.name.toLowerCase() === normalizedProviderRef,
-		);
-	}
-
 	private async handleLoginCommand(providerRef?: string): Promise<void> {
 		if (!providerRef) {
 			this.showLoginAuthTypeSelector();
 			return;
 		}
 
-		const providerOptions = this.findLoginProviderOptions(providerRef);
+		const providerOptions = findMatchingProviders(this.getLoginProviderOptions(), providerRef);
 		if (providerOptions.length === 1) {
 			await this.startProviderLogin(providerOptions[0]!);
 			return;
@@ -6758,26 +6782,9 @@ export class InteractiveMode {
 	 * when missing. Nothing is asked when a global server already uses this login.
 	 */
 	private offerRadiusMcpServer(providerId: string, providerName: string): void {
-		const mcpPath = path.join(getAgentDir(), "mcp.json");
-		const normalizeUrl = (url: string) => url.replace(/\/+$/u, "");
-		const { servers } = loadMcpConfig({
-			agentDir: getAgentDir(),
-			cwd: this.sessionManager.getCwd(),
-			projectTrusted: false,
-		});
-		const existing = servers.find(
-			(server) => "url" in server.config && normalizeUrl(server.config.url) === normalizeUrl(RADIUS_MCP_URL),
-		);
-		if (existing && "url" in existing.config && existing.config.auth?.provider === providerId) return;
-
-		let name = existing?.name ?? "radius";
-		if (!existing && servers.some((server) => server.name === name)) name = "radius-mcp";
-		const config: McpHttpServerConfig =
-			existing && "url" in existing.config
-				? { ...existing.config, auth: { provider: providerId } }
-				: { url: RADIUS_MCP_URL, auth: { provider: providerId } };
-		// `auth` replaces the MCP OAuth sign-in.
-		delete config.oauth;
+		const plan = planRadiusMcpServer(providerId, getAgentDir(), this.sessionManager.getCwd());
+		if (!plan) return;
+		const { mcpPath, name, config } = plan;
 
 		this.showSelector((done) => {
 			const selector = new ExtensionSelectorComponent(

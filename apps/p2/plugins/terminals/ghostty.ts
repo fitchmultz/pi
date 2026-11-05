@@ -30,7 +30,10 @@ const RENDER_CURSOR_X = 15;
 const RENDER_CURSOR_Y = 16;
 const RENDER_CURSOR_WIDE_TAIL = 17;
 const ROW_DIRTY = 1;
+const ROW_RAW = 2;
 const ROW_CELLS = 3;
+// GhosttyRowData
+const ROW_DATA_WRAP = 1;
 const CELL_RAW = 1;
 const CELL_STYLE = 2;
 const CELL_GRAPHEMES_LEN = 3;
@@ -38,6 +41,8 @@ const CELL_GRAPHEMES_BUF = 4;
 const CELL_BG = 5;
 const CELL_FG = 6;
 const CELL_HAS_STYLING = 8;
+// GhosttyFormatterFormat
+const FORMAT_PLAIN = 0;
 const FORMAT_VT = 1;
 // GhosttyCellData, GhosttyCellWide
 const CELL_DATA_WIDE = 3;
@@ -80,8 +85,8 @@ export interface Frame {
 		blinking: boolean;
 		color?: number;
 	};
-	/** Changed rows, top to bottom, by viewport row. */
-	changed: { y: number; cells: Cell[] }[];
+	/** Changed rows, top to bottom, by viewport row; `wrapped`: soft-wrapped, its line continues on the next row. */
+	changed: { y: number; cells: Cell[]; wrapped: boolean }[];
 }
 
 export interface KeyInput {
@@ -556,6 +561,18 @@ export class VtTerminal {
 	 * size reproduces this one, for a browser that attaches later.
 	 */
 	snapshot(): Uint8Array {
+		return this.#format(FORMAT_VT);
+	}
+
+	/**
+	 * The active screen as plain text, with the scrollback before it (the alternate screen of a full-screen program has
+	 * none): soft-wrapped lines joined, trailing spaces trimmed.
+	 */
+	text(): string {
+		return new TextDecoder().decode(this.#format(FORMAT_PLAIN));
+	}
+
+	#format(emit: number): Uint8Array {
 		const ghostty = this.#ghostty;
 		const type = "GhosttyFormatterTerminalOptions";
 		const size = ghostty.size(type);
@@ -568,7 +585,7 @@ export class VtTerminal {
 			const flag = (base: number, struct: string, name: string) =>
 				view.setUint8(base + ghostty.field(struct, name), 1);
 			view.setUint32(options + ghostty.field(type, "size"), size, true);
-			view.setUint32(options + ghostty.field(type, "emit"), FORMAT_VT, true);
+			view.setUint32(options + ghostty.field(type, "emit"), emit, true);
 			flag(options, type, "unwrap");
 			flag(options, type, "trim");
 			view.setUint32(
@@ -576,17 +593,19 @@ export class VtTerminal {
 				ghostty.size("GhosttyFormatterTerminalExtra"),
 				true,
 			);
-			// Not `tabstops`: the formatter emits them after the cursor position, moving the cursor (programs rarely
-			// change the default stops anyway).
-			for (const name of ["modes", "scrolling_region", "pwd", "keyboard"])
-				flag(extra, "GhosttyFormatterTerminalExtra", name);
 			view.setUint32(
 				screen + ghostty.field("GhosttyFormatterScreenExtra", "size"),
 				ghostty.size("GhosttyFormatterScreenExtra"),
 				true,
 			);
-			for (const name of ["cursor", "style", "hyperlink", "protection", "kitty_keyboard", "charsets"])
-				flag(screen, "GhosttyFormatterScreenExtra", name);
+			if (emit === FORMAT_VT) {
+				// Not `tabstops`: the formatter emits them after the cursor position, moving the cursor (programs rarely
+				// change the default stops anyway).
+				for (const name of ["modes", "scrolling_region", "pwd", "keyboard"])
+					flag(extra, "GhosttyFormatterTerminalExtra", name);
+				for (const name of ["cursor", "style", "hyperlink", "protection", "kitty_keyboard", "charsets"])
+					flag(screen, "GhosttyFormatterScreenExtra", name);
+			}
 			formatter = ghostty.create("ghostty_formatter_terminal_new", this.handle, options);
 			const result = ghostty.call("ghostty_formatter_format_alloc", formatter, 0, this.#scratch, this.#scratch + 4);
 			if (result !== SUCCESS) throw new Error(`Formatting the terminal failed (${result})`);
@@ -671,6 +690,9 @@ export class VtTerminal {
 				ghostty.call("ghostty_render_state_row_get", this.#rows, ROW_DIRTY, scratch);
 				const rowDirty = ghostty.view().getUint8(scratch) !== 0;
 				if (!(all || dirty === "full" || rowDirty)) continue;
+				ghostty.call("ghostty_render_state_row_get", this.#rows, ROW_RAW, scratch);
+				ghostty.call("ghostty_row_get", ghostty.view().getBigUint64(scratch, true), ROW_DATA_WRAP, scratch);
+				const wrapped = ghostty.view().getUint8(scratch) !== 0;
 				ghostty.view().setUint32(scratch, this.#cells, true);
 				ghostty.call("ghostty_render_state_row_get", this.#rows, ROW_CELLS, scratch);
 				const cells: Cell[] = [];
@@ -716,7 +738,7 @@ export class VtTerminal {
 							: -1;
 					cells.push({ text, width, fg, bg, flags: cellFlags });
 				}
-				changed.push({ y, cells });
+				changed.push({ y, cells, wrapped });
 				ghostty.view().setUint8(scratch, 0);
 				ghostty.call("ghostty_render_state_row_set", this.#rows, 0, scratch);
 			}

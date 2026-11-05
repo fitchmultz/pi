@@ -10,9 +10,13 @@
 
 - Host Session, Harness and Conversation commits accept `{ admission: true }` as a third argument to check the assembled batch, including document revisions, before committing. A confirmed refusal throws `StorageCapacityError` without failing the Session; the callback is not replayed. Use only before external effects.
 
+- `Tx.submission(id)` reads a committed submission record by ID, so a tool can find the entries of its run's inputs (`pi.live.run.inputs`) without scanning the transcript.
+
 ### Changed
 
 - Reduced historical-read work, skipped redundant SQLite writes and avoided repeated copying of partial lines.
+
+- `SqliteStorage.commit()` costs a few SQL statements per call instead of about eight per batch: it reads the check state of all batches up front, checks them in memory, and writes the accepted batches per table in multi-row statements (rows as one JSON array parameter; rows with much text bound column by column), so a group commit over a remote SQLite takes a few round trips, not hundreds. A stored document record that cannot be parsed now rejects the call as a storage failure instead of refusing the batch.
 
 ### Fixed
 

@@ -472,7 +472,10 @@ test("an invalid mcp.json keeps the last valid servers, also across a reload", a
 	const [after] = await until(s1.servers, (value) => isUp("files")(value) && host.starts().length === 2);
 	assert.equal(after!.id, instance!.id);
 	assert.equal(alive(pid), false);
-	assert.match(owner.errors.value.join("\n"), /Invalid mcp.json syntax; keeping the last valid servers/);
+	// The restarted reader reads the half-saved file once more before it reports it.
+	await until(owner.errors, (errors) =>
+		/Invalid mcp.json syntax; keeping the last valid servers/.test(errors.join("\n")),
+	);
 });
 
 test("a view outlives its last reference by the linger: a worker re-taking it keeps its processes", async (t) => {
@@ -584,9 +587,16 @@ test("placement: environments not in envs.json fail; HTTP servers connect with h
 	// One shared docs connection for both sessions, one unshared one per session.
 	assert.equal(status(all, "docs").length, 1);
 	assert.equal([...sessions].filter((session) => session.startsWith("/mine:")).length, 2);
-	assert.equal(host.starts().length, 0);
+	// Only s2's own stdio server runs on this machine; s1's are on environments.
+	await until(s2.servers, isUp("here"));
+	assert.equal(host.starts().length, 1);
 	assert.ok(authorizations.includes("Bearer secret-token"));
 	assert.equal(textOf(await s1.call({ location: remote, server: "docs", tool: "lookup", args: {} }, TEST)), "found");
+	// A call of a server waiting for a sign-in tells the model where the user signs in.
+	await assert.rejects(
+		s1.call({ location: remote, server: "locked", tool: "lookup", args: {} }, TEST),
+		/needs a sign-in: ask the user to sign in from the MCP panel in p2's sidebar \(or at \/mcp\/sign-in\/locked on p2\)/,
+	);
 });
 
 test("a project's mcp.json: its servers run at its location for its session, it turns the owner's on and off there, refusals are reported", async (t) => {
@@ -747,6 +757,8 @@ test("a reload of the plugin keeps the leases and the tools: the new supervisor 
 	const stop = follow(s1.servers, (servers) => {
 		fewest = Math.min(fewest, servers[0]?.tools.length ?? 0);
 	});
+	// The manager's memento of the listed tools is written a moment after the list changed: let it catch up.
+	await settled(host.manager.instances);
 	// A new facet value: a reload, not the same code again.
 	await host.fixture.reload([{ ...mcpServer }]);
 	const [after] = await until(s1.servers, (value) => isUp("files")(value) && host.starts().length === 2);

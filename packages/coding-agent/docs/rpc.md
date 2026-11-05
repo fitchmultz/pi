@@ -90,7 +90,7 @@ Clients must also handle child-process startup failures, unexpected exits, stder
 
 ## Shutdown
 
-Close the child's stdin to request an orderly shutdown. Pi disposes the active runtime before exiting. Clients should still handle process signals and unexpected exits.
+Close the child's stdin to request an orderly shutdown. The fork waits for shutdown handlers and pending credential writes before exiting, so give it time to exit before killing it. Ordinary shutdown does not wait for tools that ignore cancellation; certified working-session exits use strict finalization. Clients should still handle process signals and unexpected exits.
 
 SIGTERM and SIGHUP also start an orderly shutdown. Once a shutdown has started, from either stdin EOF or a signal, a stdin EOF or a single signal does not interrupt it; a second signal exits at once. Closing stdin and sending SIGTERM together is safe.
 
