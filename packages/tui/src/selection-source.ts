@@ -210,6 +210,9 @@ export class SelectionSource {
 
 	wrap(lines: string[]): string[] {
 		if (!lines.length) return lines;
+		if (!this.contentRanges.length && lines.some((line) => stripTerminalSequences(line).trim())) {
+			this.fullyMapped = false;
+		}
 		if (!this.fullyMapped) return lines.map((line) => line.replace(SELECTION_METADATA, ""));
 		this.contentRanges = mergeRanges(this.contentRanges);
 		return lines.map((line, index) => {
