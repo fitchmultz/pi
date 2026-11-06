@@ -1,4 +1,4 @@
-import type { Component } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { readFileSync } from "fs";
 import { describe, expect, it } from "vitest";
 import { ansiLinesToHtml } from "../src/core/export-html/ansi-to-html.ts";
@@ -22,19 +22,22 @@ describe("export HTML tool output whitespace", () => {
 	});
 
 	it("trims TUI spacing lines from custom tool result HTML", () => {
-		const component: Component = { render: () => ["", "\u001b[31mone\u001b[0m", "two", ""], invalidate: () => {} };
+		const component = new Text("\u001b[31mone\u001b[0m\ntwo", 0, 1);
 		const tool = {
 			name: "custom",
 			label: "custom",
 			description: "custom",
+			renderCall: () => component,
 			renderResult: () => component,
 		} as unknown as ToolDefinition;
 		const renderer = createToolHtmlRenderer({
 			getToolRenderers: () => tool,
 			theme: {} as Theme,
 			cwd: "/tmp",
+			width: 3,
 		});
 
+		expect(renderer.renderCall("id", "custom", {})).not.toContain("\x1b");
 		expect(renderer.renderResult("id", "custom", [], undefined, false)?.expanded).toBe(
 			'<div class="ansi-line"><span style="color:#800000">one</span></div><div class="ansi-line">two</div>',
 		);

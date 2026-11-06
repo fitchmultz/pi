@@ -4,6 +4,7 @@
 
 import { performance } from "node:perf_hooks";
 import { isKeyRelease, matchesKey } from "./keys.ts";
+import { stripSelectionMetadata } from "./selection-markers.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	parseOscColorResponse,
@@ -1458,7 +1459,8 @@ export abstract class TuiBase extends Container implements TUI {
 	protected applyLineResets(lines: string[]): string[] {
 		const reset = SEGMENT_RESET;
 		for (let i = 0; i < lines.length; i++) {
-			const line = lines[i];
+			const line = stripSelectionMetadata(lines[i]);
+			lines[i] = line;
 			if (!isImageLine(line)) {
 				// Cursor markers are internal render metadata and must never reach terminal output.
 				lines[i] = normalizeTerminalOutput(line.replaceAll(CURSOR_MARKER, "")) + reset;

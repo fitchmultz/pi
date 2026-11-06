@@ -13,7 +13,6 @@ import { stripAnsi } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
-import { truncateToVisualLines } from "./visual-truncate.ts";
 
 // Preview line limit when not expanded (matches tool execution behavior)
 const PREVIEW_LINES = 20;
@@ -28,7 +27,7 @@ export class BashExecutionComponent extends Container {
 	private fullOutputPath?: string;
 	private expanded = false;
 	private compactView: boolean;
-	private compactPreview?: { width: number; lines: string[] };
+	private compactPreview?: { width: number; lines: string[]; components: Text[] };
 	private contentContainer: Container;
 	/** `dim` marks `!!` commands, whose output is excluded from the model context. */
 	private readonly colorKey: "dim" | "bashMode";
@@ -111,10 +110,11 @@ export class BashExecutionComponent extends Container {
 						: "";
 		const output = this.outputLines.findLast((line) => line.trim()) ?? "";
 		const detail = [status, output ? theme.fg("muted", output) : ""].filter(Boolean).join(" ");
-		const lines = (detail ? [command, detail] : [command]).flatMap((line) =>
-			new Text(truncateToWidth(line, Math.max(1, width - this.outputPad * 2)), this.outputPad, 0).render(width),
+		const components = (detail ? [command, detail] : [command]).map(
+			(line) => new Text(truncateToWidth(line, Math.max(1, width - this.outputPad * 2)), this.outputPad, 0),
 		);
-		this.compactPreview = { width, lines };
+		const lines = components.flatMap((component) => component.render(width));
+		this.compactPreview = { width, lines, components };
 		return lines;
 	}
 
@@ -197,16 +197,15 @@ export class BashExecutionComponent extends Container {
 				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
 				this.contentContainer.addChild(new Text(`\n${displayText}`, this.outputPad, 0));
 			} else {
-				// Use shared visual truncation utility with width-aware caching
 				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
 				const styledInput = `\n${styledOutput}`;
+				const output = new Text(styledInput, this.outputPad, 0);
 				let cachedWidth: number | undefined;
 				let cachedLines: string[] | undefined;
 				this.contentContainer.addChild({
 					render: (width: number) => {
 						if (cachedLines === undefined || cachedWidth !== width) {
-							const result = truncateToVisualLines(styledInput, PREVIEW_LINES, width, this.outputPad);
-							cachedLines = result.visualLines;
+							cachedLines = output.render(width).slice(-PREVIEW_LINES);
 							cachedWidth = width;
 						}
 						return cachedLines ?? [];

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import type { TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { SELECTION_METADATA } from "../../tui/src/selection-markers.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
@@ -108,5 +109,5 @@ function renderEditTool(definition: ToolDefinition, cwd: string): string[] {
 		{ requestRender() {} } as unknown as TUI,
 		cwd,
 	);
-	return component.render(40);
+	return component.render(40).map((line) => line.replace(SELECTION_METADATA, ""));
 }

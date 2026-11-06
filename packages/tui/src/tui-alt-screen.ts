@@ -18,6 +18,7 @@ import {
 	type ScrollbarGeometry,
 } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
+import { copySelectionSource, type SelectionColumns } from "./selection-source.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	deleteAllKittyImages,
@@ -204,6 +205,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	readonly mode = "fullscreen" as const;
 	readonly [VIEWPORT_TUI] = true as const;
 	private previousScreen: string[] = [];
+	private selectionScreen: string[] = [];
 	private lastDocument: string[] = [];
 	private previousScreenWidth = 0;
 	private previousScreenHeight = 0;
@@ -495,6 +497,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	protected override resetRenderState(): void {
 		this.previousScreen = [];
+		this.selectionScreen = [];
 		this.previousScreenWidth = 0;
 		this.previousScreenHeight = 0;
 		this.currentLayout = undefined;
@@ -1453,24 +1456,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private getActiveSelectionText(): string | undefined {
 		const selection = this.getSelectionBounds();
 		if (!selection) return undefined;
-		let sourceLines: readonly string[] = this.previousScreen;
+		let sourceLines: readonly string[] = this.selectionScreen;
 		if (selection.start.scrollView) {
 			if (!this.currentLayout) return undefined;
 			const box = getScrollViewBox(this.currentLayout, selection.start.scrollView);
 			if (!box?.scrollContentLines) return undefined;
 			sourceLines = box.scrollContentLines;
 		}
-		const lines: string[] = [];
+		const selected: SelectionColumns[] = [];
 		for (let row = selection.start.row; row <= selection.end.row; row++) {
 			const line = sourceLines[row] ?? "";
 			const columns = this.getSelectionColumns(line, row, selection);
-			lines.push(
-				stripTerminalSequences(
-					sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
-				).trimEnd(),
-			);
+			selected.push({ row, ...columns });
 		}
-		const text = lines.join("\n");
+		const text = copySelectionSource(sourceLines, selected);
 		return text.length === 0 ? undefined : text;
 	}
 
@@ -1709,6 +1708,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		screen = this.compositeFlashes(screen, width, height);
 
 		const cursorPos = this.extractCursorPosition(screen, height);
+		this.selectionScreen = [...screen];
 		screen = this.applyLineResets(screen).map((line) => {
 			if (isImageLine(line) || visibleWidth(line) <= width) return line;
 			return sliceByColumn(line, 0, width, true);

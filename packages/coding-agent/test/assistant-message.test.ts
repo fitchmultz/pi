@@ -1,6 +1,7 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { SELECTION_METADATA } from "../../tui/src/selection-markers.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
 import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -62,7 +63,9 @@ describe("AssistantMessageComponent", () => {
 
 		initTheme("light");
 		component.invalidate();
-		expect(component.render(80)).toEqual(new AssistantMessageComponent(message).render(80));
+		expect(component.render(80).map((line) => line.replace(SELECTION_METADATA, ""))).toEqual(
+			new AssistantMessageComponent(message).render(80).map((line) => line.replace(SELECTION_METADATA, "")),
+		);
 		initTheme("dark");
 	});
 
