@@ -187,12 +187,12 @@ export class SelectionSource {
 		return result + SELECTION_SOURCE_END;
 	}
 
-	atomic(styled: string, source: SourceText): string {
+	atomic(styled: string, source: SourceText, kind: "atomic" | "generated" = "atomic"): string {
 		if (!source.spans.length || !styled) return styled;
 		const start = source.spans[0].sourceStart;
 		const end = source.spans[source.spans.length - 1].sourceEnd;
-		this.contentRanges.push({ start, end });
-		return selectionRunMarker({ kind: "atomic", id: this.id, start, end }) + styled + SELECTION_SOURCE_END;
+		if (kind === "atomic") this.contentRanges.push({ start, end });
+		return selectionRunMarker({ kind, id: this.id, start, end }) + styled + SELECTION_SOURCE_END;
 	}
 
 	wrap(lines: string[]): string[] {
@@ -213,9 +213,17 @@ export class SelectionSource {
 		});
 	}
 
-	select(ranges: readonly SourceRange[]): string {
+	covers(ranges: readonly SourceRange[], target: SourceRange): boolean {
+		return this.contentRanges.every((content) => {
+			const start = Math.max(content.start, target.start);
+			const end = Math.min(content.end, target.end);
+			return end <= start || ranges.some((range) => range.start <= start && range.end >= end);
+		});
+	}
+
+	select(ranges: readonly SourceRange[]): { text: string; suffix: string } {
 		let selected = mergeRanges(ranges);
-		if (!selected.length) return this.text.trim() ? "" : this.text;
+		if (!selected.length) return { text: this.text.trim() ? "" : this.text, suffix: "" };
 		const bridged: SourceRange[] = [];
 		for (const range of selected) {
 			const previous = bridged[bridged.length - 1];
@@ -241,9 +249,17 @@ export class SelectionSource {
 				selected.some((range) => range.start <= content.start && range.end >= content.end),
 			)
 		) {
-			return this.text;
+			return { text: this.text, suffix: "" };
 		}
-		return selected.map(({ start, end }) => this.text.slice(start, end)).join("\n");
+		const end = selected[selected.length - 1].end;
+		let suffixStart = end;
+		for (const [, , contentEnd, outerEnd] of this.formats) {
+			if (contentEnd <= end) suffixStart = Math.max(suffixStart, outerEnd);
+		}
+		return {
+			text: selected.map(({ start, end }) => this.text.slice(start, end)).join("\n"),
+			suffix: this.contentRanges.some((content) => content.end > end) ? "" : this.text.slice(suffixStart),
+		};
 	}
 }
 
@@ -262,6 +278,13 @@ interface SelectedSource {
 export function copySelectionSource(lines: readonly string[], selection: readonly SelectionColumns[]): string {
 	const sources = new Map<number, SelectedSource>();
 	const parts: Array<SelectedSource | string> = [];
+	const generated = new Map<SourceRange, SelectedSource>();
+	const displayedText = () =>
+		selection
+			.map(({ row, start, end }) =>
+				stripTerminalSequences(sliceByColumn(lines[row] ?? "", start, Math.max(0, end - start), true)).trimEnd(),
+			)
+			.join("\n");
 	const selectedSource = (id: number): SelectedSource | undefined => {
 		let selected = sources.get(id);
 		if (!selected) {
@@ -316,14 +339,18 @@ export function copySelectionSource(lines: readonly string[], selection: readonl
 					if (selected) {
 						if (rowDocument && rowDocument !== source.source.document) mixedDocuments = true;
 						rowDocument = source.source.document;
-						if (!source.ranges.length) parts.push(source);
-						const start = run.kind === "identity" ? run.offset : run.start;
-						const end = run.kind === "identity" ? run.offset + segment.length : run.end;
-						const previous = source.ranges[source.ranges.length - 1];
-						if (previous && start <= previous.end && end >= previous.start) {
-							previous.start = Math.min(previous.start, start);
-							previous.end = Math.max(previous.end, end);
-						} else source.ranges.push({ start, end });
+						if (run.kind === "generated") {
+							generated.set(run, source);
+						} else {
+							if (!source.ranges.length) parts.push(source);
+							const start = run.kind === "identity" ? run.offset : run.start;
+							const end = run.kind === "identity" ? run.offset + segment.length : run.end;
+							const previous = source.ranges[source.ranges.length - 1];
+							if (previous && start <= previous.end && end >= previous.start) {
+								previous.start = Math.min(previous.start, start);
+								previous.end = Math.max(previous.end, end);
+							} else source.ranges.push({ start, end });
+						}
 					}
 				} else if (selected && activeSources.size === 0) {
 					fallback += segment;
@@ -335,25 +362,29 @@ export function copySelectionSource(lines: readonly string[], selection: readonl
 		}
 		// Independent side-by-side components have no shared source order or separator.
 		if (mixedDocuments || (rowDocument && fallback.trim())) {
-			return selection
-				.map(({ row, start, end }) =>
-					stripTerminalSequences(sliceByColumn(lines[row] ?? "", start, Math.max(0, end - start), true)).trimEnd(),
-				)
-				.join("\n");
+			return displayedText();
 		}
 		if (!mappedRow || fallback.trim()) parts.push(`${fallback.trimEnd()}\n`);
 	}
+	// A generated link URL belongs to its label's source only when that label is fully selected.
+	for (const [range, selected] of generated) {
+		if (!selected.source.covers(selected.ranges, range)) return displayedText();
+	}
 	let text = "";
 	let previousDocument: symbol | undefined;
+	let previousSuffix = "";
 	for (const [index, part] of parts.entries()) {
 		if (typeof part === "string") {
 			if (previousDocument && text && !text.endsWith("\n")) text += "\n";
 			text += index === parts.length - 1 ? part.slice(0, -1) : part;
 			previousDocument = undefined;
 		} else {
+			if (previousDocument === part.source.document) text += previousSuffix;
 			if (previousDocument && previousDocument !== part.source.document && !text.endsWith("\n")) text += "\n";
-			text += part.source.select(part.ranges);
+			const selected = part.source.select(part.ranges);
+			text += selected.text;
 			previousDocument = part.source.document;
+			previousSuffix = selected.suffix;
 		}
 	}
 	return text;

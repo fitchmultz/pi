@@ -6,9 +6,9 @@ export class MarkdownSource extends SelectionSource {
 	private readonly rawSources = new WeakMap<object, SourceText>();
 	private readonly contentSources = new WeakMap<object, SourceText>();
 
-	constructor(original: string, source: SourceText, token: Token, document: symbol) {
+	constructor(original: string, source: SourceText, tokens: readonly Token[], document: symbol) {
 		super(original, document);
-		this.indexTokens([token], source);
+		this.indexTokens(tokens, source);
 	}
 
 	raw(token: object): SourceText {

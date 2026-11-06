@@ -22,7 +22,7 @@ Use `/hotkeys` to inspect Pi's active shortcuts. See [Keybindings](keybindings.m
 
 In fullscreen mode, drag over the text you want. Pi copies the selected source without display padding or artificial line breaks. Paragraph breaks and code indentation stay intact.
 
-Selecting a complete formatted phrase includes its Markdown syntax. For example, selecting all of **Use Balanced as the default.** copies `**Use Balanced as the default.**`. Selecting only `Balanced` copies that word.
+Selecting a complete formatted phrase includes its Markdown syntax. For example, selecting all of **Use Balanced as the default.** copies `**Use Balanced as the default.**`. Selecting only `Balanced` copies that word. A complete block with reference-style links also includes its hidden URL definitions.
 
 Copy-on-select is on by default. If you turn off `fullscreenCopyOnSelect`, use your configured copy shortcut after selecting. `/copy` still copies the entire last assistant message.
 

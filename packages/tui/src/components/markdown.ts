@@ -464,9 +464,24 @@ export class Markdown implements Component {
 		let sourceOffset = 0;
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
+			const blockTokens = [token];
+			if (!reuseBlocks) {
+				// Keep invisible reference definitions with a visible block without changing its rendered rows.
+				let hasContent = token.type !== "space" && token.type !== "def";
+				while (i + 1 < tokens.length) {
+					const next = tokens[i + 1];
+					const invisible = next.type === "space" || next.type === "def";
+					if (hasContent && !invisible) break;
+					hasContent ||= !invisible;
+					blockTokens.push(next);
+					i++;
+				}
+			}
 			const tokenOffset = normalizedText.indexOf(token.raw, sourceOffset);
-			const mapped = normalizedSource.slice(tokenOffset, tokenOffset + token.raw.length);
-			sourceOffset = tokenOffset + token.raw.length;
+			for (const member of blockTokens) {
+				sourceOffset = normalizedText.indexOf(member.raw, sourceOffset) + member.raw.length;
+			}
+			const mapped = normalizedSource.slice(tokenOffset, sourceOffset);
 			const originalStart = mapped.spans[0]?.sourceStart ?? 0;
 			const originalEnd = mapped.spans[mapped.spans.length - 1]?.sourceEnd ?? originalStart;
 			const original = text.slice(originalStart, originalEnd);
@@ -485,11 +500,11 @@ export class Markdown implements Component {
 									sourceEnd: span.sourceEnd - originalStart,
 								})),
 							),
-							token,
+							blockTokens,
 							this.selectionDocument,
 						)
 					: undefined;
-				this.renderBlock(block, token, nextTokenType, width, contentWidth);
+				this.renderBlock(block, blockTokens, nextTokenType, width, contentWidth);
 				block.source = this.blockSource;
 				this.blockSource = undefined;
 			}
@@ -524,7 +539,7 @@ export class Markdown implements Component {
 	/** Render one top-level block to output lines: wrapped, with margins, and padded or backgrounded to the width. */
 	private renderBlock(
 		block: RenderedBlock,
-		token: Token,
+		tokens: readonly Token[],
 		nextTokenType: string | undefined,
 		width: number,
 		contentWidth: number,
@@ -534,7 +549,10 @@ export class Markdown implements Component {
 		const rightMargin = " ".repeat(this.paddingX);
 		const bgFn = this.defaultTextStyle?.bgColor;
 		const lines: string[] = [];
-		for (const line of this.renderToken(token, contentWidth, nextTokenType)) {
+		const rendered = tokens.flatMap((token, index) =>
+			this.renderToken(token, contentWidth, tokens[index + 1]?.type ?? nextTokenType),
+		);
+		for (const line of rendered) {
 			if (isImageLine(line)) {
 				lines.push(line);
 				continue;
@@ -1007,9 +1025,12 @@ export class Markdown implements Component {
 						} else {
 							const raw = source?.raw(token);
 							const start = raw?.text.lastIndexOf(token.href) ?? -1;
-							const destination =
-								raw && start >= 0 ? raw.slice(start, start + token.href.length) : new SourceText("", []);
-							const url = source?.annotate(token.href, destination) ?? token.href;
+							const url =
+								source && raw && contentSource
+									? start >= 0
+										? source.annotate(token.href, raw.slice(start, start + token.href.length))
+										: source.atomic(token.href, contentSource, "generated")
+									: token.href;
 							result += styledLink + this.theme.linkUrl(` (${url})`) + stylePrefix;
 						}
 					}
