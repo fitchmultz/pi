@@ -15,6 +15,7 @@ import {
 	setCellDimensions,
 } from "../src/terminal-image.ts";
 import { type Component, CURSOR_MARKER, renderFakeCursor, type TUI } from "../src/tui.ts";
+import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { sliceByColumn } from "../src/utils.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -37,6 +38,20 @@ class InputComponent extends TestComponent {
 
 	handleInput(data: string): void {
 		this.lines = [data];
+	}
+}
+
+/** Stops its TUI on any key, like the CLI's suspend and external-editor keys. */
+class StopOnInputComponent extends TestComponent {
+	private readonly tui: TUI;
+
+	constructor(tui: TUI) {
+		super();
+		this.tui = tui;
+	}
+
+	handleInput(_data: string): void {
+		this.tui.stop();
 	}
 }
 
@@ -116,6 +131,47 @@ function getCellItalic(terminal: VirtualTerminal, row: number, col: number): num
 	return cell.isItalic();
 }
 
+const nextTick = (): Promise<void> => new Promise((resolve) => process.nextTick(resolve));
+
+/**
+ * Ways to stop a TUI with render work in flight: a queued frame, an armed throttle timer, or a request made while
+ * stopped. Each returns with the TUI stopped and any render callback it queued already run.
+ */
+const pendingRenderStops: Array<{ name: string; stop: (tui: TUI, terminal: VirtualTerminal) => Promise<void> }> = [
+	{
+		name: "a frame requested before stop()",
+		stop: async (tui) => {
+			tui.requestRender();
+			tui.stop();
+			await nextTick();
+		},
+	},
+	{
+		name: "a throttled frame armed at stop()",
+		stop: async (tui) => {
+			tui.requestRender();
+			await nextTick();
+			tui.stop();
+		},
+	},
+	{
+		name: "a frame requested while stopped",
+		stop: async (tui) => {
+			tui.stop();
+			tui.requestRender();
+			await nextTick();
+		},
+	},
+	{
+		// The key's own render request arrives after its handler stopped the TUI.
+		name: "a key whose handler stopped the TUI",
+		stop: async (_tui, terminal) => {
+			terminal.sendInput("x");
+			await nextTick();
+		},
+	},
+];
+
 describe("TUI render scheduling", () => {
 	it("renders keyboard input without waiting for a throttled frame", async () => {
 		const terminal = new VirtualTerminal(40, 10);
@@ -140,6 +196,39 @@ describe("TUI render scheduling", () => {
 		assert.deepStrictEqual(component.lines, ["typed"]);
 		tui.stop();
 	});
+
+	for (const Renderer of [TuiMainScreen, TuiAltScreen]) {
+		for (const { name, stop } of pendingRenderStops) {
+			it(`${Renderer.name} renders after stop() and start() with ${name}`, async () => {
+				const terminal = new VirtualTerminal(40, 10);
+				const tui: TUI = new Renderer(terminal);
+				const component = new StopOnInputComponent(tui);
+				component.lines = ["initial"];
+				tui.addChild(component);
+				tui.setFocus(component);
+				tui.start();
+				await terminal.waitForRender();
+
+				component.lines = ["pending"];
+				await stop(tui, terminal);
+				tui.start();
+				await terminal.waitForRender();
+				assert.ok(
+					terminal.getViewport().some((line) => line.includes("pending")),
+					"start() should render the current state",
+				);
+
+				component.lines = ["updated"];
+				tui.requestRender();
+				await terminal.waitForRender();
+				assert.ok(
+					terminal.getViewport().some((line) => line.includes("updated")),
+					"ordinary render requests should keep rendering",
+				);
+				tui.stop();
+			});
+		}
+	}
 });
 
 describe("TUI debug logging", () => {

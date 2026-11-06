@@ -19,6 +19,7 @@
 - Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
 
 - Fixed Markdown rendering HTML comments (`<!-- ... -->`) as visible text ([#11710](https://github.com/earendil-works/pi/issues/11710))
+- Fixed `start()` after `stop()` drawing nothing, and ignoring later `requestRender()` calls until a forced render, when a render was pending at `stop()` or requested while stopped, for example by the key handler that stopped the TUI.
 
 ## [1.5.0] - 2026-11-02
 
