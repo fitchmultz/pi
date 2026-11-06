@@ -1,14 +1,14 @@
 import type { Token, Tokens } from "marked";
-import { SelectionSource, SourceText } from "../selection-source.ts";
+import { type SelectionDocument, SelectionSource, SourceText } from "../selection-source.ts";
 
 /** Maps Marked's declared token transformations back to one original Markdown block. */
 export class MarkdownSource extends SelectionSource {
 	private readonly rawSources = new WeakMap<object, SourceText>();
 	private readonly contentSources = new WeakMap<object, SourceText>();
 
-	constructor(original: string, source: SourceText, tokens: readonly Token[], document: symbol) {
-		super(original, document);
-		this.indexTokens(tokens, source);
+	constructor(original: string, source: SourceText, token: Token, document: SelectionDocument, offset: number) {
+		super(original, document, offset);
+		this.indexTokens([token], source);
 	}
 
 	raw(token: object): SourceText {
@@ -51,7 +51,7 @@ export class MarkdownSource extends SelectionSource {
 					const atx = /^ {0,3}#{1,6}(?:[ \t]+|$)/.exec(raw.text);
 					content = atx ? raw.slice(atx[0].length).lines(token.text) : raw.lines(token.text);
 					this.indexTokens(token.tokens ?? [], content);
-					this.format(raw, content);
+					this.format(raw.slice(0, raw.text.trimEnd().length), content);
 					break;
 				}
 				case "strong":

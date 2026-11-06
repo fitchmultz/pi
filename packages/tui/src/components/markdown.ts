@@ -4,7 +4,7 @@ import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens, ty
 import markedCjkFriendly from "marked-cjk-friendly";
 import { renderLatex } from "../latex.ts";
 import { SELECTION_METADATA, SELECTION_SOURCE_END } from "../selection-markers.ts";
-import { SourceText } from "../selection-source.ts";
+import { SelectionDocument, SourceText } from "../selection-source.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, cjkPunctuationRegex, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -380,8 +380,7 @@ export class Markdown implements Component {
 	// Highlighted code of the block being rendered, only set while renderBlock runs.
 	private blockHighlightedCode?: Map<string, string[]>;
 	private blockSource?: MarkdownSource;
-	private selectionSources: MarkdownSource[] = [];
-	private readonly selectionDocument = Symbol();
+	private readonly selectionDocument = new SelectionDocument();
 
 	constructor(
 		text: string,
@@ -422,12 +421,13 @@ export class Markdown implements Component {
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
 			return this.cachedLines;
 		}
-		this.selectionSources = [];
+		this.selectionDocument.sources.length = 0;
 
 		// Calculate available width for content (subtract horizontal padding)
 		const contentWidth = Math.max(1, width - this.paddingX * 2);
 		const text = this.options.transform?.(this.text, contentWidth) ?? this.text;
 		const sourceUnchanged = text === this.text;
+		this.selectionDocument.text = text;
 
 		// Don't render anything if there's no actual text
 		if (!text || text.trim() === "") {
@@ -464,31 +464,21 @@ export class Markdown implements Component {
 		let sourceOffset = 0;
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
-			const blockTokens = [token];
-			if (!reuseBlocks) {
-				// Keep invisible reference definitions with a visible block without changing its rendered rows.
-				let hasContent = token.type !== "space" && token.type !== "def";
-				while (i + 1 < tokens.length) {
-					const next = tokens[i + 1];
-					const invisible = next.type === "space" || next.type === "def";
-					if (hasContent && !invisible) break;
-					hasContent ||= !invisible;
-					blockTokens.push(next);
-					i++;
-				}
-			}
 			const tokenOffset = normalizedText.indexOf(token.raw, sourceOffset);
-			for (const member of blockTokens) {
-				sourceOffset = normalizedText.indexOf(member.raw, sourceOffset) + member.raw.length;
-			}
-			const mapped = normalizedSource.slice(tokenOffset, sourceOffset);
+			const mapped = normalizedSource.slice(tokenOffset, tokenOffset + token.raw.length);
+			sourceOffset = tokenOffset + token.raw.length;
 			const originalStart = mapped.spans[0]?.sourceStart ?? 0;
 			const originalEnd = mapped.spans[mapped.spans.length - 1]?.sourceEnd ?? originalStart;
 			const original = text.slice(originalStart, originalEnd);
 			const nextTokenType = tokens[i + 1]?.type;
 			const reused = reuseBlocks ? (blocks.get(original) ?? previousBlocks?.get(original)) : undefined;
 			const block: RenderedBlock = reused ?? { width: -1, nextTokenType, lines: [], highlightedCode: new Map() };
-			if (block.width !== width || block.nextTokenType !== nextTokenType || !!block.source !== sourceUnchanged) {
+			if (
+				block.width !== width ||
+				block.nextTokenType !== nextTokenType ||
+				!!block.source !== sourceUnchanged ||
+				(block.source && block.source.offset !== originalStart)
+			) {
 				this.blockSource = sourceUnchanged
 					? new MarkdownSource(
 							original,
@@ -500,15 +490,16 @@ export class Markdown implements Component {
 									sourceEnd: span.sourceEnd - originalStart,
 								})),
 							),
-							blockTokens,
+							token,
 							this.selectionDocument,
+							originalStart,
 						)
 					: undefined;
-				this.renderBlock(block, blockTokens, nextTokenType, width, contentWidth);
+				this.renderBlock(block, token, nextTokenType, width, contentWidth);
 				block.source = this.blockSource;
 				this.blockSource = undefined;
 			}
-			if (block.source) this.selectionSources.push(block.source);
+			if (block.source) this.selectionDocument.sources.push(block.source);
 			if (reuseBlocks) blocks.set(original, block);
 			for (const line of block.lines) {
 				contentLines.push(line);
@@ -539,7 +530,7 @@ export class Markdown implements Component {
 	/** Render one top-level block to output lines: wrapped, with margins, and padded or backgrounded to the width. */
 	private renderBlock(
 		block: RenderedBlock,
-		tokens: readonly Token[],
+		token: Token,
 		nextTokenType: string | undefined,
 		width: number,
 		contentWidth: number,
@@ -549,10 +540,7 @@ export class Markdown implements Component {
 		const rightMargin = " ".repeat(this.paddingX);
 		const bgFn = this.defaultTextStyle?.bgColor;
 		const lines: string[] = [];
-		const rendered = tokens.flatMap((token, index) =>
-			this.renderToken(token, contentWidth, tokens[index + 1]?.type ?? nextTokenType),
-		);
-		for (const line of rendered) {
+		for (const line of this.renderToken(token, contentWidth, nextTokenType)) {
 			if (isImageLine(line)) {
 				lines.push(line);
 				continue;

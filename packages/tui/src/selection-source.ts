@@ -107,18 +107,31 @@ const sourceRecords = new Map<number, WeakRef<SelectionSource>>();
 const sourceCleanup = new FinalizationRegistry<number>((id) => sourceRecords.delete(id));
 const PROMPT_MARKER = /^\x1b\]133;[ABC](?:\x07|\x1b\\)$/;
 
+/** Original document and the source blocks owned by its current rendered frame. */
+export class SelectionDocument {
+	text: string;
+	readonly sources: SelectionSource[] = [];
+
+	constructor(text = "") {
+		this.text = text;
+	}
+}
+
 /** One cached rendered block owns its source once, not once per wrapped screen row. */
 export class SelectionSource {
 	readonly id = ++nextSourceId;
 	readonly text: string;
-	readonly document: symbol;
+	readonly document: SelectionDocument;
+	readonly offset: number;
 	readonly formats: Array<readonly [number, number, number, number]> = [];
 	private contentRanges: SourceRange[] = [];
 	private fullyMapped = true;
 
-	constructor(text: string, document = Symbol()) {
+	constructor(text: string, document?: SelectionDocument, offset = 0) {
 		this.text = text;
-		this.document = document;
+		this.document = document ?? new SelectionDocument(text);
+		this.offset = offset;
+		if (!document) this.document.sources.push(this);
 		sourceRecords.set(this.id, new WeakRef(this));
 		sourceCleanup.register(this, this.id);
 	}
@@ -214,18 +227,48 @@ export class SelectionSource {
 	}
 
 	covers(ranges: readonly SourceRange[], target: SourceRange): boolean {
+		const selected = this.resolveRanges(ranges);
 		return this.contentRanges.every((content) => {
 			const start = Math.max(content.start, target.start);
 			const end = Math.min(content.end, target.end);
-			return end <= start || ranges.some((range) => range.start <= start && range.end >= end);
+			return end <= start || selected.some((range) => range.start <= start && range.end >= end);
 		});
 	}
 
-	select(ranges: readonly SourceRange[]): { text: string; suffix: string } {
-		let selected = mergeRanges(ranges);
-		if (!selected.length) return { text: this.text.trim() ? "" : this.text, suffix: "" };
+	select(ranges: readonly SourceRange[]): { text: string; start: number; end: number; complete: boolean } {
+		const selected = this.resolveRanges(ranges);
+		if (!selected.length) {
+			return {
+				text: this.text.trim() ? "" : this.text,
+				start: 0,
+				end: this.text.length,
+				complete: this.fullyMapped && this.contentRanges.length === 0,
+			};
+		}
+		if (
+			this.contentRanges.every((content) =>
+				selected.some((range) => range.start <= content.start && range.end >= content.end),
+			)
+		) {
+			return { text: this.text, start: 0, end: this.text.length, complete: this.fullyMapped };
+		}
+		let start = selected[0].start;
+		let end = selected[selected.length - 1].end;
+		for (const [outerStart, contentStart, contentEnd, outerEnd] of this.formats) {
+			if (contentStart >= start) start = Math.min(start, outerStart);
+			if (contentEnd <= end) end = Math.max(end, outerEnd);
+		}
+		return {
+			text: selected.map(({ start, end }) => this.text.slice(start, end)).join("\n"),
+			start,
+			end,
+			complete: false,
+		};
+	}
+
+	private resolveRanges(ranges: readonly SourceRange[]): SourceRange[] {
 		const bridged: SourceRange[] = [];
-		for (const range of selected) {
+		for (const range of mergeRanges(ranges)) {
 			const previous = bridged[bridged.length - 1];
 			const gapHasContent =
 				previous &&
@@ -238,28 +281,13 @@ export class SelectionSource {
 			if (previous && !gapHasContent) previous.end = range.end;
 			else bridged.push({ ...range });
 		}
-		selected = bridged;
+		let selected = bridged;
 		for (const [start, contentStart, contentEnd, end] of this.formats) {
 			if (selected.some((range) => range.start <= contentStart && range.end >= contentEnd)) {
 				selected = mergeRanges([...selected, { start, end }]);
 			}
 		}
-		if (
-			this.contentRanges.every((content) =>
-				selected.some((range) => range.start <= content.start && range.end >= content.end),
-			)
-		) {
-			return { text: this.text, suffix: "" };
-		}
-		const end = selected[selected.length - 1].end;
-		let suffixStart = end;
-		for (const [, , contentEnd, outerEnd] of this.formats) {
-			if (contentEnd <= end) suffixStart = Math.max(suffixStart, outerEnd);
-		}
-		return {
-			text: selected.map(({ start, end }) => this.text.slice(start, end)).join("\n"),
-			suffix: this.contentRanges.some((content) => content.end > end) ? "" : this.text.slice(suffixStart),
-		};
+		return selected;
 	}
 }
 
@@ -302,7 +330,7 @@ export function copySelectionSource(lines: readonly string[], selection: readonl
 		let column = 0;
 		let fallback = "";
 		let mappedRow = false;
-		let rowDocument: symbol | undefined;
+		let rowDocument: SelectionDocument | undefined;
 		let mixedDocuments = false;
 		for (let i = 0; i < line.length; ) {
 			const ansi = extractAnsiCode(line, i);
@@ -371,21 +399,45 @@ export function copySelectionSource(lines: readonly string[], selection: readonl
 		if (!selected.source.covers(selected.ranges, range)) return displayedText();
 	}
 	let text = "";
-	let previousDocument: symbol | undefined;
-	let previousSuffix = "";
-	for (const [index, part] of parts.entries()) {
+	let previousDocument: SelectionDocument | undefined;
+	for (let index = 0; index < parts.length; index++) {
+		const part = parts[index];
 		if (typeof part === "string") {
 			if (previousDocument && text && !text.endsWith("\n")) text += "\n";
 			text += index === parts.length - 1 ? part.slice(0, -1) : part;
 			previousDocument = undefined;
 		} else {
-			if (previousDocument === part.source.document) text += previousSuffix;
-			if (previousDocument && previousDocument !== part.source.document && !text.endsWith("\n")) text += "\n";
-			const selected = part.source.select(part.ranges);
-			text += selected.text;
-			previousDocument = part.source.document;
-			previousSuffix = selected.suffix;
+			const document = part.source.document;
+			const group = [part];
+			while (index + 1 < parts.length) {
+				const next = parts[index + 1];
+				if (typeof next === "string" || next.source.document !== document) break;
+				group.push(next);
+				index++;
+			}
+			if (previousDocument && previousDocument !== document && !text.endsWith("\n")) text += "\n";
+			text += copyDocumentSelection(document, group);
+			previousDocument = document;
 		}
+	}
+	return text;
+}
+
+function copyDocumentSelection(document: SelectionDocument, parts: readonly SelectedSource[]): string {
+	const selected = new Map(parts.map((part) => [part.source, part.source.select(part.ranges)]));
+	if (
+		parts.some((part) => part.ranges.length > 0) &&
+		document.sources.every((source) => (selected.get(source) ?? source.select([])).complete)
+	)
+		return document.text;
+
+	let text = "";
+	let previousEnd: number | undefined;
+	for (const [source, selection] of selected) {
+		const start = source.offset + selection.start;
+		if (previousEnd !== undefined) text += document.text.slice(previousEnd, start);
+		text += selection.text;
+		previousEnd = source.offset + selection.end;
 	}
 	return text;
 }
