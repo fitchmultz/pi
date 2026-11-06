@@ -65,7 +65,17 @@ describe("source-aware fullscreen selection", () => {
 		}
 	});
 
-	for (const { name, markdown, first, last, expected, width = 34, collect = false, hyperlinks = true } of [
+	for (const {
+		name,
+		markdown,
+		first,
+		last,
+		expected,
+		width = 34,
+		collect = false,
+		hyperlinks = true,
+		startRowDelta = 0,
+	} of [
 		{
 			name: "a complete bold phrase within a response",
 			markdown: "Before. **Use Balanced as the default.** After.",
@@ -361,6 +371,31 @@ describe("source-aware fullscreen selection", () => {
 			width: 100,
 		},
 		{
+			name: "an indented-code fence decoration as displayed text",
+			markdown: "Before.\n\n    hello()\n\nAfter.",
+			first: "```",
+			last: "```",
+			expected: "```",
+			width: 100,
+		},
+		{
+			name: "a fence decoration with its preceding blank row",
+			markdown: "Before.\n\n    hello()\n\nAfter.",
+			first: "```",
+			last: "```",
+			expected: "\n  ```",
+			startRowDelta: -1,
+			width: 100,
+		},
+		{
+			name: "an incomplete fence as displayed text",
+			markdown: "```",
+			first: "```",
+			last: "```",
+			expected: "```",
+			width: 100,
+		},
+		{
 			name: "cached source after parser and block caches are collected",
 			markdown: "Before. **Use Balanced as the default.** After.",
 			first: "Use",
@@ -390,10 +425,11 @@ describe("source-aware fullscreen selection", () => {
 					gc();
 				}
 				const lines = terminal.getViewport();
-				const firstRow = lines.findIndex((line) => line.includes(first));
+				const firstRow = lines.findIndex((line) => line.includes(first)) + startRowDelta;
 				const lastRow = lines.findIndex((line, index) => index >= firstRow && line.includes(last));
 				assert.ok(firstRow >= 0 && lastRow >= firstRow, lines.join("\n"));
-				const start = visibleWidth(lines[firstRow].slice(0, lines[firstRow].indexOf(first)));
+				if (startRowDelta) assert.equal(lines[firstRow].trim(), "");
+				const start = startRowDelta ? 0 : visibleWidth(lines[firstRow].slice(0, lines[firstRow].indexOf(first)));
 				const end = visibleWidth(lines[lastRow].slice(0, lines[lastRow].indexOf(last) + last.length)) - 1;
 				terminal.sendInput(`\x1b[<0;${start + 1};${firstRow + 1}M`);
 				terminal.sendInput(`\x1b[<32;${end + 1};${lastRow + 1}M`);

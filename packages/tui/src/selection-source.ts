@@ -425,7 +425,9 @@ export function copySelectionSource(lines: readonly string[], selection: readonl
 			previousDocument = document;
 		}
 	}
-	return text;
+	if (text.trim()) return text;
+	const displayed = displayedText();
+	return displayed.trim() ? displayed : text;
 }
 
 function copyDocumentSelection(document: SelectionDocument, parts: readonly SelectedSource[]): string {
