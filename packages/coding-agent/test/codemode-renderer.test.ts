@@ -1,6 +1,5 @@
-import { stripVTControlCharacters } from "node:util";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import { type Component, stripTerminalSequences, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { ToolRenderContext } from "../src/core/extensions/types.ts";
 import { codemodeBackgroundMessageRenderer, codemodeRenderers } from "../src/extensions/codemode/renderer.ts";
@@ -39,7 +38,7 @@ function render(
 		theme,
 		context,
 	) as Component;
-	return stripVTControlCharacters(component.render(width).join("\n"))
+	return stripTerminalSequences(component.render(width).join("\n"))
 		.split("\n")
 		.map((line) => line.trimEnd())
 		.join("\n")
@@ -120,7 +119,7 @@ describe("codemode renderer", () => {
 		vi.setSystemTime(0);
 		const tui = { requestRender: () => {} } as unknown as TUI;
 		const component = new ToolExecutionComponent("codemode", "call", { code: "" }, {}, codemodeRenderers, tui, "/");
-		const text = () => stripVTControlCharacters(component.render(120).join("\n"));
+		const text = () => stripTerminalSequences(component.render(120).join("\n"));
 		component.markExecutionStarted();
 		component.updateResult({ content: [], details: { calls: [] }, isError: false }, true);
 		vi.advanceTimersByTime(3_000);
@@ -154,7 +153,7 @@ describe("codemode renderer", () => {
 			{ expanded: true, outputPad: 1, keyText, keyHint },
 			theme,
 		);
-		const text = stripVTControlCharacters(component.render(200).join("\n"))
+		const text = stripTerminalSequences(component.render(200).join("\n"))
 			.split("\n")
 			.map((line) => line.trimEnd())
 			.join("\n")

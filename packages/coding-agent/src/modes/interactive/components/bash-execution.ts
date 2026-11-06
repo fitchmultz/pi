@@ -197,7 +197,6 @@ export class BashExecutionComponent extends Container {
 				const displayText = availableLines.map((line) => theme.fg("muted", line)).join("\n");
 				this.contentContainer.addChild(new Text(`\n${displayText}`, this.outputPad, 0));
 			} else {
-				// Use shared visual truncation utility with width-aware caching
 				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
 				const styledInput = `\n${styledOutput}`;
 				const output = new Text(styledInput, this.outputPad, 0);
