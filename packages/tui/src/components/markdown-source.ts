@@ -7,7 +7,7 @@ export class MarkdownSource extends SelectionSource {
 	private readonly contentSources = new WeakMap<object, SourceText>();
 
 	constructor(original: string, source: SourceText, token: Token, document: SelectionDocument, offset: number) {
-		super(original, document, offset);
+		super(original, document, offset, token.type === "space" || token.type === "def" ? "trivia" : "content");
 		this.indexTokens([token], source);
 	}
 

@@ -345,6 +345,22 @@ describe("source-aware fullscreen selection", () => {
 			width: 100,
 		},
 		{
+			name: "only a paragraph before an unselected empty heading",
+			markdown: "Intro\n\n# ",
+			first: "Intro",
+			last: "Intro",
+			expected: "Intro",
+			width: 100,
+		},
+		{
+			name: "only a paragraph before an unselected empty quote",
+			markdown: "Intro\n\n>",
+			first: "Intro",
+			last: "Intro",
+			expected: "Intro",
+			width: 100,
+		},
+		{
 			name: "cached source after parser and block caches are collected",
 			markdown: "Before. **Use Balanced as the default.** After.",
 			first: "Use",

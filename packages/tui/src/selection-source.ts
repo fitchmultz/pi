@@ -124,13 +124,15 @@ export class SelectionSource {
 	readonly document: SelectionDocument;
 	readonly offset: number;
 	readonly formats: Array<readonly [number, number, number, number]> = [];
+	private readonly kind: "content" | "trivia";
 	private contentRanges: SourceRange[] = [];
 	private fullyMapped = true;
 
-	constructor(text: string, document?: SelectionDocument, offset = 0) {
+	constructor(text: string, document?: SelectionDocument, offset = 0, kind: "content" | "trivia" = "content") {
 		this.text = text;
 		this.document = document ?? new SelectionDocument(text);
 		this.offset = offset;
+		this.kind = kind;
 		if (!document) this.document.sources.push(this);
 		sourceRecords.set(this.id, new WeakRef(this));
 		sourceCleanup.register(this, this.id);
@@ -245,7 +247,7 @@ export class SelectionSource {
 				text: this.text.trim() ? "" : this.text,
 				start: 0,
 				end: this.text.length,
-				complete: this.fullyMapped && this.contentRanges.length === 0,
+				complete: this.fullyMapped && this.kind === "trivia",
 			};
 		}
 		if (
