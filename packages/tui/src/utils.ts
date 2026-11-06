@@ -1,4 +1,5 @@
 import { eastAsianWidth } from "get-east-asian-width";
+import { SELECTION_SOURCE_END, SelectionSourceTracker } from "./selection-markers.ts";
 
 // segmenters (shared instance)
 const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
@@ -162,13 +163,14 @@ function finalizeTruncatedResult(
 ): string {
 	const reset = "\x1b[0m";
 	const hyperlinkClose = getActiveOsc8Close(prefix);
+	const selectionEnd = prefix.includes("\x1b]pi:") ? SELECTION_SOURCE_END : "";
 	const visibleWidth = prefixWidth + ellipsisWidth;
 	let result: string;
 
 	if (ellipsis.length > 0) {
-		result = `${prefix}${hyperlinkClose}${reset}${ellipsis}${reset}`;
+		result = `${prefix}${selectionEnd}${hyperlinkClose}${reset}${ellipsis}${reset}`;
 	} else {
-		result = `${prefix}${hyperlinkClose}${reset}`;
+		result = `${prefix}${selectionEnd}${hyperlinkClose}${reset}`;
 	}
 
 	return pad ? result + " ".repeat(Math.max(0, maxWidth - visibleWidth)) : result;
@@ -587,6 +589,7 @@ function getActiveOsc8Close(prefix: string): string {
  * Track active ANSI SGR codes to preserve styling across line breaks.
  */
 class AnsiCodeTracker {
+	readonly source = new SelectionSourceTracker();
 	// Track individual attributes separately so we can reset them specifically
 	private bold = false;
 	private dim = false;
@@ -601,6 +604,7 @@ class AnsiCodeTracker {
 	private activeHyperlink: ActiveHyperlink | null = null;
 
 	process(ansiCode: string): void {
+		if (this.source.process(ansiCode)) return;
 		// OSC 8 hyperlink: \x1b]8;;<url>\x1b\\ (open) or \x1b]8;;\x1b\\ (close).
 		// Preserve the original terminator because some terminals only make BEL-terminated
 		// links clickable. OAuth login URLs use BEL, so reopening wrapped lines with ST
@@ -752,6 +756,7 @@ class AnsiCodeTracker {
 	clear(): void {
 		this.reset();
 		this.activeHyperlink = null;
+		this.source.run = undefined;
 	}
 
 	getActiveCodes(): string {
@@ -771,7 +776,7 @@ class AnsiCodeTracker {
 		if (this.activeHyperlink) {
 			result += formatOsc8Hyperlink(this.activeHyperlink);
 		}
-		return result;
+		return result + this.source.marker;
 	}
 
 	getActiveBackgroundCode(): string {
@@ -811,22 +816,27 @@ class AnsiCodeTracker {
 		if (this.activeHyperlink) {
 			result += formatOsc8Close(this.activeHyperlink.terminator); // Re-opened at line start via getActiveCodes()
 		}
+		if (this.source.run) result += SELECTION_SOURCE_END;
 		return result;
 	}
 }
 
 function updateTrackerFromText(text: string, tracker: AnsiCodeTracker): void {
+	let textStart = 0;
 	let i = text.indexOf("\x1b");
 	while (i !== -1) {
 		const length = ansiCodeLength(text, i);
 		if (length > 0) {
+			tracker.source.advance(i - textStart);
 			tracker.process(text.substring(i, i + length));
 			i += length;
+			textStart = i;
 		} else {
 			i++;
 		}
 		i = text.indexOf("\x1b", i);
 	}
+	tracker.source.advance(text.length - textStart);
 }
 
 /** Return only the background color active at the end of an ANSI-styled string. */
@@ -954,16 +964,18 @@ export function wrapTextWithAnsi(text: string, width: number): string[] {
 	const inputLines = text.split(/\r\n|\r|\n/);
 	const result: string[] = [];
 	const tracker = new AnsiCodeTracker();
+	const selectionEnd = text.includes("\x1b]pi:") ? SELECTION_SOURCE_END : "";
 
 	for (const inputLine of inputLines) {
 		// Prepend active ANSI codes from previous lines (except for first line)
 		const prefix = result.length > 0 ? tracker.getActiveCodes() : "";
 		const wrappedLines = wrapSingleLine(prefix + inputLine, width);
 		for (const wrappedLine of wrappedLines) {
-			result.push(wrappedLine);
+			result.push(wrappedLine + selectionEnd);
 		}
 		// Update tracker with codes from this line for next iteration
 		updateTrackerFromText(inputLine, tracker);
+		tracker.source.advance(1);
 	}
 
 	return result.length > 0 ? result : [""];
@@ -1115,6 +1127,7 @@ function breakLongWord(word: string, width: number, tracker: AnsiCodeTracker): s
 
 			currentLine += grapheme;
 			currentWidth += graphemeWidth;
+			tracker.source.advance(grapheme.length);
 		}
 		i = end;
 	}
@@ -1312,6 +1325,8 @@ export function sliceWithWidth(
 ): { text: string; width: number } {
 	if (length <= 0) return { text: "", width: 0 };
 	const endCol = startCol + length;
+	const source = new SelectionSourceTracker();
+	let started = false;
 	let result = "",
 		resultWidth = 0,
 		currentCol = 0,
@@ -1321,13 +1336,15 @@ export function sliceWithWidth(
 	while (i < line.length) {
 		const ansi = extractAnsiCode(line, i);
 		if (ansi) {
+			source.process(ansi.code);
 			// APC sequences (cursor markers) are positional one-shot commands, not persistent style
 			// state, so codes before the range carry over only when they are not APC.
 			if (currentCol >= startCol && currentCol < endCol) {
 				// Keep original order: codes from before the range must precede codes at the boundary
 				result += pendingAnsi + ansi.code;
 				pendingAnsi = "";
-			} else if (currentCol < startCol && !ansi.code.startsWith("\x1b_")) pendingAnsi += ansi.code;
+			} else if (currentCol < startCol && !ansi.code.startsWith("\x1b_") && !ansi.code.startsWith("\x1b]pi:"))
+				pendingAnsi += ansi.code;
 			i += ansi.length;
 			continue;
 		}
@@ -1340,6 +1357,10 @@ export function sliceWithWidth(
 			const inRange = currentCol >= startCol && currentCol < endCol;
 			const fits = !strict || currentCol + w <= endCol;
 			if (inRange && fits) {
+				if (!started) {
+					result += source.marker;
+					started = true;
+				}
 				if (pendingAnsi) {
 					result += pendingAnsi;
 					pendingAnsi = "";
@@ -1347,13 +1368,14 @@ export function sliceWithWidth(
 				result += segment;
 				resultWidth += w;
 			}
+			source.advance(segment.length);
 			currentCol += w;
 			if (currentCol >= endCol) break;
 		}
 		i = textEnd;
 		if (currentCol >= endCol) break;
 	}
-	return { text: result, width: resultWidth };
+	return { text: result + (source.run && started ? SELECTION_SOURCE_END : ""), width: resultWidth };
 }
 
 // Pooled tracker instance for extractSegments (avoids allocation per call)
@@ -1432,6 +1454,7 @@ export function extractSegments(
 			}
 
 			currentCol += w;
+			pooledStyleTracker.source.advance(segment.length);
 			// Early exit: done with "before" only, or done with both segments
 			if (afterLen <= 0 ? currentCol >= beforeEnd : currentCol >= afterEnd) break;
 		}
@@ -1439,5 +1462,11 @@ export function extractSegments(
 		if (afterLen <= 0 ? currentCol >= beforeEnd : currentCol >= afterEnd) break;
 	}
 
-	return { before, beforeWidth, after, afterWidth };
+	const selectionEnd = line.includes("\x1b]pi:") ? SELECTION_SOURCE_END : "";
+	return {
+		before: before + (before ? selectionEnd : ""),
+		beforeWidth,
+		after: after + (after ? selectionEnd : ""),
+		afterWidth,
+	};
 }

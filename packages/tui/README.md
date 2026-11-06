@@ -266,6 +266,10 @@ interface Component {
 
 The TUI appends a full SGR reset and OSC 8 reset at the end of each rendered line. Styles do not carry across lines. If you emit multi-line text with styling, reapply styles per line or use `wrapTextWithAnsi()` so styles are preserved for each wrapped line.
 
+`Text` and `Markdown` include private, zero-width selection annotations in rendered lines. `TuiAltScreen` uses these to copy original source without padding or soft line breaks. Fully selected Markdown spans retain their original syntax; partial spans copy only selected content. Custom transformed Markdown and components without source information keep displayed-text copying.
+
+Retain `Text` and `Markdown` instances alongside cached rendered lines to keep their source available. Both TUI renderers remove annotations before terminal output. When printing component lines or converting them to HTML outside a TUI, use `component.render(width).map(stripSelectionMetadata)`. Import `stripSelectionMetadata` from `@earendil-works/pi-tui`; it preserves ANSI styles and hyperlinks.
+
 ### Mouse Input
 
 `TuiAltScreen` normalizes SGR mouse input and hit-tests components and overlays. Events contain component-local `x`/`y`, absolute `screenX`/`screenY`, bounds, button, modifiers, click count, and wheel delta. `TuiMainScreen` does not capture mouse input because the terminal owns its scrollback.

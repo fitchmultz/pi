@@ -6,7 +6,7 @@
  */
 
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import type { Component } from "@earendil-works/pi-tui";
+import { type Component, stripSelectionMetadata } from "@earendil-works/pi-tui";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolRenderContext, ToolRenderers } from "../extensions/types.ts";
@@ -115,7 +115,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					createRenderContext(toolCallId, renderedCallComponents.get(toolCallId), false, true, false),
 				);
 				renderedCallComponents.set(toolCallId, component);
-				const lines = component.render(width);
+				const lines = component.render(width).map(stripSelectionMetadata);
 				return ansiLinesToHtml(lines);
 			} catch {
 				// On error, return undefined so HTML export can fall back to structured result rendering
@@ -152,7 +152,9 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					createRenderContext(toolCallId, renderedResultComponents.get(toolCallId), false, false, isError),
 				);
 				renderedResultComponents.set(toolCallId, collapsedComponent);
-				const collapsed = ansiLinesToHtml(trimRenderedResultLines(collapsedComponent.render(width)));
+				const collapsed = ansiLinesToHtml(
+					trimRenderedResultLines(collapsedComponent.render(width).map(stripSelectionMetadata)),
+				);
 
 				// Render expanded
 				const expandedComponent = toolDef.renderResult(
@@ -162,7 +164,9 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					createRenderContext(toolCallId, renderedResultComponents.get(toolCallId), true, false, isError),
 				);
 				renderedResultComponents.set(toolCallId, expandedComponent);
-				const expanded = ansiLinesToHtml(trimRenderedResultLines(expandedComponent.render(width)));
+				const expanded = ansiLinesToHtml(
+					trimRenderedResultLines(expandedComponent.render(width).map(stripSelectionMetadata)),
+				);
 
 				return {
 					...(collapsed && collapsed !== expanded ? { collapsed } : {}),

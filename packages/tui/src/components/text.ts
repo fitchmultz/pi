@@ -1,5 +1,12 @@
+import { SelectionSource, SourceText } from "../selection-source.ts";
 import type { Component } from "../tui.ts";
-import { applyBackgroundToLine, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
+import {
+	applyBackgroundToLine,
+	flattenLines,
+	stripTerminalSequences,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "../utils.ts";
 
 /**
  * Text component - displays multi-line text with word wrapping
@@ -14,6 +21,7 @@ export class Text implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	private selectionSource?: SelectionSource;
 
 	constructor(text: string = "", paddingX: number = 1, paddingY: number = 1, customBgFn?: (text: string) => string) {
 		this.text = text;
@@ -58,6 +66,7 @@ export class Text implements Component {
 		// Don't render anything if there's no actual text
 		if (!this.text || this.text.trim() === "") {
 			const result: string[] = [];
+			this.selectionSource = undefined;
 			this.cachedText = this.text;
 			this.cachedWidth = width;
 			this.cachedLines = result;
@@ -65,14 +74,16 @@ export class Text implements Component {
 		}
 
 		// Replace tabs with 3 spaces
-		const normalizedText = this.text.replace(/\t/g, "   ");
+		const normalizedText = this.text.replace(/\r\n?/g, "\n").replace(/\t/g, "   ");
+		this.selectionSource = new SelectionSource(stripTerminalSequences(this.text));
+		const source = new SourceText(this.selectionSource.text).replace(/\r\n?/g, "\n").replace(/\t/g, "   ");
 
 		// Reduce margins when necessary so content and padding fit within the available width.
 		const paddingX = Math.min(this.paddingX, Math.max(0, Math.floor((width - 1) / 2)));
 		const contentWidth = Math.max(1, width - paddingX * 2);
 
 		// Wrap text (this preserves ANSI codes but does NOT pad)
-		const wrappedLines = wrapTextWithAnsi(normalizedText, contentWidth);
+		const wrappedLines = wrapTextWithAnsi(this.selectionSource.annotate(normalizedText, source), contentWidth);
 
 		// Add margins and background to each line
 		const leftMargin = " ".repeat(paddingX);
@@ -102,7 +113,7 @@ export class Text implements Component {
 			emptyLines.push(line);
 		}
 
-		const result = [...emptyLines, ...contentLines, ...emptyLines];
+		const result = this.selectionSource.wrap([...emptyLines, ...contentLines, ...emptyLines]);
 		flattenLines(result);
 
 		// Update cache

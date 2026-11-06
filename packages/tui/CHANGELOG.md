@@ -4,10 +4,12 @@
 
 ### Added
 
+- Added `stripSelectionMetadata()` for consumers that print rendered component lines or convert them to HTML outside a TUI. It preserves terminal styling.
 - Added OSC 8 `file://` links for absolute and `~/` paths in Markdown text and inline code, plus OSC 8 links for URLs in inline code, so wrapped paths stay clickable
 
 ### Changed
 
+- Fullscreen selection copies source fragments from Markdown and Text without display padding or artificial wraps. Complete Markdown spans retain their syntax; partial spans copy only the selected content. Rendered strings carry private zero-width OSC annotations, which the TUI removes before terminal output.
 - Reuse unchanged editor layouts and stream long-token wrapping and grapheme scans without rebuilding intermediate arrays.
 - Reuse unchanged same-index content rows in unstyled Boxes after child changes, preserving native invalidation, mouse geometry and styled-background sampling.
 

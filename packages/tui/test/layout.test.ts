@@ -90,19 +90,19 @@ describe("Box output", () => {
 		const second = new Text("b", 0, 0);
 		const empty = new Text("", 0, 0);
 		box.addChild(first);
-		assert.deepStrictEqual(box.render(5), ["     ", " a   ", "     "]);
+		assert.deepStrictEqual(box.render(5).map(stripTerminalSequences), ["     ", " a   ", "     "]);
 		box.addChild(second);
-		assert.deepStrictEqual(box.render(5), ["     ", " a   ", " b   ", "     "]);
+		assert.deepStrictEqual(box.render(5).map(stripTerminalSequences), ["     ", " a   ", " b   ", "     "]);
 		box.addChild(empty);
 		box.removeChild(empty);
 		box.removeChild(first);
-		assert.deepStrictEqual(box.render(5), ["     ", " b   ", "     "]);
+		assert.deepStrictEqual(box.render(5).map(stripTerminalSequences), ["     ", " b   ", "     "]);
 		box.clear();
-		assert.deepStrictEqual(box.render(5), []);
+		assert.deepStrictEqual(box.render(5).map(stripTerminalSequences), []);
 		box.children = [first, second];
-		assert.deepStrictEqual(box.render(5), ["     ", " a   ", " b   ", "     "]);
+		assert.deepStrictEqual(box.render(5).map(stripTerminalSequences), ["     ", " a   ", " b   ", "     "]);
 		box.children = [second, first];
-		assert.deepStrictEqual(box.render(5), ["     ", " b   ", " a   ", "     "]);
+		assert.deepStrictEqual(box.render(5).map(stripTerminalSequences), ["     ", " b   ", " a   ", "     "]);
 	});
 });
 
@@ -215,10 +215,7 @@ describe("viewport layout", () => {
 			[new Text("one", 0, 0), { component: new Text("hidden", 0, 0), visible: () => false }, new Text("two", 0, 0)],
 			{ gap: 1 },
 		);
-		assert.deepStrictEqual(
-			stack.render(10).map((line) => line.trimEnd()),
-			["one", "", "two"],
-		);
+		assert.deepStrictEqual(visibleLines(stack.render(10)), ["one", "", "two"]);
 	});
 
 	it("crops Kitty images at a scroll view's lower boundary", () => {

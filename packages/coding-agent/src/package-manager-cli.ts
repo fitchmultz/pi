@@ -9,7 +9,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { Markdown, type MarkdownTheme, stripSelectionMetadata } from "@earendil-works/pi-tui";
 import chalk from "chalk";
 import lockfile from "proper-lockfile";
 import { selectConfig } from "./cli/config-selector.ts";
@@ -709,7 +709,7 @@ function printSelfUpdateNote(note: string): void {
 		const width = Math.max(20, process.stdout.columns ?? 80);
 		const renderedLines = new Markdown(trimmedNote, 0, 0, SELF_UPDATE_NOTE_MARKDOWN_THEME)
 			.render(width)
-			.map((line) => line.trimEnd());
+			.map((line) => stripSelectionMetadata(line).trimEnd());
 		console.log(renderedLines.join("\n"));
 	} catch {
 		console.log(trimmedNote);

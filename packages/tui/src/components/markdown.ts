@@ -3,9 +3,12 @@ import { pathToFileURL } from "node:url";
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens, type TokensList } from "marked";
 import markedCjkFriendly from "marked-cjk-friendly";
 import { renderLatex } from "../latex.ts";
+import { SELECTION_METADATA, SELECTION_SOURCE_END } from "../selection-markers.ts";
+import { SourceText } from "../selection-source.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, cjkPunctuationRegex, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
+import { MarkdownSource } from "./markdown-source.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
@@ -348,6 +351,7 @@ interface RenderedBlock {
 	lines: string[];
 	/** Highlighted lines of the block's code, keyed by language and source; they survive a resize or new spacing. */
 	highlightedCode: Map<string, string[]>;
+	source?: MarkdownSource;
 }
 
 export class Markdown implements Component {
@@ -375,6 +379,9 @@ export class Markdown implements Component {
 	private blocks?: WeakRef<Map<string, RenderedBlock>>;
 	// Highlighted code of the block being rendered, only set while renderBlock runs.
 	private blockHighlightedCode?: Map<string, string[]>;
+	private blockSource?: MarkdownSource;
+	private selectionSources: MarkdownSource[] = [];
+	private readonly selectionDocument = Symbol();
 
 	constructor(
 		text: string,
@@ -415,10 +422,12 @@ export class Markdown implements Component {
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
 			return this.cachedLines;
 		}
+		this.selectionSources = [];
 
 		// Calculate available width for content (subtract horizontal padding)
 		const contentWidth = Math.max(1, width - this.paddingX * 2);
 		const text = this.options.transform?.(this.text, contentWidth) ?? this.text;
+		const sourceUnchanged = text === this.text;
 
 		// Don't render anything if there's no actual text
 		if (!text || text.trim() === "") {
@@ -432,7 +441,8 @@ export class Markdown implements Component {
 		}
 
 		// Replace tabs with 3 spaces for consistent rendering
-		const normalizedText = text.replace(/\t/g, "   ");
+		const normalizedSource = new SourceText(text).replace(/\r\n?/g, "\n").replace(/\t/g, "   ");
+		const normalizedText = normalizedSource.text;
 
 		// Parse markdown to HTML-like tokens
 		const cached = this.cachedTokens?.deref();
@@ -451,15 +461,40 @@ export class Markdown implements Component {
 		const blocks = new Map<string, RenderedBlock>();
 		this.blocks = new WeakRef(blocks);
 		const contentLines: string[] = [];
+		let sourceOffset = 0;
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
+			const tokenOffset = normalizedText.indexOf(token.raw, sourceOffset);
+			const mapped = normalizedSource.slice(tokenOffset, tokenOffset + token.raw.length);
+			sourceOffset = tokenOffset + token.raw.length;
+			const originalStart = mapped.spans[0]?.sourceStart ?? 0;
+			const originalEnd = mapped.spans[mapped.spans.length - 1]?.sourceEnd ?? originalStart;
+			const original = text.slice(originalStart, originalEnd);
 			const nextTokenType = tokens[i + 1]?.type;
-			const reused = reuseBlocks ? (blocks.get(token.raw) ?? previousBlocks?.get(token.raw)) : undefined;
-			const block = reused ?? { width: -1, nextTokenType, lines: [], highlightedCode: new Map() };
-			if (block.width !== width || block.nextTokenType !== nextTokenType) {
+			const reused = reuseBlocks ? (blocks.get(original) ?? previousBlocks?.get(original)) : undefined;
+			const block: RenderedBlock = reused ?? { width: -1, nextTokenType, lines: [], highlightedCode: new Map() };
+			if (block.width !== width || block.nextTokenType !== nextTokenType || !!block.source !== sourceUnchanged) {
+				this.blockSource = sourceUnchanged
+					? new MarkdownSource(
+							original,
+							new SourceText(
+								mapped.text,
+								mapped.spans.map((span) => ({
+									...span,
+									sourceStart: span.sourceStart - originalStart,
+									sourceEnd: span.sourceEnd - originalStart,
+								})),
+							),
+							token,
+							this.selectionDocument,
+						)
+					: undefined;
 				this.renderBlock(block, token, nextTokenType, width, contentWidth);
+				block.source = this.blockSource;
+				this.blockSource = undefined;
 			}
-			if (reuseBlocks) blocks.set(token.raw, block);
+			if (block.source) this.selectionSources.push(block.source);
+			if (reuseBlocks) blocks.set(original, block);
 			for (const line of block.lines) {
 				contentLines.push(line);
 			}
@@ -505,7 +540,8 @@ export class Markdown implements Component {
 				continue;
 			}
 			for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
-				const lineWithMargins = leftMargin + wrappedLine + rightMargin;
+				const lineWithMargins =
+					leftMargin + wrappedLine + (this.blockSource ? SELECTION_SOURCE_END : "") + rightMargin;
 				if (bgFn) {
 					lines.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
 				} else {
@@ -517,7 +553,9 @@ export class Markdown implements Component {
 		}
 		this.blockHighlightedCode = undefined;
 		flattenLines(lines);
-		block.lines = lines;
+		block.lines = lines.some(isImageLine)
+			? lines.map((line) => line.replace(SELECTION_METADATA, ""))
+			: (this.blockSource?.wrap(lines) ?? lines);
 		block.width = width;
 		block.nextTokenType = nextTokenType;
 	}
@@ -647,6 +685,7 @@ export class Markdown implements Component {
 		styleContext?: InlineStyleContext,
 	): string[] {
 		const lines: string[] = [];
+		const source = this.blockSource;
 
 		switch (token.type) {
 			case "heading": {
@@ -702,7 +741,8 @@ export class Markdown implements Component {
 					rendered = latexToken.raw.trim();
 				}
 				for (const line of rendered.split("\n")) {
-					lines.push(this.applyDefaultStyle(line));
+					const styled = this.applyDefaultStyle(line);
+					lines.push(source?.atomic(styled, source.raw(token)) ?? styled);
 				}
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push("");
@@ -712,7 +752,14 @@ export class Markdown implements Component {
 
 			case "code": {
 				const indent = this.theme.codeBlockIndent ?? "  ";
-				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
+				const raw = source?.raw(token);
+				const code = source?.content(token);
+				const fenced = token.codeBlockStyle !== "indented";
+				const opening = this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`);
+				lines.push(
+					source && raw && fenced ? source.atomic(opening, raw.slice(0, raw.text.indexOf("\n"))) : opening,
+				);
+				let codeOffset = 0;
 				if (this.theme.highlightCode) {
 					const key = `${token.lang ?? ""}\0${token.text}`;
 					let highlighted = this.blockHighlightedCode?.get(key);
@@ -721,16 +768,32 @@ export class Markdown implements Component {
 						this.blockHighlightedCode?.set(key, highlighted);
 					}
 					for (const hlLine of highlighted) {
-						lines.push(`${indent}${hlLine}`);
+						const end = code?.text.indexOf("\n", codeOffset) ?? -1;
+						const mapped = code?.slice(codeOffset, end < 0 ? code.text.length : end);
+						lines.push(indent + (source && mapped ? source.annotate(hlLine, mapped) : hlLine));
+						codeOffset = end + 1;
 					}
 				} else {
 					// Split code by newlines and style each line
 					const codeLines = token.text.split("\n");
 					for (const codeLine of codeLines) {
-						lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
+						const styled = this.theme.codeBlock(codeLine);
+						lines.push(
+							indent +
+								(source && code
+									? source.annotate(styled, code.slice(codeOffset, codeOffset + codeLine.length))
+									: styled),
+						);
+						codeOffset += codeLine.length + 1;
 					}
 				}
-				lines.push(this.theme.codeBlockBorder("```"));
+				const closing = this.theme.codeBlockBorder("```");
+				const fence = fenced ? /(?:^|\n) {0,3}(?:`{3,}|~{3,})[ \t]*(?:\n)?$/.exec(token.raw) : undefined;
+				lines.push(
+					source && raw && fence
+						? source.atomic(closing, raw.slice(fence.index + (fence[0].startsWith("\n") ? 1 : 0)))
+						: closing,
+				);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
 				}
@@ -819,7 +882,10 @@ export class Markdown implements Component {
 			}
 
 			case "hr":
-				lines.push(this.theme.hr("─".repeat(Math.min(width, 80))));
+				{
+					const styled = this.theme.hr("─".repeat(Math.min(width, 80)));
+					lines.push(source?.atomic(styled, source.raw(token)) ?? styled);
+				}
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after horizontal rules (unless space token follows)
 				}
@@ -828,7 +894,8 @@ export class Markdown implements Component {
 			case "html":
 				// Render HTML as plain text (escaped for terminal), without its comments
 				if ("raw" in token && typeof token.raw === "string") {
-					lines.push(this.applyDefaultStyle(stripHtmlComments(token.raw).trim()));
+					const styled = this.applyDefaultStyle(stripHtmlComments(token.raw).trim());
+					lines.push(source?.annotate(styled, source.content(token).trim()) ?? styled);
 				}
 				break;
 
@@ -861,7 +928,10 @@ export class Markdown implements Component {
 		let dropLeadingSpace = false;
 		for (let i = 0; i < tokens.length; i++) {
 			let token = tokens[i];
+			const source = this.blockSource;
+			let contentSource = source?.content(token);
 			if (dropLeadingSpace && token.type === "text" && !token.tokens?.length && /^[ \t]/.test(token.text)) {
+				contentSource = contentSource?.slice(token.text.length - token.text.trimStart().length);
 				token = { ...token, text: token.text.replace(/^[ \t]+/, "") };
 			}
 			dropLeadingSpace = false;
@@ -872,20 +942,25 @@ export class Markdown implements Component {
 						!latexToken.pending && this.options.renderLatex !== false
 							? (renderLatex(latexToken.text) ?? latexToken.raw)
 							: latexToken.raw;
-					result += applyTextWithNewlines(rendered);
+					const styled = applyTextWithNewlines(rendered);
+					result += source?.atomic(styled, source.raw(token)) ?? styled;
 					break;
 				}
 
-				case "escape":
-					result += applyTextWithNewlines(this.options.preserveBackslashEscapes ? token.raw : token.text);
+				case "escape": {
+					const styled = applyTextWithNewlines(this.options.preserveBackslashEscapes ? token.raw : token.text);
+					const mapped = this.options.preserveBackslashEscapes ? source?.raw(token) : contentSource;
+					result += source && mapped ? source.annotate(styled, mapped) : styled;
 					break;
+				}
 
 				case "text":
 					// Text tokens in list items can have nested tokens for inline formatting
 					if (token.tokens && token.tokens.length > 0) {
 						result += this.renderInlineTokens(token.tokens, resolvedStyleContext);
 					} else {
-						result += this.renderLinkableText(token.text, applyTextWithNewlines);
+						const styled = this.renderLinkableText(token.text, applyTextWithNewlines);
+						result += source && contentSource ? source.annotate(styled, contentSource) : styled;
 					}
 					break;
 
@@ -906,9 +981,11 @@ export class Markdown implements Component {
 					break;
 				}
 
-				case "codespan":
-					result += this.renderCodespan(token.text) + stylePrefix;
+				case "codespan": {
+					const styled = this.renderCodespan(token.text);
+					result += (source && contentSource ? source.annotate(styled, contentSource) : styled) + stylePrefix;
 					break;
+				}
 
 				case "link": {
 					this.renderingLinkText = true;
@@ -928,7 +1005,12 @@ export class Markdown implements Component {
 						if (token.text === token.href || token.text === hrefForComparison) {
 							result += styledLink + stylePrefix;
 						} else {
-							result += styledLink + this.theme.linkUrl(` (${token.href})`) + stylePrefix;
+							const raw = source?.raw(token);
+							const start = raw?.text.lastIndexOf(token.href) ?? -1;
+							const destination =
+								raw && start >= 0 ? raw.slice(start, start + token.href.length) : new SourceText("", []);
+							const url = source?.annotate(token.href, destination) ?? token.href;
+							result += styledLink + this.theme.linkUrl(` (${url})`) + stylePrefix;
 						}
 					}
 					break;
@@ -949,14 +1031,16 @@ export class Markdown implements Component {
 					if (token.raw.startsWith("<!--")) {
 						dropLeadingSpace = i === 0 || /[ \t]$/.test(tokens[i - 1].raw);
 					} else {
-						result += applyTextWithNewlines(token.raw);
+						const styled = applyTextWithNewlines(token.raw);
+						result += source && contentSource ? source.annotate(styled, contentSource) : styled;
 					}
 					break;
 
 				default:
 					// Handle any other inline token types as plain text
 					if ("text" in token && typeof token.text === "string") {
-						result += applyTextWithNewlines(token.text);
+						const styled = applyTextWithNewlines(token.text);
+						result += source?.atomic(styled, source.raw(token)) ?? styled;
 					}
 			}
 		}
@@ -999,7 +1083,13 @@ export class Markdown implements Component {
 					: "- ";
 			const taskMarker = item.task ? `[${item.checked ? "x" : " "}] ` : "";
 			const marker = bullet + taskMarker;
-			const firstPrefix = indent + this.theme.listBullet(marker);
+			let firstPrefix = indent + this.theme.listBullet(marker);
+			const source = this.blockSource;
+			if (source) {
+				const raw = source.raw(item);
+				const prefix = /^(?: {0,3})(?:\d{1,9}[.)]|[-+*])(?:[ \t]+|$)(?:\[[ xX]\][ \t]+)?/.exec(raw.text);
+				if (prefix) firstPrefix = source.atomic(firstPrefix, raw.slice(0, prefix[0].length));
+			}
 			const continuationPrefix = indent + " ".repeat(visibleWidth(marker));
 			const itemWidth = Math.max(1, width - visibleWidth(firstPrefix));
 			let renderedAnyLine = false;
@@ -1086,7 +1176,8 @@ export class Markdown implements Component {
 		const availableForCells = availableWidth - borderOverhead;
 		if (availableForCells < numCols) {
 			// Too narrow to render a stable table. Fall back to raw markdown.
-			const fallbackLines = token.raw ? wrapTextWithAnsi(token.raw, availableWidth) : [];
+			const raw = this.blockSource?.annotate(token.raw, this.blockSource.raw(token)) ?? token.raw;
+			const fallbackLines = raw ? wrapTextWithAnsi(raw, availableWidth) : [];
 			if (nextTokenType && nextTokenType !== "space") {
 				fallbackLines.push("");
 			}

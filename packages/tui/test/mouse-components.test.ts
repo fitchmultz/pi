@@ -102,17 +102,17 @@ describe("mouse-aware components", () => {
 		box.addChild(firstRegion);
 		box.addChild(region("second", second));
 		const unchanged = ["     ", " a   ", " b   ", "     "];
-		assert.deepStrictEqual(box.render(5), unchanged);
+		assert.deepStrictEqual(box.render(5).map(stripTerminalSequences), unchanged);
 		box.handleMouse(mouse("press", 1, 2, 5, 4));
 		first.setText("a");
 		second.setText("b");
-		assert.deepStrictEqual(box.render(5), unchanged);
+		assert.deepStrictEqual(box.render(5).map(stripTerminalSequences), unchanged);
 		box.handleMouse(mouse("press", 1, 2, 5, 4));
 		box.children = [firstRegion, region("replacement", new Text("b", 0, 0))];
-		assert.deepStrictEqual(box.render(5), unchanged);
+		assert.deepStrictEqual(box.render(5).map(stripTerminalSequences), unchanged);
 		box.handleMouse(mouse("press", 1, 2, 5, 4));
 		first.setText("a\nc");
-		assert.deepStrictEqual(box.render(5), ["     ", " a   ", " c   ", " b   ", "     "]);
+		assert.deepStrictEqual(box.render(5).map(stripTerminalSequences), ["     ", " a   ", " c   ", " b   ", "     "]);
 		box.handleMouse(mouse("press", 1, 3, 5, 5));
 		assert.deepStrictEqual(hits, [
 			["first", 0, 1, 3, 2],

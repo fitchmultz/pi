@@ -13,6 +13,7 @@ import { WorkingSessionGate } from "../src/core/working-session.ts";
 import type { AuthSelectorProvider } from "../src/modes/interactive/components/oauth-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 function renderLastLine(container: Container, width = 120): string {
 	const last = container.children[container.children.length - 1];
@@ -61,8 +62,7 @@ async function flushTui(tui: TUI, terminal: VirtualTerminal): Promise<void> {
 }
 
 function normalizeRenderedOutput(container: Container, width = 220): string {
-	return renderAll(container, width)
-		.replace(/\u001b\[[0-9;]*m/g, "")
+	return stripAnsi(renderAll(container, width))
 		.replace(/\\/g, "/")
 		.split("\n")
 		.map((line) => line.replace(/\s+$/g, ""))

@@ -1,4 +1,12 @@
-import { type Component, Loader, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Loader,
+	sliceByColumn,
+	stripTerminalSequences,
+	type TUI,
+	truncateToWidth,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import type { WorkingIndicatorOptions } from "../../../core/extensions/index.ts";
 import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
@@ -23,7 +31,8 @@ export class StatusIndicator extends Loader {
 
 	renderInBorder(width: number): string {
 		const line = super.render(width + 2)[1] ?? "";
-		return truncateToWidth(line.startsWith(" ") ? line.slice(1).trimEnd() : line.trimEnd(), width, "");
+		const contentWidth = visibleWidth(stripTerminalSequences(line).trimEnd()) - 1;
+		return truncateToWidth(sliceByColumn(line, 1, contentWidth), width, "");
 	}
 
 	renderSpinnerInBorder(width: number): string {
