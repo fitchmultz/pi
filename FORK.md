@@ -123,6 +123,15 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Session hot paths incrementally retain active ancestry, compaction-aware raw context entries and model/thinking settings; projected messages and returned arrays remain fresh. Entry-list and leaf identity invalidate reuse on reload or navigation. The latest name stays indexed; branch-summary admission stays linear, file forks reuse a private exclusive descriptor, and custom-flat listings reject unrelated cwd headers before reading bodies | `core/session-manager.ts`, `core/compaction/branch-summarization.ts` | `session-manager/*.test.ts`, `session-context-edit.test.ts`, `branch-summarization.test.ts`, `file-safety.test.ts` |
 | Empty-draft boundary previews use the live manager and compute projection/LLM fields only when read; pending-queue readers never project history. Each handler retains its own preview for freshness. Canonical context still refreshes after every boundary because public Agent state allows in-place mutation; committed drafts refresh before entry notifications. Mutable nonempty drafts still need eager validation. The undocumented `emitBoundary` preview builder remains synchronous | `core/extensions/runner.ts`, `core/agent-session.ts` | `extensions-runner.test.ts`, `suite/agent-session-boundaries.test.ts` |
 
+### Internal state ownership
+
+These owner-authorized refactors remove overlapping state representations without changing
+supported behavior. Preserve their ownership guarantees when integrating equivalent upstream code.
+
+| Ownership guarantee | Owner | Primary tests |
+| --- | --- | --- |
+| One waiting/completing/settled phase owns OAuth callback admission and settlement; manual cancellation leaves an active exchange alone | `packages/ai/src/auth/oauth/callback-server.ts` | `packages/ai/test/oauth-callback-server.test.ts` |
+
 ### Performance deltas
 
 These paths remove repeated work or bound allocation while preserving their existing contracts.
