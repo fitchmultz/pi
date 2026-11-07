@@ -61,14 +61,17 @@ If you send a large volume of issues through automation, your GitHub account wil
 
 Unless you have `admin`, `maintain`, or `write` access to the target repository, do not open a PR until a maintainer of that repository has approved you using `lgtm` in the command position described above.
 
-Before submitting a code-changing PR to either upstream or the fork:
+Before submitting a code-changing PR to either upstream or the fork, run:
 
 ```bash
 npm run check
-./test.sh
 ```
 
-Both must pass. For guidance-only or other docs-only changes, inspect the complete diff and validate affected links, commands and policy consistency; do not rebuild unchanged runtime code or add source-string tests. Required hooks, CI checks and repository review rules still apply.
+Run tests for the changed behavior and affected callers through the isolated runner, following the package commands in [AGENTS.md](AGENTS.md#commands). Use the full `./test.sh` suite when the change's reach or uncertainty warrants it, rather than for every update. Reuse valid results when their relevant code and inputs are unchanged. Record what ran and its outcome.
+
+Tests must catch a credible regression or enforce an independent contract. A test designed to pass regardless of production behavior should usually be deleted.
+
+For guidance-only or other docs-only changes, inspect the complete diff and validate affected links, commands and policy consistency; do not rebuild unchanged runtime code or add source-string tests. Required hooks, CI checks and repository review rules still apply.
 
 Contributors must not edit `CHANGELOG.md`. Authorized maintainers follow the [changelog procedures in AGENTS.md](AGENTS.md#changelog).
 

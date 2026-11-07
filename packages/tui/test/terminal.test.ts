@@ -165,7 +165,7 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 		}
 	});
 
-	it("falls back to modifyOtherKeys for zero Kitty flags", () => {
+	it("falls back to modifyOtherKeys for zero Kitty flags", async () => {
 		const harness = setupNegotiation();
 		try {
 			harness.send("\x1b[?0u");
@@ -174,6 +174,9 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 			assert.equal(harness.terminal.kittyProtocolActive, false);
 			assert.equal(harness.writes.filter((write) => write === "\x1b[>4;2m").length, 1);
 
+			await harness.terminal.drainInput(0);
+			assert.equal(harness.terminal.modifyOtherKeysActive, false);
+			assert.equal(harness.writes.filter((write) => write === "\x1b[>4;0m").length, 1);
 			harness.cleanup();
 			assert.equal(harness.writes.filter((write) => write === "\x1b[>4;0m").length, 1);
 		} finally {
@@ -189,6 +192,27 @@ describe("ProcessTerminal Kitty keyboard protocol negotiation", () => {
 			assert.equal(harness.getInput(), undefined);
 			assert.equal(harness.terminal.kittyProtocolActive, false);
 			assert.equal(harness.writes.filter((write) => write === "\x1b[>4;2m").length, 1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("replaces modifyOtherKeys with Kitty mode when confirmation arrives after device attributes", () => {
+		const harness = setupNegotiation();
+		try {
+			harness.send("\x1b[?62;4;52c");
+			assert.equal(harness.terminal.modifyOtherKeysActive, true);
+
+			harness.send("\x1b[?7u");
+			assert.equal(harness.terminal.kittyProtocolActive, true);
+			assert.equal(harness.terminal.modifyOtherKeysActive, false);
+			assert.equal(harness.writes.at(-1), "\x1b[>4;0m");
+
+			harness.cleanup();
+			assert.equal(harness.terminal.kittyProtocolActive, false);
+			assert.equal(harness.terminal.modifyOtherKeysActive, false);
+			assert.equal(harness.writes.filter((write) => write === "\x1b[>4;0m").length, 1);
+			assert.equal(harness.writes.filter((write) => write === "\x1b[<u").length, 1);
 		} finally {
 			harness.cleanup();
 		}

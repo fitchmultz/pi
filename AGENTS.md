@@ -84,8 +84,9 @@ Binding for Chord v2 (`packages/chord/src/`) and its tests, when writing and whe
 ## Commands
 
 - After code changes (not docs): `npm run check` (full output, no tail). Fix all errors, warnings, and infos before committing. Does not run tests.
-- Builds and tests needed for an authorized implementation are covered by the standing fork delivery authorization below. Run the full offline package suite through `./test.sh`; `npm test` delegates to the same isolated runner.
-- `apps/p2` is outside the root check and the root tests. After p2 changes also run `cd apps/p2 && npm run check`; p2's suite is `cd apps/p2 && npm test` (TUI tests need Node 26, browser tests need `CHROMIUM_BIN`).
+- Builds and tests needed for an authorized implementation are covered by the standing fork delivery authorization below. Choose tests for the changed behavior and affected callers. Run focused commands through `./test.sh -- <command>`; use the full `./test.sh` suite when the change's reach or uncertainty warrants it. Reuse valid results when their relevant code and inputs are unchanged.
+- Tests must protect observable behavior or an independent contract and be able to fail for a credible regression. A test designed to pass regardless of production behavior should usually be deleted, not counted as verification.
+- `apps/p2` is outside the root check and the root tests. After p2 changes also run `cd apps/p2 && npm run check` and the affected p2 tests. Its full suite is `cd apps/p2 && npm test` (TUI tests need Node 26, browser tests need `CHROMIUM_BIN`).
 - Run `npm run build` when tests or other verification need built output in `dist/`, including the full Chord and Durable suites. Chord's subprocess and bundling tests load workspace packages from `dist/`; Durable imports pi-ai's `utils/*`, which have no source export. Use `npm run check` for type checking and linting.
 - Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e package tests, run `./test.sh` from the repo root. Otherwise run specific tests from the package root:
   - Vitest: `node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --run test/specific.test.ts`
