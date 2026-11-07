@@ -179,7 +179,8 @@ try {
 			const accumulator = new OutputAccumulator();
 			for (let i = 0; i < chunks; i++) accumulator.append(Buffer.from(chunk));
 			const beforeDrain = process.memoryUsage();
-			const queuedBytes = accumulator.tempFileStream?.writableLength;
+			// The harness also measures historical source roots with the separate stream field.
+			const queuedBytes = (accumulator.raw?.stream ?? accumulator.tempFileStream)?.writableLength;
 			accumulator.finish();
 			snapshot = accumulator.snapshot();
 			owned.push(snapshot.fullOutputPath);
@@ -192,7 +193,8 @@ try {
 				checksum: sha(snapshot.content),
 			};
 		};
-		verification = () => {
+		verification = (result) => {
+			assert.equal(typeof result.queuedBytes, "number", "spill write queue must be measured");
 			const bytes = readFileSync(snapshot.fullOutputPath);
 			const checksum = sha(bytes);
 			assert.equal(bytes.length, workload.totalBytes);
