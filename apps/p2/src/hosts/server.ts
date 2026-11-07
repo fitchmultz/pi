@@ -227,18 +227,10 @@ export async function startServer(options: ServerOptions = {}): Promise<P2Server
 	// Capture before plugin resources open (e.g. provider SDK startup), not only after the logs facet activates.
 	const stopLogs = captureProcessLogs("server");
 	const serveWeb = options.web ?? true;
-	/** Source files of the last built bundles, by bundle (dev watcher: which plugin saves affect downloaded code). */
-	const bundleInputs = new Map<"tui" | "web", readonly string[]>();
 	/**
-	 * Records a bundle's source files. Plugin files mark their plugin dirty when saved (`loadedFiles` below); in dev mode
-	 * the others (browser and TUI runtime code) are compared by content like the server's own modules, so a save asks
-	 * for a restart, or the next reload, which rebuilds both bundles.
+	 * Records non-plugin bundle inputs for dev restart detection. Chord's watcher tracks plugin files separately.
 	 */
 	const recordInputs = (bundle: "tui" | "web", inputs: readonly BundleInput[]): void => {
-		bundleInputs.set(
-			bundle,
-			inputs.map(({ file }) => file),
-		);
 		if (!devModules) return;
 		const plugin = (file: string) =>
 			file.startsWith(PLUGINS_DIRECTORY) ||
