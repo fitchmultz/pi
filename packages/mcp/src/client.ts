@@ -241,6 +241,8 @@ export class McpClient {
 			this.instructionsValue = result.instructions;
 			transport.setProtocolVersion?.(result.protocolVersion);
 			await this.notifyInternal("notifications/initialized", undefined, true);
+			// The transport may have closed, or `close()` been called, while the notification was sent; closed is final.
+			if (this.state !== "connecting") throw new McpConnectionClosedError();
 			this.state = "connected";
 			return result;
 		} catch (error) {
