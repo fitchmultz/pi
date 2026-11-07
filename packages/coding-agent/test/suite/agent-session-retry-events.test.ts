@@ -50,6 +50,7 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.eventsOfType("agent_end").map((event) => event.willRetry)).toEqual([true, false]);
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(harness.session.isRetrying).toBe(false);
+		expect(harness.session.retryAttempt).toBe(0);
 	});
 
 	it("retries multiple transient failures and succeeds on the final attempt", async () => {
@@ -120,6 +121,7 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.eventsOfType("agent_end").map((event) => event.willRetry)).toEqual([true, true, false]);
 		expect(harness.faux.state.callCount).toBe(3);
 		expect(harness.session.isRetrying).toBe(false);
+		expect(harness.session.retryAttempt).toBe(0);
 	});
 
 	it("prompt waits for retry completion even when assistant message_end handling is delayed", async () => {
