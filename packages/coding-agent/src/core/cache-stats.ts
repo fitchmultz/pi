@@ -18,6 +18,10 @@ export interface CacheMiss {
 	idleMs: number;
 	/** Expected transition to a different provider/model on the same ancestry. */
 	modelChanged: boolean;
+	/** Known effort change on the same provider/model. Missing effort metadata stays unknown. */
+	thinkingChanged: boolean;
+	/** Known cache-owner change within the same provider. */
+	credentialChanged: boolean;
 }
 
 export interface CacheWasteTotals {
@@ -26,6 +30,8 @@ export interface CacheWasteTotals {
 	missedCost: number;
 	missCount: number;
 	modelSwitchCount: number;
+	thinkingSwitchCount: number;
+	credentialSwitchCount: number;
 	ancestorPriceCount: number;
 	catalogPriceCount: number;
 	unpricedMissCount: number;
@@ -39,6 +45,10 @@ export interface ModelPriceSource {
 interface PreviousRequest {
 	promptTokens: number;
 	modelKey: string;
+	provider: string;
+	thinkingLevel?: AssistantMessage["thinkingLevel"];
+	providerThinkingLevel?: string;
+	cacheIdentity?: string;
 	timestamp: number;
 	/** Last observed read rate on this uninterrupted provider/model ancestry. */
 	readPerToken?: number;
@@ -63,11 +73,28 @@ function detectMiss(
 	if (missedTokens <= NOISE_FLOOR_TOKENS) return undefined;
 
 	const modelChanged = `${message.provider}/${message.responseModel ?? message.model}` !== prev.modelKey;
+	const thinkingChanged =
+		!modelChanged &&
+		(prev.providerThinkingLevel !== undefined && message.providerThinkingLevel !== undefined
+			? prev.providerThinkingLevel !== message.providerThinkingLevel
+			: prev.thinkingLevel !== undefined &&
+				message.thinkingLevel !== undefined &&
+				prev.thinkingLevel !== message.thinkingLevel);
+	const credentialChanged =
+		prev.provider === message.provider &&
+		prev.cacheIdentity !== undefined &&
+		message.cacheIdentity !== undefined &&
+		prev.cacheIdentity !== message.cacheIdentity;
 	const paidTokens = usage.input + usage.cacheWrite;
 	const paidPerToken = paidTokens > 0 ? (usage.cost.input + usage.cost.cacheWrite) / paidTokens : 0;
 	let readPerToken = usage.cacheRead > 0 ? usage.cost.cacheRead / usage.cacheRead : undefined;
 	let readPriceSource: ReadPriceSource = "usage";
-	if (readPerToken === undefined && !modelChanged && prev.readPerToken !== undefined) {
+	if (
+		readPerToken === undefined &&
+		!modelChanged &&
+		prev.cacheIdentity === message.cacheIdentity &&
+		prev.readPerToken !== undefined
+	) {
 		readPerToken = prev.readPerToken;
 		readPriceSource = "ancestor";
 	}
@@ -89,6 +116,8 @@ function detectMiss(
 		readPriceSource,
 		idleMs: Math.max(0, message.timestamp - prev.timestamp),
 		modelChanged,
+		thinkingChanged,
+		credentialChanged,
 	};
 }
 
@@ -100,11 +129,15 @@ function asPreviousRequest(message: AssistantMessage, prev: PreviousRequest | un
 	return {
 		promptTokens,
 		modelKey,
+		provider: message.provider,
+		thinkingLevel: message.thinkingLevel,
+		providerThinkingLevel: message.providerThinkingLevel,
+		cacheIdentity: message.cacheIdentity,
 		timestamp: message.timestamp,
 		readPerToken:
 			usage.cacheRead > 0
 				? usage.cost.cacheRead / usage.cacheRead
-				: modelKey === prev?.modelKey
+				: modelKey === prev?.modelKey && message.cacheIdentity === prev.cacheIdentity
 					? prev.readPerToken
 					: undefined,
 		reportedCache: (prev?.reportedCache ?? false) || usage.cacheRead + usage.cacheWrite > 0,
@@ -122,6 +155,8 @@ function scan(
 		missedCost: 0,
 		missCount: 0,
 		modelSwitchCount: 0,
+		thinkingSwitchCount: 0,
+		credentialSwitchCount: 0,
 		ancestorPriceCount: 0,
 		catalogPriceCount: 0,
 		unpricedMissCount: 0,
@@ -141,11 +176,15 @@ function scan(
 				prev = {
 					promptTokens,
 					modelKey,
+					provider: entry.provider,
+					cacheIdentity: entry.cacheIdentity,
+					thinkingLevel: entry.thinkingLevel,
+					providerThinkingLevel: entry.providerThinkingLevel,
 					timestamp: Date.parse(entry.timestamp),
 					readPerToken:
 						entry.usage.cacheRead > 0
 							? entry.usage.cost.cacheRead / entry.usage.cacheRead
-							: modelKey === prev?.modelKey
+							: modelKey === prev?.modelKey && entry.cacheIdentity === prev.cacheIdentity
 								? prev.readPerToken
 								: undefined,
 					reportedCache: true,
@@ -158,6 +197,8 @@ function scan(
 				totals.missedCost += miss.missedCost;
 				totals.missCount += 1;
 				if (miss.modelChanged) totals.modelSwitchCount += 1;
+				if (miss.thinkingChanged) totals.thinkingSwitchCount += 1;
+				if (miss.credentialChanged) totals.credentialSwitchCount += 1;
 				if (miss.readPriceSource === "ancestor") totals.ancestorPriceCount += 1;
 				if (miss.readPriceSource === "catalog") totals.catalogPriceCount += 1;
 				if (miss.readPriceSource === "unknown") totals.unpricedMissCount += 1;
