@@ -79,6 +79,7 @@ function createDeferredRunTool(toolUsage?: Usage) {
 	const started = Promise.withResolvers<void>();
 	const finished = Promise.withResolvers<void>();
 	let runId: string | undefined;
+	let commits = 0;
 	const tool: ToolDefinition = {
 		name: "deferred_run",
 		label: "deferred_run",
@@ -92,12 +93,15 @@ function createDeferredRunTool(toolUsage?: Usage) {
 					content: [{ type: "text", text: "work output" }],
 					details: undefined,
 					...(toolUsage ? { usage: toolUsage } : {}),
+					commit: () => {
+						commits++;
+					},
 				};
 			});
 			return { content: [{ type: "text", text: "started" }], details: undefined };
 		},
 	};
-	return { tool, started: started.promise, finish: finished.resolve, runId: () => runId };
+	return { tool, started: started.promise, finish: finished.resolve, runId: () => runId, commits: () => commits };
 }
 
 /** A background run that attempts a nested call when the test allows it. */
@@ -633,27 +637,108 @@ describe("codemode background runs", () => {
 		expect(usageEntries(harness)).toHaveLength(1);
 	});
 
-	it("keeps a settled run's known usage when the session is disposed during a save hold", async () => {
+	it.each([false, true])(
+		"keeps settled usage on disposal, releasing from invalidation: %s",
+		async (releaseOnInvalidation) => {
+			const run = createDeferredRunTool(usage(40, 0.4));
+			const harness = await setup([], [toolExtension(run.tool)]);
+			await promptTool(harness, "deferred_run", ["foreground done"]);
+			await run.started;
+
+			const hold = await harness.session.acquireWorkingSession();
+			if (releaseOnInvalidation) {
+				hold.invalidated.addEventListener("abort", () => void hold.release(), { once: true });
+			}
+			run.finish();
+			await flush();
+			expect(usageEntries(harness)).toHaveLength(0);
+
+			harness.session.dispose();
+
+			await vi.waitFor(() => expect(usageEntries(harness)).toHaveLength(1));
+			expect(getUsageCostBreakdown(harness.sessionManager.getBranch())).toContainEqual({
+				key: "Tools/summaries",
+				cost: 0.4,
+				tokens: 40,
+			});
+			expect(run.commits()).toBe(0);
+			expect(completions(harness, "test-background")).toHaveLength(0);
+			await hold.release();
+			expect(completions(harness, "test-background")).toHaveLength(0);
+		},
+	);
+
+	it("records a parked completion's usage once when the session is disposed", async () => {
 		const run = createDeferredRunTool(usage(40, 0.4));
 		const harness = await setup([], [toolExtension(run.tool)]);
 		await promptTool(harness, "deferred_run", ["foreground done"]);
 		await run.started;
-
-		const hold = await harness.session.acquireWorkingSession();
+		// A listener fails the completion's turn while a save waits for that turn to end. The failed send
+		// parks the run behind the save after its commit and usage.
+		const turnStarted = Promise.withResolvers<void>();
+		const answer = Promise.withResolvers<void>();
+		harness.setResponses([
+			async () => {
+				turnStarted.resolve();
+				await answer.promise;
+				return fauxAssistantMessage("after completion");
+			},
+		]);
+		let failed = false;
+		harness.session.subscribe((event) => {
+			if (event.type !== "agent_settled" || failed) return;
+			failed = true;
+			throw new Error("listener failed");
+		});
 		run.finish();
+		await turnStarted.promise;
+		const pending = harness.session.acquireWorkingSession();
+		answer.resolve();
+		const hold = await pending;
+		expect(hold.blockers).toContain(`Background run ${run.runId()} is awaiting delivery`);
+		expect(run.commits()).toBe(1);
+		expect(usageEntries(harness)).toHaveLength(1);
+
+		harness.session.dispose();
 		await flush();
-		expect(usageEntries(harness)).toHaveLength(0);
+
+		expect(usageEntries(harness)).toHaveLength(1);
+		expect(completions(harness, "test-background")).toHaveLength(1);
+	});
+
+	it("records the usage of a run whose session is disposed before its receipt", async () => {
+		const launched = Promise.withResolvers<void>();
+		const receipt = Promise.withResolvers<void>();
+		const harness = await setup(
+			[],
+			[
+				toolExtension({
+					name: "slow_receipt",
+					label: "slow_receipt",
+					description: "Starts a background run, then returns when the test allows it",
+					parameters: Type.Object({}),
+					execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
+						ctx.runInBackground("test-background", async (signal) => {
+							await new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
+							return { content: [{ type: "text", text: "stopped" }], details: undefined, usage: usage(40, 0.4) };
+						});
+						launched.resolve();
+						await receipt.promise;
+						return { content: [{ type: "text", text: "started" }], details: undefined };
+					},
+				}),
+			],
+		);
+		harness.setResponses([fauxAssistantMessage([fauxToolCall("slow_receipt", {})], { stopReason: "toolUse" })]);
+		const prompt = harness.session.prompt("go");
+		await launched.promise;
 
 		harness.session.dispose();
 
+		// The disposed session never persists the receipt; a cancelled run sends nothing, so it does not wait.
 		await vi.waitFor(() => expect(usageEntries(harness)).toHaveLength(1));
-		expect(getUsageCostBreakdown(harness.sessionManager.getBranch())).toContainEqual({
-			key: "Tools/summaries",
-			cost: 0.4,
-			tokens: 40,
-		});
-		expect(completions(harness, "test-background")).toHaveLength(0);
-		await hold.release();
+		receipt.resolve();
+		await prompt;
 		expect(completions(harness, "test-background")).toHaveLength(0);
 	});
 

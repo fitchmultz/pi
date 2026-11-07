@@ -398,7 +398,10 @@ interface BackgroundToolRun {
 	/** Run ID, which is the id of the model-issued tool call that started the run. */
 	runId: string;
 	customType: string;
-	/** Aborts the work on session abort, dispose, reload, replacement, or tree navigation. */
+	/**
+	 * Aborts the work on session abort, dispose, reload, replacement, or tree navigation. Aborting it
+	 * cancels the run: its usage is still recorded, its store write and message are not.
+	 */
 	controller: AbortController;
 	/** The assistant message that issued the launching call, used as the origin of late nested calls. */
 	originAssistant: AssistantMessage;
@@ -415,12 +418,12 @@ type BackgroundToolRunState =
 			status: "settled";
 			result: BackgroundToolResult<unknown>;
 			nested: NestedCallSummary | undefined;
-			/** False once the run is cancelled: its usage is still recorded, its writes and message are not. */
-			deliver: boolean;
-			/** Completed steps, in order. A throw or a save hold leaves the current step for the next pass. */
-			step: "commit" | "usage" | "message";
-	  }
-	| { status: "done" };
+			/**
+			 * A save hold preserves the next step. Cancellation skips the commit and message without
+			 * repeating usage already recorded.
+			 */
+			due: "commit" | "usage" | "message";
+	  };
 
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
@@ -580,6 +583,7 @@ export class AgentSession {
 	private readonly _backgroundRuns = new Map<string, BackgroundToolRun>();
 	private _backgroundDelivery: Promise<void> | undefined;
 	private _backgroundDeliveryRequested = false;
+	/** Blocks delivery during synchronous disposal callbacks, before every run has been aborted. */
 	private _disposed = false;
 	/** Declared tools whose declarations requests leave out, from `prepareLoadout` hooks. */
 	private _hiddenDeclarations: ReadonlySet<string> = new Set();
@@ -1243,15 +1247,7 @@ export class AgentSession {
 		// Taken once: a nested call that ignores the abort cannot change the record afterwards.
 		const nested = this._nestedToolCalls?.takeDetached(run.runId);
 		const content = await this._normalizeImages(result.content);
-		// The run's controller is aborted exactly when the session stopped wanting its result.
-		const deliver = !run.controller.signal.aborted;
-		run.state = {
-			status: "settled",
-			result: { ...result, content },
-			nested,
-			deliver,
-			step: deliver ? "commit" : "usage",
-		};
+		run.state = { status: "settled", result: { ...result, content }, nested, due: "commit" };
 		this._flushBackgroundRuns();
 	}
 
@@ -1283,14 +1279,7 @@ export class AgentSession {
 	}
 
 	private _abortBackgroundRuns(reason: string): void {
-		for (const run of this._backgroundRuns.values()) {
-			run.controller.abort(new Error(reason));
-			const state = run.state;
-			if (state.status !== "settled" || !state.deliver) continue;
-			// A cancelled run keeps its usage; its store write and message are dropped.
-			state.deliver = false;
-			state.step = "usage";
-		}
+		for (const run of this._backgroundRuns.values()) run.controller.abort(new Error(reason));
 	}
 
 	private _flushBackgroundRuns(): void {
@@ -1310,24 +1299,22 @@ export class AgentSession {
 		})();
 	}
 
-	/**
-	 * Account one settled run, then commit and deliver it unless it was cancelled or the session is
-	 * gone; false when nothing can advance right now.
-	 */
+	/** Advance one ready run, retaining usage even when cancelled; false when nothing can advance. */
 	private async _advanceNextBackgroundRun(): Promise<boolean> {
 		if (this.workingSessionGate.reserved || this.isCompacting) return false;
 		const run = [...this._backgroundRuns.values()].find(
-			(candidate) => candidate.state.status === "settled" && (!candidate.state.deliver || candidate.receiptReady),
+			(candidate) =>
+				candidate.state.status === "settled" && (candidate.controller.signal.aborted || candidate.receiptReady),
 		);
 		if (!run || run.state.status !== "settled") return false;
 		const state = run.state;
 		try {
-			if (state.deliver && !this._disposed && state.step === "commit") {
-				state.result.commit?.();
-				state.step = "usage";
+			if (state.due === "commit") {
+				if (!this._disposed && !run.controller.signal.aborted) state.result.commit?.();
+				state.due = "usage";
 			}
-			if (state.step === "usage") this._recordBackgroundRunUsage(run);
-			if (!state.deliver || this._disposed) {
+			if (state.due === "usage") this._recordBackgroundRunUsage(run);
+			if (this._disposed || run.controller.signal.aborted) {
 				this._finishBackgroundRun(run);
 				return true;
 			}
@@ -1365,7 +1352,7 @@ export class AgentSession {
 	/** Record a settled run's descendant and model usage once; the step advances only after the write. */
 	private _recordBackgroundRunUsage(run: BackgroundToolRun): void {
 		const state = run.state;
-		if (state.status !== "settled" || state.step !== "usage") return;
+		if (state.status !== "settled" || state.due !== "usage") return;
 		const nestedUsage = state.nested?.usage;
 		const modelUsage = state.result.usage;
 		const usage = nestedUsage && modelUsage ? combineUsage(nestedUsage, modelUsage) : (nestedUsage ?? modelUsage);
@@ -1373,11 +1360,10 @@ export class AgentSession {
 			const entry = this.sessionManager.appendUsage(run.customType, "", "", usage, `background ${run.runId}`);
 			this._emit({ type: "entry_appended", entry });
 		}
-		state.step = "message";
+		state.due = "message";
 	}
 
 	private _finishBackgroundRun(run: BackgroundToolRun): void {
-		run.state = { status: "done" };
 		this._backgroundRuns.delete(run.runId);
 	}
 
@@ -2069,7 +2055,7 @@ export class AgentSession {
 		this._disposed = true;
 		this.workingSessionGate.invalidate("Native session disposed");
 		// Dispose is synchronous, so abort as a backstop. Releasing the hold below lets the usage of a
-		// run that already settled still be written; delivery is skipped once disposed.
+		// run that already settled still be written; aborted runs skip their commit and message.
 		this._abortBackgroundRuns("Native session disposed");
 		void this.workingSessionGate.reservation?.release();
 		this._flushBackgroundRuns();
