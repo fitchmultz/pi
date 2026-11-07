@@ -619,17 +619,71 @@ export function openWorkingSession(state: WorkingSession): SessionManager {
 	);
 }
 
+/** One granted save. Invalidation makes the snapshot unusable but keeps it reserved until release. */
+class WorkingSessionReservation {
+	private readonly releaseBarrier = Promise.withResolvers<void>();
+	readonly released = this.releaseBarrier.promise;
+	private readonly lifetime = new AbortController();
+	/** Ends on release, including preparation failure or connection loss. */
+	readonly signal: AbortSignal = this.lifetime.signal;
+	private readonly invalidation = new AbortController();
+	/** Aborted once the cut is unusable; the reservation stays held until release. */
+	readonly invalidated: AbortSignal = this.invalidation.signal;
+	private phase: "preparing" | "appending" | "prepared" | "released" = "preparing";
+	private readonly onInvalidate: ((reason: string) => void) | undefined;
+	private readonly onRelease: () => void;
+
+	constructor(onInvalidate: ((reason: string) => void) | undefined, onRelease: () => void) {
+		this.onInvalidate = onInvalidate;
+		this.onRelease = onRelease;
+	}
+
+	get appending(): boolean {
+		return this.phase === "appending";
+	}
+
+	invalidate(reason: string): void {
+		if (this.invalidated.aborted) return;
+		// The filesystem guard must change before an incompatible admission returns.
+		this.onInvalidate?.(reason);
+		this.invalidation.abort(new Error(reason));
+	}
+
+	/** Run one save-hook journal append; the writer expires when preparation ends or on release. */
+	append<T>(action: () => T): T {
+		if (this.phase !== "preparing") throw new Error("Working session save writer expired");
+		this.phase = "appending";
+		try {
+			return action();
+		} finally {
+			this.phase = "preparing";
+		}
+	}
+
+	endPreparation(): void {
+		if (this.phase === "preparing") this.phase = "prepared";
+	}
+
+	assertHeld(): void {
+		if (this.phase === "released") throw new Error("Native working session released");
+		this.invalidated.throwIfAborted();
+	}
+
+	/** Free the gate before abort listeners resume native work. */
+	async release(): Promise<void> {
+		if (this.phase === "released") return;
+		this.phase = "released";
+		this.releaseBarrier.resolve();
+		this.onRelease();
+		this.lifetime.abort();
+	}
+}
+
 /** Single native admission gate; no sleep policy or polling. */
 export class WorkingSessionGate {
 	private readonly context = new AsyncLocalStorage<Array<{ foreground: boolean }>>();
 	private readonly activity = new Set<{ foreground: boolean }>();
-	private held?: {
-		invalidated: AbortController;
-		onInvalidate?: (reason: string) => void;
-		released: Promise<void>;
-		release: () => void;
-	};
-	private preparationMutation = false;
+	private held?: WorkingSessionReservation;
 	private exiting = false;
 	onIdle?: () => void;
 
@@ -642,9 +696,12 @@ export class WorkingSessionGate {
 	get reserved(): boolean {
 		return this.held !== undefined;
 	}
+	get reservation(): WorkingSessionReservation | undefined {
+		return this.held;
+	}
 
 	beforeMutation = (): void => {
-		if (!this.held || this.preparationMutation) return;
+		if (!this.held || this.held.appending) return;
 		this.invalidate("Native input or mutation during save");
 		throw new Error("Native working session is reserved for saving; retry after release");
 	};
@@ -655,38 +712,21 @@ export class WorkingSessionGate {
 	}
 
 	invalidate(reason: string): void {
-		if (!this.held || this.held.invalidated.signal.aborted) return;
-		// The filesystem guard must change before an incompatible admission returns.
-		this.held.onInvalidate?.(reason);
-		this.held.invalidated.abort(new Error(reason));
+		this.held?.invalidate(reason);
 	}
 
-	reserve(invalidated: AbortController, onInvalidate?: (reason: string) => void): void {
+	/** Reserve the session for one save; only the reservation's own release ends it. */
+	reserve(onInvalidate?: (reason: string) => void): WorkingSessionReservation {
 		if (this.held) throw new Error("Native working session already reserved");
-		let release!: () => void;
-		const released = new Promise<void>((resolve) => {
-			release = resolve;
+		this.held = new WorkingSessionReservation(onInvalidate, () => {
+			this.held = undefined;
+			this.onIdle?.();
 		});
-		this.held = { invalidated, onInvalidate, released, release };
-	}
-
-	release(): void {
-		this.held?.release();
-		this.held = undefined;
-		this.onIdle?.();
+		return this.held;
 	}
 
 	async waitForRelease(): Promise<void> {
 		await this.held?.released;
-	}
-
-	prepareMutation<T>(action: () => T): T {
-		this.preparationMutation = true;
-		try {
-			return action();
-		} finally {
-			this.preparationMutation = false;
-		}
 	}
 
 	async run<T>(action: () => Promise<T>): Promise<T> {

@@ -146,6 +146,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | --- | --- | --- |
 | One waiting/completing/settled phase owns OAuth callback admission and settlement; manual cancellation leaves an active exchange alone | `packages/ai/src/auth/oauth/callback-server.ts` | `packages/ai/test/oauth-callback-server.test.ts` |
 | Keyboard mode uses one mutually exclusive state; the outstanding Kitty stack push remains a separate cleanup obligation | `packages/tui/src/terminal.ts` | `packages/tui/test/terminal.test.ts` |
+| One granted-save reservation owns preparation, invalidation and release. Late hooks from a cancelled save cannot release the next save; activity and final-exit admission stay independent | `core/{working-session,agent-session}.ts` | `suite/{working-session,agent-session-runtime}.test.ts` |
 | RPC shutdown has one accepting/requested/draining phase. Extension requests wait for commands and idleness; EOF and signals start cleanup immediately. Repeated requests cannot restart cleanup | `modes/rpc/rpc-mode.ts` | `rpc-prompt-response-semantics.test.ts` |
 | Internal paste state uses one optional content buffer and one completion path, preserving split markers and input ordering | `packages/tui/src/stdin-buffer.ts` | `packages/tui/test/stdin-buffer.test.ts` |
 | Durable codemode keeps unlaunched calls in one held/released queue. Release checks precede launch, and each call still waits for its issued count to commit | `packages/durable/src/codemode/codemode.ts` | `packages/durable/test/{codemode,codemode-checkpoints}.test.ts` |
