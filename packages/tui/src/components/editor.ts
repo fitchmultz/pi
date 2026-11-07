@@ -2370,7 +2370,7 @@ export class Editor implements Component, Focusable {
 		options: { force: boolean; explicitTab: boolean },
 	): Promise<void> {
 		const previousTask = this.autocompleteRequestTask;
-		this.autocompleteRequestTask = (async () => {
+		const request = (async () => {
 			await previousTask;
 			if (startToken !== this.autocompleteStartToken || !this.autocompleteProvider) {
 				return;
@@ -2385,7 +2385,9 @@ export class Editor implements Component, Focusable {
 
 			await this.runAutocompleteRequest(requestId, controller, snapshotText, snapshotLine, snapshotCol, options);
 		})();
-		await this.autocompleteRequestTask;
+		// The next request waits for this one to settle, not to succeed.
+		this.autocompleteRequestTask = request.catch(() => {});
+		await request;
 	}
 
 	private setAutocompleteTriggerCharacters(triggerCharacters: string[]): void {
@@ -2421,18 +2423,24 @@ export class Editor implements Component, Focusable {
 	): Promise<void> {
 		if (!this.autocompleteProvider) return;
 
-		const suggestions = await this.autocompleteProvider.getSuggestions(
-			this.state.lines,
-			this.state.cursorLine,
-			this.state.cursorCol,
-			{ signal: controller.signal, force: options.force },
-		);
+		let suggestions: AutocompleteSuggestions | null;
+		try {
+			suggestions = await this.autocompleteProvider.getSuggestions(
+				this.state.lines,
+				this.state.cursorLine,
+				this.state.cursorCol,
+				{ signal: controller.signal, force: options.force },
+			);
+		} catch {
+			// A failed lookup offers no suggestions, including one rejected with the abort reason once superseded.
+			suggestions = null;
+		}
 
+		// Requests run one at a time, so a controller still set here belongs to this finished request.
+		this.autocompleteAbort = undefined;
 		if (!this.isAutocompleteRequestCurrent(requestId, controller, snapshotText, snapshotLine, snapshotCol)) {
 			return;
 		}
-
-		this.autocompleteAbort = undefined;
 
 		if (!suggestions || !Array.isArray(suggestions.items) || suggestions.items.length === 0) {
 			this.cancelAutocomplete();

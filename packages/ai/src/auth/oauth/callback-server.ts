@@ -63,13 +63,12 @@ export async function startOAuthCallbackServer<T>(
 	// A cancelled or closed wait may never be observed.
 	waitPromise.catch(() => undefined);
 
-	let claimed = false;
-	let settled = false;
+	let phase: "waiting" | "completing" | "settled" = "waiting";
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const onAbort = () => finish({ error: new Error("Login cancelled") });
 	const finish = (result: { value: T | undefined } | { error: Error }): void => {
-		if (settled) return;
-		settled = true;
+		if (phase === "settled") return;
+		phase = "settled";
 		if (timer) clearTimeout(timer);
 		signal?.removeEventListener("abort", onAbort);
 		if ("error" in result) rejectWait(result.error);
@@ -87,7 +86,7 @@ export async function startOAuthCallbackServer<T>(
 				sendPage(response, 400, oauthErrorHtml("State mismatch."));
 				return;
 			}
-			if (claimed || settled) {
+			if (phase !== "waiting") {
 				sendPage(response, 409, oauthErrorHtml("This sign-in has already been handled."));
 				return;
 			}
@@ -103,7 +102,7 @@ export async function startOAuthCallbackServer<T>(
 				sendPage(response, 400, oauthErrorHtml("Missing authorization code."));
 				return;
 			}
-			claimed = true;
+			phase = "completing";
 			try {
 				const value = await options.complete(code);
 				sendPage(response, 200, oauthSuccessHtml(`Signed in to ${providerName}. You may now close this page.`));
@@ -143,7 +142,7 @@ export async function startOAuthCallbackServer<T>(
 		redirectUri: `http://${redirectHost.includes(":") ? `[${redirectHost}]` : redirectHost}:${address.port}${options.path}`,
 		wait: () => waitPromise,
 		cancel: () => {
-			if (!claimed) finish({ value: undefined });
+			if (phase === "waiting") finish({ value: undefined });
 		},
 		close: () => {
 			finish({ error: new Error("OAuth callback server closed") });
