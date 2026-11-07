@@ -165,8 +165,7 @@ export class ProcessTerminal implements Terminal {
 	private wasRaw = false;
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
-	private _kittyProtocolActive = false;
-	private _modifyOtherKeysActive = false;
+	private keyboardProtocol: "legacy" | "kitty" | "modify-other-keys" = "legacy";
 	private keyboardProtocolPushed = false;
 	/** DA1 replies owed to keyboard protocol queries. Later DA1 replies answer other queries and are forwarded. */
 	private pendingKeyboardProtocolDeviceAttributes = 0;
@@ -197,11 +196,11 @@ export class ProcessTerminal implements Terminal {
 	})();
 
 	get kittyProtocolActive(): boolean {
-		return this._kittyProtocolActive;
+		return this.keyboardProtocol === "kitty";
 	}
 
 	get modifyOtherKeysActive(): boolean {
-		return this._modifyOtherKeysActive;
+		return this.keyboardProtocol === "modify-other-keys";
 	}
 
 	start(onInput: (data: string) => void, onResize: () => void): void {
@@ -327,8 +326,8 @@ export class ProcessTerminal implements Terminal {
 		if (negotiationSequence.type === "kitty-flags") {
 			if (negotiationSequence.flags !== 0) {
 				this.disableModifyOtherKeys();
-				if (!this._kittyProtocolActive) {
-					this._kittyProtocolActive = true;
+				if (!this.kittyProtocolActive) {
+					this.keyboardProtocol = "kitty";
 					setKittyProtocolActive(true);
 				}
 			} else {
@@ -337,7 +336,7 @@ export class ProcessTerminal implements Terminal {
 			return true;
 		}
 
-		if (!this._kittyProtocolActive) {
+		if (!this.kittyProtocolActive) {
 			this.enableModifyOtherKeys();
 		}
 		return true;
@@ -414,15 +413,15 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	private enableModifyOtherKeys(): void {
-		if (this._kittyProtocolActive || this._modifyOtherKeysActive) return;
+		if (this.keyboardProtocol !== "legacy") return;
 		process.stdout.write("\x1b[>4;2m");
-		this._modifyOtherKeysActive = true;
+		this.keyboardProtocol = "modify-other-keys";
 	}
 
 	private disableModifyOtherKeys(): void {
-		if (!this._modifyOtherKeysActive) return;
+		if (!this.modifyOtherKeysActive) return;
 		process.stdout.write("\x1b[>4;0m");
-		this._modifyOtherKeysActive = false;
+		this.keyboardProtocol = "legacy";
 	}
 
 	/**
@@ -441,14 +440,14 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	async drainInput(maxMs = 1000, idleMs = 50): Promise<void> {
-		const shouldDisableKittyProtocol = this.keyboardProtocolPushed || this._kittyProtocolActive;
+		const shouldDisableKittyProtocol = this.keyboardProtocolPushed || this.kittyProtocolActive;
 		this.clearKeyboardProtocolNegotiationBuffer();
 		if (shouldDisableKittyProtocol) {
 			// Disable Kitty keyboard protocol first so any late key releases
 			// do not generate new Kitty escape sequences.
 			process.stdout.write("\x1b[<u");
 			this.keyboardProtocolPushed = false;
-			this._kittyProtocolActive = false;
+			if (this.kittyProtocolActive) this.keyboardProtocol = "legacy";
 			setKittyProtocolActive(false);
 		}
 		this.disableModifyOtherKeys();
@@ -492,14 +491,14 @@ export class ProcessTerminal implements Terminal {
 		// Disable bracketed paste mode
 		process.stdout.write("\x1b[?2004l");
 
-		const shouldDisableKittyProtocol = this.keyboardProtocolPushed || this._kittyProtocolActive;
+		const shouldDisableKittyProtocol = this.keyboardProtocolPushed || this.kittyProtocolActive;
 		this.clearKeyboardProtocolNegotiationBuffer();
 
 		// Disable Kitty keyboard protocol if not already done by drainInput()
 		if (shouldDisableKittyProtocol) {
 			process.stdout.write("\x1b[<u");
 			this.keyboardProtocolPushed = false;
-			this._kittyProtocolActive = false;
+			if (this.kittyProtocolActive) this.keyboardProtocol = "legacy";
 			setKittyProtocolActive(false);
 		}
 		this.disableModifyOtherKeys();
@@ -536,8 +535,8 @@ export class ProcessTerminal implements Terminal {
 		let sequence = before;
 		if (this.progressInterval) sequence += TERMINAL_PROGRESS_CLEAR_SEQUENCE;
 		sequence += "\x1b[?2004l";
-		if (this.keyboardProtocolPushed || this._kittyProtocolActive) sequence += "\x1b[<u";
-		if (this._modifyOtherKeysActive) sequence += "\x1b[>4;0m";
+		if (this.keyboardProtocolPushed || this.kittyProtocolActive) sequence += "\x1b[<u";
+		if (this.modifyOtherKeysActive) sequence += "\x1b[>4;0m";
 		sequence += after;
 		try {
 			// process.stdout.write() may be asynchronous (e.g. Windows TTYs) and would not flush during exit.
