@@ -68,6 +68,7 @@ if (task.startsWith("record-argv:")) {
 	emitMessage(assistant(`${"x".repeat(60 * 1024)}\n${"line\n".repeat(2100)}`));
 } else if (task.startsWith("ignore-sigterm:")) {
 	fs.writeFileSync(task.slice("ignore-sigterm:".length), String(process.pid));
+	// Ignore SIGTERM before emitting: the test aborts as soon as it receives the partial message.
 	process.on("SIGTERM", () => {});
 	emitMessage(assistant("partial", { stopReason: "toolUse" }));
 	setInterval(() => {}, 1000);

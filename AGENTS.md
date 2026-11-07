@@ -86,7 +86,7 @@ Binding for Chord v2 (`packages/chord/src/`) and its tests, when writing and whe
 - After code changes (not docs): `npm run check` (full output, no tail). Fix all errors, warnings, and infos before committing. Does not run tests.
 - Builds and tests needed for an authorized implementation are covered by the standing fork delivery authorization below. Choose tests for the changed behavior and affected callers. Use focused tests for isolated changes and broader suites when the integration impact warrants them. Run isolated focused commands through `./test.sh -- <command>`; `./test.sh` and `npm test` run the full offline package suite.
 - Tests must catch a credible failure or protect an independently meaningful contract. Remove tests designed to pass regardless of whether the behavior works, including tautologies and self-comparisons. A test that passes before and after a refactor is useful when breaking the behavior would make it fail.
-- `apps/p2` is outside the root check and the root tests. After p2 changes also run `cd apps/p2 && npm run check`; p2's suite is `cd apps/p2 && npm test` (TUI tests need Node 26, browser tests need `CHROMIUM_BIN`).
+- `apps/p2` is outside the root check and the root tests. After p2 changes also run `cd apps/p2 && npm run check` and the affected p2 tests. Its full suite is `cd apps/p2 && npm test` (TUI tests need Node 26, browser tests need `CHROMIUM_BIN`).
 - Run `npm run build` when tests or other verification need built output in `dist/`, including the full Chord and Durable suites. Chord's subprocess and bundling tests load workspace packages from `dist/`; Durable imports pi-ai's `utils/*`, which have no source export. Use `npm run check` for type checking and linting.
 - Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e package tests, run `./test.sh` from the repo root. Otherwise run specific tests from the package root:
   - Vitest: `node "$(git rev-parse --show-toplevel)/node_modules/vitest/dist/cli.js" --run test/specific.test.ts`
@@ -164,6 +164,10 @@ When posting issue/PR comments:
 When closing issues via commit:
 
 - Include `fixes #<number>` or `closes #<number>` in the message so merging auto-closes the issue. For multiple issues, repeat the keyword per issue (`closes #1, closes #2`); a shared keyword (`closes #1, #2`) only closes the first.
+
+## Building p2's web UI
+
+For building or changing p2's web UI (`apps/p2`), load and follow [.pi/skills/p2-ui.md](.pi/skills/p2-ui.md).
 
 ## Testing pi Interactive Mode with tmux
 
