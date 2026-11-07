@@ -169,6 +169,8 @@ export class McpClient {
 	private errorListeners = new Set<ErrorListener>();
 	private closeListeners = new Set<CloseListener>();
 	private disposers: (() => void)[] = [];
+	/** Set by the first `close()`; settles when the transport has finished closing. */
+	private closing: Promise<void> | undefined;
 
 	constructor(options: McpClientOptions) {
 		this.options = Object.freeze({ ...options });
@@ -387,12 +389,23 @@ export class McpClient {
 		);
 	}
 
+	/**
+	 * Closes the connection and its transport. The connection ends at once: requests fail, server requests being
+	 * handled are aborted, and close listeners run (once, see `onClose`). Every call, including one from a close
+	 * listener, settles when the transport has finished closing, and rejects if closing it failed.
+	 */
 	async close(): Promise<void> {
-		const transport = this.transport;
-		this.transport = undefined;
-		this.disposeTransportListeners();
-		this.markClosed(new McpConnectionClosedError());
-		await transport?.close();
+		if (!this.closing) {
+			const transport = this.transport;
+			this.transport = undefined;
+			this.disposeTransportListeners();
+			const cleanup = Promise.withResolvers<void>();
+			// Set before the close listeners run, so a listener calling close() waits for the same cleanup.
+			this.closing = cleanup.promise;
+			this.markClosed(new McpConnectionClosedError());
+			cleanup.resolve(transport?.close());
+		}
+		await this.closing;
 	}
 
 	private async requestInternal(

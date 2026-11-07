@@ -11,6 +11,7 @@
 ### Changed
 
 - Reduced repeated copying when assembling stdio messages, SSE events and bounded HTTP error prefixes.
+- Every `McpClient.close()` call, including one from an `onClose` listener, now settles when the transport has finished closing, and rejects if closing it failed. Before, only the first call waited for the transport.
 
 ### Fixed
 
