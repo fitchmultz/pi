@@ -1,9 +1,9 @@
 // Tests of the workers component (slice 10 §3, §4): starts on demand (the link made at the fork, `started` on
 // `connect`, the start timer covering only the start), failures that stay (a crash, a `fatal`, a failed start: no fork
 // for a new hold, holders `failed { waiting }`) until `retry` or a rollout, a running worker's lost link recovered from
-// once a minute, idle stops and `busy`, `stop` and its suspension, the per-address queue, `close`, the rollout step,
-// stale lock files cleared, nothing kept of 1,000 addresses, and the worker base (an edit after the component was
-// created runs in no worker; a broken entry rejects its creation).
+// once a minute, idle stops and `busy`, `stop` and its suspension (a `ready` crossing it shows no `running`), the
+// per-address queue, `close`, the rollout step, stale lock files cleared, nothing kept of 1,000 addresses, and the
+// worker base (an edit after the component was created runs in no worker; a broken entry rejects its creation).
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -31,6 +31,9 @@ function listed(hosts: readonly RolloutHost[]) {
 
 /** The process lock module, for a process that takes a lock and is killed holding it. */
 const LOCK_MODULE = fileURLToPath(new URL("../../../src/node/workers/lock.ts", import.meta.url));
+
+/** The control channel's module, for a worker entry that tells when its worker sent a control message. */
+const CONTROL_MODULE = fileURLToPath(new URL("../../../src/node/workers/control.ts", import.meta.url));
 
 /** The state entry of `id`. */
 const stateOf = (state: unknown, id: string) =>
@@ -335,6 +338,64 @@ describe("stop", () => {
 		expect(starts).toHaveLength(3);
 		third.release();
 	});
+
+	it("a stop crossing the worker's ready stays a stop: the state goes starting, stopping, gone; nothing fails", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "chord-workers-ready-"));
+		const marker = join(dir, "ready");
+		// The fixture worker, writing `marker` once it sent `ready` (which the server may not have read yet).
+		await writeFile(
+			join(dir, "entry.ts"),
+			[
+				'import { writeFileSync } from "node:fs";',
+				`import { controlOf } from ${JSON.stringify(CONTROL_MODULE)};`,
+				`import ${JSON.stringify(ENTRY)};`,
+				"const send = process.send!.bind(process);",
+				"process.send = ((message: unknown, ...rest: unknown[]) => {",
+				"\tconst queued = send(message, ...rest);",
+				`\tif (controlOf(message)?.kind === "ready") writeFileSync(${JSON.stringify(marker)}, "");`,
+				"\treturn queued;",
+				"}) as typeof process.send;",
+			].join("\n"),
+		);
+		const pause = new Int32Array(new SharedArrayBuffer(4));
+		let seen: unknown;
+		let stopped: Promise<void> | undefined;
+		const { server, workers, behaviours, errors } = await fleet({
+			entry: join(dir, "entry.ts"),
+			// `started` arrived: the app's hook stops the worker, then holds this event loop (`Atomics.wait` sleeps without
+			// running it) until the worker sent `ready`, so the server reads that `ready` only after the stop began.
+			principal: () => {
+				const status = stateOf(workers.state.value, "S1")?.status;
+				stopped = workers.stop(Session({ id: "S1" }), context);
+				const deadline = Date.now() + 10_000;
+				while (!existsSync(marker) && Date.now() < deadline) Atomics.wait(pause, 0, 0, 5);
+				seen = [status, existsSync(marker)];
+				return { kind: "worker", id: "S1" };
+			},
+		});
+		// Its load waits after `started`: `started` and `ready` reach the server apart.
+		behaviours.set("S1", { loadMs: 300 });
+		const statuses: (string | undefined)[] = [];
+		const watch = await workers.state.watch(context);
+		watch.start(async (call) => {
+			if (call.kind === "value") statuses.push(stateOf(call.value, "S1")?.status);
+		});
+		const notes = server.hold(Notes, { id: "S1" }, context);
+		await until(() => stopped !== undefined);
+		await stopped;
+		await until(() => statuses.length > 0 && statuses.at(-1) === undefined);
+		// The stop began before the server read `ready`, which the worker had sent: they crossed.
+		expect(seen).toEqual(["starting", true]);
+		expect(statuses.filter((status, index) => status !== statuses[index - 1])).toEqual([
+			"starting",
+			"stopping",
+			undefined,
+		]);
+		expect(errors).toEqual([]);
+		await watch.stop();
+		notes.release();
+		await rm(dir, { recursive: true, force: true });
+	}, 20_000);
 
 	it("runs the worker's closers in reverse order at its stop", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "chord-workers-log-"));

@@ -164,12 +164,22 @@ type Cause = {
 /** How a child's reloads end once it is gone: stopped cleanly (a stop's exit) or with an error. */
 type Ended = { readonly kind: "stopped" } | { readonly kind: "failed"; readonly error: unknown };
 
+/**
+ * A child on its way out: a stop asked for its exit (`requested`: no crash unless a cause failed it), or its lost link
+ * shut it down (`link_lost`). A later stop makes it `requested`; its cause stays.
+ */
+type Stopping = { readonly kind: "stopping"; readonly intent: "requested" | "link_lost" };
+
+/**
+ * Where a child is (its `state`'s status): `starting` until its `ready`, then `running`; `stopping` from a stop or a lost
+ * link on. Only a starting child goes running: a `ready` that crossed a stop leaves it stopping.
+ */
+type Phase = { readonly kind: "starting" } | { readonly kind: "running" } | Stopping;
+
 /** One worker process of an address, with what its events recorded. */
 type Child = {
 	readonly process: WorkerProcess;
-	status: "starting" | "running" | "stopping";
-	/** A stop was asked for: its exit is no crash. */
-	stopping: boolean;
+	phase: Phase;
 	cause: Cause | undefined;
 	/** `started`: the app's host listens on its link. */
 	readonly started: PromiseWithResolvers<void>;
@@ -417,8 +427,12 @@ class WorkersComponent implements Workers<HostKind> {
 			return { link: child.process.link, principal: this.#options.principal(address), trusted: true };
 		} catch (error) {
 			// Closing is a stop (no failure); anything else fails the start.
-			if (this.#closing.signal.aborted) child.stopping = true;
-			else child.cause ??= { error, public: START_FAILED, killed: true };
+			if (this.#closing.signal.aborted) {
+				child.phase = { kind: "stopping", intent: "requested" };
+				this.#state.refresh();
+			} else {
+				child.cause ??= { error, public: START_FAILED, killed: true };
+			}
 			child.process.kill();
 			await child.process.exited;
 			if (this.#closing.signal.aborted) throw closed();
@@ -450,8 +464,7 @@ class WorkersComponent implements Workers<HostKind> {
 		);
 		child = {
 			process,
-			status: "starting",
-			stopping: false,
+			phase: { kind: "starting" },
 			cause: undefined,
 			started: Promise.withResolvers(),
 			ready: Promise.withResolvers(),
@@ -480,9 +493,11 @@ class WorkersComponent implements Workers<HostKind> {
 				child.started.resolve();
 				return;
 			case "ready":
-				child.status = "running";
 				child.idleSince = message.idle ? Date.now() : undefined;
 				child.ready.resolve(message.report);
+				// Sent before the child learnt of a stop that began meanwhile: it stays stopping.
+				if (child.phase.kind !== "starting") return;
+				child.phase = { kind: "running" };
 				if (routed.child === child) this.#state.refresh();
 				return;
 			case "idle":
@@ -502,9 +517,9 @@ class WorkersComponent implements Workers<HostKind> {
 	/** This side closed `child`'s link (the heartbeat, a protocol error): its child is stopped, its exit a lost link. */
 	#linkLost(child: Child): void {
 		this.#ended(child);
-		if (child.stopping) return;
+		if (stopRequested(child)) return;
 		child.cause ??= lostLink(child);
-		this.#shutdown(child);
+		this.#shutdown(child, "link_lost");
 		this.#state.refresh();
 	}
 
@@ -514,7 +529,7 @@ class WorkersComponent implements Workers<HostKind> {
 	 */
 	#linkClosed(child: Child): void {
 		this.#ended(child);
-		if (child.stopping || child.grace !== undefined) return;
+		if (stopRequested(child) || child.grace !== undefined) return;
 		const lost = lostLink(child);
 		child.grace = setTimeout(() => {
 			child.cause ??= lost;
@@ -530,7 +545,7 @@ class WorkersComponent implements Workers<HostKind> {
 	 */
 	#exited(routed: Routed, child: Child, exit: Exit): void {
 		clearTimeout(child.grace);
-		const clean = child.stopping && child.cause === undefined;
+		const clean = stopRequested(child) && child.cause === undefined;
 		const cause: Cause = child.cause ?? { error: exitError(routed.address, exit, child) };
 		const error = cause.public ?? publicExit(exit, child);
 		child.started.reject(uncrossed(error));
@@ -578,7 +593,7 @@ class WorkersComponent implements Workers<HostKind> {
 	#ended(child: Child): void {
 		if (child.ended !== undefined) return;
 		child.ended =
-			child.stopping && child.cause === undefined
+			stopRequested(child) && child.cause === undefined
 				? { kind: "stopped" }
 				: { kind: "failed", error: new ChordError({ code: "unavailable", message: "worker: its link is gone" }) };
 		child.reloaded?.({ kind: "reloaded", error: { message: "worker: its link is gone" } });
@@ -604,15 +619,14 @@ class WorkersComponent implements Workers<HostKind> {
 	async #stop(routed: Routed): Promise<void> {
 		const child = routed.child;
 		if (child === undefined) return;
-		child.stopping = true;
-		this.#shutdown(child);
+		this.#shutdown(child, "requested");
 		this.#state.refresh();
 		await child.process.exited;
 	}
 
-	/** Asks `child` to shut down and kills its tree after the grace. */
-	#shutdown(child: Child): void {
-		child.status = "stopping";
+	/** Asks `child` to shut down for `intent` and kills its tree after the grace. */
+	#shutdown(child: Child, intent: Stopping["intent"]): void {
+		child.phase = { kind: "stopping", intent };
 		child.process.send({ kind: "shutdown" });
 		clearTimeout(child.grace);
 		child.grace = setTimeout(() => child.process.kill(), GRACE);
@@ -634,7 +648,7 @@ class WorkersComponent implements Workers<HostKind> {
 			const child = routed.child;
 			if (child === undefined) continue;
 			workers++;
-			if (child.idleStop || child.status !== "running") continue;
+			if (child.idleStop || child.phase.kind !== "running") continue;
 			if (child.idleSince === undefined || now - child.idleSince < idleMs) continue;
 			child.idleStop = true;
 			void this.#enqueue(routed, () => this.#idleStop(routed, child));
@@ -680,7 +694,7 @@ class WorkersComponent implements Workers<HostKind> {
 		}
 		for (const routed of this.#addresses.values()) {
 			const child = routed.child;
-			if (child === undefined || child.status === "stopping" || child.shipped === key) continue;
+			if (child === undefined || child.phase.kind === "stopping" || child.shipped === key) continue;
 			entries.push({ host: routed.address.key, entry: this.#reload(routed.address.key, child, scripts, key) });
 		}
 		return { hosts: await Promise.all(entries.map(({ host, entry }) => bounded(host, entry, context))) };
@@ -741,6 +755,11 @@ function closed(): ChordError {
 	return new ChordError({ code: "released", reason: "closed", message: "workers: closed" });
 }
 
+/** Whether a stop asked for `child`'s exit. */
+function stopRequested(child: Child): boolean {
+	return child.phase.kind === "stopping" && child.phase.intent === "requested";
+}
+
 /** The public error of a running worker's lost link that fails its address (a second one within the window). */
 const LINK_LOST: CrossedError = { message: "worker lost its link", code: "unavailable" };
 
@@ -750,19 +769,19 @@ const LINK_LOST: CrossedError = { message: "worker lost its link", code: "unavai
  */
 function lostLink(child: Child): Cause {
 	const error = new Error("worker: link lost");
-	return child.status === "running" ? { error, public: LINK_LOST, lost: true } : { error };
+	return child.phase.kind === "running" ? { error, public: LINK_LOST, lost: true } : { error };
 }
 
 /** The full error of an exit nobody asked for (the app's logs). */
 function exitError(address: Address, { code, signal }: Exit, child: Child): Error {
 	const how = signal === null ? `code ${code}` : `signal ${signal}`;
-	const when = child.status === "starting" ? "exited before it was ready" : "exited";
+	const when = child.phase.kind === "starting" ? "exited before it was ready" : "exited";
 	return new ChordError({ code: "unavailable", message: `worker ${address.key}: ${when} (${how})` });
 }
 
 /** The public error of an exit: a start that failed, or the exit's code or signal. */
 function publicExit({ code, signal }: Exit, child: Child): CrossedError {
-	if (child.status === "starting") return START_FAILED;
+	if (child.phase.kind === "starting") return START_FAILED;
 	return { message: `worker exited (${signal ?? `code ${code}`})`, code: "unavailable" };
 }
 
@@ -825,7 +844,7 @@ function stateOf(addresses: ReadonlyMap<string, Routed>): Record<string, WorkerS
 			state[key] = { status: "failed", ...failure };
 		} else if (child !== undefined) {
 			const { pid, startedAt } = child.process;
-			state[key] = { status: child.status, pid, startedAt };
+			state[key] = { status: child.phase.kind, pid, startedAt };
 		}
 	}
 	return state;

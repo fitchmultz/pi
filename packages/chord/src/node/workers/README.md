@@ -75,7 +75,8 @@ workerMain(async ({ address, start, parent, plugins, onClose }, ctx) => {
   the kind's current set, `plugins.scripts(kind)`). The child takes the lock (waiting for an old holder without
   polling), makes its parent link and sends `started` when the app's host connects; `resolve` returns the link then.
   The start timer (60 s) covers fork, lock and connect only. `ready` (after the app's function returned, with the idle
-  state and the load report) makes the worker `running`.
+  state and the load report) makes a starting worker `running`; one whose stop began before its `ready` arrived stays
+  `stopping`.
 - **Failures stay** (R2): a crash (an exit nobody asked for), a `fatal` or a failed start leaves the address `failed`
   (`worker_failed` once, `worker_exited` for the exit) until `retry` or a rollout reaching workers.
 - **A lost link is recovered from** (decision "A lost worker link is recovered from"): a link closed by this side (the
