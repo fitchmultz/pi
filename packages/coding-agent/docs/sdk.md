@@ -57,6 +57,8 @@ See the checked [sessions example](../examples/sdk/11-sessions.ts) for creating,
 
 `AgentSessionRuntime` adds `newSession()`, `switchSession()`, `fork()`, and `importFromJsonl()`. Each operation replaces the active `AgentSession` and recreates services for the target working directory.
 
+A replacement disposes the active session before creating the next one. If the factory rejects, the operation rejects without rollback. `runtime.session` still returns the disposed session and its saved journal. Start, resume, fork, or import a session to continue. Further replacement and disposal do not notify the disposed session's extensions again. If `setup`, rebind, or `withSession` fails after creation, the new session stays current.
+
 After a runtime replacement, subscriptions belong to the old `AgentSession` and must be rebound. See the [session runtime example](../examples/sdk/13-session-runtime.ts).
 
 ### Complete working-session save and restore

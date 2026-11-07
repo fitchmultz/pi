@@ -65,21 +65,28 @@ function extractUserMessageText(content: string | Array<{ type: string; text?: s
 		.join("");
 }
 
+/** A session with its cwd-bound services and setup results; a replacement swaps them together. */
+type RuntimeParts = Pick<
+	CreateAgentSessionRuntimeResult,
+	"session" | "services" | "diagnostics" | "modelFallbackMessage"
+>;
+
+/** Torn-down parts retain the journal and credential writes, but receive no further lifecycle events. */
+type RuntimeState = { kind: "live" | "tornDown"; parts: RuntimeParts };
+
 /**
  * Owns the current AgentSession plus its cwd-bound services.
  *
  * Session replacement methods tear down the current runtime first, then create
- * and apply the next runtime. If creation fails, the error is propagated to the
- * caller. The caller is responsible for user-facing error handling.
+ * and apply the next runtime. A failed factory leaves the disposed session current,
+ * without rollback or repeated lifecycle events. Failures in setup, rebind or
+ * withSession leave the newly created session current. The caller handles errors.
  */
 export class AgentSessionRuntime {
 	private rebindSession?: (session: AgentSession) => Promise<void>;
 	private beforeSessionInvalidate?: () => void;
-	private _session: AgentSession;
-	private _services: AgentSessionServices;
+	private state: RuntimeState;
 	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
-	private _diagnostics: AgentSessionRuntimeDiagnostic[];
-	private _modelFallbackMessage?: string;
 	private finalization?: (session: AgentSession) => Promise<void>;
 	private strictFinalization = false;
 
@@ -92,37 +99,35 @@ export class AgentSessionRuntime {
 	}
 
 	constructor(
-		_session: AgentSession,
-		_services: AgentSessionServices,
+		session: AgentSession,
+		services: AgentSessionServices,
 		createRuntime: CreateAgentSessionRuntimeFactory,
-		_diagnostics: AgentSessionRuntimeDiagnostic[] = [],
-		_modelFallbackMessage?: string,
+		diagnostics: AgentSessionRuntimeDiagnostic[] = [],
+		modelFallbackMessage?: string,
 	) {
-		this._session = _session;
-		this._services = _services;
+		this.state = { kind: "live", parts: { session, services, diagnostics, modelFallbackMessage } };
 		this.createRuntime = createRuntime;
-		this._diagnostics = _diagnostics;
-		this._modelFallbackMessage = _modelFallbackMessage;
 	}
 
 	get services(): AgentSessionServices {
-		return this._services;
+		return this.state.parts.services;
 	}
 
+	/** The live session, or after a failed replacement the torn-down one that identifies its saved journal. */
 	get session(): AgentSession {
-		return this._session;
+		return this.state.parts.session;
 	}
 
 	get cwd(): string {
-		return this._services.cwd;
+		return this.state.parts.services.cwd;
 	}
 
 	get diagnostics(): readonly AgentSessionRuntimeDiagnostic[] {
-		return this._diagnostics;
+		return this.state.parts.diagnostics;
 	}
 
 	get modelFallbackMessage(): string | undefined {
-		return this._modelFallbackMessage;
+		return this.state.parts.modelFallbackMessage;
 	}
 
 	setRebindSession(rebindSession?: (session: AgentSession) => Promise<void>): void {
@@ -146,7 +151,7 @@ export class AgentSessionRuntime {
 		targetSessionFile?: string,
 	): Promise<{ cancelled: boolean }> {
 		const runner = this.session.extensionRunner;
-		if (!runner.hasHandlers("session_before_switch")) {
+		if (this.state.kind === "tornDown" || !runner.hasHandlers("session_before_switch")) {
 			return { cancelled: false };
 		}
 
@@ -163,7 +168,7 @@ export class AgentSessionRuntime {
 		options: { position: "before" | "at" },
 	): Promise<{ cancelled: boolean }> {
 		const runner = this.session.extensionRunner;
-		if (!runner.hasHandlers("session_before_fork")) {
+		if (this.state.kind === "tornDown" || !runner.hasHandlers("session_before_fork")) {
 			return { cancelled: false };
 		}
 
@@ -176,23 +181,24 @@ export class AgentSessionRuntime {
 	}
 
 	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
+		const { kind, parts } = this.state;
+		if (kind === "tornDown") return;
+		const { session } = parts;
 		// Settle any active response first so the aborted turn (including tool
 		// results) is persisted to the outgoing session before it is replaced.
-		await this.session.abort();
-		await emitSessionShutdownEvent(this.session.extensionRunner, {
+		await session.abort();
+		await emitSessionShutdownEvent(session.extensionRunner, {
 			type: "session_shutdown",
 			reason,
 			targetSessionFile,
 		});
 		this.beforeSessionInvalidate?.();
-		this.session.dispose();
+		session.dispose();
+		this.state = { kind: "tornDown", parts };
 	}
 
 	private apply(result: CreateAgentSessionRuntimeResult): void {
-		this._session = result.session;
-		this._services = result.services;
-		this._diagnostics = result.diagnostics;
-		this._modelFallbackMessage = result.modelFallbackMessage;
+		this.state = { kind: "live", parts: result };
 	}
 
 	private async finishSessionReplacement(withSession?: (ctx: ReplacedSessionContext) => Promise<void>): Promise<void> {
@@ -424,27 +430,34 @@ export class AgentSessionRuntime {
 	 * Dispose the session for process exit. Also waits for credential writes in progress: an OAuth
 	 * refresh may already have spent the old single-use refresh token, so exiting before the new one
 	 * is saved would lose the login (#11692). `disposition` is read when the quit event is built; see
-	 * {@link SessionShutdownEvent.disposition}.
+	 * {@link SessionShutdownEvent.disposition}. A torn-down session still runs finalization and
+	 * settles credential writes, without repeating shutdown.
 	 */
 	async dispose(options: { disposition?: () => ShutdownDisposition | undefined } = {}): Promise<void> {
-		const session = this.session;
+		const { kind, parts } = this.state;
+		const { session } = parts;
 		await session.workingSessionGate.finalExit(async () => {
-			await session.cancelWorkingSession("Native runtime is exiting");
-			const disposition = options.disposition?.();
-			const event: SessionShutdownEvent = {
-				type: "session_shutdown",
-				reason: "quit",
-				...(disposition ? { disposition } : {}),
-			};
-			if (this.strictFinalization) {
-				await session.abort();
-				await session.extensionRunner.emitShutdownStrict(event);
-			} else {
-				await emitSessionShutdownEvent(session.extensionRunner, event);
+			if (kind === "live") {
+				await session.cancelWorkingSession("Native runtime is exiting");
+				const disposition = options.disposition?.();
+				const event: SessionShutdownEvent = {
+					type: "session_shutdown",
+					reason: "quit",
+					...(disposition ? { disposition } : {}),
+				};
+				if (this.strictFinalization) {
+					await session.abort();
+					await session.extensionRunner.emitShutdownStrict(event);
+				} else {
+					await emitSessionShutdownEvent(session.extensionRunner, event);
+				}
 			}
 			await this.finalization?.(session);
-			this.beforeSessionInvalidate?.();
-			session.dispose();
+			if (kind === "live") {
+				this.beforeSessionInvalidate?.();
+				session.dispose();
+				this.state = { kind: "tornDown", parts };
+			}
 			await this.services.modelRuntime.settleCredentialWrites();
 		});
 	}

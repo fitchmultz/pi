@@ -84,10 +84,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		{ resolve: (value: any) => void; reject: (error: Error) => void }
 	>();
 
-	// Extension shutdown requests (ctx.shutdown()) wait until input is attached, no command is
-	// being handled, and the session is idle. See checkShutdownRequested().
-	let shutdownRequested = false;
-	let shuttingDown = false;
+	// Extension requests wait for input attachment, commands and idleness; EOF and signals drain immediately.
+	let shutdownPhase: "accepting" | "requested" | "draining" = "accepting";
 	let inputReady = false;
 	let activeCommands = 0;
 	// SIGTERM/SIGHUP received so far. Only a repeated signal forces exit during shutdown.
@@ -362,8 +360,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				},
 			},
 			shutdownHandler: () => {
-				shutdownRequested = true;
-				// An idle session has no command response or agent_settled left to check the flag.
+				// A request during shutdown must not start a second one.
+				if (shutdownPhase === "draining") return;
+				shutdownPhase = "requested";
+				// An idle session has no command response or agent_settled left to check the request.
 				// Check on the next tick so the requesting handler finishes first.
 				setImmediate(checkShutdownRequested);
 			},
@@ -399,7 +399,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			process.on(signal, () => {
 				signalCount++;
 				killTrackedDetachedChildren();
-				if (!shuttingDown) {
+				if (shutdownPhase !== "draining") {
 					void shutdown(exitCode, signal);
 				} else if (signalCount > 1) {
 					// Process managers often close stdin and send SIGTERM together, so one signal
@@ -767,8 +767,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	/** Dispose the runtime and exit. Runs once; later calls (stdin EOF after a signal) do nothing. */
 	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<void> {
-		if (shuttingDown) return;
-		shuttingDown = true;
+		if (shutdownPhase === "draining") return;
+		shutdownPhase = "draining";
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		await runtimeHost.dispose();
@@ -786,7 +786,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	 * Each of those ending calls this again.
 	 */
 	function checkShutdownRequested(): void {
-		if (!shutdownRequested || shuttingDown || !inputReady || activeCommands > 0 || !session.isIdle) return;
+		if (shutdownPhase !== "requested" || !inputReady || activeCommands > 0 || !session.isIdle) return;
 		void shutdown();
 	}
 
@@ -834,7 +834,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 						await session.workingSessionGate.waitForRelease();
 					}
 				}
-				if (shuttingDown) return;
+				if (shutdownPhase === "draining") return;
 				response = readonly
 					? await handleCommand(command)
 					: await session.workingSessionGate.run(async () => handleCommand(command));
