@@ -4,8 +4,10 @@ import fs, {
 	mkdtempSync,
 	readFileSync,
 	realpathSync,
+	rmdirSync,
 	rmSync,
 	statSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -245,6 +247,33 @@ describe("background command extension delivery", () => {
 		await delay(1100);
 		expect(other.faux.state.callCount).toBe(0);
 		expect(notices(other)).toHaveLength(2);
+	});
+	it("stops delivery without crashing when another process takes over its lease, then resumes", async () => {
+		const h = await harness();
+		const root = backgroundCommandDirectory(h.sessionManager);
+		const { command, release } = held(h);
+		const job = await startBackgroundCommand(root, command, { command, cwd: h.tempDir, env: getShellEnv() });
+		await until(() => lockfile.checkSync(root, { realpath: false }));
+		// Another process sharing the session replaces the lease, as when this owner stalls past the
+		// stale threshold; the owner notices at its next lock refresh, 5 seconds after acquiring it.
+		const lock = `${root}.lock`;
+		const keepFresh = () => utimesSync(lock, new Date(), new Date());
+		keepFresh();
+		const takeover = setInterval(keepFresh, 500);
+		try {
+			await delay(6500);
+			writeFileSync(release, "go");
+			await until(() => backgroundCommandFinished(readBackgroundCommand(root, job.id)));
+			h.setResponses([fauxAssistantMessage("Continued")]);
+			await h.session.prompt("Continue while the other process owns delivery");
+			expect(notices(h)).toHaveLength(0);
+		} finally {
+			clearInterval(takeover);
+		}
+		h.setResponses([fauxAssistantMessage("Completion consumed")]);
+		rmdirSync(lock);
+		await until(() => notices(h).length === 1 && h.session.isIdle);
+		expect(h.faux.state.callCount).toBe(2);
 	});
 	it("retains compute for an idle detached job and pauses completion delivery until save release", async () => {
 		const h = await harness();

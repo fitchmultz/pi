@@ -147,6 +147,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | Durable scheduler lifetime uses the same paused/running/closing state that inspection reports. Dispatch coalescing, task indexes and invocation lifetime remain independent | `packages/durable/src/harness/scheduler.ts` | `packages/durable/test/{harness-inspect,harness-lifecycle,harness-sleep}.test.ts`, `packages/durable/test-workers/wake.test.ts` |
 | Each open Anthropic content block owns its emitted block and content index. Only a tool-call owner carries an argument parser, which stays off emitted messages | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/{anthropic-sse-parsing,streaming-tool-arguments,anthropic-message-threads}.test.ts` |
 | Photon loading keeps the completed module in its cached promise rather than a second module field | `utils/photon.ts` | `image-processing.test.ts` |
+| Background-command monitoring keeps its idle poll timer and latest context in one optional record. The delivery lock, journal receipt scan, scan cancellation, and save pause remain independent | `extensions/background-command/index.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
 
 ### Performance deltas
 

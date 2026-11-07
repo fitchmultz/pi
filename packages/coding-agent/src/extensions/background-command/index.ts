@@ -28,17 +28,21 @@ interface BackgroundCommandNoticeDetails {
 	jobs?: Pick<BackgroundCommandJob, "id" | "status">[];
 }
 
+/** Idle completion polling with the latest context a session event or tool call supplied; absent when stopped. */
+interface Monitor {
+	context: ExtensionContext;
+	timer: NodeJS.Timeout;
+}
+
 export function createBackgroundCommandExtension(): ExtensionFactory {
 	return (pi) => {
-		let timer: NodeJS.Timeout | undefined;
-		let context: ExtensionContext | undefined;
+		let monitor: Monitor | undefined;
 		let release: (() => void) | undefined;
 		let recovery: Promise<void> | undefined;
 		let recoveryController: AbortController | undefined;
 		let root: string | undefined;
 		let ownerKey: string | undefined;
 		let wakeSuppressed = false;
-		let stopped = false;
 		let saving = false;
 		const seen = new Set<string>();
 		const pending = new Set<string>();
@@ -70,9 +74,8 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 			}
 		}
 		function stop(): void {
-			stopped = true;
-			if (timer) clearInterval(timer);
-			timer = undefined;
+			if (monitor) clearInterval(monitor.timer);
+			monitor = undefined;
 			recoveryController?.abort();
 			recoveryController = undefined;
 			recovery = undefined;
@@ -104,13 +107,12 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 				pending.clear();
 				acknowledged.clear();
 			}
-			stopped = false;
-			context = ctx;
-			if (!timer) timer = setInterval(() => inspect(), 1000).unref();
+			if (monitor) monitor.context = ctx;
+			else monitor = { context: ctx, timer: setInterval(() => inspect(), 1000).unref() };
 			return root;
 		}
 		async function completion(ctx: ExtensionContext): Promise<CustomMessageEntryDraft | undefined> {
-			if (stopped || saving || !root || !existsSync(root) || ctx.hasPendingMessages()) return;
+			if (!monitor || saving || !root || !existsSync(root) || ctx.hasPendingMessages()) return;
 			if (!release) {
 				try {
 					// One live session process owns delivery. After a crash the lease expires;
@@ -139,7 +141,7 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 				stop();
 				throw error;
 			}
-			if (stopped || saving || controller?.signal.aborted || ctx.hasPendingMessages()) return;
+			if (!monitor || saving || controller?.signal.aborted || ctx.hasPendingMessages()) return;
 			receipts(ctx.sessionManager.getEntries());
 			const jobs = listBackgroundCommands(root, acknowledged);
 			for (const job of jobs) {
@@ -174,8 +176,8 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 			};
 		}
 		async function inspect(): Promise<void> {
-			if (!context || saving) return;
-			const ctx = context;
+			if (!monitor || saving) return;
+			const ctx = monitor.context;
 			try {
 				if (!ctx.isIdle()) return;
 				const notice = await completion(ctx);
