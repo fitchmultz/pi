@@ -149,6 +149,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | Each open Anthropic content block owns its emitted block and content index. Only a tool-call owner carries an argument parser, which stays off emitted messages | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/{anthropic-sse-parsing,streaming-tool-arguments,anthropic-message-threads}.test.ts` |
 | Photon loading keeps the completed module in its cached promise rather than a second module field | `utils/photon.ts` | `image-processing.test.ts` |
 | Background-command monitoring keeps its idle poll timer and latest context in one optional record. The delivery lock, journal receipt scan, scan cancellation, and save pause remain independent | `extensions/background-command/index.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
+| Disposal and reload use the runner's default stale-context message. Runner and runtime lifetimes stay separate: a reused resource loader can give a new runner live contexts while earlier extension APIs remain stale | `core/agent-session.ts`, `core/extensions/runner.ts` | `agent-session-runtime-events.test.ts`, `suite/regressions/{2860-replaced-session-context,5943-session-start-notify,7193-event-bus-lifecycle}.test.ts` |
 
 ### Performance deltas
 
