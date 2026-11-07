@@ -514,6 +514,23 @@ describe("SessionManager.setSessionFile with corrupted files", () => {
 		expect(sm.getSessionFile()).toBe(explicitPath);
 	});
 
+	it("keeps writing the current journal after refusing a non-session file", () => {
+		const session = SessionManager.create(tempDir, tempDir);
+		session.appendMessage(userMsg("before"));
+		const current = session.getSessionFile()!;
+		const rejected = join(tempDir, "notes.jsonl");
+		writeFileSync(rejected, "not a session\n");
+
+		expect(() => session.setSessionFile(rejected)).toThrow(`Session file is not a valid pi session: ${rejected}`);
+		session.appendMessage(userMsg("after"));
+
+		expect(readFileSync(rejected, "utf8")).toBe("not a session\n");
+		expect(SessionManager.open(current).buildSessionContext().messages).toMatchObject([
+			{ content: "before" },
+			{ content: "after" },
+		]);
+	});
+
 	it("subsequent loads of initialized empty file work correctly", () => {
 		const emptyFile = join(tempDir, "empty.jsonl");
 		writeFileSync(emptyFile, "");
@@ -638,6 +655,18 @@ describe("SessionManager session file creation", () => {
 		session.appendMessage(assistantMsg("first answer"));
 
 		expect(readSessionFileRoles(session.getSessionFile()!)).toEqual(["session", "user", "custom", "assistant"]);
+	});
+
+	it("keeps refusing appends while an unrelated file occupies a new session's path", () => {
+		const file = join(tempDir, "explicit.jsonl");
+		const session = SessionManager.open(file, tempDir);
+		// Another writer creates the explicit path before this session's first conversation entry.
+		writeFileSync(file, "unrelated\n");
+		const eexist = expect.objectContaining({ code: "EEXIST" });
+
+		expect(() => session.appendMessage(userMsg("first question"))).toThrow(eexist);
+		expect(() => session.appendMessage(userMsg("second question"))).toThrow(eexist);
+		expect(readFileSync(file, "utf8")).toBe("unrelated\n");
 	});
 
 	const canDenyWrites = process.platform !== "win32" && process.getuid?.() !== 0;
