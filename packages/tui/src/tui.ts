@@ -519,6 +519,11 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
+	/**
+	 * A frame is owed, and a queued next-tick callback or the render timer will draw it. Never set while stopped:
+	 * those callbacks skip a stopped TUI, and a flag left behind would make requestRender() skip every later frame.
+	 * stop() drops the owed frame and start() requests a fresh one.
+	 */
 	private renderRequested = false;
 	private immediateRenderScheduled = false;
 	private renderTimer: NodeJS.Timeout | undefined;
@@ -1015,6 +1020,7 @@ export abstract class TuiBase extends Container implements TUI {
 		this.stopped = true;
 		process.off("exit", this.exitRestoreHandler);
 		this.cancelRenderTimer();
+		this.renderRequested = false;
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
 		}
@@ -1038,12 +1044,14 @@ export abstract class TuiBase extends Container implements TUI {
 			this.requestImmediateRender();
 			return;
 		}
-		if (this.renderRequested) return;
+		if (this.stopped || this.renderRequested) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
 	}
 
 	private requestImmediateRender(): void {
+		// start() draws what changed while stopped. A forced request has already reset the render state.
+		if (this.stopped) return;
 		this.cancelRenderTimer();
 		this.renderRequested = true;
 		if (this.immediateRenderScheduled) return;

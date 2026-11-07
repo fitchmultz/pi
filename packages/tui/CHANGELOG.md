@@ -17,8 +17,11 @@
 
 - Fixed fullscreen Kitty images disappearing after a terminal resize when the terminal clears cached image data during a screen erase.
 - Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
+- Fixed a rejected `getSuggestions()` call stopping all later autocomplete requests and escaping as an unhandled rejection, which ends Node processes by default. `Editor` now handles a failed lookup like one with no suggestions, including a rejection with the abort reason after a newer request supersedes it.
 
 - Fixed Markdown rendering HTML comments (`<!-- ... -->`) as visible text ([#11710](https://github.com/earendil-works/pi/issues/11710))
+- Fixed `start()` after `stop()` drawing nothing, and ignoring later `requestRender()` calls until a forced render, when a render was pending at `stop()` or requested while stopped, for example by the key handler that stopped the TUI.
+- Fixed `TuiMainScreen` drawing changed lines at the wrong rows and leaving stale lines when restarted with `stop()` and `start()` without a forced render. The first frame after the restart now clears and redraws the screen, as `requestRender(true)` does.
 
 ## [1.5.0] - 2026-11-02
 

@@ -58,6 +58,7 @@
 
 ### Fixed
 
+- Fixed cache notices treating known account and thinking-level changes as unexplained misses. Subsequent same-account misses remain visible, and observed cache-read prices do not carry across account changes.
 - Fixed fullscreen highlighted copies including display padding and artificial line breaks or losing Markdown syntax. `/copy` remains the whole-message command. See [Copy part of a response](docs/terminal-setup.md#copy-part-of-a-response).
 - Fixed ordinary self-update commands on immutable fork installations checking upstream's version instead of updating fork main. Explicit custom update commands retain precedence.
 - Fixed `/copy` and extension clipboard writes failing on Termux without a working Termux:API writer by falling back to the terminal's OSC 52 support.
@@ -65,6 +66,7 @@
 - Fixed fork updates, installs and isolated tests on Termux with version-managed Node by using native `$PREFIX/bin/bash` instead of assuming Bash is next to Node ([#284](https://github.com/fitchmultz/pi/issues/284)).
 - Fixed forking legacy sessions skipping migration and losing earlier model context, compaction references, and legacy custom-message roles ([#256](https://github.com/fitchmultz/pi/issues/256)).
 - Fixed a failed session journal write, such as a temporary permission error, disconnecting earlier history on reopen once writes recovered. After a failed append to an existing journal, the next append or save rewrites it from accepted history, replacing any partial record; new sessions no longer report an earlier session's write failure ([#257](https://github.com/fitchmultz/pi/issues/257)).
+- Fixed a session whose first journal write failed partway, for example on a full disk, failing every later write because the partial file already existed (`EEXIST`). The next append or save now rewrites that file from accepted history; appends still never overwrite a file another writer created at the session's path first. A `SessionManager.setSessionFile()` call that rejects a file now keeps later entries in the current journal instead of writing them into the rejected file.
 - Fixed chat card backgrounds tinting iTerm margins and window chrome in fullscreen mode; terminal-default side gutters preserve card colors, prompt navigation, and image scrolling ([#243](https://github.com/fitchmultz/pi/issues/243)).
 - Fixed quitting an unready restarted worker rolling back to the previous worker instead of exiting, including when its shutdown handlers outlast the startup deadline.
 - Fixed messages sent while Pi quits, such as a child completion arriving during a shutdown hook, starting a new turn. A managed restart then failed its final capture and stopped unfinished children; quit now admits shutdown persistence but no new or steered turn.
@@ -119,6 +121,7 @@
 - Fixed the Gondolin example extension installing node-forge 1.4.0 (GHSA-86w9-cpqp-85rv) and undici 6.26.0 by updating it to Gondolin 0.14.0. Gondolin now blocks guest HTTP and TLS requests to loopback, private and link-local addresses by default.
 - Fixed fork updates and installs losing npm error logs and redownloading dependencies on retry. Both now share a private npm cache and retain failed-attempt logs ([#285](https://github.com/fitchmultz/pi/issues/285)). See [Fork installation](docs/quickstart.md#fork-installation).
 - Fixed full instruction groups being duplicated in later prompts and after compaction when their discovery result was still present. Changed owner instructions are delivered once without rewriting prior context; tool-selection and read-before-use checks remain in effect.
+- Fixed inherited autocomplete failures exiting Pi. An extension autocomplete provider or slash-command argument completion that rejects now shows no suggestions instead of ending the session with an uncaught exception, and later completions keep working.
 
 - Fixed the bash tool reporting only `Command timed out` when the command had already exited but a background process it started kept writing to its output until the timeout. The error now also reports the shell's exit code and when it exited ([#11613](https://github.com/earendil-works/pi/issues/11613))
 - Images in steering and follow-up messages, including `prompt()` while streaming, are now resized like images in idle prompts instead of being sent and saved at full size ([#11738](https://github.com/earendil-works/pi/issues/11738))

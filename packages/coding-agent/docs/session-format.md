@@ -120,6 +120,8 @@ Records model-attributed usage that is not an assistant message and does not par
 
 Usage entries contribute to session token and cost totals. Pi hides them from the conversation tree. Consumers should treat unknown `kind` values as normal usage rather than rejecting them.
 
+Cache-warm entries also preserve the warm request's optional `cacheIdentity`, `thinkingLevel`, and `providerThinkingLevel` metadata. Cache diagnostics compare the next response with that request, not an earlier assistant's account or effort. Older entries without this metadata remain unknown.
+
 ### CompactionEntry
 
 Created when context is compacted. Stores a summary of earlier messages and a complete system prompt/tool checkpoint.
