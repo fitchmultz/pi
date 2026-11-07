@@ -7,19 +7,28 @@ import type { CommitResult, Seq, StorageWrite } from "../types.ts";
 /** A part's own failure at publication: memory could not adopt it, or one of the Session's own observers threw. */
 export type PublishFailure = { readonly kind: "adoption" | "listener"; readonly error: unknown };
 
-/** One logical commit the line admitted: stored (`writes`, never empty), or held in memory only (no `writes`). */
+/** One logical commit the line admitted: stored (`write`, `writes` never empty), or held in memory only (`held`). */
 export type PartSpec = {
 	/** Line index of the job that admitted it: a failure it causes makes only later jobs' outcomes `SessionFailed`. */
 	readonly index: number;
-	readonly writes: readonly StorageWrite[] | undefined;
 	/** Keys it writes: a read of one waits for its publication. */
 	readonly keys: readonly string[];
 	readonly context: Context;
-	/** Publish it in memory, in line order, once it is durable (with its seq) or, held, once the parts before it are. */
-	readonly publish: (seq: Seq | undefined) => PublishFailure | undefined;
 	/** It will never be published: abort what it prepared. */
 	readonly discard: () => void;
-};
+} & (
+	| {
+			readonly kind: "write";
+			readonly writes: readonly StorageWrite[];
+			/** Publish it in memory, in line order, once it is durable, with its seq. */
+			readonly publish: (seq: Seq) => PublishFailure | undefined;
+	  }
+	| {
+			readonly kind: "held";
+			/** Publish it in memory, in line order, once the parts before it are. */
+			readonly publish: () => PublishFailure | undefined;
+	  }
+);
 
 /** An admitted part and its outcome. */
 export type Part = PartSpec & {
@@ -72,8 +81,8 @@ export type WriterHost = {
  * The writer of one Session. The line admits each commit as a part once its callback and settlement succeeded; the
  * writer sends every part admitted while no call is in flight as one `commit()` call, off the line, and publishes
  * the parts of a call one by one, in line order, with a macrotask between two, so the continuations of the waits one
- * resolves start before the next is published. Held commits are parts without writes, published when the parts before
- * them are.
+ * resolves start before the next is published. Held commits are `held` parts, which store nothing, published when the
+ * parts before them are.
  *
  * Each part registers the keys it writes; until it is published, it is the newest unpublished writer of each, and a
  * job that touches one waits for its gate. A key leaves when its newest writer is published, so the map holds one entry
@@ -159,7 +168,7 @@ export class Writer {
 
 	/** Store `parts` in one call, then publish them in order; settles every one of them. */
 	async #send(parts: readonly Admitted[]): Promise<void> {
-		const stored = parts.filter((part) => part.writes !== undefined);
+		const stored = parts.filter((part) => part.kind === "write");
 		const seqs: (Seq | undefined)[] = [];
 		let result: CommitResult | undefined;
 		let rejected: { readonly error: unknown } | undefined;
@@ -171,7 +180,7 @@ export class Writer {
 		if (stored.length > 0) {
 			try {
 				result = await this.#host.commit(
-					stored.map((part) => part.writes!),
+					stored.map((part) => part.writes),
 					(index, seq) => {
 						seqs[index] = seq;
 					},
@@ -213,28 +222,36 @@ export class Writer {
 		let storedIndex = 0;
 		let published = 0;
 		for (const part of parts) {
-			const index = part.writes === undefined ? undefined : storedIndex++;
 			if (stop !== undefined) {
 				// A part after a rejected call's last receipt has the call's error; any other part after a stop was not sent,
 				// nor any part once something else failed the Session.
 				const outcome: FailedOutcome =
-					rejected !== undefined && index !== undefined && stop.external !== true
+					rejected !== undefined && part.kind === "write" && stop.external !== true
 						? { kind: "own", error: rejected.error }
 						: SESSION_FAILED;
 				failing.push({ part, outcome, published: false });
 				continue;
 			}
-			const seq = index === undefined ? undefined : seqs[index];
-			if (index !== undefined && seq === undefined) {
-				const error =
-					rejected !== undefined
-						? rejected.error
-						: index === result?.stored && "refused" in result
-							? result.refused
-							: new Error("Storage committed without adopting the batch");
-				failing.push({ part, outcome: { kind: "own", error }, published: false });
-				stop = { error, at: part.index };
-				continue;
+			let publish: () => PublishFailure | undefined;
+			if (part.kind === "held") publish = part.publish;
+			else {
+				const index = storedIndex++;
+				const seq = seqs[index];
+				if (seq === undefined) {
+					const error =
+						rejected !== undefined
+							? rejected.error
+							: index === result?.stored && "refused" in result
+								? result.refused
+								: new Error("Storage committed without adopting the batch");
+					failing.push({ part, outcome: { kind: "own", error }, published: false });
+					stop = { error, at: part.index };
+					continue;
+				}
+				publish = () => {
+					this.#host.stored(part.writes);
+					return part.publish(seq);
+				};
 			}
 			// A macrotask between two parts: what the first resolves runs before the second is published.
 			if (published++ > 0) await hop();
@@ -249,8 +266,7 @@ export class Writer {
 				this.#unregister(part);
 				// A throw anywhere in it, the read caches included, leaves memory behind what is stored: like an adoption's.
 				try {
-					if (part.writes !== undefined) this.#host.stored(part.writes);
-					failure = part.publish(seq);
+					failure = publish();
 				} catch (error) {
 					failure = { kind: "adoption", error };
 				}

@@ -870,6 +870,7 @@ export class SessionImpl implements Session {
 			if (batch.length === 0) return;
 			const context = BACKGROUND_CONTEXT;
 			await this.#writer.admit({
+				kind: "write",
 				index,
 				writes: batch,
 				keys: [],
@@ -1136,8 +1137,8 @@ export class SessionImpl implements Session {
 			if (held !== undefined) {
 				// Adopted in memory when the commits before it are published, as a part of no storage call.
 				const part = this.#writer.admit({
+					kind: "held",
 					index,
-					writes: undefined,
 					keys: tx.writeKeys(),
 					context,
 					publish: () => this.#hold(tx, held, withinMs, context),
@@ -1164,11 +1165,12 @@ export class SessionImpl implements Session {
 		const keys = tx.writeKeys();
 		for (const key of membership as readonly string[]) keys.push(key);
 		const part = this.#writer.admit({
+			kind: "write",
 			index,
 			writes,
 			keys,
 			context,
-			publish: (seq) => this.#adopt(tx, writes, taken, seq!, context),
+			publish: (seq) => this.#adopt(tx, writes, taken, seq, context),
 			discard,
 		});
 		this.#sweepDocuments();
@@ -1286,18 +1288,18 @@ export class SessionImpl implements Session {
 			const conversationId = record.scope.kind === "conversation" ? record.scope.conversationId : undefined;
 			changes.push({ type: "document", kind: "change", record, conversationId, version, value, ops: stored.ops });
 		}
-		const publish = (seq: Seq | undefined): undefined => {
+		const publish = (seq: Seq): undefined => {
 			for (const [index, hold] of holds.entries()) {
 				if (writes[index]!.content.kind === "base") hold.loaded.deltasSinceBase = 0;
 				else hold.loaded.deltasSinceBase++;
 			}
-			if (this.#commitListeners.size > 0) this.#notifyHosts({ seq: seq!, changes }, context);
+			if (this.#commitListeners.size > 0) this.#notifyHosts({ seq, changes }, context);
 			this.#release(holds);
 			return undefined;
 		};
 		// Run from a job on the line, which a failure it causes is the outcome of.
 		const index = this.#current!.index;
-		await this.#writer.admit({ index, writes, keys, context, publish, discard: ignore }).outcome;
+		await this.#writer.admit({ kind: "write", index, writes, keys, context, publish, discard: ignore }).outcome;
 	}
 
 	/** After their store: forget `holds`, unpin their documents, and move the timer to the next deadline. */

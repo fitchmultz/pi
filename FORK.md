@@ -142,6 +142,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | Keyboard mode uses one mutually exclusive state; the outstanding Kitty stack push remains a separate cleanup obligation | `packages/tui/src/terminal.ts` | `packages/tui/test/terminal.test.ts` |
 | Internal paste state uses one optional content buffer and one completion path, preserving split markers and input ordering | `packages/tui/src/stdin-buffer.ts` | `packages/tui/test/stdin-buffer.test.ts` |
 | Durable codemode keeps unlaunched calls in one held/released queue. Release checks precede launch, and each call still waits for its issued count to commit | `packages/durable/src/codemode/codemode.ts` | `packages/durable/test/{codemode,codemode-checkpoints}.test.ts` |
+| Durable writer parts distinguish stored writes from memory-only holds. Only stored parts carry writes and publish with a durable sequence number | `packages/durable/src/session/{writer,session}.ts` | `packages/durable/test/{session-group-commit,session-deferred-commits,session-adoption,harness-storage-failure}.test.ts` |
 | Photon loading keeps the completed module in its cached promise rather than a second module field | `utils/photon.ts` | `image-processing.test.ts` |
 
 ### Performance deltas
