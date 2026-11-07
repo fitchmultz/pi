@@ -377,13 +377,9 @@ export class McpServerConnection implements McpToolCaller, McpResourceServer {
 		});
 		const log = this.log;
 		if (log) client.onNotification("notifications/message", (params) => log.write(this.entry.name, params));
-		// Closing the client fails its pending initialize or discovery requests and closes the transport.
-		// Memoized: a second `client.close()` returns before the first finished closing the transport.
-		let closing: Promise<void> | undefined;
-		const closeClient = () => {
-			closing ??= client.close().catch(() => undefined);
-			return closing;
-		};
+		// Closing the client fails its pending initialize or discovery requests and closes the transport. Each call
+		// waits for the transport, also when shutdown already started closing it.
+		const closeClient = () => client.close().catch(() => undefined);
 		this.shutdown.signal.addEventListener("abort", closeClient, { once: true });
 		let transport: McpTransport | undefined;
 		try {

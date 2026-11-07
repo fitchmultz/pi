@@ -4,6 +4,7 @@ import {
 	LATEST_PROTOCOL_VERSION,
 	type McpAuthRequiredError,
 	McpClient,
+	McpConnectionClosedError,
 	type McpFetch,
 	McpHttpError,
 	McpSessionExpiredError,
@@ -657,6 +658,54 @@ describe("StreamableHttpTransport", () => {
 		const deletes = requests.filter((entry) => entry.method === "DELETE");
 		expect(deletes.map((entry) => entry.headers.authorization)).toEqual([`Bearer token-${before}`]);
 		expect(deletes[0]?.headers["mcp-session-id"]).toBe("session-1");
+	});
+
+	it("settles every close, including one from a close listener, after the session DELETE finishes", async () => {
+		const callReceived = Promise.withResolvers<void>();
+		const deleteReceived = Promise.withResolvers<void>();
+		let finishDelete = () => {};
+		const { url, requests } = await startServer(async (request, response, requests) => {
+			// The server holds the DELETE until the test finishes it.
+			if (request.method === "DELETE") {
+				requests.push({ method: "DELETE", headers: request.headers });
+				finishDelete = () => response.end();
+				deleteReceived.resolve();
+				return;
+			}
+			if (request.method !== "POST") return protocolHandler(request, response, requests);
+			const message = JSON.parse(await readBody(request)) as Record<string, unknown>;
+			// The tool call is never answered.
+			if (message.method === "tools/call") callReceived.resolve();
+			else await protocolHandler(request, response, requests, message);
+		});
+		const client = new McpClient({ name: "http-test", version: "1.0.0" });
+		await client.connect(new StreamableHttpTransport({ url, openGetStream: false }));
+		const settled: string[] = [];
+		const closing: Promise<void>[] = [];
+		const close = (caller: string) => {
+			closing.push(client.close().then(() => void settled.push(caller)));
+		};
+		let closeEvents = 0;
+		client.onClose(() => {
+			closeEvents++;
+			close("close listener");
+		});
+		const call = client.callTool("echo");
+		await callReceived.promise;
+		close("first");
+		// Pending requests fail at once, without waiting for the transport to close.
+		await expect(call).rejects.toBeInstanceOf(McpConnectionClosedError);
+		await deleteReceived.promise;
+		close("second");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(settled).toEqual([]);
+		expect(client.connectionState).toBe("closed");
+
+		finishDelete();
+		await Promise.all(closing);
+		expect(settled.sort()).toEqual(["close listener", "first", "second"]);
+		expect(closeEvents).toBe(1);
+		expect(requests.filter((entry) => entry.method === "DELETE")).toHaveLength(1);
 	});
 
 	// #10188: Cloudflare Workers reject the platform fetch when called with a receiver other than globalThis.
