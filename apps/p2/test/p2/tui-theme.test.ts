@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Markdown, TuiAltScreen } from "@earendil-works/pi-tui";
+import { Markdown, stripSelectionMetadata, TuiAltScreen } from "@earendil-works/pi-tui";
 import { WebSocketServer } from "ws";
 import { VirtualTerminal } from "../../../../packages/tui/test/virtual-terminal.ts";
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
@@ -36,7 +36,9 @@ async function runtime(t: { after(fn: () => unknown): void }) {
 	t.after(() => value.dispose());
 	return value;
 }
-const heading = (ref: ThemeRef) => new Markdown("# Title", 0, 0, ref.markdown).render(40).join("\n");
+// Lines as the TUI outputs them, without the private selection annotations: a new or invalidated Markdown gets new IDs.
+const rendered = (component: Markdown) => component.render(40).map(stripSelectionMetadata).join("\n");
+const heading = (ref: ThemeRef) => rendered(new Markdown("# Title", 0, 0, ref.markdown));
 
 test("two runtimes in one process keep their own themes, previews and terminal colors", async (t) => {
 	const dark = await runtime(t);
@@ -49,13 +51,13 @@ test("two runtimes in one process keep their own themes, previews and terminal c
 
 	// A rendered component built on the ref's derived theme picks up a swap without being rebuilt.
 	const component = new Markdown("# Title", 0, 0, dark.theme.markdown);
-	const before = component.render(40).join("\n");
+	const before = rendered(component);
 	const version = dark.theme.version;
 	dark.appearance.update({ local: local({ theme: "light" }) });
 	assert.equal(dark.theme.version, version + 1);
 	component.invalidate();
-	assert.equal(component.render(40).join("\n"), heading(light.theme));
-	assert.notEqual(component.render(40).join("\n"), before);
+	assert.equal(rendered(component), heading(light.theme));
+	assert.notEqual(rendered(component), before);
 	// Unchanged inputs do not swap (no needless rebuilds).
 	dark.appearance.update({ local: local({ theme: "light" }) });
 	assert.equal(dark.theme.version, version + 1);

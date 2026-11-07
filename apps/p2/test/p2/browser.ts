@@ -17,6 +17,10 @@ export const chromium =
 export const browserTests =
 	process.env.P2_BROWSER_TESTS === "1" ||
 	(process.env.P2_BROWSER_TESTS !== "0" && process.platform !== "android" && existsSync(chromium));
+/** A frame as DevTools describes it (`Page.Frame`). */
+type BrowserFrame = { id: string; parentId?: string; url: string; unreachableUrl?: string };
+type FrameTree = { frame: BrowserFrame; childFrames?: FrameTree[] };
+type TargetInfo = { targetId: string; type: string; url: string };
 export class Browser {
 	readonly process: ChildProcess;
 	readonly profile: string;
@@ -100,18 +104,9 @@ export class Browser {
 	 * origin, so the page itself cannot reach into it.
 	 */
 	async evaluateInFrame<T>(url: string, expression: string): Promise<T> {
-		const { targetInfos } = (await this.call("Target.getTargets")) as {
-			targetInfos: { targetId: string; type: string; url: string }[];
-		};
-		const target = targetInfos.find((info) => info.type === "iframe" && info.url.includes(url));
+		const target = (await this.frameTargets()).find((info) => info.url.includes(url));
 		if (!target) throw new Error(`No frame target for ${url}`);
-		const { sessionId } = (await this.call("Target.attachToTarget", {
-			targetId: target.targetId,
-			flatten: true,
-		})) as {
-			sessionId: string;
-		};
-		try {
+		return this.inTarget(target.targetId, async (sessionId) => {
 			const response = (await this.call(
 				"Runtime.evaluate",
 				{ expression, returnByValue: true, awaitPromise: true },
@@ -119,6 +114,36 @@ export class Browser {
 			)) as { result: { value: T }; exceptionDetails?: unknown };
 			if (response.exceptionDetails) throw new Error(JSON.stringify(response.exceptionDetails));
 			return response.result.value;
+		});
+	}
+	/**
+	 * Frames in every process, main frame first. `Page.getFrameTree` omits out-of-process frames, including blocked
+	 * frames' isolated error pages; each has its own target and frame tree.
+	 */
+	async frames(): Promise<BrowserFrame[]> {
+		const frames: BrowserFrame[] = [];
+		const add = ({ frame, childFrames = [] }: FrameTree): void => {
+			frames.push(frame);
+			for (const child of childFrames) add(child);
+		};
+		const tree = async (sessionId?: string) =>
+			((await this.call("Page.getFrameTree", {}, sessionId)) as { frameTree: FrameTree }).frameTree;
+		add(await tree());
+		for (const target of await this.frameTargets()) add(await this.inTarget(target.targetId, tree));
+		return frames;
+	}
+	/** The targets of frames that run outside the page's process. */
+	private async frameTargets(): Promise<TargetInfo[]> {
+		const { targetInfos } = (await this.call("Target.getTargets")) as { targetInfos: TargetInfo[] };
+		return targetInfos.filter((info) => info.type === "iframe");
+	}
+	/** Runs `use` with a flat session attached to the target, then detaches it. */
+	private async inTarget<T>(targetId: string, use: (sessionId: string) => Promise<T>): Promise<T> {
+		const { sessionId } = (await this.call("Target.attachToTarget", { targetId, flatten: true })) as {
+			sessionId: string;
+		};
+		try {
+			return await use(sessionId);
 		} finally {
 			await this.call("Target.detachFromTarget", { sessionId }).catch(() => {});
 		}

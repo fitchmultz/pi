@@ -4,7 +4,7 @@ import { createServer, type IncomingHttpHeaders, request } from "node:http";
 import { after, before, describe, it } from "node:test";
 import { WebSocket as NodeWebSocket } from "ws";
 import { Browser, browserTests } from "./browser.ts";
-import { type Fixture, startFixture, webBundle } from "./helpers.ts";
+import { type Fixture, poll, startFixture, webBundle } from "./helpers.ts";
 
 function get(
 	port: number,
@@ -157,13 +157,18 @@ describe("web host", () => {
 				await browser.open(`http://127.0.0.1:${fixture.server.port}/`);
 				await browser.wait("document.querySelector('.composer textarea') && !document.querySelector('.offline')");
 				assert.deepEqual(await browser.evaluate("window.cspViolations"), []);
-				// A page of another origin (another port, same site) framing the app: Chromium refuses to render it.
+				// A page of another origin (another port, same site) framing the app: Chromium refuses to render it and
+				// commits its error page in the frame, possibly in another process.
 				await browser.open(`http://127.0.0.1:${framerPort}/`);
-				await new Promise((resolve) => setTimeout(resolve, 1500));
-				const tree = (await browser.call("Page.getFrameTree")) as {
-					frameTree: { childFrames?: { frame: { url: string; unreachableUrl?: string } }[] };
+				// The frame holds an empty document until its navigation commits.
+				const framed = async () => {
+					const [page, ...frames] = await browser.frames();
+					return frames.find(
+						(frame) => frame.parentId === page.id && frame.url !== "" && frame.url !== "about:blank",
+					);
 				};
-				const child = tree.frameTree.childFrames?.[0]?.frame;
+				await poll(async () => (await framed()) !== undefined, 30_000, "the framer's iframe to commit");
+				const child = await framed();
 				assert.ok(child, "the framer has its iframe");
 				assert.ok(
 					child.url.startsWith("chrome-error:") || child.unreachableUrl !== undefined,
