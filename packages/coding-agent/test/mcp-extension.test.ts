@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -453,15 +453,29 @@ describe("MCP tools", () => {
 describe("MCP connections", () => {
 	const servers: InMemoryTransport[] = [];
 
-	/** In-memory server that answers initialize, tools/list, and tools/call with "ok". */
+	/**
+	 * In-memory server that answers initialize, tools/list, and tools/call with "ok". `closeOnRefresh`: it closes
+	 * the connection instead of answering a second tools/list.
+	 */
 	function createTransport(
-		options: { expireFirstCall?: boolean; methods?: string[]; noTools?: boolean; resources?: boolean } = {},
+		options: {
+			closeOnRefresh?: boolean;
+			expireFirstCall?: boolean;
+			methods?: string[];
+			noTools?: boolean;
+			resources?: boolean;
+		} = {},
 	) {
 		const pair = createInMemoryTransportPair();
 		servers.push(pair.server);
+		let lists = 0;
 		pair.server.onMessage((message) => {
 			if (!("id" in message) || !("method" in message)) return;
 			options.methods?.push(message.method);
+			if (options.closeOnRefresh && message.method === "tools/list" && lists++ > 0) {
+				void pair.server.close();
+				return;
+			}
 			const response: JsonRpcMessage =
 				message.method === "initialize"
 					? {
@@ -597,6 +611,18 @@ for await (const line of createInterface({ input: process.stdin })) {
 		expect(await connection.callTool("echo", {}, {})).toEqual({ content: [{ type: "text", text: "ok" }] });
 		expect(connection.state).toBe("connected");
 		expect(opened()).toBe(2);
+		await connection.close();
+	});
+
+	it("keeps why a connection dropped when a tools refresh was waiting", async () => {
+		const { connection } = connect({ name: "fake", config: { command: "unused" }, source: "test" }, [
+			() => createTransport({ closeOnRefresh: true }),
+		]);
+		await connection.getClient();
+		await servers.at(-1)?.send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(connection.state).toBe("disconnected");
+		expect(connection.error).toBe("Connection closed");
 		await connection.close();
 	});
 
@@ -751,6 +777,78 @@ for await (const line of createInterface({ input: process.stdin })) {
 			expect(authorizations).toEqual(["Bearer tok"]);
 		} finally {
 			await connection.close();
+			await new Promise((resolve) => server.close(resolve));
+		}
+	});
+
+	it("closes a client dropped for a new sign-in before close returns, and stays closed", async () => {
+		const deletion = Promise.withResolvers<ServerResponse>();
+		const server = createServer((request, response) => {
+			if (request.method === "GET") {
+				response.writeHead(405).end();
+			} else if (request.method === "DELETE") {
+				// Held, so close() runs while the call that needs a new sign-in is still dropping its client.
+				deletion.resolve(response);
+			} else {
+				let body = "";
+				request.setEncoding("utf8");
+				request.on("data", (chunk) => {
+					body += chunk;
+				});
+				request.on("end", () => {
+					const message: JsonRpcMessage = JSON.parse(body);
+					if (!("id" in message) || !("method" in message)) {
+						response.writeHead(202).end();
+					} else if (message.method === "tools/call") {
+						response.writeHead(401).end();
+					} else {
+						const result =
+							message.method === "initialize"
+								? {
+										protocolVersion: LATEST_PROTOCOL_VERSION,
+										capabilities: { tools: {} },
+										serverInfo: { name: "fake", version: "1.0.0" },
+									}
+								: { tools: [] };
+						response.writeHead(200, { "content-type": "application/json", "mcp-session-id": "s1" });
+						response.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+					}
+				});
+			}
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const { port } = server.address() as AddressInfo;
+		const states: string[] = [];
+		const connection = new McpServerConnection({
+			entry: {
+				name: "gateway",
+				config: { url: `http://127.0.0.1:${port}/mcp`, auth: { provider: "gateway" } },
+				source: "test",
+			},
+			cwd: process.cwd(),
+			createTransport: createDefaultTransport,
+			credentials: new McpOAuthCredentialStore(new InMemoryAuthStorageBackend()),
+			providerToken: async () => "tok",
+			onTools: () => {},
+			onChange: (current) => states.push(current.state),
+		});
+		try {
+			await connection.getClient();
+			const call = connection.callTool("echo", {}, {});
+			const held = await deletion.promise;
+			const order: string[] = [];
+			const closing = connection.close().then(() => order.push("closed"));
+			// A close() that does not wait for the dropped client resolves before the next event loop turn.
+			await new Promise((resolve) => setImmediate(resolve));
+			order.push("DELETE answered");
+			held.writeHead(204).end();
+			await expect(call).rejects.toThrow('MCP server "gateway" requires sign-in.');
+			await closing;
+			expect(order).toEqual(["DELETE answered", "closed"]);
+			expect(connection.state).toBe("closed");
+			expect(states).toEqual(["connecting", "connected", "closed"]);
+		} finally {
+			server.closeAllConnections();
 			await new Promise((resolve) => server.close(resolve));
 		}
 	});

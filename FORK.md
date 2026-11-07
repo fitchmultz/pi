@@ -81,6 +81,8 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | --- | --- | --- |
 | Render requests cannot outlive their callbacks across stop/start; stopping drops the owed frame and starting requests a new one. A main-screen stop moves the cursor below the frame, so the first frame after a restart redraws the screen instead of diffing against it | `packages/tui/src/{tui,tui-main-screen}.ts` | `packages/tui/test/tui-render.test.ts` |
 | MCP initialization rejects a connection closed while its final notification is sent; closed stays final and close listeners run once | `packages/mcp/src/client.ts` | `packages/mcp/test/client.test.ts` |
+| A pending tools refresh must not overwrite a disconnected MCP server's error output | `extensions/mcp/runtime.ts` | `mcp-extension.test.ts` |
+| Session shutdown waits for MCP transports already closing after reconnect or sign-in changes, so quitting does not leave old stdio servers running. Calls on clients detached after session expiry remain independent | `extensions/mcp/runtime.ts` | `mcp-extension.test.ts` |
 | Command output must drain after process exit without counting link backpressure as silence | `packages/env/daemon/src/{exec,output,process,pty}.rs` | `packages/env/test/{process,terminal,conformance,remote}.test.ts` |
 | WebSocket errors close their Chord link or HTTP scope while `ws` completes its close handshake, delivering code 1009 for oversized frames | `packages/chord/src/node/http/upgrades.ts`, `apps/p2/src/hosts/socket-limits.ts` | `packages/chord/test/node/http/upgrades.test.ts`, `apps/p2/test/p2/socket-limits.test.ts` |
 | A worker whose `ready` crosses its stop must stay `stopping` in `workers.state`; upstream shows it `running` again until it exits, which the rollout step and the app kit's `exportData` read | `packages/chord/src/node/workers/workers.ts` | `packages/chord/test/node/workers/workers.test.ts` |
@@ -152,6 +154,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | Photon loading keeps the completed module in its cached promise rather than a second module field | `utils/photon.ts` | `image-processing.test.ts` |
 | Background-command monitoring keeps its idle poll timer and latest context in one optional record. The delivery lock, journal receipt scan, scan cancellation, and save pause remain independent | `extensions/background-command/index.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
 | Disposal and reload use the runner's default stale-context message. Runner and runtime lifetimes stay separate: a reused resource loader can give a new runner live contexts while earlier extension APIs remain stale | `core/agent-session.ts`, `core/extensions/runner.ts` | `agent-session-runtime-events.test.ts`, `suite/regressions/{2860-replaced-session-context,5943-session-start-notify,7193-event-bus-lifecycle}.test.ts` |
+| MCP status and error share one union; closed derives from shutdown. Client, discovery and pending-connect ownership stay independent | `extensions/mcp/{runtime,index}.ts` | `mcp-extension.test.ts` |
 
 ### Performance deltas
 
