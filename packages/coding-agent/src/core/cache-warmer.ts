@@ -386,6 +386,11 @@ export class CacheWarmer {
 					message.responseModel ?? message.model,
 					message.usage,
 					extensionOverride ? "extension override" : undefined,
+					{
+						cacheIdentity: message.cacheIdentity,
+						thinkingLevel: message.thinkingLevel ?? run.options.reasoning ?? "off",
+						providerThinkingLevel: message.providerThinkingLevel,
+					},
 				);
 				this.onWarmed?.(entry);
 			}

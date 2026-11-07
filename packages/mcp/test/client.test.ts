@@ -5,6 +5,7 @@ import {
 	LATEST_PROTOCOL_VERSION,
 	McpAbortError,
 	McpClient,
+	McpConnectionClosedError,
 	McpError,
 	McpTimeoutError,
 } from "../src/index.ts";
@@ -299,6 +300,23 @@ describe("McpClient", () => {
 		expect(
 			server.messages.some((message) => "method" in message && message.method === "notifications/cancelled"),
 		).toBe(false);
+	});
+
+	it.each([
+		["server", (_client: McpClient, server: TestServer) => server.transport.close()],
+		["client", (client: McpClient) => client.close()],
+	] as const)("fails to connect when the %s closes the connection during initialization", async (_closer, close) => {
+		const { clientTransport, server } = await createServer();
+		const client = new McpClient({ name: "test-client", version: "1.0.0" });
+		const closed = vi.fn();
+		client.onClose(closed);
+		// The last step of initialization: connect() has sent the notification but not yet returned.
+		server.transport.onMessage((message) => {
+			if ("method" in message && message.method === "notifications/initialized") void close(client, server);
+		});
+		await expect(client.connect(clientTransport)).rejects.toBeInstanceOf(McpConnectionClosedError);
+		expect(client.connectionState).toBe("closed");
+		expect(closed).toHaveBeenCalledTimes(1);
 	});
 
 	it("notifies close listeners once when the transport drops", async () => {

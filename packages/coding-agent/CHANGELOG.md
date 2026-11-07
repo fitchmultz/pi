@@ -58,6 +58,7 @@
 
 ### Fixed
 
+- Fixed cache notices treating known account and thinking-level changes as unexplained misses. Subsequent same-account misses remain visible, and observed cache-read prices do not carry across account changes.
 - Fixed fullscreen highlighted copies including display padding and artificial line breaks or losing Markdown syntax. `/copy` remains the whole-message command. See [Copy part of a response](docs/terminal-setup.md#copy-part-of-a-response).
 - Fixed ordinary self-update commands on immutable fork installations checking upstream's version instead of updating fork main. Explicit custom update commands retain precedence.
 - Fixed `/copy` and extension clipboard writes failing on Termux without a working Termux:API writer by falling back to the terminal's OSC 52 support.
@@ -119,6 +120,7 @@
 - Fixed the Gondolin example extension installing node-forge 1.4.0 (GHSA-86w9-cpqp-85rv) and undici 6.26.0 by updating it to Gondolin 0.14.0. Gondolin now blocks guest HTTP and TLS requests to loopback, private and link-local addresses by default.
 - Fixed fork updates and installs losing npm error logs and redownloading dependencies on retry. Both now share a private npm cache and retain failed-attempt logs ([#285](https://github.com/fitchmultz/pi/issues/285)). See [Fork installation](docs/quickstart.md#fork-installation).
 - Fixed full instruction groups being duplicated in later prompts and after compaction when their discovery result was still present. Changed owner instructions are delivered once without rewriting prior context; tool-selection and read-before-use checks remain in effect.
+- Fixed inherited autocomplete failures exiting Pi. An extension autocomplete provider or slash-command argument completion that rejects now shows no suggestions instead of ending the session with an uncaught exception, and later completions keep working.
 - Fixed a prompt submitted while another prompt was still being prepared, such as back-to-back RPC prompts, being dropped even with `streamingBehavior` after RPC had reported it `started`. Pi also reported idle and emitted `agent_settled` while the first run continued, and `abort()` returned before that run stopped. The later prompt now joins the started run as a steer or follow-up, or is rejected without `streamingBehavior`.
 
 - Fixed the bash tool reporting only `Command timed out` when the command had already exited but a background process it started kept writing to its output until the timeout. The error now also reports the shell's exit code and when it exited ([#11613](https://github.com/earendil-works/pi/issues/11613))
