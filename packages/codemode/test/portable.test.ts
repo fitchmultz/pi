@@ -55,6 +55,31 @@ describe("InlineCodemodeSandbox", () => {
 		expect(result).toMatchObject({ ok: false, error: { kind: "timeout" } });
 		expect(result.calls.length).toBeGreaterThan(1);
 	});
+
+	// The VM's messages arrive in microtasks, so its second call is already queued when the first call's tool aborts.
+	it("runs no call that arrives after the execution has its outcome", async () => {
+		const controller = new AbortController();
+		const ran: string[] = [];
+		const sandbox = new InlineCodemodeSandbox({
+			wasm,
+			tools: [
+				{
+					name: "first",
+					execute: () => {
+						ran.push("first");
+						controller.abort(new Error("cancelled"));
+					},
+				},
+				{ name: "second", execute: () => void ran.push("second") },
+			],
+		});
+		const result = await sandbox.execute("await Promise.all([tools.first(), tools.second()])", {
+			signal: controller.signal,
+		});
+		expect(result).toMatchObject({ ok: false, error: { kind: "aborted", message: "cancelled" } });
+		expect(ran).toEqual(["first"]);
+		expect(result.calls).toHaveLength(1);
+	});
 });
 
 describe("RemoteCodemodeSandbox", () => {
