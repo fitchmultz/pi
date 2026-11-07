@@ -44,8 +44,10 @@ import type {
 	StreamOptions,
 	TextContent,
 	ThinkingBudgets,
+	ThinkingContent,
 	ThinkingLevel,
 	Tool,
+	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
@@ -117,15 +119,24 @@ export interface BedrockOptions extends StreamOptions {
 }
 
 /**
- * Stream state of one open Bedrock content block, keyed by `contentBlockIndex` and kept off the content block so it
- * never reaches partial messages.
+ * One open Bedrock content block, keyed by `contentBlockIndex`: the block pushed to `output.content` and its stream
+ * state, kept off the block so it never reaches partial messages. A stop or the end of the stream closes it.
  */
-type OpenBlock = {
-	readonly contentIndex: number;
-	readonly arguments?: ToolCallArgumentsStream;
-	/** Encrypted reasoning deltas, joined into `thinkingSignature` when the block ends. */
-	redactedChunks?: Uint8Array[];
-};
+type OpenBlock =
+	| { readonly type: "text"; readonly block: TextContent; readonly contentIndex: number }
+	| {
+			readonly type: "thinking";
+			readonly block: ThinkingContent;
+			readonly contentIndex: number;
+			/** Encrypted reasoning deltas, joined into `thinkingSignature` when the block ends. */
+			redactedChunks?: Uint8Array[];
+	  }
+	| {
+			readonly type: "toolCall";
+			readonly block: ToolCall;
+			readonly contentIndex: number;
+			readonly arguments: ToolCallArgumentsStream;
+	  };
 
 type OpenBlocks = Map<number, OpenBlock>;
 
@@ -365,11 +376,11 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 			}
 
 			// A stream can settle without stopping every block, so finalize here too.
-			flushOpenBlocks(openBlocks, output);
+			flushOpenBlocks(openBlocks);
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			flushOpenBlocks(openBlocks, output);
+			flushOpenBlocks(openBlocks);
 			output.stopReason = options.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatBedrockError(error);
 			if (output.stopReason === "error") {
@@ -619,14 +630,20 @@ function handleContentBlockStart(
 	const start = event.start;
 
 	if (start?.toolUse) {
-		output.content.push({
+		const block: ToolCall = {
 			type: "toolCall",
 			id: start.toolUse.toolUseId || "",
 			name: start.toolUse.name || "",
 			arguments: {},
-		});
+		};
+		output.content.push(block);
 		const contentIndex = output.content.length - 1;
-		openBlocks.set(event.contentBlockIndex!, { contentIndex, arguments: new ToolCallArgumentsStream() });
+		openBlocks.set(event.contentBlockIndex!, {
+			type: "toolCall",
+			block,
+			contentIndex,
+			arguments: new ToolCallArgumentsStream(),
+		});
 		stream.push({ type: "toolcall_start", contentIndex, partial: output });
 	}
 }
@@ -640,23 +657,22 @@ function handleContentBlockDelta(
 	const contentBlockIndex = event.contentBlockIndex!;
 	const delta = event.delta;
 	let open = openBlocks.get(contentBlockIndex);
-	let block = open === undefined ? undefined : output.content[open.contentIndex];
 
 	if (delta?.text !== undefined) {
 		// If no text block exists yet, create one, as `handleContentBlockStart` is not sent for text blocks
 		if (!open) {
-			output.content.push({ type: "text", text: "" });
-			open = { contentIndex: output.content.length - 1 };
+			const block: TextContent = { type: "text", text: "" };
+			output.content.push(block);
+			open = { type: "text", block, contentIndex: output.content.length - 1 };
 			openBlocks.set(contentBlockIndex, open);
-			block = output.content[open.contentIndex];
 			stream.push({ type: "text_start", contentIndex: open.contentIndex, partial: output });
 		}
-		if (block?.type === "text") {
-			block.text += delta.text;
+		if (open.type === "text") {
+			open.block.text += delta.text;
 			stream.push({ type: "text_delta", contentIndex: open.contentIndex, delta: delta.text, partial: output });
 		}
-	} else if (delta?.toolUse && block?.type === "toolCall" && open?.arguments !== undefined) {
-		block.arguments = open.arguments.append(delta.toolUse.input || "");
+	} else if (delta?.toolUse && open?.type === "toolCall") {
+		open.block.arguments = open.arguments.append(delta.toolUse.input || "");
 		stream.push({
 			type: "toolcall_delta",
 			contentIndex: open.contentIndex,
@@ -665,14 +681,15 @@ function handleContentBlockDelta(
 		});
 	} else if (delta?.reasoningContent) {
 		if (!open) {
-			output.content.push({ type: "thinking", thinking: "", thinkingSignature: "" });
-			open = { contentIndex: output.content.length - 1 };
+			const block: ThinkingContent = { type: "thinking", thinking: "", thinkingSignature: "" };
+			output.content.push(block);
+			open = { type: "thinking", block, contentIndex: output.content.length - 1 };
 			openBlocks.set(contentBlockIndex, open);
-			block = output.content[open.contentIndex];
 			stream.push({ type: "thinking_start", contentIndex: open.contentIndex, partial: output });
 		}
 
-		if (block?.type === "thinking") {
+		if (open.type === "thinking") {
+			const { block } = open;
 			const thinkingIndex = open.contentIndex;
 			if (delta.reasoningContent.text) {
 				block.thinking += delta.reasoningContent.text;
@@ -715,16 +732,13 @@ function handleContentBlockDelta(
  * block: `Uint8Array` is not JSON and serializes to an index-keyed object roughly ten times the size of the base64
  * payload.
  */
-function flushRedactedContent(open: OpenBlock, output: AssistantMessage): void {
-	const block = output.content[open.contentIndex];
-	if (block?.type !== "thinking" || !open.redactedChunks) return;
-	block.thinkingSignature = bytesToBase64(open.redactedChunks);
-	open.redactedChunks = undefined;
+function flushRedactedContent(open: Extract<OpenBlock, { type: "thinking" }>): void {
+	if (open.redactedChunks) open.block.thinkingSignature = bytesToBase64(open.redactedChunks);
 }
 
 /** Ends the stream state of blocks a stream settled without stopping. */
-function flushOpenBlocks(openBlocks: OpenBlocks, output: AssistantMessage): void {
-	for (const open of openBlocks.values()) flushRedactedContent(open, output);
+function flushOpenBlocks(openBlocks: OpenBlocks): void {
+	for (const open of openBlocks.values()) if (open.type === "thinking") flushRedactedContent(open);
 	openBlocks.clear();
 }
 
@@ -757,19 +771,18 @@ function handleContentBlockStop(
 	if (!open) return;
 	openBlocks.delete(event.contentBlockIndex!);
 	const index = open.contentIndex;
-	const block = output.content[index]!;
 
-	switch (block.type) {
+	switch (open.type) {
 		case "text":
-			stream.push({ type: "text_end", contentIndex: index, content: block.text, partial: output });
+			stream.push({ type: "text_end", contentIndex: index, content: open.block.text, partial: output });
 			break;
 		case "thinking":
-			flushRedactedContent(open, output);
-			stream.push({ type: "thinking_end", contentIndex: index, content: block.thinking, partial: output });
+			flushRedactedContent(open);
+			stream.push({ type: "thinking_end", contentIndex: index, content: open.block.thinking, partial: output });
 			break;
 		case "toolCall":
-			if (open.arguments !== undefined) Object.assign(block, open.arguments.finish());
-			stream.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: output });
+			Object.assign(open.block, open.arguments.finish());
+			stream.push({ type: "toolcall_end", contentIndex: index, toolCall: open.block, partial: output });
 			break;
 	}
 }
