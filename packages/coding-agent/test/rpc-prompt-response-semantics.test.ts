@@ -743,10 +743,10 @@ describe("RPC shutdown triggers", () => {
 		vi.restoreAllMocks();
 	});
 
-	async function startWithSlowDispose() {
+	async function startWithSlowDispose(extensionsResult?: LoadExtensionsResult) {
 		const exitSpy = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
 		vi.spyOn(process.stdin, "pause").mockImplementation(() => process.stdin);
-		const started = await startRpcMode({ withAuth: false, responseDelayMs: 0 });
+		const started = await startRpcMode({ withAuth: false, responseDelayMs: 0, extensionsResult });
 		let finishDispose = () => {};
 		const disposeFinished = new Promise<void>((resolve) => {
 			finishDispose = resolve;
@@ -803,6 +803,68 @@ describe("RPC shutdown triggers", () => {
 			expect(exitSpy).toHaveBeenCalledTimes(1);
 			expect(exitSpy).toHaveBeenCalledWith(143);
 		} finally {
+			await cleanup();
+		}
+	});
+
+	// #11599: a second ctx.shutdown() during cleanup is ignored.
+	it("lets a shutdown started by an extension request finish when the extension requests it again", async () => {
+		let requestShutdown: (() => void) | undefined;
+		const { runtimeHost, exitSpy, finishDispose, cleanup } = await startWithSlowDispose(
+			await createTestExtensionsResult([
+				(pi) => {
+					pi.on("session_start", (_event, ctx) => {
+						requestShutdown = () => ctx.shutdown();
+					});
+				},
+			]),
+		);
+		try {
+			requestShutdown!();
+			await vi.waitFor(() => expect(runtimeHost.dispose).toHaveBeenCalledTimes(1));
+			requestShutdown!();
+			await sleep(10);
+			expect(runtimeHost.dispose).toHaveBeenCalledTimes(1);
+			expect(exitSpy).not.toHaveBeenCalled();
+
+			finishDispose();
+			await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(0));
+			expect(exitSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("starts shutdown on SIGTERM while an extension request waits for its command", async () => {
+		let commandStarted = false;
+		let releaseCommand = () => {};
+		const { lineHandler, runtimeHost, exitSpy, finishDispose, cleanup } = await startWithSlowDispose(
+			await createTestExtensionsResult([
+				(pi) => {
+					pi.registerCommand("hold", {
+						handler: async (_args, ctx) => {
+							ctx.shutdown();
+							commandStarted = true;
+							await new Promise<void>((resolve) => {
+								releaseCommand = resolve;
+							});
+						},
+					});
+				},
+			]),
+		);
+		try {
+			lineHandler(JSON.stringify({ id: "h", type: "prompt", message: "/hold" }));
+			await vi.waitFor(() => expect(commandStarted).toBe(true));
+			process.emit("SIGTERM");
+			await vi.waitFor(() => expect(runtimeHost.dispose).toHaveBeenCalledTimes(1));
+
+			releaseCommand();
+			finishDispose();
+			await vi.waitFor(() => expect(exitSpy).toHaveBeenCalledWith(143));
+			expect(exitSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			releaseCommand();
 			await cleanup();
 		}
 	});
