@@ -12,7 +12,8 @@ import {
 	stream as streamOpenAICodexResponses,
 	streamSimple as streamSimpleOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
-import type { Api, Context, Model } from "../src/types.ts";
+import { cleanupSessionResources } from "../src/session-resources.ts";
+import type { Api, AssistantMessage, Context, Model } from "../src/types.ts";
 import { formatUserAgent } from "../src/utils/identity.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
@@ -2352,6 +2353,167 @@ describe("openai-codex streaming", () => {
 			connectionsCreated: 2,
 			connectionsReused: 0,
 		});
+	});
+
+	describe("cached websocket occupancy", () => {
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const firstContext = normalizeContext({
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Say hello", timestamp: 1 }],
+		});
+		const continueContext = (first: AssistantMessage) =>
+			normalizeContext({
+				messages: [...firstContext.messages, first, { role: "user", content: "Now finish", timestamp: 2 }],
+			});
+		const cachedOptions = (sessionId: string) => ({
+			apiKey: mockToken(),
+			sessionId,
+			transport: "websocket-cached" as const,
+			fetch: vi.fn<typeof fetch>(async () => new Response("unexpected SSE fallback", { status: 500 })),
+		});
+
+		// Socket N answers its Kth request with response `resp_N_K`. After holdNextResponse(), the next
+		// answer waits for respondHeld().
+		function stubCodexWebSockets() {
+			const sockets: CodexTestSocket[] = [];
+			const held: (() => void)[] = [];
+			let holdNext = false;
+			class CodexTestSocket extends EventTarget {
+				readyState = 1;
+				readonly requests: { previous_response_id?: string }[] = [];
+				readonly closeReasons: (string | undefined)[] = [];
+				private readonly id: number;
+
+				constructor() {
+					super();
+					this.id = sockets.push(this);
+					queueMicrotask(() => this.dispatchEvent(new Event("open")));
+				}
+
+				send(data: string): void {
+					this.requests.push(JSON.parse(data) as { previous_response_id?: string });
+					const response = {
+						id: `resp_${this.id}_${this.requests.length}`,
+						status: "completed",
+						usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+					};
+					const answer = () =>
+						this.dispatchEvent(
+							new MessageEvent("message", { data: JSON.stringify({ type: "response.completed", response }) }),
+						);
+					if (holdNext) held.push(answer);
+					else queueMicrotask(answer);
+					holdNext = false;
+				}
+
+				close(_code?: number, reason?: string): void {
+					this.closeReasons.push(reason);
+					this.readyState = 3;
+				}
+			}
+			vi.stubGlobal("WebSocket", CodexTestSocket);
+			return {
+				sockets,
+				holdNextResponse: () => {
+					holdNext = true;
+				},
+				respondHeld: () => {
+					for (const answer of held.splice(0)) answer();
+				},
+			};
+		}
+
+		it("gives a concurrent request its own one-shot websocket while the cached one is leased", async () => {
+			const server = stubCodexWebSockets();
+			const options = cachedOptions("leased-ws");
+			server.holdNextResponse();
+			const leased = streamOpenAICodexResponses(model, firstContext, options).result();
+			await vi.waitFor(() => expect(server.sockets[0]?.requests).toHaveLength(1));
+
+			const concurrent = await streamOpenAICodexResponses(model, firstContext, options).result();
+			server.respondHeld();
+			const first = await leased;
+			await streamOpenAICodexResponses(model, continueContext(first), options).result();
+
+			const [cached, oneShot] = server.sockets;
+			expect(concurrent.stopReason).toBe("stop");
+			expect(server.sockets).toHaveLength(2);
+			expect(oneShot.requests.map((request) => request.previous_response_id)).toEqual([undefined]);
+			expect(oneShot.closeReasons).toEqual(["done"]);
+			expect(cached.requests.map((request) => request.previous_response_id)).toEqual([undefined, "resp_1_1"]);
+			expect(cached.closeReasons).toEqual([]);
+			expect(options.fetch).not.toHaveBeenCalled();
+		});
+
+		it.each(["aborted while leased", "closed by the server while idle"] as const)(
+			"replaces a cached websocket %s with a full-context connection",
+			async (ending) => {
+				const server = stubCodexWebSockets();
+				const options = cachedOptions(`replaced-ws-${ending}`);
+				const first = await streamOpenAICodexResponses(model, firstContext, options).result();
+				const [cached] = server.sockets;
+				if (ending === "aborted while leased") {
+					const controller = new AbortController();
+					server.holdNextResponse();
+					const aborted = streamOpenAICodexResponses(model, continueContext(first), {
+						...options,
+						signal: controller.signal,
+					}).result();
+					await vi.waitFor(() => expect(cached.requests).toHaveLength(2));
+					controller.abort();
+					expect((await aborted).stopReason).toBe("aborted");
+				} else {
+					// The server closed the connection while no request was using it.
+					cached.readyState = 3;
+				}
+				const result = await streamOpenAICodexResponses(model, continueContext(first), options).result();
+
+				expect(result.stopReason).toBe("stop");
+				expect(cached.closeReasons).toEqual(["done"]);
+				expect(server.sockets).toHaveLength(2);
+				expect(server.sockets[1].requests.map((request) => request.previous_response_id)).toEqual([undefined]);
+				expect(options.fetch).not.toHaveBeenCalled();
+			},
+		);
+
+		it.each(["idle expiry", "session cleanup"] as const)(
+			"keeps a reused cached websocket open past its earlier idle deadline, then closes it on %s",
+			async (closure) => {
+				vi.useFakeTimers();
+				const server = stubCodexWebSockets();
+				const options = cachedOptions(`idle-ws-${closure}`);
+				const first = await streamOpenAICodexResponses(model, firstContext, options).result();
+				const [cached] = server.sockets;
+
+				// Reuse four minutes into the five-minute idle window and hold the request past its end.
+				await vi.advanceTimersByTimeAsync(4 * 60_000);
+				server.holdNextResponse();
+				const leased = streamOpenAICodexResponses(model, continueContext(first), options).result();
+				await vi.advanceTimersByTimeAsync(2 * 60_000);
+				expect(cached.requests.map((request) => request.previous_response_id)).toEqual([undefined, "resp_1_1"]);
+				expect(cached.closeReasons).toEqual([]);
+				server.respondHeld();
+				expect((await leased).stopReason).toBe("stop");
+
+				if (closure === "idle expiry") await vi.advanceTimersByTimeAsync(5 * 60_000);
+				else cleanupSessionResources(options.sessionId);
+				expect(cached.closeReasons).toEqual([closure === "idle expiry" ? "idle_timeout" : "debug_close"]);
+				// No expiry timer is left to keep the process alive.
+				expect(vi.getTimerCount()).toBe(0);
+				expect(options.fetch).not.toHaveBeenCalled();
+			},
+		);
 	});
 
 	it.each([false, true])("sends cached deltas with retained-payload mutation: %s", async (mutatePayload) => {
