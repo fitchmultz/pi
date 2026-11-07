@@ -156,6 +156,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | Background-command monitoring keeps its idle poll timer and latest context in one optional record. The delivery lock, journal receipt scan, scan cancellation, and save pause remain independent | `extensions/background-command/index.ts` | `suite/background-command-session.test.ts`, `background-command-process.test.ts` |
 | Disposal and reload use the runner's default stale-context message. Runner and runtime lifetimes stay separate: a reused resource loader can give a new runner live contexts while earlier extension APIs remain stale | `core/agent-session.ts`, `core/extensions/runner.ts` | `agent-session-runtime-events.test.ts`, `suite/regressions/{2860-replaced-session-context,5943-session-start-notify,7193-event-bus-lifecycle}.test.ts` |
 | MCP status and error share one union; closed derives from shutdown. Client, discovery and pending-connect ownership stay independent | `extensions/mcp/{runtime,index}.ts` | `mcp-extension.test.ts` |
+| Bash tool output keeps its raw bytes in one memory, open-file or closed-file state. Decoder finish stays separate from file closure, and a closed file keeps its path | `core/tools/output-accumulator.ts` | `{private-spill,bash-spill,tools}.test.ts` |
 
 ### Performance deltas
 

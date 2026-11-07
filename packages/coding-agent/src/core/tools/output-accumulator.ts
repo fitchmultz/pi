@@ -21,6 +21,12 @@ export interface FullOutput {
 	truncated: boolean;
 }
 
+/** Raw bytes move from memory to a private file; closing the file keeps its path. */
+type RawOutput =
+	| { readonly kind: "memory"; readonly chunks: Buffer[] }
+	| { readonly kind: "file"; readonly path: string; readonly stream: WriteStream; readonly done: Promise<void> }
+	| { readonly kind: "closed"; readonly path: string };
+
 function byteLength(text: string): number {
 	return Buffer.byteLength(text, "utf-8");
 }
@@ -39,7 +45,7 @@ export class OutputAccumulator {
 	private readonly tempFilePrefix: string;
 	private readonly decoder = new TextDecoder();
 
-	private rawChunks: Buffer[] = [];
+	private raw: RawOutput = { kind: "memory", chunks: [] };
 	private tailText = "";
 	private tailBytes = 0;
 	private tailStartsAtLineBoundary = true;
@@ -50,10 +56,6 @@ export class OutputAccumulator {
 	private currentLineBytes = 0;
 	private hasOpenLine = false;
 	private finished = false;
-
-	private tempFilePath: string | undefined;
-	private tempFileStream: WriteStream | undefined;
-	private tempFileDone: Promise<void> | undefined;
 
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
@@ -70,12 +72,15 @@ export class OutputAccumulator {
 		this.totalRawBytes += data.length;
 		this.appendDecodedText(this.decoder.decode(data, { stream: true }));
 
-		if (this.tempFileStream || this.shouldUseTempFile()) {
-			this.ensureTempFile();
-			return writeOutputFileChunk(this.tempFileStream!, data);
-		} else if (data.length > 0) {
-			this.rawChunks.push(data);
+		if (this.raw.kind === "memory" && !this.shouldUseTempFile()) {
+			if (data.length > 0) this.raw.chunks.push(data);
+			return undefined;
 		}
+		const raw = this.ensureTempFile();
+		if (raw.kind === "closed") {
+			throw new Error("Cannot append to an output accumulator after closeTempFile()");
+		}
+		return writeOutputFileChunk(raw.stream, data);
 	}
 
 	finish(): void {
@@ -115,20 +120,20 @@ export class OutputAccumulator {
 		return {
 			content: truncation.content,
 			truncation,
-			fullOutputPath: this.tempFilePath,
+			fullOutputPath: this.raw.kind === "memory" ? undefined : this.raw.path,
 		};
 	}
 
 	async closeTempFile(): Promise<void> {
-		if (!this.tempFileStream) {
+		if (this.raw.kind !== "file") {
 			return;
 		}
 
-		const stream = this.tempFileStream;
-		this.tempFileStream = undefined;
+		const { path, stream, done } = this.raw;
+		this.raw = { kind: "closed", path };
 
 		stream.end();
-		await this.tempFileDone;
+		await done;
 	}
 
 	/**
@@ -137,10 +142,10 @@ export class OutputAccumulator {
 	 * last `maxBytes / 2` bytes around an omission marker.
 	 */
 	async readFullOutput(maxBytes: number): Promise<FullOutput> {
-		if (!this.tempFilePath) {
-			return { content: new TextDecoder().decode(Buffer.concat(this.rawChunks)), truncated: false };
+		if (this.raw.kind === "memory") {
+			return { content: new TextDecoder().decode(Buffer.concat(this.raw.chunks)), truncated: false };
 		}
-		const file = await open(this.tempFilePath, "r");
+		const file = await open(this.raw.path, "r");
 		try {
 			const size = (await file.stat()).size;
 			if (size <= maxBytes) {
@@ -232,17 +237,15 @@ export class OutputAccumulator {
 		);
 	}
 
-	private ensureTempFile(): void {
-		if (this.tempFilePath) {
-			return;
+	private ensureTempFile(): Exclude<RawOutput, { kind: "memory" }> {
+		if (this.raw.kind !== "memory") {
+			return this.raw;
 		}
 		const { path, stream, done } = createOutputFileStream(this.tempFilePrefix, ".log");
-		this.tempFilePath = path;
-		this.tempFileStream = stream;
-		this.tempFileDone = done;
-		for (const chunk of this.rawChunks) {
-			this.tempFileStream.write(chunk);
+		for (const chunk of this.raw.chunks) {
+			stream.write(chunk);
 		}
-		this.rawChunks = [];
+		this.raw = { kind: "file", path, stream, done };
+		return this.raw;
 	}
 }
