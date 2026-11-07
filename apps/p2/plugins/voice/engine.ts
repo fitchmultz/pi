@@ -178,7 +178,8 @@ export class VoiceEngine {
 	readonly #onChange: () => void;
 	readonly #room: VoiceRoom;
 	readonly #producer: () => boolean;
-	#running = false;
+	/** The current start owns startup results until stop or failure clears it. */
+	#running: object | undefined;
 	#micStream: MediaStream | undefined;
 	#micAudioContext: AudioContext | undefined;
 	#micSource: MediaStreamAudioSourceNode | undefined;
@@ -325,7 +326,7 @@ export class VoiceEngine {
 	}
 
 	get running(): boolean {
-		return this.#running;
+		return this.#running !== undefined;
 	}
 
 	/** The microphone is muted: this person stays in the room and hears it, but sends nothing. */
@@ -358,7 +359,8 @@ export class VoiceEngine {
 	/** Starts listening; call from a user gesture (microphone permission, audio playback). */
 	async start(): Promise<void> {
 		if (this.#running) return;
-		this.#running = true;
+		const run = {};
+		this.#running = run;
 		this.error = undefined;
 		this.audioBlocked = false;
 		this.#muted = false;
@@ -373,12 +375,18 @@ export class VoiceEngine {
 		try {
 			// pibot's startRecognition.
 			const micStream = await navigator.mediaDevices.getUserMedia({ audio: micAudioConstraints, video: false });
+			// A late stream must not replace the current start's microphone.
+			if (run !== this.#running) {
+				for (const track of micStream.getTracks()) track.stop();
+				return;
+			}
 			this.#micStream = micStream;
-			if (!this.#running) return this.#release();
 			const [audioTrack] = micStream.getAudioTracks();
 			await audioTrack?.applyConstraints(micAudioConstraints).catch((error: unknown) => {
 				this.#log(`mic constraint apply failed: ${messageOf(error)}`);
 			});
+			// stop() already released this start's microphone.
+			if (run !== this.#running) return;
 			const settings = audioTrack?.getSettings();
 			if (settings) this.#log(`mic settings: ${JSON.stringify(settings)}`);
 			const micAudioContext = new AudioContext();
@@ -401,12 +409,19 @@ export class VoiceEngine {
 			// Where the sound goes (labels are readable once the microphone is allowed), now and on every change.
 			void this.#logDevices();
 			navigator.mediaDevices.addEventListener("devicechange", this.#onDevices);
-			this.#wakeLock = await navigator.wakeLock?.request("screen").catch(() => undefined);
+			const wakeLock = await navigator.wakeLock?.request("screen").catch(() => undefined);
+			// stop() could not release a wake lock that had not arrived yet.
+			if (run !== this.#running) {
+				void wakeLock?.release().catch(() => {});
+				return;
+			}
+			this.#wakeLock = wakeLock;
 		} catch (error) {
-			this.#fail(messageOf(error));
+			// A stale failure must not stop a newer start or overwrite the off state.
+			if (run === this.#running) this.#fail(messageOf(error));
+			else this.#log(`failed after stop: ${messageOf(error)}`);
 			return;
 		}
-		if (!this.#running) return;
 		this.rebind();
 		this.#connect();
 		this.#checkContext(this.#micAudioContext);
@@ -415,7 +430,7 @@ export class VoiceEngine {
 	stop(): void {
 		if (!this.#running) return;
 		this.#log("stop");
-		this.#running = false;
+		this.#running = undefined;
 		this.#transcripts.clear();
 		this.#release();
 		this.error = undefined;
@@ -447,7 +462,7 @@ export class VoiceEngine {
 
 	/** Whether an answer is being read (asked for or playing): a tap on the orb then calls `interrupt()`. */
 	get reading(): boolean {
-		return this.#running && this.#speaking();
+		return this.running && this.#speaking();
 	}
 
 	/** Stops reading the answers known so far; voice mode stays on, and the agent keeps working. */
@@ -546,7 +561,7 @@ export class VoiceEngine {
 		console.error(`[voice] ${message}`);
 		this.#log(`failed: ${message}`);
 		this.#flush();
-		this.#running = false;
+		this.#running = undefined;
 		this.#release();
 		this.error = message;
 		this.lastError = { message, at: Date.now() };
