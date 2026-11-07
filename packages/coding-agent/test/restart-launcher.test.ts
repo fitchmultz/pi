@@ -376,6 +376,8 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 		"process.exit(0);",
 		"setInterval(() => {}, 1000);",
 		"process.on('SIGTERM', () => process.send({type:'pi:ready'}, () => process.exit(17))); setInterval(() => {}, 1000);",
+		// Ignoring SIGTERM at the deadline ends in SIGKILL after the grace period, then the one rollback.
+		"process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);",
 	])("rolls back unready candidate once: %s", async (body) => {
 		const f = await fixture();
 		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else ready();');
@@ -457,7 +459,8 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(a
 	it("does not roll back or replay after readiness", async () => {
 		const f = await fixture();
 		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else ready();');
-		f.release("B", "process.send({type:'pi:ready'}, () => process.exit(17));");
+		// Failing only after its 3-second startup deadline would have expired: readiness cancelled the deadline.
+		f.release("B", "process.send({type:'pi:ready'}, () => setTimeout(() => process.exit(17), 3500));");
 		f.select(a);
 		expect(await f.run(a)).toBe(17);
 		expect(f.read().map((r) => r.runtime)).toEqual(["A", "B"]);
