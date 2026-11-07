@@ -18,6 +18,8 @@
 - Fixed Streamable HTTP `application/json` responses bypassing `maxMessageBytes`; oversized JSON responses are now cancelled and rejected like oversized SSE events ([#11335](https://github.com/earendil-works/pi/issues/11335))
 - Fixed Streamable HTTP errors reading the whole HTTP error body; only the first 8 KiB kept in the error is read, and the rest is cancelled
 - Fixed `McpClient.connect()` reporting success after the connection closed during initialization. It now rejects with `McpConnectionClosedError`, keeps the client closed, and notifies close listeners only once.
+- Fixed `OAuthCallbackServer.close()` waiting for minutes when the browser kept an unused connection open to the callback port, for example a preconnect. It now closes the remaining connections ([#11311](https://github.com/earendil-works/pi/issues/11311))
+
 
 ## [1.5.0] - 2026-11-02
 

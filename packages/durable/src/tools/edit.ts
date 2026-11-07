@@ -4,12 +4,10 @@ import { defineTool } from "../harness/define.ts";
 import type { ToolRegistration } from "../harness/types.ts";
 import {
 	applyEditsToNormalizedContent,
-	detectLineEnding,
+	applyReplacementsToOriginal,
 	type Edit,
-	generateDiffString,
-	generateUnifiedPatch,
+	generateEditDiff,
 	normalizeToLF,
-	restoreLineEndings,
 } from "./edit-diff.ts";
 import { requireEnv } from "./env.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
@@ -126,20 +124,25 @@ export function createEditTool(): ToolRegistration<typeof editSchema, EditToolDe
 					}
 					const bom = rawContent.startsWith("\uFEFF") ? "\uFEFF" : "";
 					const content = rawContent.slice(bom.length);
-					const originalEnding = detectLineEnding(content);
 					const normalizedContent = normalizeToLF(content);
-					const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
+					const { baseContent, newContent, replacements } = applyEditsToNormalizedContent(
+						normalizedContent,
+						edits,
+						path,
+					);
+					const diffResult = generateEditDiff(path, baseContent, newContent, replacements);
 					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
 
-					const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+					const finalContent =
+						bom +
+						(content === normalizedContent ? newContent : applyReplacementsToOriginal(content, replacements));
 					const writeResult = await env.writeFile(absolutePath, finalContent, context);
 					if (!writeResult.ok) throw editAccessError(path, writeResult.error);
 					if (context.abortSignal?.aborted) throw new Error("Operation aborted");
 
-					const diffResult = generateDiffString(baseContent, newContent);
 					const details: EditToolDetails = {
 						diff: diffResult.diff,
-						patch: generateUnifiedPatch(path, baseContent, newContent),
+						patch: diffResult.patch,
 						...(diffResult.firstChangedLine === undefined
 							? {}
 							: { firstChangedLine: diffResult.firstChangedLine }),

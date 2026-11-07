@@ -2468,6 +2468,7 @@ export class InteractiveMode {
 		this.loadedResourcesContainer.clear();
 		this.chatContainer.clear();
 		this.pendingMessagesContainer.clear();
+		this.pendingBashComponents = [];
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -3955,6 +3956,9 @@ export class InteractiveMode {
 				break;
 
 			case "agent_settled":
+				// The session records deferred user bash results when the run settles; show them there too.
+				this.flushPendingBashComponents();
+				this.ui.requestRender();
 				await this.checkShutdownRequested();
 				break;
 

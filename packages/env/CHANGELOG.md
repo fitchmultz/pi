@@ -16,6 +16,7 @@
 - Fixed one oversized file-watch change stopping the daemon's output writer; the change is reported as `overflow` and the connection and watcher keep working ([#10516](https://github.com/earendil-works/pi/issues/10516)).
 - Fixed concurrent `acceptHostKey`/`forgetHostKey` calls through equivalent known-hosts path spellings losing updates, which could restore a removed host key ([#10517](https://github.com/earendil-works/pi/issues/10517)).
 - Fixed cancelled or timed-out daemon shell commands on macOS sometimes running later steps after the current step was killed; cancellation and timeouts now stop the whole command.
+- An aborted or timed-out request no longer waits for a remote host that does not answer: aborting while the connection starts rejects at once with `aborted`, a sent request settles as `aborted` if the daemon does not answer its cancel within a second, `RemoteExecutionEnv.exec` enforces its timeout locally as well, and file operations stop waiting for the connection when aborted. `ssh` gets `ConnectTimeout=15`, so a host that is down fails a start within 15 s.
 
 - On Windows, an `exec` command's output readers stop once the command has settled, also while a descendant keeps a pipe open without writing; they stayed blocked until it exited, because cancelling a blocked read did not reach the standard library's overlapped pipe I/O.
 

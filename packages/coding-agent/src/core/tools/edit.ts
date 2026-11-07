@@ -1,11 +1,9 @@
 import {
 	applyEditsToNormalizedContent,
-	detectLineEnding,
+	applyReplacementsToOriginal,
 	type Edit,
-	generateDiffString,
-	generateUnifiedPatch,
+	generateEditDiff,
 	normalizeToLF,
-	restoreLineEndings,
 } from "@earendil-works/pi-durable/tools/edit-diff";
 import { constants } from "fs";
 import { access as fsAccess, readFile as fsReadFile, writeFile as fsWriteFile } from "fs/promises";
@@ -186,17 +184,23 @@ export function createEditToolDefinition(
 
 				// Strip BOM before matching. The model will not include an invisible BOM in oldText.
 				const { bom, text: content } = splitBom(rawContent);
-				const originalEnding = detectLineEnding(content);
 				const normalizedContent = normalizeToLF(content);
-				const { baseContent, newContent } = applyEditsToNormalizedContent(normalizedContent, edits, path);
+				const { baseContent, newContent, replacements } = applyEditsToNormalizedContent(
+					normalizedContent,
+					edits,
+					path,
+				);
+				// Diff before writing, so diff computation cannot fail after the write.
+				const editDiff = generateEditDiff(path, baseContent, newContent, replacements);
 				throwIfAborted();
 
-				const finalContent = bom + restoreLineEndings(newContent, originalEnding);
+				// Splice into the original text, so untouched lines keep their line endings. Without any CR
+				// the original is the normalized text, and the normalized result is already final.
+				const finalContent =
+					bom + (content === normalizedContent ? newContent : applyReplacementsToOriginal(content, replacements));
 				await ops.writeFile(absolutePath, finalContent);
 				throwIfAborted();
 
-				const diffResult = generateDiffString(baseContent, newContent);
-				const patch = generateUnifiedPatch(path, baseContent, newContent);
 				return {
 					content: [
 						{
@@ -204,7 +208,7 @@ export function createEditToolDefinition(
 							text: `Successfully replaced ${edits.length} block(s) in ${path}.`,
 						},
 					],
-					details: { diff: diffResult.diff, patch, firstChangedLine: diffResult.firstChangedLine },
+					details: editDiff,
 				};
 			});
 		},

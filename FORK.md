@@ -2,11 +2,12 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`80d4d3c869016ed9c61d16a88e5eb5e0e56186a9` (2026-11-05), following official v1.5.0.
+`085c84e98e7f4c950f2be606466fff4f75d8fe7c` (2026-11-07), following official v1.5.0.
 It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
-The [2026-11-05 integration record](docs/upstream-sync-2026-11-05.md) documents the current baseline,
+The [2026-11-07 integration record](docs/upstream-sync-2026-11-07.md) documents the current baseline,
+conflict decisions and verification. The [2026-11-05 integration record](docs/upstream-sync-2026-11-05.md) documents the previous baseline,
 conflict decisions and verification. The [2026-11-04 integration record](docs/upstream-sync-2026-11-04.md)
 records the previous integration. The [v1.5.0 integration record](docs/upstream-sync-1.5.0.md) records the preceding release integration. The
 [2026-10-29 integration record](docs/upstream-sync-2026-10-29.md) records the previous
@@ -91,7 +92,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | After a failed journal write, including the first write that creates the file, the next append or save must rewrite the journal from accepted memory so reopened history keeps its ancestry without duplicate or partial records. Appends never adopt a file another writer created at a new journal's path, a file rejected by `setSessionFile()` never receives the current session's entries, and a new session starts without the old failure ([#257](https://github.com/fitchmultz/pi/issues/257)) | `core/session-manager.ts` | `session-manager/file-operations.test.ts`, `suite/regressions/257-journal-write-failure.test.ts` |
 | Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
 | HTML export must not replace the journal through any alias | `core/export-html/index.ts` | `file-safety.test.ts` |
-| Edits must preserve UTF-8 and untouched original text/boundaries | Shared policy in `packages/durable/src/tools/edit-diff.ts`; byte I/O in `packages/durable/src/tools/edit.ts`, `core/tools/{edit,edit-diff}.ts`, `utils/text.ts` | `packages/durable/test/tools.test.ts`, `edit-byte-safety.test.ts` |
+| Edits must preserve UTF-8 and untouched original text/boundaries. Upstream's line-ending splicing and bounded diff windows run in the shared owner; fuzzy matching keeps the fork's exact original spans | Shared policy in `packages/durable/src/tools/edit-diff.ts`; byte I/O in `packages/durable/src/tools/edit.ts`, `core/tools/{edit,edit-diff}.ts`, `utils/text.ts` | `packages/durable/test/tools.test.ts`, `edit-byte-safety.test.ts`, `edit-diff-window.test.ts`, `edit-tool-diff-before-write.test.ts` |
 | One auth-check failure must not hide healthy providers or replace saved/scoped selections | `packages/ai/src/models.ts`, `core/{model-runtime,model-resolver,sdk}.ts` | `packages/ai/test/models-runtime.test.ts`, `model-runtime-auth-options.test.ts`, `model-resolver.test.ts`, `agent-session-dynamic-provider.test.ts` |
 | Refresh admission must precede config I/O: awaited scopes follow current per-provider catalog/auth readiness, global availability reads cannot discard credential synchronization or make it join unrelated work, and full-pass auth failures retain provider-local diagnostics and sibling credential filters under scoped overlap. Scoped snapshot updates read only their own catalogs, so a refresh stays linear in the number of providers | `core/model-runtime.ts` | `model-runtime-refresh-order.test.ts`, `agent-session-dynamic-provider.test.ts`, `model-runtime-credential-sync.test.ts` |
 | OAuth state, cancellation and UI failures must retain listener/prompt cleanup | `packages/ai/src/auth/oauth/{callback-server,openai-chatgpt}.ts` | `packages/ai/test/{oauth-callback-server,openai-chatgpt-oauth}.test.ts` |
@@ -230,6 +231,12 @@ Grep uses upstream's `rg --no-config` and ripgrep-provided context lines, with n
 projected-context scan to omit the failed assistant and its matching tool results together.
 These are release integrations, not additional fork mechanisms.
 
+Grep globs follow upstream's search-path-relative matching. Edit execution and preview use upstream's
+bounded diff windows, computed before writing. Original line endings are spliced back only at
+matched ranges, with the fork's exact fuzzy-boundary mapping retained in the shared Durable owner.
+Kitty fullscreen images draw after all covered text rows on every terminal. These upstream fixes
+do not replace the fork's UTF-8 validation, compact Bash rendering, or source-aware selection.
+
 Model references follow upstream's shared provider-selection policy, including gateway IDs,
 thinking suffixes, authenticated-provider tie breaking and explicit-key ambiguity. The fork retains
 saved/scoped selections when a provider's auth check fails. Codemode follows upstream's prompt
@@ -339,17 +346,23 @@ The focused native working-session and provider-auth-fallback APIs above are own
 
 ## Remotes and history
 
-- `origin`: upstream `earendil-works/pi` (fetch only). `fork`: `fitchmultz/pi`.
-- Local `main` tracks `fork/main`. Merge upstream; never rebase or force-push fork history.
+- Identify remotes by URL with `git remote -v`. In the ecosystem checkout, `origin` is
+  `fitchmultz/pi` and `upstream` is `earendil-works/pi` (fetch only).
+- Local `main` tracks the fork's `main`. Merge upstream; never rebase or force-push fork history.
 - The 1.0 rebuild started from the v1.0.0 tree and recorded earlier fork history with
   `git merge -s ours`.
 
 ## Updating from upstream
 
+Choose checks for the changed behavior and affected callers, reusing still-valid results.
+The full suite below suits broad integrations; focused catch-up merges use the affected
+tests through `./test.sh -- <command>`.
+
 ```sh
-git fetch origin --tags
-git worktree add -b sync/upstream-<tag> ../worktrees/pi/upstream-<tag> fork/main
-cd ../worktrees/pi/upstream-<tag>
+git fetch origin
+git -c fetch.pruneTags=false fetch upstream --tags
+git worktree add -b sync/upstream-<tag> ~/Projects/worktrees/pi/upstream-<tag> origin/main
+cd ~/Projects/worktrees/pi/upstream-<tag>
 git merge <tag>                  # resolve conflicts, keeping the features above
 npm ci --ignore-scripts
 npm run hydrate:model-data
