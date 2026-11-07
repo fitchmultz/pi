@@ -1,6 +1,10 @@
 import {
 	type AssistantMessage,
 	createAssistantMessageEventStream,
+	createModels,
+	fauxAssistantMessage,
+	fauxProvider,
+	fauxToolCall,
 	type Message,
 	type Model,
 	type ToolResultMessage,
@@ -2127,6 +2131,121 @@ describe("agentLoopContinue with AgentMessage", () => {
 		const messages = await stream.result();
 		expect(messages.length).toBe(1);
 		expect(messages[0].role).toBe("assistant");
+	});
+});
+
+describe("agent loop streams of a run that throws", () => {
+	const prompt = createUserMessage("hello");
+	const unusedStreamFn = () => {
+		throw new Error("Unexpected stream call");
+	};
+	const adapters = {
+		agentLoop: (config: AgentLoopConfig, signal?: AbortSignal) =>
+			agentLoop([prompt], { messages: [], tools: [] }, config, signal, unusedStreamFn),
+		agentLoopContinue: (config: AgentLoopConfig, signal?: AbortSignal) =>
+			agentLoopContinue({ messages: [prompt], tools: [] }, config, signal, unusedStreamFn),
+	};
+
+	it.each([
+		{ adapter: "agentLoop", accepted: [prompt] },
+		{ adapter: "agentLoopContinue", accepted: [] },
+	] as const)("$adapter ends with an error message, turn_end and agent_end", async ({ adapter, accepted }) => {
+		const stream = adapters[adapter]({
+			model: createModel(),
+			convertToLlm: identityConverter,
+			prepareRequest: async () => {
+				throw new Error("prepareRequest failed");
+			},
+		});
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+		const messages = await stream.result();
+
+		const failure = messages.at(-1);
+		expect(failure).toMatchObject({
+			role: "assistant",
+			api: "openai-responses",
+			provider: "openai",
+			model: "mock",
+			stopReason: "error",
+			errorMessage: "prepareRequest failed",
+		});
+		// Messages accepted before the failure stay in the result.
+		expect(messages).toEqual([...accepted, failure]);
+		expect(events.slice(-4)).toEqual([
+			{ type: "message_start", message: failure },
+			{ type: "message_end", message: failure },
+			{ type: "turn_end", message: failure, toolResults: [] },
+			{ type: "agent_end", messages },
+		]);
+	});
+
+	it("keeps a completed streamed tool turn when the next turn's preparation throws", async () => {
+		const toolSchema = obj({});
+		const tool: AgentTool<typeof toolSchema, undefined> = {
+			name: "noop",
+			label: "Noop",
+			description: "Noop tool",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "done" }], details: undefined };
+			},
+		};
+		const toolCall = fauxToolCall("noop", {}, { id: "tool-1" });
+		const faux = fauxProvider();
+		faux.setResponses([fauxAssistantMessage(toolCall, { stopReason: "toolUse" })]);
+		const models = createModels();
+		models.setProvider(faux.provider);
+
+		const stream = agentLoop(
+			[prompt],
+			{ messages: [], tools: [tool] },
+			{
+				model: faux.getModel(),
+				convertToLlm: identityConverter,
+				prepareNextTurn: () => {
+					throw new Error("prepareNextTurn failed");
+				},
+			},
+			undefined,
+			models.streamSimple.bind(models),
+		);
+		const events: AgentEvent[] = [];
+		for await (const event of stream) events.push(event);
+
+		// The response streams from a pending partial, so its message_start differs from the message it ends with.
+		expect(events).toContainEqual({
+			type: "message_start",
+			message: expect.objectContaining({ role: "assistant", content: [], stopReason: "pending" }),
+		});
+		expect(await stream.result()).toEqual([
+			expect.objectContaining({ role: "system", toolsAdded: [expect.objectContaining({ name: "noop" })] }),
+			prompt,
+			expect.objectContaining({ role: "assistant", content: [toolCall], stopReason: "toolUse" }),
+			expect.objectContaining({
+				role: "toolResult",
+				toolCallId: "tool-1",
+				content: [{ type: "text", text: "done" }],
+			}),
+			expect.objectContaining({ role: "assistant", stopReason: "error", errorMessage: "prepareNextTurn failed" }),
+		]);
+	});
+
+	it("reports a run stopped by caller cancellation as aborted", async () => {
+		const controller = new AbortController();
+		const stream = adapters.agentLoop(
+			{
+				model: createModel(),
+				convertToLlm: identityConverter,
+				prepareRequest: (_request, signal) => signal?.throwIfAborted(),
+			},
+			controller.signal,
+		);
+		controller.abort();
+
+		const messages = await stream.result();
+		expect(messages.at(-1)).toMatchObject({ stopReason: "aborted", errorMessage: "This operation was aborted" });
 	});
 });
 

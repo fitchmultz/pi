@@ -50,22 +50,7 @@ export function agentLoop(
 	signal: AbortSignal | undefined,
 	streamFn: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
-	const stream = createAgentStream();
-
-	void runAgentLoop(
-		prompts,
-		context,
-		config,
-		async (event) => {
-			stream.push(event);
-		},
-		signal,
-		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
-
-	return stream;
+	return streamAgentRun(config, signal, (emit) => runAgentLoop(prompts, context, config, emit, signal, streamFn));
 }
 
 /**
@@ -90,19 +75,60 @@ export function agentLoopContinue(
 		throw new Error("Cannot continue from message role: assistant");
 	}
 
-	const stream = createAgentStream();
+	return streamAgentRun(config, signal, (emit) => runAgentLoopContinue(context, config, emit, signal, streamFn));
+}
 
-	void runAgentLoopContinue(
-		context,
-		config,
-		async (event) => {
-			stream.push(event);
+/**
+ * Stream the events of one loop run. A run that throws, for example from a hook, still ends the stream: the assistant
+ * message `Agent` reports for a thrown run, with stopReason "error" ("aborted" after caller cancellation) and the
+ * error's message, then `turn_end` and `agent_end` with the messages accepted before the failure and that message.
+ */
+function streamAgentRun(
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	run: (emit: AgentEventSink) => Promise<AgentMessage[]>,
+): EventStream<AgentEvent, AgentMessage[]> {
+	const stream = new EventStream<AgentEvent, AgentMessage[]>(
+		(event: AgentEvent) => event.type === "agent_end",
+		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
+	);
+	// A run that throws returns no messages, so keep the ones it has accepted.
+	const newMessages: AgentMessage[] = [];
+	const emit = (event: AgentEvent): void => {
+		if (event.type === "message_end") newMessages.push(event.message);
+		stream.push(event);
+	};
+
+	void run(emit).then(
+		(messages) => {
+			stream.end(messages);
 		},
-		signal,
-		streamFn,
-	).then((messages) => {
-		stream.end(messages);
-	});
+		(error: unknown) => {
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "" }],
+				api: config.model.api,
+				provider: config.model.provider,
+				model: config.model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: signal?.aborted ? "aborted" : "error",
+				errorMessage: error instanceof Error ? error.message : String(error),
+				timestamp: Date.now(),
+			};
+			emit({ type: "message_start", message });
+			emit({ type: "message_end", message });
+			emit({ type: "turn_end", message, toolResults: [] });
+			emit({ type: "agent_end", messages: newMessages });
+			stream.end(newMessages);
+		},
+	);
 
 	return stream;
 }
@@ -156,13 +182,6 @@ export async function runAgentLoopContinue(
 
 	await runLoop(currentContext, newMessages, config, signal, emit, streamFn ?? getDefaultStreamFn());
 	return newMessages;
-}
-
-function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
-	return new EventStream<AgentEvent, AgentMessage[]>(
-		(event: AgentEvent) => event.type === "agent_end",
-		(event: AgentEvent) => (event.type === "agent_end" ? event.messages : []),
-	);
 }
 
 /**

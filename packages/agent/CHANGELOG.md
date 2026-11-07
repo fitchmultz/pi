@@ -6,6 +6,10 @@
 
 - Reuse normalized tool definitions during native agent-loop comparisons.
 
+### Fixed
+
+- Fixed `agentLoop()` and `agentLoopContinue()` streams never ending, and leaving an unhandled rejection, when the run throws, for example from `prepareRequest`. The stream now ends with an error assistant message (`aborted` after cancellation), `turn_end` and `agent_end`, and `result()` keeps the messages accepted before the failure.
+
 ## [1.5.0] - 2026-11-02
 
 ### Breaking Changes
