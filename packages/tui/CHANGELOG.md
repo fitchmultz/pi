@@ -17,6 +17,7 @@
 
 - Fixed fullscreen Kitty images disappearing after a terminal resize when the terminal clears cached image data during a screen erase.
 - Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
+- Fixed a rejected `getSuggestions()` call stopping all later autocomplete requests and escaping as an unhandled rejection, which ends Node processes by default. `Editor` now handles a failed lookup like one with no suggestions, including a rejection with the abort reason after a newer request supersedes it.
 
 - Fixed Markdown rendering HTML comments (`<!-- ... -->`) as visible text ([#11710](https://github.com/earendil-works/pi/issues/11710))
 

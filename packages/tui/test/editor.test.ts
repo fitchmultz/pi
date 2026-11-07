@@ -42,6 +42,15 @@ async function flushAutocomplete(): Promise<void> {
 	await new Promise((resolve) => setImmediate(resolve));
 }
 
+/** Two suggestions open the menu; Tab applies a single suggestion directly. */
+const twoSuggestions = {
+	items: [
+		{ value: "alpha", label: "alpha" },
+		{ value: "beta", label: "beta" },
+	],
+	prefix: "",
+};
+
 describe("Editor component", () => {
 	describe("Prompt history navigation", () => {
 		it("does nothing on Up arrow when history is empty", () => {
@@ -2782,6 +2791,58 @@ describe("Editor component", () => {
 			await new Promise((resolve) => setTimeout(resolve, 50));
 
 			assert.strictEqual(aborts, 1);
+		});
+
+		it("closes the menu when a suggestion request fails and still serves later requests", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let calls = 0;
+			editor.setAutocompleteProvider({
+				// Calls 1 and 3 fail; call 2 returns two suggestions.
+				getSuggestions: async () => {
+					calls += 1;
+					if (calls !== 2) throw new Error("lookup failed");
+					return twoSuggestions;
+				},
+				applyCompletion,
+			});
+
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.strictEqual(calls, 2);
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			// Typing refreshes the open menu. A failed refresh closes it instead of leaving stale suggestions.
+			editor.handleInput("a");
+			await flushAutocomplete();
+			assert.strictEqual(calls, 3);
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+		});
+
+		it("runs the superseding request when the superseded one rejects with its abort reason", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let calls = 0;
+			editor.setAutocompleteProvider({
+				getSuggestions: async (_lines, _cursorLine, _cursorCol, { signal }) => {
+					calls += 1;
+					if (calls === 1) {
+						// Like fetch(), the first lookup rejects with the abort reason once a newer request supersedes it.
+						await new Promise((_resolve, reject) => {
+							signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+						});
+					}
+					return twoSuggestions;
+				},
+				applyCompletion,
+			});
+
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.strictEqual(calls, 2);
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
 		});
 
 		it("hides autocomplete when backspacing slash command to empty", async () => {
