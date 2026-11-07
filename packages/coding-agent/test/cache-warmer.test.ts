@@ -672,20 +672,23 @@ describe("cache warming", () => {
 		]).toEqual([false, true, true, true]);
 	});
 
-	it("replays profitable requests and preserves options across repeated refreshes", async () => {
+	it.each([
+		{ reasoning: "high", thinkingLevel: "high" },
+		{ reasoning: undefined, thinkingLevel: "off" },
+	] as const)("replays with $thinkingLevel thinking", async ({ reasoning, thinkingLevel }) => {
 		vi.useFakeTimers();
 		const { warmer, calls, events, warmedEntries } = fakeRuntime({
 			result: async (model) => ({
 				...response(model),
 				cacheIdentity: "warm-account",
-				providerThinkingLevel: "high",
+				providerThinkingLevel: reasoning,
 			}),
 		});
 		const signal = new AbortController().signal;
 		const transformHeaders = async () => ({});
 
 		const originalRequest = request(adaptiveModel, {
-			reasoning: "high",
+			reasoning,
 			signal,
 			sessionId: "s",
 			transformHeaders,
@@ -697,7 +700,7 @@ describe("cache warming", () => {
 		expect(calls[0]).toMatchObject({
 			model: adaptiveModel,
 			options: {
-				reasoning: "high",
+				reasoning,
 				sessionId: "s",
 				transformHeaders,
 				maxTokens: 1,
@@ -726,8 +729,8 @@ describe("cache warming", () => {
 				model: adaptiveModel.id,
 				usage: warmUsage,
 				cacheIdentity: "warm-account",
-				thinkingLevel: "high",
-				providerThinkingLevel: "high",
+				thinkingLevel,
+				providerThinkingLevel: reasoning,
 			},
 		]);
 
