@@ -97,7 +97,7 @@ describe("NestedToolCallRunner", () => {
 		expect(runner.takeRecord("other")).toBeUndefined();
 	});
 
-	it("records calls of nested tools on the model-issued call", async () => {
+	it("records descendants while the caller holds the sequential queue", async () => {
 		const leaf: AgentTool = {
 			name: "leaf",
 			label: "Leaf",
@@ -108,7 +108,7 @@ describe("NestedToolCallRunner", () => {
 			},
 		};
 		const tools: AgentTool[] = [leaf];
-		const { runner } = createRunner(tools);
+		const { runner } = createRunner(tools, { sequential: true });
 		tools.push({
 			name: "middle",
 			label: "Middle",
