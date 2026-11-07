@@ -325,22 +325,21 @@ class CodemodeCall {
 	private replaying = false;
 	/** Whether an earlier attempt ran this call: its nested call keys may already exist. */
 	private rerun = false;
-	/** Whether live calls may launch; before, they are held (see `release()`). */
-	private released = false;
+	/**
+	 * Live calls not launched yet. Held: none may launch (see `release()`). Released: each launches once its issued count
+	 * is committed.
+	 */
+	private admission: { state: "held" | "released"; calls: CodemodeHostCall[] } = { state: "held", calls: [] };
 	/** The count an earlier attempt recorded after the script's first run. */
 	private firstIssued: number | undefined;
 	/** The highest issued count known to be committed: calls up to it may launch. */
 	private durableIssued = 0;
-	/** Live calls waiting for their issued count to be committed. */
-	private waiting: CodemodeHostCall[] = [];
 	/** Journal index of each replayed call ID. */
 	private replayIndex = new Map<number, number>();
 	/** Calls the VM issued so far; its call IDs are 1, 2, ... */
 	private issued = 0;
 	/** Replay: results of journaled calls, ready to deliver in journal order. */
 	private readonly ready = new Map<number, CodemodeOutcome>();
-	/** Replay: calls the journal does not have, admitted once replay is done. */
-	private held: CodemodeHostCall[] = [];
 	/** Live: finished calls waiting for their journal commit. */
 	private queue: { id: number; at: number; outcome: CodemodeOutcome; global?: JournalEntry["global"] }[] = [];
 	/** Acknowledged counts to record, by result number (0: the script's first run). */
@@ -651,10 +650,8 @@ class CodemodeCall {
 		this.issued = Math.max(this.issued, call.id);
 		const index = this.replaying ? (this.replayIndex.get(call.id) ?? -1) : -1;
 		if (index === -1) {
-			if (this.released) {
-				this.waiting.push(call);
-				this.launchCovered();
-			} else this.held.push(call);
+			this.admission.calls.push(call);
+			this.launchCovered();
 			return;
 		}
 		const entry = this.replayed[index]!;
@@ -746,10 +743,10 @@ class CodemodeCall {
 	 */
 	private async release(): Promise<void> {
 		await this.gate;
-		if (this.stopped || this.released) return;
-		const calls = this.held.splice(0);
+		if (this.stopped || this.admission.state !== "held") return;
 		if (this.rerun) {
-			for (const call of calls) {
+			// A copy: a call made while these checks wait is new, so it is not checked.
+			for (const call of [...this.admission.calls]) {
 				let other: string | undefined;
 				try {
 					other = await this.earlier(call);
@@ -764,17 +761,17 @@ class CodemodeCall {
 				}
 			}
 		}
-		this.released = true;
-		this.waiting.push(...calls, ...this.held.splice(0));
+		this.admission = { state: "released", calls: this.admission.calls };
 		this.launchCovered();
 	}
 
-	/** Launch the waiting calls whose issued count is committed. */
+	/** Launch the released calls whose issued count is committed. */
 	private launchCovered(): void {
-		if (!this.released || this.stopped) return;
-		const covered = this.waiting.filter((call) => call.id <= this.durableIssued);
+		const { admission } = this;
+		if (admission.state === "held" || this.stopped) return;
+		const covered = admission.calls.filter((call) => call.id <= this.durableIssued);
 		if (covered.length === 0) return;
-		this.waiting = this.waiting.filter((call) => call.id > this.durableIssued);
+		admission.calls = admission.calls.filter((call) => call.id > this.durableIssued);
 		for (const call of covered) this.launch(call);
 	}
 
