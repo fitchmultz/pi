@@ -135,6 +135,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | --- | --- | --- |
 | One waiting/completing/settled phase owns OAuth callback admission and settlement; manual cancellation leaves an active exchange alone | `packages/ai/src/auth/oauth/callback-server.ts` | `packages/ai/test/oauth-callback-server.test.ts` |
 | Keyboard mode uses one mutually exclusive state; the outstanding Kitty stack push remains a separate cleanup obligation | `packages/tui/src/terminal.ts` | `packages/tui/test/terminal.test.ts` |
+| Internal paste state uses one optional content buffer and one completion path, preserving split markers and input ordering | `packages/tui/src/stdin-buffer.ts` | `packages/tui/test/stdin-buffer.test.ts` |
 
 ### Performance deltas
 

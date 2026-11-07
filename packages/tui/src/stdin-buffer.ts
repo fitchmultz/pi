@@ -307,8 +307,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	private timeout: ReturnType<typeof setTimeout> | null = null;
 	private readonly timeoutMs: number;
 	private readonly escapeTimeoutMs: number;
-	private pasteMode: boolean = false;
-	private pasteBuffer: string = "";
+	/** Bracketed paste received so far, or undefined outside a paste. getBuffer() and flush() never expose it. */
+	private pasteBuffer: string | undefined;
 	private pendingKittyPrintableCodepoint: number | undefined;
 
 	constructor(options: StdinBufferOptions = {}) {
@@ -343,29 +343,12 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return;
 		}
 
-		this.buffer += str;
-
-		if (this.pasteMode) {
-			this.pasteBuffer += this.buffer;
-			this.buffer = "";
-
-			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
-			if (endIndex !== -1) {
-				const pastedContent = this.pasteBuffer.slice(0, endIndex);
-				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
-
-				this.pasteMode = false;
-				this.pasteBuffer = "";
-				this.pendingKittyPrintableCodepoint = undefined;
-
-				this.emit("paste", pastedContent);
-
-				if (remaining.length > 0) {
-					this.process(remaining);
-				}
-			}
+		if (this.pasteBuffer !== undefined) {
+			this.receivePaste(this.pasteBuffer + str);
 			return;
 		}
+
+		this.buffer += str;
 
 		const startIndex = this.buffer.indexOf(BRACKETED_PASTE_START);
 		if (startIndex !== -1) {
@@ -378,26 +361,9 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			}
 
 			this.pendingKittyPrintableCodepoint = undefined;
-			this.buffer = this.buffer.slice(startIndex + BRACKETED_PASTE_START.length);
-			this.pasteMode = true;
-			this.pasteBuffer = this.buffer;
+			const afterStart = this.buffer.slice(startIndex + BRACKETED_PASTE_START.length);
 			this.buffer = "";
-
-			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
-			if (endIndex !== -1) {
-				const pastedContent = this.pasteBuffer.slice(0, endIndex);
-				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
-
-				this.pasteMode = false;
-				this.pasteBuffer = "";
-				this.pendingKittyPrintableCodepoint = undefined;
-
-				this.emit("paste", pastedContent);
-
-				if (remaining.length > 0) {
-					this.process(remaining);
-				}
-			}
+			this.receivePaste(afterStart);
 			return;
 		}
 
@@ -443,6 +409,24 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.emit("data", sequence);
 	}
 
+	/** Holds a paste until its end marker, then emits it and decodes the input after the marker. */
+	private receivePaste(received: string): void {
+		const endIndex = received.indexOf(BRACKETED_PASTE_END);
+		if (endIndex === -1) {
+			this.pasteBuffer = received;
+			return;
+		}
+
+		const remaining = received.slice(endIndex + BRACKETED_PASTE_END.length);
+		this.pasteBuffer = undefined;
+		this.pendingKittyPrintableCodepoint = undefined;
+		this.emit("paste", received.slice(0, endIndex));
+
+		if (remaining.length > 0) {
+			this.process(remaining);
+		}
+	}
+
 	flush(): string[] {
 		if (this.timeout) {
 			clearTimeout(this.timeout);
@@ -465,8 +449,7 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.timeout = null;
 		}
 		this.buffer = "";
-		this.pasteMode = false;
-		this.pasteBuffer = "";
+		this.pasteBuffer = undefined;
 		this.pendingKittyPrintableCodepoint = undefined;
 	}
 
