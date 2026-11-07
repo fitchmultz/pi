@@ -176,6 +176,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		if (lineDiff > 0) this.terminal.write(`\x1b[${lineDiff}B`);
 		else if (lineDiff < 0) this.terminal.write(`\x1b[${-lineDiff}A`);
 		this.terminal.write("\r\n");
+		// The cursor has left the frame the render state describes, so the first frame after start() redraws the screen.
+		this.resetRenderState();
 	}
 
 	private collectKittyImageIds(lines: string[]): Set<number> {

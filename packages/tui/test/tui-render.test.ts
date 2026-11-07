@@ -199,36 +199,63 @@ describe("TUI render scheduling", () => {
 
 	for (const Renderer of [TuiMainScreen, TuiAltScreen]) {
 		for (const { name, stop } of pendingRenderStops) {
-			it(`${Renderer.name} renders after stop() and start() with ${name}`, async () => {
-				const terminal = new VirtualTerminal(40, 10);
+			it(`${Renderer.name} draws the current frame after stop() and start() with ${name}`, async () => {
+				const terminal = new VirtualTerminal(40, 6);
 				const tui: TUI = new Renderer(terminal);
 				const component = new StopOnInputComponent(tui);
-				component.lines = ["initial"];
+				component.lines = ["a1", "b2", "c3", "d4"];
 				tui.addChild(component);
 				tui.setFocus(component);
 				tui.start();
 				await terminal.waitForRender();
 
-				component.lines = ["pending"];
+				// Only the first line changes, so a diff against the screen stop() left behind lands on the wrong rows.
+				component.lines = ["A1", "b2", "c3", "d4"];
 				await stop(tui, terminal);
 				tui.start();
 				await terminal.waitForRender();
-				assert.ok(
-					terminal.getViewport().some((line) => line.includes("pending")),
-					"start() should render the current state",
+				assert.deepStrictEqual(
+					terminal.getViewport(),
+					["A1", "b2", "c3", "d4", "", ""],
+					"start() should draw the current frame",
 				);
 
-				component.lines = ["updated"];
+				component.lines = ["A1", "b2", "c3", "D4"];
 				tui.requestRender();
 				await terminal.waitForRender();
-				assert.ok(
-					terminal.getViewport().some((line) => line.includes("updated")),
-					"ordinary render requests should keep rendering",
+				assert.deepStrictEqual(
+					terminal.getViewport(),
+					["A1", "b2", "c3", "D4", "", ""],
+					"ordinary render requests should update that frame",
 				);
 				tui.stop();
 			});
 		}
 	}
+
+	it("TuiMainScreen hands a preserved screen to a restored renderer without redrawing it", async () => {
+		const terminal = new VirtualTerminal(40, 6);
+		// Output above the frame shows whether either start() cleared the screen.
+		terminal.write("shell prompt\r\n");
+		const component = new TestComponent();
+		component.lines = ["a1", "b2", "c3", "d4"];
+		const first = new TuiMainScreen(terminal);
+		first.addChild(component);
+		first.start();
+		await terminal.waitForRender();
+
+		// Switching between regular and fullscreen mode hands the main screen to a new renderer this way.
+		const state = first.captureRenderState();
+		first.stop({ preserveScreen: true });
+		const next = new TuiMainScreen(terminal);
+		next.restoreRenderState(state);
+		next.addChild(component);
+		component.lines = ["A1", "b2", "c3", "d4"];
+		next.start();
+		await terminal.waitForRender();
+		assert.deepStrictEqual(terminal.getViewport(), ["shell prompt", "A1", "b2", "c3", "d4", ""]);
+		next.stop();
+	});
 });
 
 describe("TUI debug logging", () => {
