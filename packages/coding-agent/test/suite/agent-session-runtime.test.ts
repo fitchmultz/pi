@@ -93,7 +93,12 @@ describe("AgentSessionRuntime characterization", () => {
 				noThemes: true,
 			},
 		};
+		let failNextCreation = false;
 		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+			if (failNextCreation) {
+				failNextCreation = false;
+				throw new Error("runtime factory failure");
+			}
 			const services = await createAgentSessionServices({
 				...runtimeOptions,
 				cwd,
@@ -125,7 +130,14 @@ describe("AgentSessionRuntime characterization", () => {
 			}
 		});
 
-		return { runtime, faux, tempDir };
+		return {
+			runtime,
+			faux,
+			tempDir,
+			failNextCreation: () => {
+				failNextCreation = true;
+			},
+		};
 	}
 
 	it.skipIf(process.platform === "win32")(
@@ -628,6 +640,78 @@ describe("AgentSessionRuntime characterization", () => {
 			"assistant",
 		]);
 	});
+
+	it.each(["resume its journal", "fork from it", "exit"] as const)(
+		"shuts down a session once when its replacement fails, then lets the host %s",
+		async (next) => {
+			const events: string[] = [];
+			let instances = 0;
+			const { runtime, failNextCreation } = await createRuntimeForTest((pi) => {
+				const instance = ++instances;
+				pi.on("session_before_switch", (event) => {
+					events.push(`${instance}:before_switch:${event.reason}`);
+				});
+				pi.on("session_before_fork", () => {
+					events.push(`${instance}:before_fork`);
+				});
+				pi.on("session_shutdown", (event) => {
+					events.push(`${instance}:shutdown:${event.reason}`);
+				});
+			});
+			await runtime.session.prompt("hello");
+			const tornDown = runtime.session;
+			const journal = tornDown.sessionFile!;
+			const [userMessage] = tornDown.getUserMessagesForForking();
+			failNextCreation();
+
+			await expect(runtime.newSession()).rejects.toThrow("runtime factory failure");
+			// Nothing is rolled back; the runtime keeps exposing the torn-down session.
+			expect(runtime.session).toBe(tornDown);
+			expect(events).toEqual(["1:before_switch:new", "1:shutdown:new"]);
+
+			if (next === "exit") {
+				await runtime.dispose();
+			} else if (next === "resume its journal") {
+				await runtime.switchSession(journal);
+				expect(runtime.session.sessionFile).toBe(journal);
+				expect(runtime.session.getUserMessagesForForking().map((message) => message.text)).toEqual(["hello"]);
+			} else {
+				expect(await runtime.fork(userMessage!.entryId)).toEqual({ cancelled: false, selectedText: "hello" });
+				expect(runtime.session).not.toBe(tornDown);
+			}
+			expect(events).toEqual(["1:before_switch:new", "1:shutdown:new"]);
+		},
+	);
+
+	it.each(["setup", "rebind", "withSession"] as const)(
+		"keeps the session created before a failed %s current and shuts it down once at exit",
+		async (callback) => {
+			const events: string[] = [];
+			let instances = 0;
+			const { runtime } = await createRuntimeForTest((pi) => {
+				const instance = ++instances;
+				pi.on("session_shutdown", (event) => {
+					events.push(`${instance}:shutdown:${event.reason}`);
+				});
+			});
+			const original = runtime.session;
+			const fail = async () => {
+				throw new Error(`${callback} failure`);
+			};
+			if (callback === "rebind") runtime.setRebindSession(fail);
+
+			const replacement = runtime.newSession({
+				setup: callback === "setup" ? fail : undefined,
+				withSession: callback === "withSession" ? fail : undefined,
+			});
+			await expect(replacement).rejects.toThrow(`${callback} failure`);
+			runtime.setRebindSession(undefined);
+			expect(runtime.session).not.toBe(original);
+
+			await runtime.dispose();
+			expect(events).toEqual(["1:shutdown:new", "2:shutdown:quit"]);
+		},
+	);
 
 	it("preserves an existing session when importing a file with the same name", async () => {
 		const { runtime, tempDir } = await createRuntimeForTest(() => {});

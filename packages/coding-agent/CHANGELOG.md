@@ -59,6 +59,7 @@
 
 ### Fixed
 
+- Fixed failed session replacements sending lifecycle events to extensions already shut down. Recovery and exit now leave the disposed session alone; failures after the new session is created keep that session current. See [Session storage](docs/sdk.md#session-storage).
 - Fixed cache notices treating known account and thinking-level changes as unexplained misses. Subsequent same-account misses remain visible, and observed cache-read prices do not carry across account changes.
 - Fixed fullscreen highlighted copies including display padding and artificial line breaks or losing Markdown syntax. `/copy` remains the whole-message command. See [Copy part of a response](docs/terminal-setup.md#copy-part-of-a-response).
 - Fixed ordinary self-update commands on immutable fork installations checking upstream's version instead of updating fork main. Explicit custom update commands retain precedence.
