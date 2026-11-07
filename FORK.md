@@ -77,6 +77,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
+| Render requests cannot outlive their callbacks across stop/start; stopping drops the owed frame and starting requests a new one. A main-screen stop moves the cursor below the frame, so the first frame after a restart redraws the screen instead of diffing against it | `packages/tui/src/{tui,tui-main-screen}.ts` | `packages/tui/test/tui-render.test.ts` |
 | MCP initialization rejects a connection closed while its final notification is sent; closed stays final and close listeners run once | `packages/mcp/src/client.ts` | `packages/mcp/test/client.test.ts` |
 | Command output must drain after process exit without counting link backpressure as silence | `packages/env/daemon/src/{exec,output,process,pty}.rs` | `packages/env/test/{process,terminal,conformance,remote}.test.ts` |
 | WebSocket errors close their Chord link or HTTP scope while `ws` completes its close handshake, delivering code 1009 for oversized frames | `packages/chord/src/node/http/upgrades.ts`, `apps/p2/src/hosts/socket-limits.ts` | `packages/chord/test/node/http/upgrades.test.ts`, `apps/p2/test/p2/socket-limits.test.ts` |
