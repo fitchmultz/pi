@@ -813,6 +813,70 @@ describe("cache warming", () => {
 		expect(unavailable.calls).toHaveLength(0);
 	});
 
+	it("reports a due refresh as refreshing from its decision until the next one is scheduled", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		let decide!: (action: CacheWarmingAction) => void;
+		let finish!: () => void;
+		const { warmer, calls, warmedEntries } = fakeRuntime({
+			// Pi decides "stop" for this prompt size, so the extension forces the refresh.
+			branch: branchWithPrompt(5_000),
+			decide: () =>
+				new Promise((resolve) => {
+					decide = resolve;
+				}),
+			result: (model) =>
+				new Promise((resolve) => {
+					finish = () => resolve(response(model));
+				}),
+		});
+		warmer.start(request(), current, request());
+		expect(warmer.status).toMatchObject({ state: "scheduled", nextWarmAt: 270_000, extensionOverride: false });
+
+		await vi.advanceTimersByTimeAsync(270_000);
+		expect(calls).toHaveLength(0);
+		expect(warmer.status).toMatchObject({ state: "refreshing", nextWarmAt: 270_000, extensionOverride: false });
+
+		decide("warm");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(calls).toHaveLength(1);
+		expect(warmer.status).toMatchObject({
+			state: "refreshing",
+			nextWarmAt: 270_000,
+			decision: { action: "stop" },
+			extensionOverride: true,
+		});
+
+		finish();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(warmedEntries).toHaveLength(1);
+		expect(warmer.status).toMatchObject({ state: "scheduled", nextWarmAt: 540_000, extensionOverride: false });
+		warmer.cancel();
+	});
+
+	it("drops a refresh whose conversation changes during its decision", async () => {
+		vi.useFakeTimers();
+		let decide!: (action: CacheWarmingAction) => void;
+		let stillCurrent = true;
+		const { warmer, calls } = fakeRuntime({
+			decide: () =>
+				new Promise((resolve) => {
+					decide = resolve;
+				}),
+		});
+		warmer.start(request(), () => stillCurrent, request());
+		await vi.advanceTimersByTimeAsync(270_000);
+		stillCurrent = false;
+		decide("warm");
+		await vi.advanceTimersByTimeAsync(0);
+
+		// Warming stays stopped even when the conversation matches the request again.
+		stillCurrent = true;
+		await vi.advanceTimersByTimeAsync(600_000);
+		expect(calls).toHaveLength(0);
+		expect(warmer.status).toMatchObject({ state: "inactive", reason: "conversation context changed" });
+	});
+
 	it.each([
 		{ api: "anthropic-messages", retention: "short", baseWrite: 0, tierWrite: 25, missCost: 2.45, action: "warm" },
 		{ api: "anthropic-messages", retention: "short", baseWrite: 12.5, tierWrite: 0, missCost: 0, action: "stop" },

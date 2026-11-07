@@ -142,7 +142,7 @@ export interface CacheWarmingDecisionEventResult {
 }
 
 export interface CacheWarmingStatus {
-	/** "scheduled": a refresh timer is armed; "refreshing": a warm request is in flight. */
+	/** "scheduled": a refresh timer is armed; "refreshing": a due refresh is being decided or sent. */
 	state: "inactive" | "scheduled" | "refreshing";
 	/** Why nothing is scheduled. */
 	reason?: string;
@@ -160,6 +160,18 @@ export interface CacheWarmRequest {
 	options: ModelsSimpleStreamOptions;
 }
 
+/** When a run's next refresh is due and how late it may still be sent; fixed when it is scheduled. */
+interface RefreshTimes {
+	nextWarmAt: number;
+	/** Latest safe time to send this refresh, leaving half the original expiry margin. */
+	refreshDeadlineAt: number;
+}
+
+type RefreshCycle =
+	| (RefreshTimes & { kind: "scheduled"; timer: ReturnType<typeof setTimeout> })
+	| (RefreshTimes & { kind: "deciding" })
+	| (RefreshTimes & { kind: "refreshing"; extensionOverride: boolean });
+
 interface ActiveRun extends CacheWarmRequest {
 	/** False once the session's model or messages no longer match the request. */
 	isCurrent: () => boolean;
@@ -167,15 +179,10 @@ interface ActiveRun extends CacheWarmRequest {
 	retention: CacheRetention;
 	ttlMs: number;
 	delayMs: number;
-	/** Latest safe time to send this refresh, leaving half the original expiry margin. */
-	refreshDeadlineAt: number;
 	startedAt: number;
 	controller: AbortController;
 	phase: "streaming" | "idle";
-	nextWarmAt: number;
-	/** Set while a refresh that an extension forced is in flight. */
-	extensionOverride: boolean;
-	timer?: ReturnType<typeof setTimeout>;
+	cycle: RefreshCycle;
 }
 
 /**
@@ -213,15 +220,15 @@ export class CacheWarmer {
 		if (!run) return this.inactive;
 		if (!run.isCurrent()) return { state: "inactive", reason: "conversation context changed" };
 		const decision = this.evaluate(run);
-		const refreshing = run.timer === undefined;
-		if (!decision.economicsAvailable && !refreshing) {
+		const { cycle } = run;
+		if (!decision.economicsAvailable && cycle.kind === "scheduled") {
 			return { state: "inactive", reason: "cache economics unavailable" };
 		}
 		return {
-			state: refreshing ? "refreshing" : "scheduled",
-			nextWarmAt: run.nextWarmAt,
+			state: cycle.kind === "scheduled" ? "scheduled" : "refreshing",
+			nextWarmAt: cycle.nextWarmAt,
 			decision,
-			extensionOverride: run.extensionOverride,
+			extensionOverride: cycle.kind === "refreshing" && cycle.extensionOverride,
 		};
 	}
 
@@ -254,18 +261,16 @@ export class CacheWarmer {
 			);
 			return;
 		}
-		this.run = {
+		const run: Omit<ActiveRun, "cycle"> = {
 			...request,
 			isCurrent,
 			...timing,
-			refreshDeadlineAt: 0,
 			startedAt: Date.now(),
 			controller: new AbortController(),
 			phase: "streaming",
-			nextWarmAt: 0,
-			extensionOverride: false,
 		};
-		this.schedule(this.run);
+		const cycle = this.schedule(run);
+		if (cycle) this.run = { ...run, cycle };
 	}
 
 	onAgentSettled(): void {
@@ -277,7 +282,7 @@ export class CacheWarmer {
 		}
 		run.phase = "idle";
 		const deadline = run.startedAt + MAX_IDLE_WARMING_AGE_MS;
-		if (run.nextWarmAt > deadline || Date.now() >= deadline) {
+		if (run.cycle.nextWarmAt > deadline || Date.now() >= deadline) {
 			this.stop("30-minute idle safety limit reached");
 		}
 	}
@@ -298,7 +303,7 @@ export class CacheWarmer {
 		const run = this.run;
 		if (!run) return;
 		this.run = undefined;
-		if (run.timer) clearTimeout(run.timer);
+		if (run.cycle.kind === "scheduled") clearTimeout(run.cycle.timer);
 		run.controller.abort();
 	}
 
@@ -307,24 +312,35 @@ export class CacheWarmer {
 		this.inactive = { state: "inactive", reason, ...stopped };
 	}
 
-	private schedule(run: ActiveRun): void {
-		run.extensionOverride = false;
-		run.nextWarmAt = Date.now() + run.delayMs;
-		// A timer can run late after sleep or event-loop blockage. Keep half of
-		// the planned pre-expiry margin for that delay and request dispatch; a
-		// late refresh is likely a full-price cache write, not a cache warm.
-		run.refreshDeadlineAt = run.nextWarmAt + Math.floor((run.ttlMs - run.delayMs) / 2);
+	private schedule(run: Pick<ActiveRun, "startedAt" | "phase" | "ttlMs" | "delayMs">): RefreshCycle | undefined {
+		const nextWarmAt = Date.now() + run.delayMs;
 		const deadline = run.startedAt + (run.phase === "idle" ? MAX_IDLE_WARMING_AGE_MS : MAX_WARMING_AGE_MS);
-		if (run.nextWarmAt > deadline || Date.now() >= deadline) {
+		if (nextWarmAt > deadline || Date.now() >= deadline) {
 			this.stop(run.phase === "idle" ? "30-minute idle safety limit reached" : "one-hour safety limit reached");
-			return;
+			return undefined;
 		}
-		run.timer = setTimeout(() => void this.refresh(run), Math.max(0, run.nextWarmAt - Date.now()));
-		run.timer.unref?.();
+		// Replacing or stopping a run clears this timer, so it always fires for the current run.
+		const timer = setTimeout(
+			() => {
+				if (this.run) void this.refresh(this.run);
+			},
+			Math.max(0, nextWarmAt - Date.now()),
+		);
+		timer.unref?.();
+		return {
+			kind: "scheduled",
+			timer,
+			nextWarmAt,
+			// A timer can run late after sleep or event-loop blockage. Keep half of
+			// the planned pre-expiry margin for that delay and request dispatch; a
+			// late refresh is likely a full-price cache write, not a cache warm.
+			refreshDeadlineAt: nextWarmAt + Math.floor((run.ttlMs - run.delayMs) / 2),
+		};
 	}
 
 	private async refresh(run: ActiveRun): Promise<void> {
-		run.timer = undefined;
+		const { nextWarmAt, refreshDeadlineAt } = run.cycle;
+		run.cycle = { kind: "deciding", nextWarmAt, refreshDeadlineAt };
 		if (!this.validateRun(run)) return;
 		if (this.refreshDeadlineMissed(run)) return;
 		const decision = this.evaluate(run);
@@ -353,7 +369,7 @@ export class CacheWarmer {
 			return;
 		}
 
-		run.extensionOverride = extensionOverride;
+		run.cycle = { kind: "refreshing", nextWarmAt, refreshDeadlineAt, extensionOverride };
 		try {
 			const message = await this.models
 				.streamSimple(
@@ -397,11 +413,13 @@ export class CacheWarmer {
 		} catch {
 			// Cache warming is best-effort and must not affect the active agent run.
 		}
-		if (this.run === run) this.schedule(run);
+		if (this.run !== run) return;
+		const next = this.schedule(run);
+		if (next) run.cycle = next;
 	}
 
 	private refreshDeadlineMissed(run: ActiveRun): boolean {
-		if (Date.now() <= run.refreshDeadlineAt) return false;
+		if (Date.now() <= run.cycle.refreshDeadlineAt) return false;
 		this.stop("cache refresh deadline missed");
 		return true;
 	}
