@@ -17,6 +17,7 @@
 - The third-party licenses are in `THIRD_PARTY_NOTICES/`, renamed from `LICENSES/`, which Vite's license notices read as the package's license file, failing browser builds that bundle the package.
 - Fixed Streamable HTTP `application/json` responses bypassing `maxMessageBytes`; oversized JSON responses are now cancelled and rejected like oversized SSE events ([#11335](https://github.com/earendil-works/pi/issues/11335))
 - Fixed Streamable HTTP errors reading the whole HTTP error body; only the first 8 KiB kept in the error is read, and the rest is cancelled
+- Fixed `McpClient.connect()` reporting success after the connection closed during initialization. It now rejects with `McpConnectionClosedError`, keeps the client closed, and notifies close listeners only once.
 
 ## [1.5.0] - 2026-11-02
 
