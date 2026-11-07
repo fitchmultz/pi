@@ -630,6 +630,35 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedPaste, ["Hello 世界 🎉"]);
 			assert.deepStrictEqual(emittedSequences, []);
 		});
+
+		it("should decode input around pastes in one chunk in order", () => {
+			const events: string[] = [];
+			buffer.on("data", (sequence) => events.push(`data:${sequence}`));
+			buffer.on("paste", (content) => events.push(`paste:${content}`));
+
+			// The raw "a" after the paste is a new key, not a duplicate of the Kitty "a" before it.
+			processInput("\x1b[97u\x1b[200~one\x1b[201~a\x1b[200~two\x1b[201~\x1b[A");
+
+			assert.deepStrictEqual(events, ["data:\x1b[97u", "paste:one", "data:a", "paste:two", "data:\x1b[A"]);
+		});
+
+		it("should recognize paste markers split across chunks", () => {
+			processInput("x\x1b[20");
+			processInput("0~hello\x1b[2");
+			processInput("01~y");
+
+			assert.deepStrictEqual(emittedPaste, ["hello"]);
+			assert.deepStrictEqual(emittedSequences, ["x", "y"]);
+		});
+
+		it("should discard an unterminated paste on clear", () => {
+			processInput("\x1b[200~partial");
+			buffer.clear();
+			processInput("a");
+
+			assert.deepStrictEqual(emittedPaste, []);
+			assert.deepStrictEqual(emittedSequences, ["a"]);
+		});
 	});
 
 	describe("Destroy", () => {

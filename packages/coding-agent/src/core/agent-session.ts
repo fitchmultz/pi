@@ -2873,20 +2873,27 @@ export class AgentSession {
 		// Reserve the context through async input hooks and auth checks so tree navigation cannot
 		// start meanwhile (#9154). _startRun marks the run active synchronously, so there is no gap.
 		this._promptPreflightCount++;
-		let trigger: BeforeAgentStartTrigger | undefined;
+		let trigger: Extract<BeforeAgentStartTrigger, { messageType: "user" }> | undefined;
 		try {
 			trigger = await this._preparePrompt(text, options);
 		} finally {
 			this._promptPreflightCount--;
 		}
-		if (trigger) await this._startRun(trigger, () => preflightResult?.("started"));
+		if (!trigger) return;
+		// Another prompt can start a run while this one awaits input hooks or auth. That run owns the
+		// session, so handle this prompt as one sent during it, without preparing it again.
+		if (this.isStreaming) await this._queuePrompt(trigger.prompt, trigger.images, options);
+		else await this._startRun(trigger, () => preflightResult?.("started"));
 	}
 
 	/**
 	 * Run input hooks, expand templates, queue while streaming, and validate model and auth.
 	 * Returns the run trigger, or undefined when the prompt was handled or queued.
 	 */
-	private async _preparePrompt(text: string, options?: PromptOptions): Promise<BeforeAgentStartTrigger | undefined> {
+	private async _preparePrompt(
+		text: string,
+		options?: PromptOptions,
+	): Promise<Extract<BeforeAgentStartTrigger, { messageType: "user" }> | undefined> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 
@@ -2910,19 +2917,9 @@ export class AgentSession {
 			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 		}
 
-		// If streaming, queue via steer() or followUp() based on option
+		// Queueing into the active run needs no model or auth check.
 		if (this.isStreaming) {
-			if (!options?.streamingBehavior) {
-				throw new Error(
-					"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
-				);
-			}
-			if (options.streamingBehavior === "followUp") {
-				await this._queueFollowUp(expandedText, currentImages);
-			} else {
-				await this._queueSteer(expandedText, currentImages);
-			}
-			preflightResult?.("queued");
+			await this._queuePrompt(expandedText, currentImages, options);
 			return undefined;
 		}
 
@@ -2947,6 +2944,25 @@ export class AgentSession {
 		}
 
 		return { messageType: "user", prompt: expandedText, images: currentImages };
+	}
+
+	/** Queue a prepared prompt into the active run by its streamingBehavior, or reject it without one. */
+	private async _queuePrompt(
+		text: string,
+		images: ImageContent[] | undefined,
+		options?: PromptOptions,
+	): Promise<void> {
+		if (!options?.streamingBehavior) {
+			throw new Error(
+				"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+			);
+		}
+		if (options.streamingBehavior === "followUp") {
+			await this._queueFollowUp(text, images);
+		} else {
+			await this._queueSteer(text, images);
+		}
+		options.preflightResult?.("queued");
 	}
 
 	/**

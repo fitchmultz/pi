@@ -11,8 +11,9 @@ file-store work. The latest official release remains v1.5.0.
 Fork updates merged during verification include autocomplete recovery and OAuth
 callback ownership through `9eaa5e288`, keyboard-mode ownership in `c165dc14f`,
 TUI stop/start rendering in `841736738`, and first-journal-write recovery in
-`41ead4441`. The test-selection policy from `ffbb62332` is retained. Their
-histories and regression coverage remain intact.
+`41ead4441`. Later catch-ups include bracketed-paste ownership in `ebf9add79`
+and overlapping-prompt admission in `e2c71f1bb`. The test-selection policy from
+`ffbb62332` is retained. Their histories and regression coverage remain intact.
 
 ## Conflict decisions
 
@@ -57,6 +58,7 @@ publishing or account-management workflow is enabled.
   all 44 TUI rendering tests passed, including ordinary stop/start rendering.
   Journal persistence and recovery checks passed all 49 cases on Linux and 47
   on macOS, where the two Linux-only file-limit recovery cases are skipped.
+  The later input-owner catch-up passed all 85 stdin-buffer and 25 prompt cases.
 - p2 type/lint check passed. On current Node 26.13.0 and headless Chrome, all 20
   activity-model and activity-sheet tests passed, including mobile and desktop
   navigation, streamed output and tool details.
