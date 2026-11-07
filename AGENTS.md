@@ -84,7 +84,8 @@ Binding for Chord v2 (`packages/chord/src/`) and its tests, when writing and whe
 ## Commands
 
 - After code changes (not docs): `npm run check` (full output, no tail). Fix all errors, warnings, and infos before committing. Does not run tests.
-- Builds and tests needed for an authorized implementation are covered by the standing fork delivery authorization below. Run the full offline package suite through `./test.sh`; `npm test` delegates to the same isolated runner.
+- Builds and tests needed for an authorized implementation are covered by the standing fork delivery authorization below. Choose tests for the changed behavior and affected callers. Use focused tests for isolated changes and broader suites when the integration impact warrants them. Run isolated focused commands through `./test.sh -- <command>`; `./test.sh` and `npm test` run the full offline package suite.
+- Tests must catch a credible failure or protect an independently meaningful contract. Remove tests designed to pass regardless of whether the behavior works, including tautologies and self-comparisons. A test that passes before and after a refactor is useful when breaking the behavior would make it fail.
 - `apps/p2` is outside the root check and the root tests. After p2 changes also run `cd apps/p2 && npm run check`; p2's suite is `cd apps/p2 && npm test` (TUI tests need Node 26, browser tests need `CHROMIUM_BIN`).
 - Run `npm run build` when tests or other verification need built output in `dist/`, including the full Chord and Durable suites. Chord's subprocess and bundling tests load workspace packages from `dist/`; Durable imports pi-ai's `utils/*`, which have no source export. Use `npm run check` for type checking and linting.
 - Never run the full vitest suite directly: it includes e2e tests that activate when endpoint/auth env vars are present. For all non-e2e package tests, run `./test.sh` from the repo root. Otherwise run specific tests from the package root:
