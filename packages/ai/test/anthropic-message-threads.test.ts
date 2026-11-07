@@ -1,6 +1,6 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type AnthropicOptions, stream } from "../src/api/anthropic-messages.ts";
+import { type AnthropicOptions, stream, streamSimple } from "../src/api/anthropic-messages.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type { AssistantMessage, Message, Model, Tool, ToolResultMessage } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
@@ -546,7 +546,20 @@ describe("Anthropic message threads", () => {
 		const h = harness();
 		const messages = [user("first")];
 		await say(h, messages);
-		await turn(h, messages.slice(0, 1), { options: { maxTokens: 1, disableContinuation: true } });
+		// pi's cache warmer replays through streamSimple, which must pass disableContinuation on to stream.
+		const replay = normalizeContext({
+			systemPrompt: "You are a test assistant.",
+			tools: [tool("lookup")],
+			messages: messages.slice(0, 1),
+		});
+		await streamSimple(baseModel, replay, {
+			apiKey: "test-key",
+			fetch: h.fetch,
+			sessionId: h.sessionId,
+			maxRetries: 0,
+			maxTokens: 1,
+			disableContinuation: true,
+		}).result();
 		messages.push(user("second"));
 		await say(h, messages);
 
