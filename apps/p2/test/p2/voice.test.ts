@@ -214,6 +214,68 @@ describe("voice transcripts waiting for the conversation", () => {
 		assert.match(errors[1] ?? "", /Too many messages waiting/);
 		queue.clear();
 	});
+
+	// Voice mode goes off (`clear`) while work it started is in flight, and is on again before that work completes: the
+	// work completes, but nothing said before is sent (nor what a stop withdrew), and what is said after goes alone once
+	// nothing is in flight (an old stop would withdraw it too), not counted as held back by the link.
+	type InFlight = ReturnType<typeof setup> & { stop: TranscriptTarget["stop"]; release: () => void };
+	for (const { flight, busy, start, finish } of [
+		{
+			flight: "the stop the speaker's words started is in flight",
+			busy: false,
+			start: ({ queue, stop }: InFlight) => queue.stopping(stop()),
+			finish: ({ release }: InFlight) => release(),
+		},
+		{
+			flight: "a transcript waits for the stop its words started",
+			busy: false,
+			start: ({ queue, stop }: InFlight) => {
+				queue.stopping(stop());
+				queue.push("said before", false);
+			},
+			finish: ({ release }: InFlight) => release(),
+		},
+		{
+			flight: "the stop before a send is in flight",
+			busy: true,
+			start: ({ queue }: InFlight) => queue.push("said before"),
+			finish: ({ release }: InFlight) => release(),
+		},
+		{
+			flight: "a send is in flight",
+			busy: false,
+			start: ({ queue }: InFlight) => queue.push("said before", false),
+			finish: async ({ next }: InFlight) =>
+				(await next()).reject(new ChordError({ code: "unavailable", message: "ping timeout" })),
+		},
+	])
+		it(`drops what was said when voice mode goes off while ${flight}, and sends what is said after alone`, async () => {
+			const queued = setup({ busy });
+			const { queue, calls, next, restore, errors, setTarget, target } = queued;
+			// Stops settle when the test says so; the first withdraws this person's message queued before.
+			const gate = Promise.withResolvers<void>();
+			const stop = () =>
+				target.stop().then(async (stopped) => {
+					await gate.promise;
+					return stopped;
+				});
+			setTarget({ ...target, stop });
+			restore.push("queued before");
+			const held: InFlight = { ...queued, stop, release: () => gate.resolve() };
+			start(held);
+			const before = [...calls];
+			queue.clear();
+			queue.push("said after", false);
+			assert.deepEqual(calls, before, "nothing else goes while that work is in flight");
+			await finish(held);
+			const sent = await next();
+			assert.deepEqual(calls, [...before, "send said after"]);
+			assert.deepEqual({ size: queue.size, waiting: queue.waiting }, { size: 1, waiting: 0 });
+			sent.resolve();
+			await queue.flush();
+			assert.equal(queue.size, 0);
+			assert.deepEqual(errors, []);
+		});
 });
 
 describe("voice barge-in detector (pibot's)", () => {
