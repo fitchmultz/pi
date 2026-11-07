@@ -77,7 +77,9 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	modelId: string;
 }
 
-export interface UsageEntry extends SessionEntryBase {
+export interface UsageEntry
+	extends SessionEntryBase,
+		Pick<AssistantMessage, "cacheIdentity" | "thinkingLevel" | "providerThinkingLevel"> {
 	type: "usage";
 	/** Arbitrary usage category, such as "cache_warm". */
 	kind: string;
@@ -1452,7 +1454,14 @@ export class SessionManager {
 	}
 
 	/** Append model-attributed usage that does not participate in LLM context. Returns the appended entry. */
-	appendUsage(kind: string, provider: string, model: string, usage: Usage, note?: string): UsageEntry {
+	appendUsage(
+		kind: string,
+		provider: string,
+		model: string,
+		usage: Usage,
+		note?: string,
+		metadata?: Pick<UsageEntry, "cacheIdentity" | "thinkingLevel" | "providerThinkingLevel">,
+	): UsageEntry {
 		const entry: UsageEntry = {
 			type: "usage",
 			id: generateId(this.byId),
@@ -1463,6 +1472,9 @@ export class SessionManager {
 			model,
 			usage,
 			...(note ? { note } : {}),
+			cacheIdentity: metadata?.cacheIdentity,
+			thinkingLevel: metadata?.thinkingLevel,
+			providerThinkingLevel: metadata?.providerThinkingLevel,
 		};
 		this._appendEntry(entry);
 		return entry;

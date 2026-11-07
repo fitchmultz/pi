@@ -77,6 +77,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
+| MCP initialization rejects a connection closed while its final notification is sent; closed stays final and close listeners run once | `packages/mcp/src/client.ts` | `packages/mcp/test/client.test.ts` |
 | Command output must drain after process exit without counting link backpressure as silence | `packages/env/daemon/src/{exec,output,process,pty}.rs` | `packages/env/test/{process,terminal,conformance,remote}.test.ts` |
 | WebSocket errors close their Chord link or HTTP scope while `ws` completes its close handshake, delivering code 1009 for oversized frames | `packages/chord/src/node/http/upgrades.ts`, `apps/p2/src/hosts/socket-limits.ts` | `packages/chord/test/node/http/upgrades.test.ts`, `apps/p2/test/p2/socket-limits.test.ts` |
 | Legacy published Kimi Coding catalogs must not break offline builds or revert the native OpenAI protocol on fetched/cached overlays; preserve effort/tool constraints and K3 cache-write pricing | `packages/ai/src/api/kimi.ts`, `packages/ai/catalog/{families/kimi,providers/kimi-coding,providers/moonshotai}.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts` |
@@ -112,6 +113,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Hyperlink control payloads must stay byte-identical | `packages/tui/src/utils.ts` | `packages/tui/test/truncate-to-width.test.ts` |
 | Very long newline-free Markdown, such as a 20M-unit saved user message, must render instead of overflowing the native regex stack in Marked's Setext-heading rule; Setext matching is skipped only when no newline exists | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` |
 | Terminal cell-size replies must reach native housekeeping before extension input listeners | `packages/tui/src/tui.ts` | `packages/tui/test/tui-cell-size-input.test.ts` |
+| A failed autocomplete lookup, including a rejection with the abort reason after a newer request supersedes it, must not block later requests or escape as an unhandled rejection, which exits Pi | `packages/tui/src/components/editor.ts` | `packages/tui/test/editor.test.ts` |
 | Image coordinate notes need independent unrounded axis ratios | `utils/image-resize.ts` | `image-dimension-note.test.ts` |
 | Branch budgets must exclude system declarations not serialized as conversation | `core/compaction/branch-summarization.ts` | `branch-summarization.test.ts` |
 | Cache overlap estimates must follow native ancestry, identify expected model/provider transitions and distinguish current, prior observed, catalog and unknown read prices without changing real usage totals | `core/cache-stats.ts`, `modes/interactive/interactive-mode.ts` | `cache-stats.test.ts`, `interactive-mode-assistant-diagnostics.test.ts`, `suite/prompt-cache-prefix.test.ts` |
@@ -122,6 +124,16 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Repeated context-usage reads must reuse the last scalar without rescanning archived ancestry; native leaf identity and effective model limits preserve compaction, edits, branches and reload/restore behavior | `core/agent-session.ts` | `suite/agent-session-context-usage.test.ts` |
 | Session hot paths incrementally retain active ancestry, compaction-aware raw context entries and model/thinking settings; projected messages and returned arrays remain fresh. Entry-list and leaf identity invalidate reuse on reload or navigation. The latest name stays indexed; branch-summary admission stays linear, file forks reuse a private exclusive descriptor, and custom-flat listings reject unrelated cwd headers before reading bodies | `core/session-manager.ts`, `core/compaction/branch-summarization.ts` | `session-manager/*.test.ts`, `session-context-edit.test.ts`, `branch-summarization.test.ts`, `file-safety.test.ts` |
 | Empty-draft boundary previews use the live manager and compute projection/LLM fields only when read; pending-queue readers never project history. Each handler retains its own preview for freshness. Canonical context still refreshes after every boundary because public Agent state allows in-place mutation; committed drafts refresh before entry notifications. Mutable nonempty drafts still need eager validation. The undocumented `emitBoundary` preview builder remains synchronous | `core/extensions/runner.ts`, `core/agent-session.ts` | `extensions-runner.test.ts`, `suite/agent-session-boundaries.test.ts` |
+
+### Internal state ownership
+
+These owner-authorized refactors remove overlapping state representations without changing
+supported behavior. Preserve their ownership guarantees when integrating equivalent upstream code.
+
+| Ownership guarantee | Owner | Primary tests |
+| --- | --- | --- |
+| One waiting/completing/settled phase owns OAuth callback admission and settlement; manual cancellation leaves an active exchange alone | `packages/ai/src/auth/oauth/callback-server.ts` | `packages/ai/test/oauth-callback-server.test.ts` |
+| Keyboard mode uses one mutually exclusive state; the outstanding Kitty stack push remains a separate cleanup obligation | `packages/tui/src/terminal.ts` | `packages/tui/test/terminal.test.ts` |
 
 ### Performance deltas
 
