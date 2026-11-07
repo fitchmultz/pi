@@ -28,8 +28,7 @@ type ReadFileSync = typeof fs.readFileSync;
 
 const WASM_FILENAME = "photon_rs_bg.wasm";
 
-// Lazy-loaded photon module
-let photonModule: typeof import("@silvia-odwyer/photon-node") | null = null;
+// Cache the load attempt, including null when Photon is unavailable.
 let loadPromise: Promise<typeof import("@silvia-odwyer/photon-node") | null> | null = null;
 
 function pathOrNull(file: PathOrFileDescriptor): string | null {
@@ -114,10 +113,6 @@ function patchPhotonWasmRead(): () => void {
  * Returns cached module on subsequent calls.
  */
 export async function loadPhoton(): Promise<typeof import("@silvia-odwyer/photon-node") | null> {
-	if (photonModule) {
-		return photonModule;
-	}
-
 	if (loadPromise) {
 		return loadPromise;
 	}
@@ -125,11 +120,9 @@ export async function loadPhoton(): Promise<typeof import("@silvia-odwyer/photon
 	loadPromise = (async () => {
 		const restoreReadFileSync = patchPhotonWasmRead();
 		try {
-			photonModule = await import("@silvia-odwyer/photon-node");
-			return photonModule;
+			return await import("@silvia-odwyer/photon-node");
 		} catch {
-			photonModule = null;
-			return photonModule;
+			return null;
 		} finally {
 			restoreReadFileSync();
 		}
