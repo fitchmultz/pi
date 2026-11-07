@@ -142,7 +142,7 @@ describe("portable SQLite facade settlement", () => {
 		await storage.close(BACKGROUND_CONTEXT);
 	});
 
-	it("lets admitted multi-query reads finish before storage closes", async () => {
+	it("lets admitted multi-query reads finish before storage closes, and refuses new calls meanwhile", async () => {
 		const storage = await SqliteStorage.open(await openNodeSqliteDatabase(":memory:"));
 		const entryId = idFromNumber<EntryId>(2);
 		await commitWrites(
@@ -159,6 +159,10 @@ describe("portable SQLite facade settlement", () => {
 		const closed = storage.close(BACKGROUND_CONTEXT);
 		// A repeated close settles only when the database is closed.
 		expect(storage.close(BACKGROUND_CONTEXT)).toBe(closed);
+		// Made while the admitted reads still run.
+		await expect(storage.conversation(ROOT_CONVERSATION_ID, BACKGROUND_CONTEXT)).rejects.toThrow(
+			"SqliteStorage is closed",
+		);
 		expect((await scan).items.map((item) => item.id)).toEqual([entryId]);
 		expect((await entry)?.entry.kind).toBe("probe");
 		expect(await head).toBeUndefined();

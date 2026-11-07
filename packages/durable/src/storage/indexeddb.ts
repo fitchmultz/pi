@@ -408,7 +408,7 @@ function createSchema(database: IDBDatabase): void {
 /** Browser IndexedDB implementation of the durable storage contract. One owner must serialize access to each database. */
 export class IndexedDbStorage implements Storage {
 	private readonly database: IDBDatabase;
-	private closed = false;
+	/** Seals admission and retains the outcome for every close caller. */
 	private closing: Promise<void> | undefined;
 	private activeOperations = 0;
 	private operationsDrained: (() => void) | undefined;
@@ -832,8 +832,10 @@ export class IndexedDbStorage implements Storage {
 
 	close(_context: Context): Promise<void> {
 		if (this.closing === undefined) {
-			this.closed = true;
-			this.closing = this.closeDatabase();
+			// Publish before cleanup can run synchronously.
+			const { promise, resolve, reject } = Promise.withResolvers<void>();
+			this.closing = promise;
+			this.closeDatabase().then(resolve, reject);
 		}
 		return this.closing;
 	}
@@ -1266,7 +1268,7 @@ export class IndexedDbStorage implements Storage {
 	}
 
 	private assertOpen(): void {
-		if (this.closed) throw new Error("IndexedDbStorage is closed");
+		if (this.closing !== undefined) throw new Error("IndexedDbStorage is closed");
 	}
 }
 

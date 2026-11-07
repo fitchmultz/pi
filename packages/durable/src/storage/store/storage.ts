@@ -96,7 +96,7 @@ export class StoreStorage implements Storage {
 	readonly #claimant: Claimant;
 	readonly #tables: CommitTables;
 	readonly #queries: StorageQueries;
-	#closed = false;
+	/** Seals admission and retains the outcome for every close caller. */
 	#closing: Promise<void> | undefined;
 	/** Calls underway, which `close` waits for before it releases the claims (`#drained` once they reach 0). */
 	#underway = 0;
@@ -363,22 +363,27 @@ export class StoreStorage implements Storage {
 	 */
 	close(_context: Context): Promise<void> {
 		if (this.#closing === undefined) {
-			this.#closed = true;
-			this.#closing = (async () => {
-				if (this.#underway > 0) {
-					await new Promise<void>((resolve) => {
-						this.#drained = resolve;
-					});
-				}
-				this.#store.claims.release(this.#claimant);
-			})();
+			// Publish before cleanup can run synchronously.
+			const { promise, resolve, reject } = Promise.withResolvers<void>();
+			this.#closing = promise;
+			this.#close().then(resolve, reject);
 		}
 		return this.#closing;
 	}
 
+	/** Waits for the commits and mints underway, then releases the claims. */
+	async #close(): Promise<void> {
+		if (this.#underway > 0) {
+			await new Promise<void>((resolve) => {
+				this.#drained = resolve;
+			});
+		}
+		this.#store.claims.release(this.#claimant);
+	}
+
 	/** Runs one commit or mint of this storage: refused once it closed, counted until it settles (`close` waits). */
 	async #call<T>(run: () => Promise<T>): Promise<T> {
-		if (this.#closed) throw new Error("StoreStorage is closed");
+		if (this.#closing !== undefined) throw new Error("StoreStorage is closed");
 		this.#underway++;
 		try {
 			return await run();
@@ -401,7 +406,7 @@ export class StoreStorage implements Storage {
 	 */
 	#reading<T>(read: () => Promise<T>): Promise<T> {
 		try {
-			if (this.#closed) throw new Error("StoreStorage is closed");
+			if (this.#closing !== undefined) throw new Error("StoreStorage is closed");
 			return read();
 		} catch (error) {
 			return Promise.reject(error);

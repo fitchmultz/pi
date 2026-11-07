@@ -150,13 +150,24 @@ describe("claims and close", () => {
 		await store.close(context);
 	});
 
-	it("waits at close for its calls underway, then releases its claims", async () => {
+	it("waits at each close for its calls underway, refusing new ones, then releases its claims", async () => {
 		const store = await memoryStore();
 		const storage = await StoreStorage.open(store, "harness", context);
-		const commit = commitWrites(storage, [{ type: "conversation", value: { id: ROOT_CONVERSATION_ID } }], context);
-		const closing = storage.close(context);
-		await commit;
-		await closing;
+		const stored: number[] = [];
+		const commit = storage.commit(
+			[[{ type: "conversation", value: { id: ROOT_CONVERSATION_ID } }]],
+			(index) => stored.push(index),
+			context,
+		);
+		// A close and a repeated one, each noting the batches stored when it settled.
+		const closes = [storage.close(context), storage.close(context)].map((close) => close.then(() => [...stored]));
+		// Made while the commit is underway: the claims are still held.
+		const refused = storage.conversation(ROOT_CONVERSATION_ID, context);
+		const second = StoreStorage.open(store, "harness", context);
+		await expect(refused).rejects.toThrow("StoreStorage is closed");
+		await expect(second).rejects.toMatchObject({ code: "invalid", reason: "args" });
+		expect(await Promise.all(closes)).toEqual([[0], [0]]);
+		await expect(commit).resolves.toEqual({ stored: 1 });
 		await StoreStorage.open(store, "harness", context);
 		await store.close(context);
 	});
