@@ -33,7 +33,9 @@ import type {
 	StreamFunction,
 	StreamOptions,
 	TextContent,
+	ThinkingContent,
 	Tool,
+	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
 import { createCacheTrace } from "../utils/cache-trace.ts";
@@ -805,6 +807,21 @@ async function* iterateAnthropicEvents(
 	}
 }
 
+/**
+ * An Anthropic content block between `content_block_start` and `content_block_stop`: the block emitted in
+ * `output.content`, its content index and, for a tool call, the stream of its arguments. Redacted thinking is a
+ * thinking block. The stream state stays off the block, so it never reaches partials.
+ */
+type OpenBlock =
+	| { readonly kind: "text"; readonly block: TextContent; readonly contentIndex: number }
+	| { readonly kind: "thinking"; readonly block: ThinkingContent; readonly contentIndex: number }
+	| {
+			readonly kind: "toolCall";
+			readonly block: ToolCall;
+			readonly contentIndex: number;
+			readonly arguments: ToolCallArgumentsStream;
+	  };
+
 export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
@@ -942,12 +959,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
-			// Stream state per Anthropic block index, kept off the content blocks so it never reaches partials.
-			const openBlocks = new Map<number, { contentIndex: number; arguments?: ToolCallArgumentsStream }>();
-			const openBlock = (anthropicIndex: number) => {
-				const open = openBlocks.get(anthropicIndex);
-				return open === undefined ? undefined : { ...open, block: output.content[open.contentIndex]! };
-			};
+			const openBlocks = new Map<number, OpenBlock>();
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				trace?.terminal(event);
@@ -984,46 +996,53 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						}
 						continue;
 					}
+					const contentIndex = output.content.length;
 					if (event.content_block.type === "text") {
-						output.content.push({ type: "text", text: event.content_block.text ?? "" });
-						openBlocks.set(event.index, { contentIndex: output.content.length - 1 });
-						stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
+						const block: TextContent = { type: "text", text: event.content_block.text ?? "" };
+						output.content.push(block);
+						openBlocks.set(event.index, { kind: "text", block, contentIndex });
+						stream.push({ type: "text_start", contentIndex, partial: output });
 					} else if (event.content_block.type === "thinking") {
-						output.content.push({
+						const block: ThinkingContent = {
 							type: "thinking",
 							thinking: event.content_block.thinking ?? "",
 							thinkingSignature: event.content_block.signature ?? "",
-						});
-						openBlocks.set(event.index, { contentIndex: output.content.length - 1 });
-						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+						};
+						output.content.push(block);
+						openBlocks.set(event.index, { kind: "thinking", block, contentIndex });
+						stream.push({ type: "thinking_start", contentIndex, partial: output });
 					} else if (event.content_block.type === "redacted_thinking") {
-						output.content.push({
+						const block: ThinkingContent = {
 							type: "thinking",
 							thinking: "[Reasoning redacted]",
 							thinkingSignature: event.content_block.data,
 							redacted: true,
-						});
-						openBlocks.set(event.index, { contentIndex: output.content.length - 1 });
-						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
+						};
+						output.content.push(block);
+						openBlocks.set(event.index, { kind: "thinking", block, contentIndex });
+						stream.push({ type: "thinking_start", contentIndex, partial: output });
 					} else if (event.content_block.type === "tool_use") {
-						output.content.push({
+						const block: ToolCall = {
 							type: "toolCall",
 							id: event.content_block.id,
 							name: isOAuth
 								? fromClaudeCodeName(event.content_block.name, currentTools)
 								: event.content_block.name,
 							arguments: (event.content_block.input as Record<string, any>) ?? {},
-						});
+						};
+						output.content.push(block);
 						openBlocks.set(event.index, {
-							contentIndex: output.content.length - 1,
+							kind: "toolCall",
+							block,
+							contentIndex,
 							arguments: new ToolCallArgumentsStream(),
 						});
-						stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
+						stream.push({ type: "toolcall_start", contentIndex, partial: output });
 					}
 				} else if (event.type === "content_block_delta") {
-					const open = openBlock(event.index);
+					const open = openBlocks.get(event.index);
 					if (event.delta.type === "text_delta") {
-						if (open?.block.type === "text") {
+						if (open?.kind === "text") {
 							open.block.text += event.delta.text;
 							stream.push({
 								type: "text_delta",
@@ -1033,7 +1052,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							});
 						}
 					} else if (event.delta.type === "thinking_delta") {
-						if (open?.block.type === "thinking") {
+						if (open?.kind === "thinking") {
 							open.block.thinking += event.delta.thinking;
 							stream.push({
 								type: "thinking_delta",
@@ -1043,7 +1062,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							});
 						}
 					} else if (event.delta.type === "input_json_delta") {
-						if (open?.block.type === "toolCall" && open.arguments !== undefined) {
+						if (open?.kind === "toolCall") {
 							open.block.arguments = open.arguments.append(event.delta.partial_json);
 							stream.push({
 								type: "toolcall_delta",
@@ -1053,39 +1072,36 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							});
 						}
 					} else if (event.delta.type === "signature_delta") {
-						if (open?.block.type === "thinking") {
+						if (open?.kind === "thinking") {
 							open.block.thinkingSignature = open.block.thinkingSignature || "";
 							open.block.thinkingSignature += event.delta.signature;
 						}
 					}
 				} else if (event.type === "content_block_stop") {
-					const open = openBlock(event.index);
+					const open = openBlocks.get(event.index);
 					openBlocks.delete(event.index);
-					if (open) {
-						const { block, contentIndex: index } = open;
-						if (block.type === "text") {
-							stream.push({
-								type: "text_end",
-								contentIndex: index,
-								content: block.text,
-								partial: output,
-							});
-						} else if (block.type === "thinking") {
-							stream.push({
-								type: "thinking_end",
-								contentIndex: index,
-								content: block.thinking,
-								partial: output,
-							});
-						} else if (block.type === "toolCall" && open.arguments !== undefined) {
-							Object.assign(block, open.arguments.finish());
-							stream.push({
-								type: "toolcall_end",
-								contentIndex: index,
-								toolCall: block,
-								partial: output,
-							});
-						}
+					if (open?.kind === "text") {
+						stream.push({
+							type: "text_end",
+							contentIndex: open.contentIndex,
+							content: open.block.text,
+							partial: output,
+						});
+					} else if (open?.kind === "thinking") {
+						stream.push({
+							type: "thinking_end",
+							contentIndex: open.contentIndex,
+							content: open.block.thinking,
+							partial: output,
+						});
+					} else if (open?.kind === "toolCall") {
+						Object.assign(open.block, open.arguments.finish());
+						stream.push({
+							type: "toolcall_end",
+							contentIndex: open.contentIndex,
+							toolCall: open.block,
+							partial: output,
+						});
 					}
 				} else if (event.type === "message_delta") {
 					const transformations = event.input_transformations;
