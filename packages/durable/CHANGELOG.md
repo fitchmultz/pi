@@ -11,6 +11,7 @@
 - Host Session, Harness and Conversation commits accept `{ admission: true }` as a third argument to check the assembled batch, including document revisions, before committing. A confirmed refusal throws `StorageCapacityError` without failing the Session; the callback is not replayed. Use only before external effects.
 
 - `Tx.submission(id)` reads a committed submission record by ID, so a tool can find the entries of its run's inputs (`pi.live.run.inputs`) without scanning the transcript.
+- Per-conversation compaction settings: `configure({ compaction })` stores a `CompactionSettings` (the shape of `HarnessSettings.compaction`, `modelOverrides` included) in `pi.agent`, inherited by children and forks. Each field resolves from the conversation's model override, then the harness's, then the conversation's own fields, then the harness-wide policy; a conversation's `enabled: false` also beats the harness's model overrides, so it turns off threshold, background and overflow compaction before a compaction task is created ([#11771](https://github.com/earendil-works/pi/issues/11771))
 
 ### Changed
 
@@ -23,6 +24,8 @@
 - Fuzzy edits preserve untouched text on the same line, Unicode boundaries and literal carriage returns. Editing invalid UTF-8 now fails without rewriting the file ([#10655](https://github.com/earendil-works/pi/issues/10655)).
 - An aborted or timed-out `NodeExecutionEnv.exec()` shell command on macOS no longer runs its later steps after the current step is killed.
 - SQLite refuses oversized input and write admissions without failing the Session. An already queued input whose encoded entry cannot fit settles `unanswered` with `input_too_large`, preserving the current answer and allowing valid queued inputs to continue. Actual commit and uncertain storage failures remain fatal.
+- Fixed `tool_search` not finding a deferred tool by property names and descriptions behind a local `$ref` in its parameters, as in MCP input schemas that put their models in `$defs`. Referenced definitions are read once, so recursive schemas do not loop, and definitions nothing references stay out of the search text ([#11803](https://github.com/earendil-works/pi/issues/11803))
+- Fixed every code mode run failing with `URI malformed` when any callable tool had a `$ref` with a malformed percent escape (`#/$defs/%E0`) in its schema, even scripts that do not call that tool. The parameter now renders as `unknown` in the tool's declaration ([#11803](https://github.com/earendil-works/pi/issues/11803))
 
 ## [1.5.0] - 2026-11-02
 
