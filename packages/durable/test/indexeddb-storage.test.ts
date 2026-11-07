@@ -155,6 +155,23 @@ it("persists minted IDs across reopen", async () => {
 	}
 });
 
+it("waits at each close for the commit underway, refusing calls from the close on", async () => {
+	const storage = await IndexedDbStorage.open("close-admitted-commit", { indexedDB: new IDBFactory() });
+	await createRoot(storage);
+	const entry = { id: await storage.mintId<EntryId>(), conversationId: ROOT_CONVERSATION_ID, kind: "admitted" };
+	const stored: number[] = [];
+	const commit = storage.commit([[{ type: "entry", value: entry }]], (index) => stored.push(index), context);
+	// A close and a repeated one, each noting the batches stored a task after it settled. The commit calls `receive`
+	// in the task its transaction ends in, so a close that does not wait for that transaction notes none.
+	const closes = [storage.close(context), storage.close(context)].map((close) =>
+		close.then(() => new Promise<void>((resolve) => setImmediate(resolve))).then(() => [...stored]),
+	);
+	// Made while the commit is underway.
+	await expect(storage.conversation(ROOT_CONVERSATION_ID, context)).rejects.toThrow("IndexedDbStorage is closed");
+	expect(await Promise.all(closes)).toEqual([[0], [0]]);
+	await expect(commit).resolves.toEqual({ stored: 1 });
+});
+
 it("rolls back table writes when a later document copy fails", async () => {
 	const indexedDB = new IDBFactory();
 	const storage = await IndexedDbStorage.open("atomic-copy", { indexedDB });
