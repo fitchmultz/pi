@@ -333,6 +333,51 @@ describe("McpClient", () => {
 		expect(closed).toHaveBeenCalledTimes(1);
 	});
 
+	// PR #338: a synchronous cleanup error must not strand repeated closes or connect()'s failure cleanup.
+	it.each(["transport", "error listener"] as const)(
+		"settles every close and the pending connect when the %s throws synchronously",
+		async (source) => {
+			const { clientTransport, server } = await createServer();
+			const client = new McpClient({ name: "test-client", version: "1.0.0" });
+			const initializing = Promise.withResolvers<void>();
+			server.setHandler("initialize", () => {
+				initializing.resolve();
+				return new Promise(() => {});
+			});
+			const failure = new Error("cleanup failed synchronously");
+			const originalClose = clientTransport.close;
+			const closing: Promise<void>[] = [];
+			client.onClose(() => {
+				closing.push(client.close());
+			});
+			if (source === "transport") {
+				clientTransport.close = () => {
+					throw failure;
+				};
+			} else {
+				client.onClose(() => {
+					throw new Error("close listener failed");
+				});
+				client.onError(() => {
+					throw failure;
+				});
+			}
+			const connecting = client.connect(clientTransport).catch((error: unknown) => error);
+			try {
+				await initializing.promise;
+				closing.push(client.close(), client.close());
+				expect(closing).toHaveLength(3);
+				for (const result of await Promise.allSettled(closing))
+					expect(result).toEqual({ status: "rejected", reason: failure });
+				expect(await connecting).toBeInstanceOf(McpConnectionClosedError);
+				expect(client.connectionState).toBe("closed");
+			} finally {
+				clientTransport.close = originalClose;
+				await server.transport.close();
+			}
+		},
+	);
+
 	it("answers roots/list and dispatches notifications", async () => {
 		const { clientTransport, server } = await createServer();
 		const client = new McpClient({
