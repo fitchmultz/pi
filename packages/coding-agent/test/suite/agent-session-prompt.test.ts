@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { PromptDisposition, PromptOptions } from "../../src/core/agent-session.ts";
 import type { BeforeAgentStartEvent, ExtensionAPI, InputEvent } from "../../src/core/extensions/index.ts";
 import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
@@ -561,6 +562,108 @@ describe("AgentSession prompt characterization", () => {
 		await expect(harness.session.prompt("hi")).rejects.toThrow(
 			`No API key found for ${harness.getModel().provider}.`,
 		);
+	});
+
+	// Two prompts can both finish their asynchronous preparation before either starts a run.
+	describe("a prompt prepared while another prompt starts its run", () => {
+		/** Submit two prompts whose input handling overlaps; the first response waits for release or abort. */
+		async function submitOverlappingPrompts(secondOptions: PromptOptions) {
+			const inputs: string[] = [];
+			const bothReceived = Promise.withResolvers<void>();
+			const harness = await createHarness({
+				extensionFactories: [
+					(pi) => {
+						pi.on("input", async (event) => {
+							inputs.push(event.text);
+							if (inputs.length === 2) bothReceived.resolve();
+							await bothReceived.promise;
+							return { action: "transform", text: `${event.text} (prepared)` };
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const response = Promise.withResolvers<void>();
+			harness.setResponses([
+				async (_context, options) => {
+					options?.signal?.addEventListener("abort", () => response.resolve(), { once: true });
+					await response.promise;
+					return fauxAssistantMessage("one");
+				},
+				fauxAssistantMessage("two"),
+			]);
+			const dispositions: PromptDisposition[] = [];
+			const first = harness.session.prompt("first");
+			const second = harness.session
+				.prompt("second", { ...secondOptions, preflightResult: (disposition) => dispositions.push(disposition) })
+				.then(
+					() => "accepted",
+					(error: Error) => error.message,
+				);
+			await vi.waitFor(() => expect(harness.faux.state.callCount).toBe(1));
+			return { harness, inputs, dispositions, first, second, releaseResponse: () => response.resolve() };
+		}
+
+		it.each([
+			{
+				streamingBehavior: "followUp" as const,
+				admission: { second: "accepted", dispositions: ["queued"] },
+				transcript: ["user: first (prepared)", "assistant: one", "user: second (prepared)", "assistant: two"],
+			},
+			{
+				streamingBehavior: "steer" as const,
+				admission: { second: "accepted", dispositions: ["queued"] },
+				// Steering queued while a run starts goes into its first request.
+				transcript: ["user: first (prepared)", "user: second (prepared)", "assistant: one"],
+			},
+			{
+				streamingBehavior: undefined,
+				admission: {
+					second:
+						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+					dispositions: [],
+				},
+				transcript: ["user: first (prepared)", "assistant: one"],
+			},
+		])(
+			"treats the second prompt as sent during the first run (streamingBehavior $streamingBehavior)",
+			async ({ streamingBehavior, admission, transcript }) => {
+				const { harness, inputs, dispositions, first, second, releaseResponse } = await submitOverlappingPrompts({
+					streamingBehavior,
+				});
+
+				// The first prompt's run keeps the session busy until it settles.
+				expect({ idle: harness.session.isIdle, settled: harness.eventsOfType("agent_settled").length }).toEqual({
+					idle: false,
+					settled: 0,
+				});
+				expect({ second: await second, dispositions }).toEqual(admission);
+
+				releaseResponse();
+				await first;
+				// Input handlers ran once per prompt: a queued prompt is not prepared again.
+				expect(inputs).toEqual(["first", "second"]);
+				expect(
+					harness.session.messages.flatMap((message) =>
+						message.role === "user" || message.role === "assistant"
+							? [`${message.role}: ${getMessageText(message)}`]
+							: [],
+					),
+				).toEqual(transcript);
+				expect(harness.eventsOfType("agent_settled")).toEqual([{ type: "agent_settled", aborted: false }]);
+			},
+		);
+
+		it("lets abort stop the run the first prompt started", async () => {
+			const { harness, first, second } = await submitOverlappingPrompts({ streamingBehavior: "followUp" });
+
+			await harness.session.abort();
+
+			expect(harness.eventsOfType("agent_settled")).toEqual([{ type: "agent_settled", aborted: true }]);
+			await first;
+			expect(await second).toBe("accepted");
+			expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "aborted" });
+		});
 	});
 
 	// Issue #10267, #5581: a run started by sendMessage(..., { triggerTurn: true }) skipped
