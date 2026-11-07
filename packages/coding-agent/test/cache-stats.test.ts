@@ -143,6 +143,62 @@ describe("collectCacheMisses", () => {
 });
 
 describe("detectCacheMiss", () => {
+	it("labels only the changed account, not a second miss on its continuation", () => {
+		const first = { ...turn2, cacheIdentity: "account-a", thinkingLevel: "high" as const };
+		const switched = {
+			...assistant({ input: 110_000, cost: { input: 1.1 } }),
+			cacheIdentity: "account-b",
+			thinkingLevel: "high" as const,
+		};
+		const manager = session(first);
+		const firstMiss = detectCacheMiss(manager.getBranch(), switched, models);
+		expect(firstMiss?.credentialChanged).toBe(true);
+		expect(firstMiss?.readPriceSource).toBe("catalog");
+		manager.appendMessage(switched);
+		const next = { ...switched, timestamp: 200_000 };
+		const nextMiss = detectCacheMiss(manager.getBranch(), next, models);
+		expect(nextMiss?.credentialChanged).toBe(false);
+		expect(nextMiss?.thinkingChanged).toBe(false);
+		expect(nextMiss?.readPriceSource).toBe("catalog");
+		manager.appendMessage(next);
+		const totals = computeCacheWaste(manager.getEntries(), models);
+		expect(totals.missCount).toBe(2);
+		expect(totals.credentialSwitchCount).toBe(1);
+	});
+
+	it.each([
+		{ previous: { thinkingLevel: "high" }, current: { thinkingLevel: "low" }, changed: true },
+		{ previous: { thinkingLevel: "high" }, current: {}, changed: false },
+		{ previous: {}, current: { thinkingLevel: "low" }, changed: false },
+		{
+			previous: { thinkingLevel: "xhigh", providerThinkingLevel: "high" },
+			current: { thinkingLevel: "high", providerThinkingLevel: "high" },
+			changed: false,
+		},
+		{
+			previous: { thinkingLevel: "high", providerThinkingLevel: "high" },
+			current: { thinkingLevel: "high", providerThinkingLevel: "low" },
+			changed: true,
+		},
+	] satisfies {
+		previous: Partial<AssistantMessage>;
+		current: Partial<AssistantMessage>;
+		changed: boolean;
+	}[])("compares recorded effort without inventing missing metadata: %j", ({ previous, current, changed }) => {
+		const manager = session({ ...turn2, ...previous });
+		const next = { ...assistant({ input: 110_000 }), ...current };
+		expect(detectCacheMiss(manager.getBranch(), next, models)?.thinkingChanged).toBe(changed);
+		manager.appendMessage(next);
+		expect(computeCacheWaste(manager.getEntries(), models).thinkingSwitchCount).toBe(changed ? 1 : 0);
+	});
+
+	it("does not compare unknown or different-provider cache identities", () => {
+		for (const previous of [turn2, { ...turn2, provider: "other", cacheIdentity: "other-scope" }]) {
+			const next = { ...assistant({ input: 110_000 }), cacheIdentity: "current-scope" };
+			expect(detectCacheMiss(session(previous).getBranch(), next, models)?.credentialChanged).toBe(false);
+		}
+	});
+
 	it("reports a request-start gap, not an observed idle period", () => {
 		const missMessage = assistant({ cacheWrite: 110_000, cost: { cacheWrite: 0.4125 }, timestamp: 600_000 });
 		const miss = detectCacheMiss(session(turn1, turn2).getBranch(), missMessage, models);

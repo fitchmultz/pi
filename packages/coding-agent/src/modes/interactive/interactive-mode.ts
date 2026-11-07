@@ -4558,7 +4558,13 @@ export class InteractiveMode {
 				: miss.missedCost >= 0.01
 					? ` (~$${miss.missedCost.toFixed(2)} extra${readPriceNote})`
 					: "";
-		const label = miss.modelChanged ? "Expected model/provider cache transition" : "Cache miss estimate";
+		const transitions = [
+			...(miss.modelChanged ? ["model/provider"] : []),
+			...(miss.thinkingChanged ? ["thinking level"] : []),
+			...(miss.credentialChanged ? ["account"] : []),
+		];
+		const label =
+			transitions.length > 0 ? `Expected cache transition (${transitions.join(", ")})` : "Cache miss estimate";
 		const detail = `${formatTokens(miss.missedTokens)} estimated uncached overlap tokens${cost}`;
 		this.chatContainer.addChild(new Spacer(1));
 		addChatActivity(this.chatContainer, new ThemedText(() => theme.fg("warning", `${label}: ${detail}`), 1, 0));
@@ -7149,6 +7155,12 @@ export class InteractiveMode {
 					info += `\n${theme.fg("dim", "Cache overlap estimate (all branches):")} ${cacheWaste.missedTokens.toLocaleString()} tokens, ${requestLabel}`;
 					if (cacheWaste.modelSwitchCount > 0) {
 						info += `\n  ${theme.fg("dim", `Includes ${cacheWaste.modelSwitchCount} expected model/provider ${cacheWaste.modelSwitchCount === 1 ? "transition" : "transitions"}`)}`;
+					}
+					if (cacheWaste.thinkingSwitchCount > 0) {
+						info += `\n  ${theme.fg("dim", `Includes ${cacheWaste.thinkingSwitchCount} thinking-level ${cacheWaste.thinkingSwitchCount === 1 ? "transition" : "transitions"}`)}`;
+					}
+					if (cacheWaste.credentialSwitchCount > 0) {
+						info += `\n  ${theme.fg("dim", `Includes ${cacheWaste.credentialSwitchCount} account ${cacheWaste.credentialSwitchCount === 1 ? "transition" : "transitions"}`)}`;
 					}
 					const cost =
 						cacheWaste.unpricedMissCount === cacheWaste.missCount
