@@ -1,7 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
 import { InMemoryCredentialStore } from "../src/auth/credential-store.ts";
 import type { ApiKeyAuth, CredentialStore, OAuthAuth, ProviderAuth } from "../src/auth/types.ts";
-import { calculateCost, createModels, createProvider, hasApi, type Provider } from "../src/models.ts";
+import {
+	calculateCost,
+	createModels,
+	createProvider,
+	hasApi,
+	type MutableModels,
+	type Provider,
+	type RefreshModelsContext,
+} from "../src/models.ts";
 import { InMemoryModelsStore, type ModelsStore, type ModelsStoreEntry } from "../src/models-store.ts";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions, Usage } from "../src/types.ts";
 import { AssistantMessageEventStream } from "../src/utils/event-stream.ts";
@@ -713,6 +721,40 @@ describe("Models runtime", () => {
 
 		expect(state).toBe("generation-2");
 		expect((await store.read("dynamic"))?.models[0]?.id).toBe("generation-2");
+	});
+
+	it.each<[string, (models: MutableModels, provider: Provider) => unknown]>([
+		["a newer refresh", (models) => models.refresh({ providers: ["dynamic"], allowNetwork: false })],
+		["provider replacement", (models, provider) => models.setProvider(provider)],
+		["provider deletion", (models) => models.deleteProvider("dynamic")],
+		["clearing providers", (models) => models.clearProviders()],
+	])("applies a settled refresh's late publication only until %s", async (_change, supersede) => {
+		const store = new InMemoryModelsStore();
+		let state = "initial";
+		let publishLate: RefreshModelsContext["publish"] | undefined;
+		const provider = testProvider({
+			id: "dynamic",
+			// A non-cooperative provider publishes after its refresh has returned.
+			refreshModels: async ({ publish }) => {
+				publishLate ??= publish;
+			},
+		});
+		const models = createModels({ modelsStore: store });
+		models.setProvider(provider);
+		expect((await models.refresh({ providers: ["dynamic"], allowNetwork: false })).errors.size).toBe(0);
+		const publication = (value: string) => ({
+			persist: { models: [testModel("dynamic", value)] },
+			update: () => {
+				state = value;
+			},
+		});
+
+		expect(await publishLate?.(publication("late"))).toBe(true);
+		await supersede(models, provider);
+		expect(await publishLate?.(publication("stale"))).toBe(false);
+
+		expect(state).toBe("late");
+		expect((await store.read("dynamic"))?.models.map((model) => model.id)).toEqual(["late"]);
 	});
 
 	it("passes caller signals to provider auth callbacks", async () => {
