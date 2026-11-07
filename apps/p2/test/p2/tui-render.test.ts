@@ -9,7 +9,13 @@ import {
 	type EntryRecord,
 	ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
-import { stripTerminalSequences, Text, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
+import {
+	stripSelectionMetadata,
+	stripTerminalSequences,
+	Text,
+	TuiAltScreen,
+	visibleWidth,
+} from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@p2/app/v1";
 import { VirtualTerminal } from "../../../../packages/tui/test/virtual-terminal.ts";
 import { Chat, type EntriesPage } from "../../plugins/chat/contract.ts";
@@ -225,9 +231,11 @@ test("tool cards: pi's bash, read, edit diff, generic fallback, code mode with n
 	// Baked colors follow a theme swap (section 5.4).
 	const ref = theme();
 	const card = new ToolExecutionComponent(tool({}), PLUGIN_TUI_RENDERERS.get("bash"), ctx(ref));
-	const dark = card.render(60).join("\n");
+	// As the TUI outputs it, without the private selection annotations, whose IDs change with any rebuild.
+	const styled = () => card.render(60).map(stripSelectionMetadata).join("\n");
+	const dark = styled();
 	ref.set(createTheme(BUILTIN_THEMES.light!, "truecolor"));
-	assert.notEqual(card.render(60).join("\n"), dark);
+	assert.notEqual(styled(), dark);
 });
 
 test("transcript: streaming answer becomes its entry in place, tool lifecycle, markers and p2 notices", () => {
