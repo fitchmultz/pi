@@ -113,6 +113,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Hyperlink control payloads must stay byte-identical | `packages/tui/src/utils.ts` | `packages/tui/test/truncate-to-width.test.ts` |
 | Very long newline-free Markdown, such as a 20M-unit saved user message, must render instead of overflowing the native regex stack in Marked's Setext-heading rule; Setext matching is skipped only when no newline exists | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` |
 | Terminal cell-size replies must reach native housekeeping before extension input listeners | `packages/tui/src/tui.ts` | `packages/tui/test/tui-cell-size-input.test.ts` |
+| A failed autocomplete lookup, including a rejection with the abort reason after a newer request supersedes it, must not block later requests or escape as an unhandled rejection, which exits Pi | `packages/tui/src/components/editor.ts` | `packages/tui/test/editor.test.ts` |
 | Image coordinate notes need independent unrounded axis ratios | `utils/image-resize.ts` | `image-dimension-note.test.ts` |
 | Branch budgets must exclude system declarations not serialized as conversation | `core/compaction/branch-summarization.ts` | `branch-summarization.test.ts` |
 | Cache overlap estimates must follow native ancestry, identify expected model/provider transitions and distinguish current, prior observed, catalog and unknown read prices without changing real usage totals | `core/cache-stats.ts`, `modes/interactive/interactive-mode.ts` | `cache-stats.test.ts`, `interactive-mode-assistant-diagnostics.test.ts`, `suite/prompt-cache-prefix.test.ts` |
@@ -131,6 +132,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 
 | Ownership guarantee | Owner | Primary tests |
 | --- | --- | --- |
+| One waiting/completing/settled phase owns OAuth callback admission and settlement; manual cancellation leaves an active exchange alone | `packages/ai/src/auth/oauth/callback-server.ts` | `packages/ai/test/oauth-callback-server.test.ts` |
 | Keyboard mode uses one mutually exclusive state; the outstanding Kitty stack push remains a separate cleanup obligation | `packages/tui/src/terminal.ts` | `packages/tui/test/terminal.test.ts` |
 
 ### Performance deltas
