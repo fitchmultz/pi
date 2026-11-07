@@ -143,6 +143,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | Internal paste state uses one optional content buffer and one completion path, preserving split markers and input ordering | `packages/tui/src/stdin-buffer.ts` | `packages/tui/test/stdin-buffer.test.ts` |
 | Durable codemode keeps unlaunched calls in one held/released queue. Release checks precede launch, and each call still waits for its issued count to commit | `packages/durable/src/codemode/codemode.ts` | `packages/durable/test/{codemode,codemode-checkpoints}.test.ts` |
 | Durable writer parts distinguish stored writes from memory-only holds. Only stored parts carry writes and publish with a durable sequence number | `packages/durable/src/session/{writer,session}.ts` | `packages/durable/test/{session-group-commit,session-deferred-commits,session-adoption,harness-storage-failure}.test.ts` |
+| Each open Anthropic content block owns its emitted block and content index. Only a tool-call owner carries an argument parser, which stays off emitted messages | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/{anthropic-sse-parsing,streaming-tool-arguments,anthropic-message-threads}.test.ts` |
 | Photon loading keeps the completed module in its cached promise rather than a second module field | `utils/photon.ts` | `image-processing.test.ts` |
 
 ### Performance deltas
