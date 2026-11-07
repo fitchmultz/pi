@@ -771,11 +771,7 @@ export function createMcpExtension(options: McpExtensionOptions = {}): Extension
 				const connection = server.connection;
 				server.attempt = undefined;
 				server.connection = undefined;
-				if (connection) {
-					// A reconnect may already have detached its old client while awaiting transport
-					// shutdown. Closing the connection alone does not wait for that reconnect.
-					server.closing = Promise.all([connection.close(), server.ready]).then(() => undefined);
-				}
+				if (connection) server.closing = connection.close();
 				const closing = server.closing;
 				hideTools(server.entry.name);
 				emitChange();
