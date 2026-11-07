@@ -335,6 +335,8 @@ for (const [backend, create] of Object.entries(BACKENDS)) {
 			);
 			await waitFor(() => recorded.calls.length === 1);
 			controller.abort(new Error("diverged"));
+			// The abort decides the outcome: `finished` is set now, before `result` settles.
+			expect(recorded.run.finished).toBe(true);
 			const result = await recorded.run.result;
 			expect(result).toMatchObject({ ok: false, error: { kind: "aborted", message: "diverged" }, output: [] });
 			expect(() => recorded.run.deliver(1, STARTED_AT, 1, { ok: true, value: null })).not.toThrow();

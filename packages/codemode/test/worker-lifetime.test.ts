@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Worker } from "node:worker_threads";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type CodemodeResult, CodemodeSandbox } from "../src/index.ts";
+import { type CodemodeResult, CodemodeSandbox, loadQuickJSWasm } from "../src/index.ts";
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -63,6 +63,44 @@ describe("worker lifetime", () => {
 				error: { kind: "sandbox", message: "Failed to load QuickJS: wasm unavailable" },
 			});
 			expect(acquireWorker).not.toHaveBeenCalled();
+		} finally {
+			await sandbox.close();
+		}
+	});
+
+	// An already-aborted execution has its outcome before it would launch a worker.
+	it("does not acquire admission for an execution aborted before it starts", async () => {
+		const acquireWorker = vi.fn(() => vi.fn());
+		// A loaded module, so a launcher that ran anyway would acquire admission before the result is read.
+		const sandbox = new CodemodeSandbox({ acquireWorker, wasm: await loadQuickJSWasm() });
+		try {
+			const signal = AbortSignal.abort(new Error("cancelled"));
+			expect(await sandbox.execute("while (true) {}", { signal })).toMatchObject({
+				ok: false,
+				error: { kind: "aborted", message: "cancelled" },
+			});
+			expect(acquireWorker).not.toHaveBeenCalled();
+		} finally {
+			await sandbox.close();
+		}
+	});
+
+	// #10748: a launch that resumes after the outcome was decided must not leave its worker running.
+	it("stops a worker that starts after its execution was aborted", async () => {
+		const releaseWorker = vi.fn();
+		const exited = Promise.withResolvers<void>();
+		const sandbox = new CodemodeSandbox({
+			acquireWorker: () => releaseWorker,
+			onWorkerStarted: (done) => exited.resolve(done),
+		});
+		try {
+			const controller = new AbortController();
+			const pending = sandbox.execute("while (true) {}", { signal: controller.signal });
+			// The launcher awaits QuickJS before it starts the worker, so this abort decides the outcome first.
+			controller.abort(new Error("cancelled"));
+			expect(await pending).toMatchObject({ ok: false, error: { kind: "aborted", message: "cancelled" } });
+			await exited.promise;
+			expect(releaseWorker).toHaveBeenCalledTimes(1);
 		} finally {
 			await sandbox.close();
 		}
