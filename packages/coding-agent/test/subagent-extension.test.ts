@@ -314,11 +314,16 @@ describe("subagent example extension", () => {
 		it("escalates SIGTERM to SIGKILL based on close state and preserves partial details", async () => {
 			const pidFile = join(tempDir, "ignores-sigterm.pid");
 			const controller = new AbortController();
+			const updates: AgentToolResult<unknown>[] = [];
 			const execution = captureSettlement(
-				executeSubagent(singleTask(fixtureScenario.ignoreSigterm(pidFile)), { signal: controller.signal }),
+				executeSubagent(singleTask(fixtureScenario.ignoreSigterm(pidFile)), {
+					signal: controller.signal,
+					onUpdate: (update) => updates.push(update),
+				}),
 			);
 
-			await waitFor(() => existsSync(pidFile));
+			// The fixture writes its PID and ignores SIGTERM before it emits "partial".
+			await waitFor(() => updates.some((update) => resultText(update) === "partial"));
 			const pid = Number(readFileSync(pidFile, "utf8"));
 			vi.useFakeTimers();
 			controller.abort();
@@ -333,6 +338,7 @@ describe("subagent example extension", () => {
 			if (settled.status === "fulfilled") {
 				const child = detailsOf(settled.result).results[0];
 				expect(child.status).toBe("aborted");
+				expect(child.terminationSignal).toBe("SIGKILL");
 				expect(child.messages).toHaveLength(1);
 			}
 		});
