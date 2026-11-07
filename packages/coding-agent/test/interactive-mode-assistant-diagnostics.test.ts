@@ -103,6 +103,8 @@ describe("InteractiveMode cache estimates", () => {
 		const root = manager.appendMessage({ role: "user", content: "root", timestamp: 0 });
 		const previous: AssistantMessage = {
 			...fauxAssistantMessage("previous", { timestamp: 0 }),
+			cacheIdentity: "account-a",
+			thinkingLevel: "high",
 			usage: {
 				input: 0,
 				output: 0,
@@ -167,8 +169,22 @@ describe("InteractiveMode cache estimates", () => {
 		manager.branch(previousId);
 		show.call(context, { ...current, provider: "other-route" });
 		const transition = stripAnsi(context.chatContainer.render(160).join("\n"));
-		expect(transition).toContain("Expected model/provider cache transition");
+		expect(transition).toContain("Expected cache transition (model/provider)");
 		expect(transition).toContain("catalog read price");
 		expect(transition).not.toContain("Cache miss estimate:");
+
+		context.chatContainer.clear();
+		const switched: AssistantMessage = { ...current, cacheIdentity: "account-b", thinkingLevel: "low" };
+		show.call(context, switched);
+		const accountTransition = stripAnsi(context.chatContainer.render(160).join("\n"));
+		expect(accountTransition).toContain("Expected cache transition (thinking level, account)");
+		expect(accountTransition).toContain("catalog read price");
+
+		manager.appendMessage(switched);
+		context.chatContainer.clear();
+		show.call(context, { ...switched, timestamp: 700_000 });
+		const continuation = stripAnsi(context.chatContainer.render(160).join("\n"));
+		expect(continuation).toContain("Cache miss estimate:");
+		expect(continuation).not.toContain("Expected cache transition");
 	});
 });
