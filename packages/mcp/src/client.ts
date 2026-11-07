@@ -402,8 +402,12 @@ export class McpClient {
 			const cleanup = Promise.withResolvers<void>();
 			// Set before the close listeners run, so a listener calling close() waits for the same cleanup.
 			this.closing = cleanup.promise;
-			this.markClosed(new McpConnectionClosedError());
-			cleanup.resolve(transport?.close());
+			try {
+				this.markClosed(new McpConnectionClosedError());
+				cleanup.resolve(transport?.close());
+			} catch (error) {
+				cleanup.reject(error);
+			}
 		}
 		await this.closing;
 	}
