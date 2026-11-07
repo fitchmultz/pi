@@ -619,6 +619,8 @@ export interface AssistantMessage {
 	model: string;
 	responseModel?: string; // Concrete model reported by the provider, when reported. May equal the requested `model`
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	/** Non-secret, provider-scoped credential/cache-owner identity for local diagnostics. Not a request cache key. */
+	cacheIdentity?: string;
 	/** Exact provider-native effort level used for this response. Absent for legacy or unmanaged responses. */
 	providerThinkingLevel?: string;
 	/** Pi thinking level the agent loop requested for this response. Absent outside the agent loop and for legacy responses. */

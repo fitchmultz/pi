@@ -579,6 +579,8 @@ describe("cache warming", () => {
 				kind: "cache_warm",
 				provider: model.provider,
 				model: model.id,
+				thinkingLevel: "max",
+				providerThinkingLevel: "max",
 				usage: {
 					input: 3,
 					output: 1,
@@ -670,14 +672,23 @@ describe("cache warming", () => {
 		]).toEqual([false, true, true, true]);
 	});
 
-	it("replays profitable requests and preserves options across repeated refreshes", async () => {
+	it.each([
+		{ reasoning: "high", thinkingLevel: "high" },
+		{ reasoning: undefined, thinkingLevel: "off" },
+	] as const)("replays with $thinkingLevel thinking", async ({ reasoning, thinkingLevel }) => {
 		vi.useFakeTimers();
-		const { warmer, calls, events, appendUsage, warmedEntries } = fakeRuntime();
+		const { warmer, calls, events, warmedEntries } = fakeRuntime({
+			result: async (model) => ({
+				...response(model),
+				cacheIdentity: "warm-account",
+				providerThinkingLevel: reasoning,
+			}),
+		});
 		const signal = new AbortController().signal;
 		const transformHeaders = async () => ({});
 
 		const originalRequest = request(adaptiveModel, {
-			reasoning: "high",
+			reasoning,
 			signal,
 			sessionId: "s",
 			transformHeaders,
@@ -689,7 +700,7 @@ describe("cache warming", () => {
 		expect(calls[0]).toMatchObject({
 			model: adaptiveModel,
 			options: {
-				reasoning: "high",
+				reasoning,
 				sessionId: "s",
 				transformHeaders,
 				maxTokens: 1,
@@ -711,14 +722,17 @@ describe("cache warming", () => {
 		});
 		expect(events[0].missCost).toBeCloseTo(0.575);
 		expect(events[0].warmCost).toBeCloseTo(0.050025);
-		expect(appendUsage).toHaveBeenCalledWith(
-			"cache_warm",
-			adaptiveModel.provider,
-			adaptiveModel.id,
-			warmUsage,
-			undefined,
-		);
-		expect(warmedEntries).toEqual([appendUsage.mock.results[0]?.value]);
+		expect(warmedEntries).toMatchObject([
+			{
+				kind: "cache_warm",
+				provider: adaptiveModel.provider,
+				model: adaptiveModel.id,
+				usage: warmUsage,
+				cacheIdentity: "warm-account",
+				thinkingLevel,
+				providerThinkingLevel: reasoning,
+			},
+		]);
 
 		await vi.advanceTimersByTimeAsync(270_000);
 		expect(calls).toHaveLength(2);

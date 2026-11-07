@@ -127,6 +127,7 @@ interface AssistantMessage {
   model: string;
   responseModel?: string;
   responseId?: string;
+  cacheIdentity?: string;
   providerThinkingLevel?: string;
   thinkingLevel?: ModelThinkingLevel;
   diagnostics?: AssistantMessageDiagnostic[];
@@ -141,6 +142,10 @@ interface AssistantMessage {
 ```
 
 `responseModel` records the concrete model reported by the provider, when the provider reports one. It may equal the requested model. `responseId`, `providerThinkingLevel`, `thinkingLevel`, `diagnostics`, and `rawStopReason` preserve provider or runtime details.
+
+`cacheIdentity` is optional, non-secret, provider-scoped metadata identifying the credential or cache owner. Providers that know this identity keep it stable across responses and change it when the owner changes. It is not a request cache key. Cache notices compare two known identities to label an account transition. Missing identities remain unknown.
+
+Cache notices also label known thinking-level changes. They compare native `providerThinkingLevel` values when both exist, otherwise recorded `thinkingLevel` values. These labels identify expected boundaries, not proven causes. A later miss with unchanged metadata remains a cache-miss estimate. Session statistics retain all reported usage and costs.
 
 `"pending"` is used for a partial assistant message while it streams. The completed message in `message_end` has a terminal stop reason, and Pi does not persist `"pending"` assistant messages in session JSONL.
 
