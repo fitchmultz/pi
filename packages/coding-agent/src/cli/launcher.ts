@@ -29,6 +29,26 @@ interface Launch {
 	pinnedWorker?: string;
 }
 
+// Readiness and timeout exclude each other. Exit intent can arrive in any phase.
+type LaunchAttempt =
+	| { kind: "starting"; deadline?: NodeJS.Timeout }
+	| { kind: "timedOut"; kill?: NodeJS.Timeout }
+	| { kind: "ready"; restart?: Extract<RestartWorkerMessage, { type: "pi:restart" }> };
+
+/** Cancels the pending startup deadline or kill escalation and returns the same phase without it. */
+function stopTimer(attempt: LaunchAttempt): LaunchAttempt {
+	switch (attempt.kind) {
+		case "starting":
+			clearTimeout(attempt.deadline);
+			return { kind: "starting" };
+		case "timedOut":
+			clearTimeout(attempt.kill);
+			return { kind: "timedOut" };
+		case "ready":
+			return attempt;
+	}
+}
+
 function isLauncherRestartArtifact(path: string): boolean {
 	return basename(path) === "working-session.json" && basename(dirname(path)).startsWith("pi-restart-state-");
 }
@@ -138,14 +158,9 @@ export async function superviseCli(
 	process.on("exit", killChild);
 	try {
 		while (!stopping) {
-			let ready = false;
 			let exitIntent = false;
 			const workerId = randomUUID();
 			let completed: CompletedWorkingSession | undefined;
-			let timedOut = false;
-			let restart: Extract<RestartWorkerMessage, { type: "pi:restart" }> | undefined;
-			let timeout: NodeJS.Timeout | undefined;
-			let killTimeout: NodeJS.Timeout | undefined;
 			child = spawn(process.execPath, [...(options.execArgv ?? process.execArgv), launch.worker, ...launch.args], {
 				stdio: ["inherit", "inherit", "inherit", "ipc"],
 				env: {
@@ -158,22 +173,32 @@ export async function superviseCli(
 				},
 			});
 			const current = child;
+			let attempt: LaunchAttempt = {
+				kind: "starting",
+				deadline: handoff
+					? setTimeout(() => {
+							attempt = { kind: "timedOut", kill: setTimeout(() => current.kill("SIGKILL"), 2000) };
+							current.kill("SIGTERM");
+						}, options.startupTimeoutMs ?? 60_000)
+					: undefined,
+			};
 			current.on("message", (value: unknown) => {
 				if (!value || typeof value !== "object" || !("type" in value) || stopping) return;
 				if (value.type === "pi:exit") {
 					// Shutdown hooks may already have released owned work, so a declared exit stands past the deadline.
 					exitIntent = true;
-					clearTimeout(timeout);
-					clearTimeout(killTimeout);
+					attempt = stopTimer(attempt);
 					return;
 				}
-				if (timedOut) return;
+				if (attempt.kind === "timedOut") return;
 				if (value.type === "pi:ready") {
-					ready = true;
+					if (attempt.kind === "starting") {
+						clearTimeout(attempt.deadline);
+						attempt = { kind: "ready" };
+					}
 					fallback = undefined;
 					for (const path of restartArtifacts) removeRestartArtifact(path);
 					restartArtifacts.clear();
-					clearTimeout(timeout);
 					const accepted: RestartLauncherMessage = { type: "pi:accepted" };
 					// A worker that is already exiting may have closed its channel; readiness stands either way.
 					if (current.connected) current.send(accepted, () => {});
@@ -197,7 +222,12 @@ export async function superviseCli(
 						receipt.launch === launchId
 					)
 						completed = receipt as CompletedWorkingSession;
-				} else if (value.type === "pi:restart" && ready && "session" in value && "request" in value) {
+				} else if (
+					value.type === "pi:restart" &&
+					attempt.kind === "ready" &&
+					"session" in value &&
+					"request" in value
+				) {
 					try {
 						const session = value.session;
 						if (
@@ -214,7 +244,7 @@ export async function superviseCli(
 							return;
 						assertPrivateFilePath(session.workingSession);
 						if (!statSync(session.workingSession).isFile()) return;
-						restart = {
+						attempt.restart = {
 							type: "pi:restart",
 							session: {
 								sessionFile: session.sessionFile,
@@ -228,13 +258,6 @@ export async function superviseCli(
 					}
 				}
 			});
-			if (handoff) {
-				timeout = setTimeout(() => {
-					timedOut = true;
-					current.kill("SIGTERM");
-					killTimeout = setTimeout(() => current.kill("SIGKILL"), 2000);
-				}, options.startupTimeoutMs ?? 60_000);
-			}
 			const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolvePromise) => {
 				current.on("error", (error) => {
 					console.error(`Pi worker failed to start: ${error.message}`);
@@ -242,16 +265,16 @@ export async function superviseCli(
 				});
 				current.on("exit", (code, signal) => resolvePromise({ code, signal }));
 			});
-			clearTimeout(timeout);
-			clearTimeout(killTimeout);
+			attempt = stopTimer(attempt);
 			child = undefined;
 			const exitCode = result.signal
 				? 128 + constants.signals[result.signal]
-				: timedOut && !exitIntent
+				: attempt.kind === "timedOut" && !exitIntent
 					? 1
 					: (result.code ?? 1);
 			if (stopping) return exitCode;
-			if (restart && result.code === 0 && !result.signal) {
+			if (attempt.kind === "ready" && attempt.restart && result.code === 0 && !result.signal) {
+				const { restart } = attempt;
 				// A worker can report a user-supplied path; only launcher-created native artifacts are ours to delete.
 				if (isLauncherRestartArtifact(restart.session.workingSession))
 					restartArtifacts.add(restart.session.workingSession);
@@ -284,17 +307,18 @@ export async function superviseCli(
 				}
 				continue;
 			}
-			if (!ready && fallback && handoff && !exitIntent) {
-				const failure = timedOut
-					? `Updated Pi did not become ready within ${(options.startupTimeoutMs ?? 60_000) / 1000} seconds.`
-					: "Updated Pi exited before becoming ready.";
+			if (attempt.kind !== "ready" && fallback && handoff && !exitIntent) {
+				const failure =
+					attempt.kind === "timedOut"
+						? `Updated Pi did not become ready within ${(options.startupTimeoutMs ?? 60_000) / 1000} seconds.`
+						: "Updated Pi exited before becoming ready.";
 				console.error(`${failure} Returning to the previous launch configuration once.`);
 				launch = fallback;
 				fallback = undefined;
 				handoff = { ...handoff, failure, extensions: undefined };
 				continue;
 			}
-			if (!ready && restartArtifacts.size > 0 && !exitIntent) {
+			if (attempt.kind !== "ready" && restartArtifacts.size > 0 && !exitIntent) {
 				// No worker consumed the handoff and no recovery remains; keep it for explicit recovery.
 				for (const path of restartArtifacts) {
 					if (!existsSync(path)) continue;
@@ -304,7 +328,7 @@ export async function superviseCli(
 				}
 				restartArtifacts.clear();
 			}
-			if (ready && completed && result.code === 0 && !result.signal && exitPath) {
+			if (attempt.kind === "ready" && completed && result.code === 0 && !result.signal && exitPath) {
 				assertPrivateFilePath(completed.path);
 				assertPrivateFilePath(exitPath);
 				// Native finalization owns the full codec; the launcher checks its exact identity and bytes.
