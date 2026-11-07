@@ -452,18 +452,17 @@ function getNextCycleIndex(
 
 export class AgentSession {
 	readonly workingSessionGate = new WorkingSessionGate();
+	/** An acquisition waiting for an eligible boundary; once granted, the gate's reservation owns it. */
 	private _workingSessionRequest?: {
 		boundary: WorkingSessionBoundary;
 		resolve: (hold: WorkingSessionHold) => void;
 		reject: (error: unknown) => void;
-		controller: AbortController;
 		onInvalidate?: (reason: string) => void;
 	};
 	private _workingSessionHost?: WorkingSessionHost;
 	private _workingSessionReady = true;
 	private _workingSessionMode?: WorkingSession["mode"];
 	workingSessionLaunch?: WorkingSessionLaunch;
-	private _workingSessionRelease?: () => Promise<void>;
 	private _restoredWorkingSession = false;
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -684,16 +683,15 @@ export class AgentSession {
 		if (!this.workingSessionLaunch)
 			throw new Error("Native working-session capture requires an explicit workingSessionLaunch agent directory");
 		options.signal?.throwIfAborted();
-		const controller = new AbortController();
 		return new Promise<WorkingSessionHold>((resolve, reject) => {
 			const abort = () => {
 				const reason = options.signal?.reason ?? new Error("Working session acquisition cancelled");
-				if (this._workingSessionRelease) {
+				const reservation = this.workingSessionGate.reservation;
+				if (reservation) {
 					this.workingSessionGate.invalidate("Native working-session acquisition cancelled");
 					reject(reason);
-					void this._workingSessionRelease();
+					void reservation.release();
 				} else {
-					controller.abort(reason);
 					this._workingSessionRequest = undefined;
 					reject(reason);
 				}
@@ -701,7 +699,6 @@ export class AgentSession {
 			options.signal?.addEventListener("abort", abort, { once: true });
 			this._workingSessionRequest = {
 				boundary: options.boundary ?? "settled",
-				controller,
 				resolve: (hold) => {
 					hold.signal.addEventListener("abort", () => options.signal?.removeEventListener("abort", abort), {
 						once: true,
@@ -730,32 +727,19 @@ export class AgentSession {
 			return;
 		if (boundary === "settled" && this.agent.state.isStreaming) return;
 		if (this.isBashRunning || this.isCompacting || this.isRetrying) return;
-		const invalidated = new AbortController();
-		this.workingSessionGate.reserve(invalidated, request.onInvalidate);
+		this._workingSessionRequest = undefined;
+		const reservation = this.workingSessionGate.reserve(request.onInvalidate);
 		this._cacheWarmer?.cancel();
-		let active = true;
-		const release = async () => {
-			if (!active) return;
-			active = false;
-			this._workingSessionRelease = undefined;
-			this._workingSessionRequest = undefined;
-			this.workingSessionGate.release();
-			request.controller.abort();
-		};
-		this._workingSessionRelease = release;
 		try {
 			if (!this.workingSessionLaunch || !this._resourceLoader.getWorkingSessionResources)
 				throw new Error("Native working-session persistence owner is unavailable");
-			let preparing = true;
 			const event: WorkingSessionSaveEvent = {
 				type: "working_session_save",
 				boundary,
-				signal: request.controller.signal,
+				signal: reservation.signal,
 				invalidate: (reason) => this.workingSessionGate.invalidate(reason),
 				appendEntry: (customType, data) => {
-					if (!preparing || !active || request.controller.signal.aborted)
-						throw new Error("Working session save writer expired");
-					this.workingSessionGate.prepareMutation(() => this.sessionManager.appendCustomEntry(customType, data));
+					reservation.append(() => this.sessionManager.appendCustomEntry(customType, data));
 				},
 			};
 			const blockers = await this._extensionRunner.emitWorkingSessionSave(event);
@@ -772,14 +756,14 @@ export class AgentSession {
 						: `Background run ${run.runId} is awaiting delivery`,
 				);
 			}
-			preparing = false;
+			reservation.endPreparation();
 			if (this._extensionRunner.hasPendingUI) blockers.push("Unresolved extension UI");
 			if (this._workingSessionMode && !this._workingSessionHost)
 				blockers.push(`Native ${this._workingSessionMode.kind} mode has not restored its buffers`);
 			await this.settingsManager.flushWorkingSession();
 			this.sessionManager.flushWorkingSession();
-			request.controller.signal.throwIfAborted();
-			invalidated.signal.throwIfAborted();
+			reservation.signal.throwIfAborted();
+			reservation.invalidated.throwIfAborted();
 			if (this.workingSessionGate.busy) throw new Error("Native activity changed during save preparation");
 			const queues = this.agent.getQueuedMessages();
 			const header = this.sessionManager.getHeader();
@@ -840,18 +824,15 @@ export class AgentSession {
 				boundary,
 				blockers,
 				sleepReady: blockers.length === 0,
-				signal: request.controller.signal,
-				invalidated: invalidated.signal,
-				assertHeld: () => {
-					if (!active) throw new Error("Native working session released");
-					invalidated.signal.throwIfAborted();
-				},
-				release,
+				signal: reservation.signal,
+				invalidated: reservation.invalidated,
+				assertHeld: () => reservation.assertHeld(),
+				release: () => reservation.release(),
 			});
 			if (boundary === "turn") await this.workingSessionGate.waitForRelease();
 		} catch (error) {
 			request.reject(error);
-			await release();
+			await reservation.release();
 		}
 	}
 
@@ -2090,7 +2071,7 @@ export class AgentSession {
 		// Dispose is synchronous, so abort as a backstop. Releasing the hold below lets the usage of a
 		// run that already settled still be written; delivery is skipped once disposed.
 		this._abortBackgroundRuns("Native session disposed");
-		if (this._workingSessionRelease) void this._workingSessionRelease();
+		void this.workingSessionGate.reservation?.release();
 		this._flushBackgroundRuns();
 		this._workingSessionRequest?.reject(new Error("Native session disposed"));
 		this._workingSessionRequest = undefined;
@@ -3333,9 +3314,9 @@ export class AgentSession {
 	/** Runtime exit cancels this capability before joining the paused agent. */
 	async cancelWorkingSession(reason: string): Promise<void> {
 		this.workingSessionGate.invalidate(reason);
-		if (this._workingSessionRelease) await this._workingSessionRelease();
+		const reservation = this.workingSessionGate.reservation;
+		if (reservation) await reservation.release();
 		else if (this._workingSessionRequest) {
-			this._workingSessionRequest.controller.abort(new Error(reason));
 			this._workingSessionRequest.reject(new Error(reason));
 			this._workingSessionRequest = undefined;
 		}

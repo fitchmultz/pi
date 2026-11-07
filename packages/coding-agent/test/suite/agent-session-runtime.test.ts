@@ -393,6 +393,24 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(entries.some((entry) => entry.type === "message")).toBe(false);
 	});
 
+	it("cancels a held save before shutdown handlers persist state", async () => {
+		const { runtime } = await createRuntimeForTest((pi) => {
+			pi.on("session_shutdown", () => {
+				pi.appendEntry("shutdown-state", { saved: true });
+			});
+		});
+		const hold = await runtime.session.acquireWorkingSession();
+
+		await runtime.dispose();
+
+		expect(hold.invalidated.reason).toMatchObject({ message: "Native runtime is exiting" });
+		expect(runtime.session.sessionManager.getEntries()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ type: "custom", customType: "shutdown-state", data: { saved: true } }),
+			]),
+		);
+	});
+
 	it("refuses late steering into a run that ordinary quit has not stopped yet", async () => {
 		const outcomes: string[] = [];
 		let decided!: () => void;

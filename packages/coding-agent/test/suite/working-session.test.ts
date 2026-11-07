@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
-import type { ExtensionContext, ExtensionToolContext } from "../../src/core/extensions/types.ts";
+import type { ExtensionAPI, ExtensionContext, ExtensionToolContext } from "../../src/core/extensions/types.ts";
 import { DefaultResourceLoader, type ResourceLoader } from "../../src/core/resource-loader.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -2142,6 +2142,72 @@ describe("Native working sessions", () => {
 			h.session.sessionManager.appendCustomEntry("timer", true);
 		},
 	);
+
+	it("refuses ordinary extension mutation while an asynchronous save handler yields", async () => {
+		const handler = deferred();
+		let extension: ExtensionAPI | undefined;
+		let yielded = false;
+		const h = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					extension = pi;
+					pi.on("working_session_save", async () => {
+						yielded = true;
+						await handler.promise;
+					});
+				},
+			],
+		});
+		harnesses.push(h);
+		const failed = expect(h.session.acquireWorkingSession()).rejects.toThrow("Native input or mutation during save");
+		try {
+			await vi.waitFor(() => expect(yielded).toBe(true));
+			expect(() => extension!.appendEntry("timer", true)).toThrow("reserved");
+		} finally {
+			handler.resolve();
+		}
+		await failed;
+	});
+
+	it("expires a cancelled save's late writer and keeps the next save reserved", async () => {
+		const firstHandler = deferred();
+		const lateAppends: string[] = [];
+		let saves = 0;
+		const h = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					pi.on("working_session_save", async (event) => {
+						if (++saves > 1) return;
+						await firstHandler.promise;
+						try {
+							event.appendEntry("late", true);
+						} catch (error) {
+							lateAppends.push(error instanceof Error ? error.message : String(error));
+						}
+					});
+				},
+			],
+		});
+		harnesses.push(h);
+		const cancel = new AbortController();
+		const cancelled = expect(h.session.acquireWorkingSession({ signal: cancel.signal })).rejects.toThrow(
+			"caller left",
+		);
+		await vi.waitFor(() => expect(saves).toBe(1));
+		cancel.abort(new Error("caller left"));
+		await cancelled;
+		const hold = await h.session.acquireWorkingSession();
+		try {
+			firstHandler.resolve();
+			await vi.waitFor(() => expect(lateAppends).toEqual(["Working session save writer expired"]));
+			// Let the cancelled save finish its failure path before probing the next reservation.
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(() => h.session.sessionManager.appendCustomEntry("during next save", true)).toThrow("reserved");
+			expect(hold.invalidated.aborted).toBe(true);
+		} finally {
+			await hold.release();
+		}
+	});
 
 	it("propagates save-hook failures and refuses a newer journal without writes", async () => {
 		const broken = await createHarness({
