@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -25,6 +25,31 @@ chmodSync(session.getSessionFile(), 0o600);
 attempt(() => add("x".repeat(32 * 1024)));
 attempt(() => session.flushWorkingSession());
 console.log(JSON.stringify(codes));
+`;
+
+// The first write fails partway under a 4 KiB soft file-size limit. Recovery needs that limit lifted inside
+// the same process, which only Linux allows (prlimit); the child restores its original limit itself.
+const failingFirstWriter = `
+import { execFileSync } from "node:child_process";
+import { statSync } from "node:fs";
+import { SessionManager } from ${JSON.stringify(sessionManagerUrl)};
+const [root, recovery] = process.argv.slice(1);
+const prlimit = (...args) => execFileSync("prlimit", ["--pid=" + process.pid, ...args], { encoding: "utf8" }).trim();
+const originalLimit = prlimit("--fsize", "--output=SOFT", "--noheadings", "--raw");
+const session = SessionManager.create(root, root);
+const add = (content) => session.appendMessage({ role: "user", content, timestamp: 1 });
+const codes = [];
+const attempt = (write) => { try { write(); codes.push("ok"); } catch (error) { codes.push(error.code); } };
+session.appendModelChange("anthropic", "setup");
+prlimit("--fsize=4096:");
+attempt(() => add("x".repeat(8192)));
+const partialBytes = statSync(session.getSessionFile()).size;
+attempt(() => add("while limited"));
+prlimit("--fsize=" + originalLimit + ":");
+attempt(() => (recovery === "append" ? add("recovered") : session.flushWorkingSession()));
+attempt(() => add("after recovery"));
+const records = [session.getHeader(), ...session.getEntries()];
+console.log(JSON.stringify({ codes, partialBytes, file: session.getSessionFile(), records }));
 `;
 
 const harnesses: Harness[] = [];
@@ -62,3 +87,24 @@ it.runIf(process.platform !== "win32" && process.getuid?.() !== 0)(
 		expect(openWorkingSession(hold.state).buildSessionContext()).toEqual(manager.buildSessionContext());
 	},
 );
+
+// A failed first write leaves a partial journal that this session created. Later writes must rewrite it from
+// accepted memory instead of failing with EEXIST, and the result must hold each accepted record exactly once.
+it.runIf(process.platform === "linux").each([
+	{ recovery: "append", messages: ["x".repeat(8192), "while limited", "recovered", "after recovery"] },
+	{ recovery: "save", messages: ["x".repeat(8192), "while limited", "after recovery"] },
+])("repairs a failed first journal write at the next $recovery once writable", ({ recovery, messages }) => {
+	const root = mkdtempSync(join(tmpdir(), "pi-first-write-"));
+	roots.push(root);
+	const child = spawnSync(process.execPath, ["--input-type=module", "-e", failingFirstWriter, root, recovery], {
+		encoding: "utf8",
+	});
+	expect(child.stderr).toBe("");
+	const { codes, partialBytes, file, records } = JSON.parse(child.stdout);
+	expect(partialBytes).toBe(4096);
+	expect(codes).toEqual(["EFBIG", "EFBIG", "ok", "ok"]);
+	expect(readFileSync(file, "utf8")).toBe(records.map((record: unknown) => `${JSON.stringify(record)}\n`).join(""));
+	expect(SessionManager.open(file).buildSessionContext().messages).toMatchObject(
+		messages.map((content) => ({ content })),
+	);
+});
