@@ -566,6 +566,8 @@ for await (const event of agentLoopContinue(context, config, undefined, streamFn
 
 These low-level streams are observational. They preserve event order, but they do not wait for your async event handling to settle before later producer phases continue. If you need message processing to act as a barrier before tool preflight, use the `Agent` class instead of raw `agentLoop()` or `agentLoopContinue()`.
 
+If the run throws, for example from `prepareRequest`, the stream still ends: it emits an assistant message with `stopReason: "error"` (`"aborted"` after cancellation through `signal`) and the error text in `errorMessage`, then `turn_end` and `agent_end`. `result()` resolves to the messages accepted before the failure, followed by that assistant message.
+
 ## License
 
 MIT
