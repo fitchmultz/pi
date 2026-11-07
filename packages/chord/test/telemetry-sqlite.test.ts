@@ -333,10 +333,11 @@ describe("SQLite telemetry buffering and aggregation", () => {
 		]);
 	});
 
-	it("flushes once per second and retains only rows inside the retention window", async () => {
+	it("flushes once per second until closed, and retains only rows inside the retention window", async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(20_001);
 		await using f = await fixture({ retentionMs: 20_000 });
+		const timers = vi.getTimerCount();
 		await f.telemetry.startSpan({ name: "old" }, () => {});
 		f.telemetry.metrics.counter("old").add(1);
 		await vi.advanceTimersByTimeAsync(1000);
@@ -348,6 +349,7 @@ describe("SQLite telemetry buffering and aggregation", () => {
 		expect(await f.db.all("SELECT name FROM telemetry_spans")).toEqual([{ name: "recent" }]);
 		expect(await f.db.all("SELECT name FROM telemetry_metrics")).toEqual([]);
 		await f.telemetry.close();
+		expect(vi.getTimerCount()).toBe(timers - 1);
 		expect(await f.db.all("SELECT name FROM telemetry_metrics")).toEqual([{ name: "recent" }]);
 	});
 
@@ -433,9 +435,12 @@ describe("SQLite telemetry buffering and aggregation", () => {
 		const db = await openNodeSqliteDatabase(":memory:");
 		try {
 			const telemetry = await createSqliteTelemetry(db);
+			const timers = vi.getTimerCount();
 			const transaction = vi.spyOn(db, "transaction").mockRejectedValue(undefined);
 			await vi.advanceTimersByTimeAsync(1000);
 			await expect(telemetry.flush()).rejects.toBeUndefined();
+			// The failure stopped the timer, before any close.
+			expect(vi.getTimerCount()).toBe(timers - 1);
 			await expect(telemetry.close()).rejects.toBeUndefined();
 			await vi.advanceTimersByTimeAsync(5000);
 			expect(transaction).toHaveBeenCalledTimes(1);
