@@ -579,6 +579,8 @@ describe("cache warming", () => {
 				kind: "cache_warm",
 				provider: model.provider,
 				model: model.id,
+				thinkingLevel: "max",
+				providerThinkingLevel: "max",
 				usage: {
 					input: 3,
 					output: 1,
@@ -672,7 +674,13 @@ describe("cache warming", () => {
 
 	it("replays profitable requests and preserves options across repeated refreshes", async () => {
 		vi.useFakeTimers();
-		const { warmer, calls, events, appendUsage, warmedEntries } = fakeRuntime();
+		const { warmer, calls, events, warmedEntries } = fakeRuntime({
+			result: async (model) => ({
+				...response(model),
+				cacheIdentity: "warm-account",
+				providerThinkingLevel: "high",
+			}),
+		});
 		const signal = new AbortController().signal;
 		const transformHeaders = async () => ({});
 
@@ -711,14 +719,17 @@ describe("cache warming", () => {
 		});
 		expect(events[0].missCost).toBeCloseTo(0.575);
 		expect(events[0].warmCost).toBeCloseTo(0.050025);
-		expect(appendUsage).toHaveBeenCalledWith(
-			"cache_warm",
-			adaptiveModel.provider,
-			adaptiveModel.id,
-			warmUsage,
-			undefined,
-		);
-		expect(warmedEntries).toEqual([appendUsage.mock.results[0]?.value]);
+		expect(warmedEntries).toMatchObject([
+			{
+				kind: "cache_warm",
+				provider: adaptiveModel.provider,
+				model: adaptiveModel.id,
+				usage: warmUsage,
+				cacheIdentity: "warm-account",
+				thinkingLevel: "high",
+				providerThinkingLevel: "high",
+			},
+		]);
 
 		await vi.advanceTimersByTimeAsync(270_000);
 		expect(calls).toHaveLength(2);

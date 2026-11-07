@@ -269,11 +269,37 @@ describe("detectCacheMiss", () => {
 		vi.useFakeTimers();
 		try {
 			vi.setSystemTime(500_000);
-			const manager = session(turn1);
+			const manager = session({
+				...turn1,
+				cacheIdentity: "original-account",
+				thinkingLevel: "high",
+				providerThinkingLevel: "high",
+			});
 			const parent = manager.getLeafId()!;
-			manager.appendUsage("cache_warm", "test", "test-model", turn2.usage);
-			const missMessage = assistant({ cacheWrite: 110_000, timestamp: 600_000 });
-			expect(detectCacheMiss(manager.getBranch(), missMessage, models)?.idleMs).toBe(100_000);
+			const warmed = {
+				cacheIdentity: "warm-account",
+				thinkingLevel: "low",
+				providerThinkingLevel: "low",
+			} satisfies Partial<AssistantMessage>;
+			manager.appendUsage("cache_warm", "test", "test-model", turn2.usage, undefined, warmed);
+			const missMessage = { ...assistant({ cacheWrite: 110_000, timestamp: 600_000 }), ...warmed };
+			expect(detectCacheMiss(manager.getBranch(), missMessage, models)).toMatchObject({
+				idleMs: 100_000,
+				credentialChanged: false,
+				thinkingChanged: false,
+				readPriceSource: "ancestor",
+			});
+			expect(
+				detectCacheMiss(
+					manager.getBranch(),
+					{ ...missMessage, cacheIdentity: "next-account", providerThinkingLevel: "high" },
+					models,
+				),
+			).toMatchObject({
+				credentialChanged: true,
+				thinkingChanged: true,
+				readPriceSource: "catalog",
+			});
 			manager.branch(parent);
 			manager.appendUsage("custom_operation", "test", "test-model", turn2.usage);
 			expect(detectCacheMiss(manager.getBranch(), missMessage, models)?.idleMs).toBe(600_000);

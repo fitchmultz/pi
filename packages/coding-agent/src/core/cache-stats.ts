@@ -177,11 +177,14 @@ function scan(
 					promptTokens,
 					modelKey,
 					provider: entry.provider,
+					cacheIdentity: entry.cacheIdentity,
+					thinkingLevel: entry.thinkingLevel,
+					providerThinkingLevel: entry.providerThinkingLevel,
 					timestamp: Date.parse(entry.timestamp),
 					readPerToken:
 						entry.usage.cacheRead > 0
 							? entry.usage.cost.cacheRead / entry.usage.cacheRead
-							: modelKey === prev?.modelKey
+							: modelKey === prev?.modelKey && entry.cacheIdentity === prev.cacheIdentity
 								? prev.readPerToken
 								: undefined,
 					reportedCache: true,
