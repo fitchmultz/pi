@@ -250,6 +250,30 @@ async function* createToolCallsWithoutOutputIndexEvents(): AsyncIterable<Respons
 	for (const event of events) yield event as unknown as ResponseStreamEvent;
 }
 
+// OpenRouter finishes output items out of order: the function call is done before the reasoning item (#6009).
+async function* createOutOfOrderItemEvents(): AsyncIterable<ResponseStreamEvent> {
+	const reasoning = { type: "reasoning", id: "reasoning_1", summary: [] };
+	const call = { type: "function_call", id: "function_call_1", call_id: "call_1", name: "bash" };
+	const events = [
+		{ type: "response.output_item.added", sequence_number: 2, output_index: 0, item: reasoning },
+		{ type: "response.output_item.added", sequence_number: 81, output_index: 1, item: { ...call, arguments: "" } },
+		{
+			type: "response.output_item.done",
+			sequence_number: 89,
+			output_index: 1,
+			item: { ...call, arguments: '{"command":"ls"}' },
+		},
+		{
+			type: "response.output_item.done",
+			sequence_number: 90,
+			output_index: 0,
+			item: { ...reasoning, encrypted_content: "encrypted_reasoning_1" },
+		},
+		{ type: "response.completed", sequence_number: 91, response: { id: "resp_out_of_order", status: "completed" } },
+	];
+	for (const event of events) yield event as unknown as ResponseStreamEvent;
+}
+
 describe("OpenAI Responses terminal event handling", () => {
 	it.each([undefined, 0])("retains raw cached field presence separately from normalized zero: %s", async (cached) => {
 		const directory = mkdtempSync(join(tmpdir(), "pi-responses-cache-trace-"));
@@ -340,6 +364,23 @@ describe("OpenAI Responses terminal event handling", () => {
 				model,
 			),
 		).rejects.toThrow("OpenAI Responses stream completed with an unfinished tool call: bash (call_a|fc_a)");
+	});
+
+	// https://github.com/earendil-works/pi/issues/6009
+	it("keeps reasoning and a tool call apart when their output items finish out of order", async () => {
+		const model = createModel();
+		const output = createOutput(model);
+
+		await processResponsesStream(createOutOfOrderItemEvents(), output, new AssistantMessageEventStream(), model);
+
+		expect(output.stopReason).toBe("toolUse");
+		expect(output.content).toMatchObject([
+			{
+				type: "thinking",
+				thinkingSignature: expect.stringContaining('"encrypted_content":"encrypted_reasoning_1"'),
+			},
+			{ type: "toolCall", id: "call_1|function_call_1", name: "bash", arguments: { command: "ls" } },
+		]);
 	});
 
 	it("forwards parsed provider stream events in order", async () => {
