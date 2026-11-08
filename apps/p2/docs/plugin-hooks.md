@@ -113,7 +113,7 @@ contracts and factories are the enforcement.
 | `RequestResolvers` | name → `(req, ctx) => {principal, origin}` | before Host checks (`src/hosts/server.ts:357`) | radius, devices | Trusted transports only. |
 | `SessionAccess` | name → `(principal, session, ctx) => boolean` | `mayReach`: worker routes, files (`src/runtime/server.ts:158-165`) | sharing (`plugins/sharing/server.ts:332`) | Any yes admits a non-owner. |
 | `WorkerInitValues` | key → `(session, ctx) => value` | before each worker spawn; a throw refuses it (`src/runtime/server.ts:297-303`) | sessions (`plugins/sessions/server.ts:103`, key `session`) | Worker reads `WorkerProcess.init.values[key]`. |
-| `SessionArchived` | name → `(session, ctx) => Promise` | awaited before `archive` returns (`plugins/sessions/server.ts:69`) | ports (`plugins/ports/server.ts:42`) | Defined by the sessions plugin. No restore/delete/create counterparts. |
+| `SessionArchived` | name → `(session, ctx) => Promise` | called in turn by the archive job after the row is archived; `archive` answers without waiting for them (`plugins/sessions/server.ts:461,615-618`) | ports (`plugins/ports/server.ts:42`) | Defined by the sessions plugin. No restore/delete/create counterparts. |
 
 ```ts
 // plugins/sharing/server.ts:326
