@@ -1068,8 +1068,10 @@ translated phone drawer and intercept chat taps.
   Each terminal has a number in its session (`index`: the lowest free one from 1, kept while it lives), an optional
   name and an `agent` mark; tabs show the name, else the title, else "Terminal N", agent terminals with a "Pi" badge.
   Every connection that listed a session hears its list change (`terminals`: opened, closed, exited, renamed, by any
-  viewer or the agent); a panel showing a terminal keeps it, one showing none attaches the newest new one. Archiving a
-  session closes its terminals (`SessionArchived`, a host-lifetime contribution; no host is started for it).
+  viewer or the agent); a panel showing a terminal keeps it, one showing none attaches the newest new one. A panel that
+  reconnects lists again: its terminal if still listed, else the newest running one, else none (one closed while it
+  was away is not left on screen). Archiving a session closes its terminals (`SessionArchived`, a host-lifetime
+  contribution; no host is started for it).
   **Agent terminal tool** (owner decisions): the agent drives the same terminals the owner sees (shared: the owner
   watches and types; the agent may read, type into and close any terminal of its session, the owner's too). Guest
   turns may use it, like bash. Code mode only, like MCP tools (`deferred`, `callers: ["tools"]`; scripts find it with
@@ -1099,6 +1101,7 @@ translated phone drawer and intercept chat taps.
   terminal N"; code mode's calls show the command line. TUI: a card with the command line and the output's last lines.
   `terminals-host.test.ts` covers shells, disconnect snapshots, foreground jobs, themes and flood resync;
   `terminals.test.ts` covers guest/control denial, one-use byte grants, session isolation, reload and server restart;
+  `terminal-reconnect.test.ts` a dropped socket replaced, and a terminal closed meanwhile not shown after it;
   `terminal-agent-host.test.ts` the host's calls (keys done once, cursor, waits, cancel, plain text, the alternate
   screen, captures, ring overflow, list pushes, the cap, closing a session, an outdated host); `terminal-tool.test.ts`
   the tool end to end (scripts, shared with the owner both ways, errors, guest turns, stale workers and foreign
