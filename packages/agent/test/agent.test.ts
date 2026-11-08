@@ -1080,10 +1080,14 @@ describe("Agent", () => {
 		}
 	});
 
-	it("keeps steering ahead of follow-up from a non-assistant continuation tail", async () => {
+	it.each([
+		{ tail: "user", messages: [createUserMessage("existing")] },
+		// An assistant tail starts from one queued batch, so this exercises continue()'s fallback order.
+		{ tail: "assistant", messages: [createUserMessage("existing"), createAssistantMessage("existing response")] },
+	])("keeps steering ahead of follow-up from a $tail continuation tail", async ({ messages }) => {
 		const requests: string[][] = [];
 		const agent = new Agent({
-			initialState: { messages: [createUserMessage("existing")] },
+			initialState: { messages },
 			streamFn: (_model, context) => {
 				requests.push(
 					context.messages.flatMap((message) =>
