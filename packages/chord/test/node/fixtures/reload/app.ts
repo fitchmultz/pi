@@ -80,9 +80,14 @@ export async function editAndApply(
  * discovered yet, the plugin set changed).
  */
 export async function edit(app: ReloadApp, dir: string, files: Readonly<Record<string, string>>): Promise<void> {
-	await writePlugin(app.root, dir, `@test/${dir}`, files);
 	const name = `@test/${dir}`;
-	const marked = (): boolean => app.app.plugins.state.value.dirty.includes(name) || app.app.plugins.state.value.set;
+	// A known plugin waits for its own mark: a `set` left by an earlier change stays until the next discovery.
+	const known = app.app.plugins.component.discovery.plugins.some((plugin) => plugin.name === name);
+	await writePlugin(app.root, dir, name, files);
+	const marked = (): boolean => {
+		const { dirty, set } = app.app.plugins.state.value;
+		return known ? dirty.includes(name) : set;
+	};
 	await poll(marked, 30_000, `${name} marked`);
 }
 
