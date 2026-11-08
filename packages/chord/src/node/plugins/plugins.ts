@@ -143,7 +143,7 @@ export interface Plugins {
 	 * build discovers and builds them. Returns their names.
 	 */
 	installPlugin(source: PluginSource, root: string, context: Context): Promise<readonly string[]>;
-	/** Stops the watcher. */
+	/** Stops the watcher for good: a build's discovery that finishes later adds no watch. */
 	close(): void;
 }
 
