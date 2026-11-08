@@ -198,150 +198,123 @@ async function runLoop(
 	let currentContext = initialContext;
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
-	let explicitContinuation = false;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
-	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
-		let hasMoreToolCalls = true;
-
-		// Inner loop: process tool calls and steering messages
-		while (hasMoreToolCalls || pendingMessages.length > 0) {
-			let preparedMessages: AgentMessage[] = [];
-			if (lastCompletedTurn) {
-				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
-				if (nextTurnSnapshot) {
-					currentContext = nextTurnSnapshot.context ?? currentContext;
-					preparedMessages = nextTurnSnapshot.messages ?? [];
-					config = {
-						...config,
-						model: nextTurnSnapshot.model ?? config.model,
-						reasoning:
-							nextTurnSnapshot.thinkingLevel === undefined
-								? config.reasoning
-								: nextTurnSnapshot.thinkingLevel === "off"
-									? undefined
-									: nextTurnSnapshot.thinkingLevel,
-					};
-				}
-				// Preparation can be long-running (for example, compaction). Pick up steering
-				// queued while it ran. Only poll again if the earlier poll returned nothing;
-				// otherwise one-at-a-time mode would deliver two messages in this turn.
-				if (pendingMessages.length === 0) {
-					pendingMessages = (await config.getSteeringMessages?.()) || [];
-				}
-				await emit({ type: "turn_start" });
-			}
-
-			// Process prepared and queued messages before the next assistant response.
-			for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
-				await emit({ type: "message_start", message });
-				await emit({ type: "message_end", message });
-				currentContext.messages.push(message);
-				newMessages.push(message);
-			}
-			pendingMessages = [];
-
-			const requestUpdate = await config.prepareRequest?.(
-				{
-					context: currentContext,
-					model: config.model,
-					thinkingLevel: config.reasoning ?? "off",
-				},
-				signal,
-			);
-			if (requestUpdate) {
-				currentContext = requestUpdate.context ?? currentContext;
+		let preparedMessages: AgentMessage[] = [];
+		if (lastCompletedTurn) {
+			const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
+			if (nextTurnSnapshot) {
+				currentContext = nextTurnSnapshot.context ?? currentContext;
+				preparedMessages = nextTurnSnapshot.messages ?? [];
 				config = {
 					...config,
-					model: requestUpdate.model ?? config.model,
+					model: nextTurnSnapshot.model ?? config.model,
 					reasoning:
-						requestUpdate.thinkingLevel === undefined
+						nextTurnSnapshot.thinkingLevel === undefined
 							? config.reasoning
-							: requestUpdate.thinkingLevel === "off"
+							: nextTurnSnapshot.thinkingLevel === "off"
 								? undefined
-								: requestUpdate.thinkingLevel,
+								: nextTurnSnapshot.thinkingLevel,
 				};
 			}
+			// Preparation can be long-running (for example, compaction). Pick up steering
+			// queued while it ran. Only poll again if the earlier poll returned nothing;
+			// otherwise one-at-a-time mode would deliver two messages in this turn.
+			if (pendingMessages.length === 0) {
+				pendingMessages = (await config.getSteeringMessages?.()) || [];
+			}
+			await emit({ type: "turn_start" });
+		}
 
-			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
+		// Process prepared and queued messages before the next assistant response.
+		for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
+			await emit({ type: "message_start", message });
+			await emit({ type: "message_end", message });
+			currentContext.messages.push(message);
 			newMessages.push(message);
+		}
+		pendingMessages = [];
 
-			if (message.stopReason === "error" || message.stopReason === "aborted") {
-				lastCompletedTurn = {
-					message,
-					toolResults: [],
-					context: currentContext,
-					newMessages,
-				};
-				await config.finishTurn?.(lastCompletedTurn, signal);
-				await emit({ type: "turn_end", message, toolResults: [] });
-				await emit({ type: "agent_end", messages: newMessages });
-				return;
-			}
+		const requestUpdate = await config.prepareRequest?.(
+			{
+				context: currentContext,
+				model: config.model,
+				thinkingLevel: config.reasoning ?? "off",
+			},
+			signal,
+		);
+		if (requestUpdate) {
+			currentContext = requestUpdate.context ?? currentContext;
+			config = {
+				...config,
+				model: requestUpdate.model ?? config.model,
+				reasoning:
+					requestUpdate.thinkingLevel === undefined
+						? config.reasoning
+						: requestUpdate.thinkingLevel === "off"
+							? undefined
+							: requestUpdate.thinkingLevel,
+			};
+		}
 
-			// Check for tool calls
-			const toolCalls = message.content.filter((c) => c.type === "toolCall");
+		// Stream assistant response
+		const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
+		newMessages.push(message);
 
-			const toolResults: ToolResultMessage[] = [];
-			hasMoreToolCalls = false;
-			if (toolCalls.length > 0) {
-				// A "length" stop means the output was cut off by the token limit, so
-				// every tool call in the message may carry truncated arguments. Fail
-				// them all instead of executing potentially borked calls.
-				const executedToolBatch =
-					message.stopReason === "length"
-						? await failToolCallsFromTruncatedMessage(toolCalls, emit)
-						: await executeToolCalls(currentContext, message, config, signal, emit);
-				toolResults.push(...executedToolBatch.messages);
-				hasMoreToolCalls = !executedToolBatch.terminate;
-
-				for (const result of toolResults) {
-					currentContext.messages.push(result);
-					newMessages.push(result);
-				}
-			}
-
+		if (message.stopReason === "error" || message.stopReason === "aborted") {
 			lastCompletedTurn = {
 				message,
-				toolResults,
+				toolResults: [],
 				context: currentContext,
 				newMessages,
 			};
-			const decision = await config.finishTurn?.(lastCompletedTurn, signal);
-			await emit({ type: "turn_end", message, toolResults });
+			await config.finishTurn?.(lastCompletedTurn, signal);
+			await emit({ type: "turn_end", message, toolResults: [] });
+			break;
+		}
 
-			if (decision?.action === "end") {
-				await emit({ type: "agent_end", messages: newMessages });
-				return;
-			}
+		// Check for tool calls
+		const toolCalls = message.content.filter((c) => c.type === "toolCall");
 
-			explicitContinuation = decision?.action === "continue";
-			pendingMessages = (await config.getSteeringMessages?.()) || [];
-			if (hasMoreToolCalls || pendingMessages.length > 0) {
-				explicitContinuation = false;
+		const toolResults: ToolResultMessage[] = [];
+		let hasMoreToolCalls = false;
+		if (toolCalls.length > 0) {
+			// A "length" stop means the output was cut off by the token limit, so
+			// every tool call in the message may carry truncated arguments. Fail
+			// them all instead of executing potentially borked calls.
+			const executedToolBatch =
+				message.stopReason === "length"
+					? await failToolCallsFromTruncatedMessage(toolCalls, emit)
+					: await executeToolCalls(currentContext, message, config, signal, emit);
+			toolResults.push(...executedToolBatch.messages);
+			hasMoreToolCalls = !executedToolBatch.terminate;
+
+			for (const result of toolResults) {
+				currentContext.messages.push(result);
+				newMessages.push(result);
 			}
 		}
 
+		lastCompletedTurn = {
+			message,
+			toolResults,
+			context: currentContext,
+			newMessages,
+		};
+		const decision = await config.finishTurn?.(lastCompletedTurn, signal);
+		await emit({ type: "turn_end", message, toolResults });
+
+		// Natural work satisfies this turn's continuation; it never adds a later request.
+		if (decision?.action === "end") break;
+		pendingMessages = (await config.getSteeringMessages?.()) || [];
+		if (hasMoreToolCalls || pendingMessages.length > 0) continue;
 		// Agent would stop here. Check for follow-up messages.
-		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
-		if (followUpMessages.length > 0) {
-			// Set as pending so inner loop processes them
-			explicitContinuation = false;
-			pendingMessages = followUpMessages;
-			continue;
-		}
-
+		pendingMessages = (await config.getFollowUpMessages?.()) || [];
+		if (pendingMessages.length > 0) continue;
 		// No natural request was selected, so fulfill the continuation decision with one context-only turn.
-		if (explicitContinuation) {
-			explicitContinuation = false;
-			continue;
-		}
-
-		// No more messages, exit
-		break;
+		if (decision?.action !== "continue") break;
 	}
 
 	await emit({ type: "agent_end", messages: newMessages });

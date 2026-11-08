@@ -1581,7 +1581,26 @@ describe("agentLoop with AgentMessage", () => {
 		expect(convertedSecondTurnHasUpdate).toBe(true);
 	});
 
-	it("picks up steering queued during prepareNextTurn before the next request", async () => {
+	it.each([
+		{
+			queuedDuring: "tool execution",
+			// The completed turn's poll returns the message, so preparation is not followed by another poll.
+			nextTurn: ["getSteeringMessages", "prepareNextTurn", "turn_start", "steering", "request with steering"],
+		},
+		{
+			queuedDuring: "prepareNextTurn",
+			nextTurn: [
+				"getSteeringMessages",
+				"prepareNextTurn",
+				"getSteeringMessages",
+				"turn_start",
+				"steering",
+				"request with steering",
+			],
+		},
+	])("polls steering queued during $queuedDuring before the next turn starts", async ({ queuedDuring, nextTurn }) => {
+		const steering = createUserMessage("steering");
+		const queued: AgentMessage[] = [];
 		const toolSchema = obj({});
 		const tool: AgentTool<typeof toolSchema, undefined> = {
 			name: "noop",
@@ -1589,31 +1608,38 @@ describe("agentLoop with AgentMessage", () => {
 			description: "Noop tool",
 			parameters: toolSchema,
 			async execute() {
+				if (queuedDuring === "tool execution") queued.push(steering);
 				return { content: [{ type: "text", text: "done" }], details: undefined };
 			},
 		};
-		const queued: AgentMessage[] = [];
-		const lateSteering = createUserMessage("late steering");
+		const observed: string[] = [];
 		let providerCalls = 0;
-		let secondRequestIncludedSteering = false;
 		const config: AgentLoopConfig = {
 			model: createModel(),
 			convertToLlm: identityConverter,
 			prepareNextTurn: () => {
-				queued.push(lateSteering);
+				observed.push("prepareNextTurn");
+				if (queuedDuring === "prepareNextTurn" && providerCalls === 1) queued.push(steering);
 				return undefined;
 			},
-			getSteeringMessages: async () => queued.splice(0),
+			getSteeringMessages: async () => {
+				observed.push("getSteeringMessages");
+				return queued.splice(0);
+			},
 		};
 
-		const stream = agentLoop(
+		await runAgentLoop(
 			[createUserMessage("run")],
 			{ messages: [], tools: [tool] },
 			config,
+			(event) => {
+				if (event.type === "turn_start" || event.type === "turn_end") observed.push(event.type);
+				if (event.type === "message_start" && event.message === steering) observed.push("steering");
+			},
 			undefined,
 			(_model, context) => {
 				providerCalls++;
-				if (providerCalls === 2) secondRequestIncludedSteering = context.messages.includes(lateSteering);
+				observed.push(context.messages.includes(steering) ? "request with steering" : "request");
 				const response = createAssistantMessageEventStream();
 				queueMicrotask(() => {
 					const message =
@@ -1628,10 +1654,16 @@ describe("agentLoop with AgentMessage", () => {
 				return response;
 			},
 		);
-		await stream.result();
 
-		expect(providerCalls).toBe(2);
-		expect(secondRequestIncludedSteering).toBe(true);
+		expect(observed).toEqual([
+			"turn_start",
+			"getSteeringMessages",
+			"request",
+			"turn_end",
+			...nextTurn,
+			"turn_end",
+			"getSteeringMessages",
+		]);
 	});
 
 	it("action:end receives finalized turn context and stops before queue polling", async () => {
