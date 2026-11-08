@@ -176,6 +176,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | One function defines the selector mutation lock that fork updates and every installer operation share: `<selector>.lock`, never stolen based on age | `utils/{fork-release-store,fork-update}.ts`, `scripts/install-fork.mjs` | `scripts/install-fork.test.mjs`, `fork-update.test.ts` |
 | p2's browser connection loop has one attempt/deciding/waiting/idle/stopped phase. Each attempt owns its timers, a wake while `canRetry` decides is remembered, and stop is final in every phase; the backoff count stays separate | `apps/p2/src/web/reconnect.ts` | `apps/p2/test/p2/{web-reconnect,ui-reconnect}.test.ts` |
 | The Chord store's closed state holds its one close. The first `close` refuses new work and ends exports; every caller joins that close, and a cancelled wait ends only its own. The close waits for admitted commits and reads underway before closing the backend; the backend-failure latch and batch divergence stay separate facts | `packages/chord/src/store/store.ts` | `packages/chord/test/store/{store,export,apply-batch}.test.ts` |
+| A Chord link's held-message record alone marks an asynchronous handling and drains later messages in order; the handshake, heartbeat and close state stay separate | `packages/chord/src/link/channel.ts` | `packages/chord/test/link/channel.test.ts`, `packages/chord/test/remote/{host-link,consumer,provider,relay}.test.ts` |
 
 ### Performance deltas
 
