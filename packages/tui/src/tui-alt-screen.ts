@@ -106,8 +106,6 @@ interface SelectionRange {
 	end: SelectionPoint;
 }
 
-type SelectionGranularity = "character" | "word" | "line";
-
 interface ClickTarget {
 	timestamp: number;
 	count: number;
@@ -131,10 +129,50 @@ interface WheelEvent {
 	button: number;
 }
 
-interface ScrollbarDrag {
-	scrollView: ScrollView;
-	grabOffset: number;
+/**
+ * The pointer gesture in progress until its release. The text selection that a selection gesture drags out is
+ * separate state, so it stays after the release.
+ */
+type PointerGesture = NoGesture | ComponentGesture | ScrollbarGesture | SelectionGesture;
+
+interface NoGesture {
+	readonly kind: "none";
 }
+
+/** A component that handled the press, or captured the pointer, receives every event until the release. */
+interface ComponentGesture {
+	readonly kind: "component";
+	target: TuiMouseDispatchTarget;
+	/** The press position until the pointer moves; a release there also clicks the target. */
+	clickPoint: { x: number; y: number } | undefined;
+}
+
+/** A dragged scrollbar thumb follows the pointer until the release, even over an overlay opened meanwhile. */
+interface ScrollbarGesture {
+	readonly kind: "scrollbar";
+	readonly scrollView: ScrollView;
+	readonly grabOffset: number;
+}
+
+/** A primary-button press that drags out the text selection. */
+interface SelectionGesture {
+	readonly kind: "selection";
+	/** The double- or triple-clicked word or line, which dragging extends by whole words or lines. */
+	readonly unit: { granularity: "word" | "line"; range: SelectionRange } | undefined;
+	dragged: boolean;
+	/** The OSC 8 link under the press, opened by a release without a drag. */
+	pressedUrl: string | undefined;
+	/** Scrolls the selection's view while the pointer is held past its top or bottom edge. */
+	autoScroll: SelectionAutoScroll | undefined;
+}
+
+interface SelectionAutoScroll {
+	readonly timer: NodeJS.Timeout;
+	direction: -1 | 1;
+	pointer: { x: number; y: number };
+}
+
+const NO_GESTURE: NoGesture = { kind: "none" };
 
 interface ScrollbarTarget {
 	scrollView: ScrollView;
@@ -220,23 +258,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly uploadedKittyImages = new Map<number, CachedKittyImage>();
 	private selectionAnchor?: SelectionPoint;
 	private selectionFocus?: SelectionPoint;
-	private selectionGranularity: SelectionGranularity = "character";
-	private selectionInitialRange?: SelectionRange;
 	private lastClick?: ClickTarget;
-	private selectionDragPointer?: { x: number; y: number };
-	private selectionAutoScrollDirection: -1 | 0 | 1 = 0;
-	private selectionAutoScrollTimer?: NodeJS.Timeout;
-	private selectionPressActive = false;
-	private scrollbarDrag?: ScrollbarDrag;
+	private gesture: PointerGesture = NO_GESTURE;
 	private scrollbarHover?: ScrollView;
 	private scrollToEndIndicatorRect?: ScrollToEndIndicatorRect;
 	private activeSearch?: ActiveSearch;
-	private pressedUrl?: string;
-	private selectionDragged = false;
-	private mouseCapture?: TuiMouseDispatchTarget;
-	private mousePressTarget?: TuiMouseDispatchTarget;
-	private mousePressPoint?: { x: number; y: number };
-	private mousePressMoved = false;
 	private lastComponentClick?: {
 		timestamp: number;
 		count: number;
@@ -347,10 +373,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStart(): void {
-		this.stopSelectionAutoScroll();
-		this.selectionPressActive = false;
+		this.endGesture();
 		this.stopScrollbarHover();
-		this.stopScrollbarDrag();
 		this.flashes.dispose();
 		this.altScreenActive = true;
 		const capabilities = getCapabilities();
@@ -364,12 +388,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.lastDocument = [];
 		this.selectionAnchor = undefined;
 		this.selectionFocus = undefined;
-		this.selectionGranularity = "character";
-		this.selectionInitialRange = undefined;
 		this.lastClick = undefined;
-		this.pressedUrl = undefined;
-		this.selectionDragged = false;
-		this.clearComponentMouseGesture();
 		this.lastComponentClick = undefined;
 		this.resetRenderState();
 		const term = process.env.TERM?.toLowerCase() ?? "";
@@ -390,11 +409,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
 		this.closeSearch();
-		this.stopSelectionAutoScroll();
-		this.selectionPressActive = false;
+		this.endGesture();
 		this.stopScrollbarHover();
-		this.stopScrollbarDrag();
-		this.clearComponentMouseGesture();
 		this.flashes.dispose();
 		if (!this.altScreenActive) return;
 		this.terminal.write(
@@ -687,33 +703,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return this.isOverlayFocused() && this.activeSearch?.overlay?.isFocused() !== true;
 	}
 
-	private clearComponentMouseGesture(): void {
-		this.mouseCapture = undefined;
-		this.mousePressTarget = undefined;
-		this.mousePressPoint = undefined;
-		this.mousePressMoved = false;
-	}
-
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
-			const hadActiveSelection = this.selectionPressActive;
-			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
-			this.selectionPressActive = false;
-			this.stopSelectionAutoScroll();
+			// Losing focus cancels the active gesture. A selection still being dragged is dropped, repainting only
+			// if it was visible; a completed selection stays.
+			if (this.gesture.kind === "selection") {
+				const visible = this.getSelectionBounds() !== undefined;
+				this.clearTextSelection();
+				if (visible) this.requestRender();
+			} else {
+				this.endGesture();
+			}
 			this.stopScrollbarHover();
 			if (this.activeSearch?.component.setHoveredNavigationDirection(undefined)) this.requestRender();
-			this.stopScrollbarDrag();
-			this.pressedUrl = undefined;
-			this.selectionDragged = false;
-			this.clearComponentMouseGesture();
 			this.lastComponentClick = undefined;
-			if (hadActiveSelection) {
-				this.selectionAnchor = undefined;
-				this.selectionFocus = undefined;
-				this.selectionGranularity = "character";
-				this.selectionInitialRange = undefined;
-				if (hadNonEmptyActiveSelection) this.requestRender();
-			}
 			this.lastClick = undefined;
 			return { consume: true };
 		}
@@ -871,7 +874,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const focusTarget = this.resolveMouseFocusTarget(result.focusTarget ?? result.target.component);
 		const focusChanged = result.focus === true && this.getFocusedComponent() !== focusTarget;
 		if (result.focus) this.setFocus(focusTarget);
-		if (result.capture) this.mouseCapture = result.target;
+		if (result.capture) this.captureMouse(result.target);
 		return (
 			result.render ??
 			(focusChanged ||
@@ -904,15 +907,29 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return count;
 	}
 
+	/** Clears the text selection and ends the gesture that was dragging it out. */
 	private clearTextSelection(): void {
-		this.stopSelectionAutoScroll();
-		this.selectionPressActive = false;
+		if (this.gesture.kind === "selection") this.endGesture();
 		this.selectionAnchor = undefined;
 		this.selectionFocus = undefined;
-		this.selectionGranularity = "character";
-		this.selectionInitialRange = undefined;
-		this.pressedUrl = undefined;
-		this.selectionDragged = false;
+	}
+
+	/** Starts `gesture`, ending the previous one. */
+	private startGesture(gesture: ComponentGesture | ScrollbarGesture | SelectionGesture): void {
+		this.endGesture();
+		this.gesture = gesture;
+	}
+
+	/** Ends the active gesture and stops its auto-scroll. The text selection stays. */
+	private endGesture(): void {
+		if (this.gesture.kind === "selection") this.stopSelectionAutoScroll(this.gesture);
+		this.gesture = NO_GESTURE;
+	}
+
+	/** Routes later pointer events to a component that asked to capture them, until a release. */
+	private captureMouse(target: TuiMouseDispatchTarget): void {
+		if (this.gesture.kind === "component") this.gesture.target = target;
+		else this.startGesture({ kind: "component", target, clickPoint: undefined });
 	}
 
 	private handleMouseEvent(raw: SgrMouseEvent): void {
@@ -926,26 +943,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				: "press";
 		const event = this.createMouseEvent(type, raw.button, raw.x, raw.y);
 
-		if (this.mouseCapture || this.mousePressTarget) {
-			const target = this.mouseCapture ?? this.mousePressTarget!;
-			if (this.mousePressPoint && (raw.x !== this.mousePressPoint.x || raw.y !== this.mousePressPoint.y)) {
-				this.mousePressMoved = true;
-				this.lastComponentClick = undefined;
-			}
-			let render = false;
-			const targetResult = this.dispatchMouseToTarget(event, target);
-			if (targetResult) render = this.applyMouseDispatchResult(event, targetResult);
-			if (raw.release) {
-				if (!this.mousePressMoved && this.mousePressPoint?.x === raw.x && this.mousePressPoint.y === raw.y) {
-					const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
-						clickCount: this.getComponentClickCount(target, raw.x, raw.y),
-					});
-					const clickResult = this.dispatchMouseToTarget(clickEvent, target);
-					if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
-				}
-				this.clearComponentMouseGesture();
-			}
-			if (render) this.requestRender();
+		// Component and scrollbar gestures receive every event until their release, wherever the pointer is,
+		// so an overlay that opens during the drag cannot take the release. A text selection lets components
+		// under the pointer handle its events first.
+		const gesture = this.gesture;
+		if (gesture.kind === "component") {
+			this.continueComponentGesture(gesture, event, raw);
+			return;
+		}
+		if (gesture.kind === "scrollbar") {
+			this.continueScrollbarDrag(gesture, raw);
 			return;
 		}
 
@@ -954,9 +961,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const overlay = this.dispatchMouseToOverlay(event);
 		if (!overlay.hit) {
 			if (this.handleScrollToEndIndicatorMouseEvent(raw)) return;
-			const scrollbarHandled = this.handleScrollbarMouseEvent(raw);
-			if (!this.scrollbarDrag) this.updateScrollbarHover(raw.x, raw.y);
-			if (scrollbarHandled) return;
+			if (this.startScrollbarDrag(raw)) return;
+			this.updateScrollbarHover(raw.x, raw.y);
 		} else {
 			this.stopScrollbarHover();
 		}
@@ -966,9 +972,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			const render = this.applyMouseDispatchResult(event, result);
 			if (type === "press") {
 				this.clearTextSelection();
-				this.mousePressTarget = result.target;
-				this.mousePressPoint = { x: raw.x, y: raw.y };
-				this.mousePressMoved = false;
+				this.startGesture({ kind: "component", target: result.target, clickPoint: { x: raw.x, y: raw.y } });
 			}
 			if (render) this.requestRender();
 			return;
@@ -976,6 +980,29 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		if (this.handleRightClickPaste(raw)) return;
 		this.handleSelectionMouseEvent(raw);
+	}
+
+	/** Sends an event to the component that owns the gesture; a release where it was pressed also clicks it. */
+	private continueComponentGesture(gesture: ComponentGesture, event: TuiMouseEvent, raw: SgrMouseEvent): void {
+		const target = gesture.target;
+		if (gesture.clickPoint && (raw.x !== gesture.clickPoint.x || raw.y !== gesture.clickPoint.y)) {
+			gesture.clickPoint = undefined;
+			this.lastComponentClick = undefined;
+		}
+		let render = false;
+		const targetResult = this.dispatchMouseToTarget(event, target);
+		if (targetResult) render = this.applyMouseDispatchResult(event, targetResult);
+		if (raw.release) {
+			if (gesture.clickPoint) {
+				const clickEvent = this.createMouseEvent("click", raw.button, raw.x, raw.y, {
+					clickCount: this.getComponentClickCount(target, raw.x, raw.y),
+				});
+				const clickResult = this.dispatchMouseToTarget(clickEvent, target);
+				if (clickResult) render = this.applyMouseDispatchResult(clickEvent, clickResult) || render;
+			}
+			this.endGesture();
+		}
+		if (render) this.requestRender();
 	}
 
 	private parseWheelEvent(data: string): WheelEvent | undefined {
@@ -1102,53 +1129,31 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		scrollView.scrollTo(scrollTop);
 	}
 
-	private handleScrollbarMouseEvent(event: SgrMouseEvent): boolean {
-		if (this.scrollbarDrag) {
-			if (event.release) {
-				this.stopScrollbarDrag();
-				return true;
-			}
-			const box = this.currentLayout
-				? getScrollViewBox(this.currentLayout, this.scrollbarDrag.scrollView)
-				: undefined;
-			const geometry = box ? getScrollbarGeometry(box) : undefined;
-			if (geometry) {
-				this.scrollScrollbarToPointer(
-					this.scrollbarDrag.scrollView,
-					geometry,
-					event.y,
-					this.scrollbarDrag.grabOffset,
-				);
-			}
-			return true;
+	/** Moves a dragged scrollbar thumb with the pointer; the release ends the drag and refreshes hover. */
+	private continueScrollbarDrag(gesture: ScrollbarGesture, event: SgrMouseEvent): void {
+		if (event.release) {
+			this.endGesture();
+			this.updateScrollbarHover(event.x, event.y);
+			return;
 		}
+		const box = this.currentLayout ? getScrollViewBox(this.currentLayout, gesture.scrollView) : undefined;
+		const geometry = box ? getScrollbarGeometry(box) : undefined;
+		if (geometry) this.scrollScrollbarToPointer(gesture.scrollView, geometry, event.y, gesture.grabOffset);
+	}
 
+	/** Starts a scrollbar drag for a primary-button press on a scrollbar; returns whether it did. */
+	private startScrollbarDrag(event: SgrMouseEvent): boolean {
 		if (event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
 		const target = this.getScrollbarTargetAt(event.x, event.y);
 		if (!target) return false;
-		this.stopSelectionAutoScroll();
-		this.selectionPressActive = false;
-		this.selectionAnchor = undefined;
-		this.selectionFocus = undefined;
-		this.selectionGranularity = "character";
-		this.selectionInitialRange = undefined;
-		this.lastClick = undefined;
-		this.pressedUrl = undefined;
-		this.selectionDragged = false;
+		this.resetTextSelection();
 		this.setScrollbarHover(target.scrollView);
 		const onThumb =
 			event.y >= target.geometry.thumbTop && event.y < target.geometry.thumbTop + target.geometry.thumbHeight;
 		const grabOffset = onThumb ? event.y - target.geometry.thumbTop : Math.floor(target.geometry.thumbHeight / 2);
 		if (!onThumb) this.scrollScrollbarToPointer(target.scrollView, target.geometry, event.y, grabOffset);
-		this.scrollbarDrag = {
-			scrollView: target.scrollView,
-			grabOffset,
-		};
+		this.startGesture({ kind: "scrollbar", scrollView: target.scrollView, grabOffset });
 		return true;
-	}
-
-	private stopScrollbarDrag(): void {
-		this.scrollbarDrag = undefined;
 	}
 
 	private getScrollSelectionPoint(scrollView: ScrollView, x: number, y: number): SelectionPoint | undefined {
@@ -1234,14 +1239,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		};
 	}
 
-	private updateSelectionFocus(point: SelectionPoint): void {
-		if (this.selectionGranularity === "character" || !this.selectionInitialRange) {
+	private updateSelectionFocus(gesture: SelectionGesture, point: SelectionPoint): void {
+		const unit = gesture.unit;
+		if (!unit) {
 			this.selectionFocus = point;
 			return;
 		}
-		const range = this.selectionGranularity === "word" ? this.getWordSelection(point) : this.getLineSelection(point);
+		const range = unit.granularity === "word" ? this.getWordSelection(point) : this.getLineSelection(point);
 		if (!range) return;
-		const initial = this.selectionInitialRange;
+		const initial = unit.range;
 		const targetBeforeInitial =
 			range.start.row < initial.start.row ||
 			(range.start.row === initial.start.row && range.start.col < initial.start.col);
@@ -1280,15 +1286,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return count;
 	}
 
-	private updateSelectionAutoScroll(event: SgrMouseEvent): void {
+	private updateSelectionAutoScroll(gesture: SelectionGesture, event: SgrMouseEvent): void {
 		const scrollView = this.selectionAnchor?.scrollView;
 		if (!scrollView || !this.currentLayout) {
-			this.stopSelectionAutoScroll();
+			this.stopSelectionAutoScroll(gesture);
 			return;
 		}
 		const box = getScrollViewBox(this.currentLayout, scrollView);
 		if (!box || box.rect.height <= 0 || box.clip.height <= 0) {
-			this.stopSelectionAutoScroll();
+			this.stopSelectionAutoScroll(gesture);
 			return;
 		}
 		const visibleTop = Math.max(0, box.rect.y, box.clip.y);
@@ -1297,62 +1303,65 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			box.rect.y + box.rect.height - 1,
 			box.clip.y + box.clip.height - 1,
 		);
-		this.selectionDragPointer = { x: event.x, y: event.y };
-		this.selectionAutoScrollDirection = event.y <= visibleTop ? -1 : event.y >= visibleBottom ? 1 : 0;
-		if (this.selectionAutoScrollDirection === 0) {
-			this.stopSelectionAutoScroll();
+		const direction = event.y <= visibleTop ? -1 : event.y >= visibleBottom ? 1 : 0;
+		if (direction === 0) {
+			this.stopSelectionAutoScroll(gesture);
 			return;
 		}
-		if (this.selectionAutoScrollTimer) return;
-		this.selectionAutoScrollTimer = setInterval(() => this.autoScrollSelection(), 50);
-		this.selectionAutoScrollTimer.unref();
+		const pointer = { x: event.x, y: event.y };
+		if (gesture.autoScroll) {
+			gesture.autoScroll.direction = direction;
+			gesture.autoScroll.pointer = pointer;
+			return;
+		}
+		const autoScroll: SelectionAutoScroll = {
+			timer: setInterval(() => this.autoScrollSelection(gesture, autoScroll), 50),
+			direction,
+			pointer,
+		};
+		autoScroll.timer.unref();
+		gesture.autoScroll = autoScroll;
 	}
 
-	private autoScrollSelection(): void {
+	private autoScrollSelection(gesture: SelectionGesture, autoScroll: SelectionAutoScroll): void {
 		const scrollView = this.selectionAnchor?.scrollView;
-		const pointer = this.selectionDragPointer;
-		const direction = this.selectionAutoScrollDirection;
-		if (!scrollView || !pointer || direction === 0) {
-			this.stopSelectionAutoScroll();
+		if (!scrollView) {
+			this.stopSelectionAutoScroll(gesture);
 			return;
 		}
-		const remaining = scrollView.scrollBy(direction);
-		if (remaining === direction) {
-			this.stopSelectionAutoScroll();
+		const remaining = scrollView.scrollBy(autoScroll.direction);
+		if (remaining === autoScroll.direction) {
+			this.stopSelectionAutoScroll(gesture);
 			return;
 		}
-		const point = this.getScrollSelectionPoint(scrollView, pointer.x, pointer.y);
-		if (point) this.updateSelectionFocus(point);
+		const point = this.getScrollSelectionPoint(scrollView, autoScroll.pointer.x, autoScroll.pointer.y);
+		if (point) this.updateSelectionFocus(gesture, point);
 		this.requestRender();
 	}
 
-	private stopSelectionAutoScroll(): void {
-		if (this.selectionAutoScrollTimer) {
-			clearInterval(this.selectionAutoScrollTimer);
-			this.selectionAutoScrollTimer = undefined;
-		}
-		this.selectionAutoScrollDirection = 0;
-		this.selectionDragPointer = undefined;
+	private stopSelectionAutoScroll(gesture: SelectionGesture): void {
+		if (!gesture.autoScroll) return;
+		clearInterval(gesture.autoScroll.timer);
+		gesture.autoScroll = undefined;
 	}
 
 	private handleSelectionMouseEvent(event: SgrMouseEvent): void {
 		const button = event.button & 3;
 		if (button !== 0 && !(event.release && button === 3)) return;
+		const gesture = this.gesture;
 		const anchorScrollView = this.selectionAnchor?.scrollView;
 		const point = this.getSelectionPoint(event, anchorScrollView);
 		if (event.release) {
-			if (!this.selectionPressActive) return;
-			this.selectionPressActive = false;
-			this.stopSelectionAutoScroll();
+			if (gesture.kind !== "selection") return;
+			this.endGesture();
 			if (!this.selectionAnchor) return;
-			this.updateSelectionFocus(point);
+			this.updateSelectionFocus(gesture, point);
 			const isClick =
-				!this.selectionDragged &&
+				!gesture.dragged &&
 				this.selectionAnchor.scrollView === point.scrollView &&
 				this.selectionAnchor.row === point.row &&
 				this.selectionAnchor.col === point.col;
-			const clickedUrl = isClick ? this.pressedUrl : undefined;
-			this.pressedUrl = undefined;
+			const clickedUrl = isClick ? gesture.pressedUrl : undefined;
 			if (clickedUrl && this.openUrl) {
 				this.selectionAnchor = undefined;
 				this.selectionFocus = undefined;
@@ -1382,17 +1391,15 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			return;
 		}
 		if ((event.button & 32) !== 0) {
-			if (!this.selectionPressActive || !this.selectionAnchor) return;
-			this.selectionDragged = true;
+			if (gesture.kind !== "selection" || !this.selectionAnchor) return;
+			gesture.dragged = true;
+			gesture.pressedUrl = undefined;
 			this.lastClick = undefined;
-			this.pressedUrl = undefined;
-			this.updateSelectionFocus(point);
-			this.updateSelectionAutoScroll(event);
+			this.updateSelectionFocus(gesture, point);
+			this.updateSelectionAutoScroll(gesture, event);
 			this.requestRender();
 			return;
 		}
-		this.stopSelectionAutoScroll();
-		this.selectionPressActive = true;
 		const scrollView =
 			!this.hasOverlay() && this.currentLayout
 				? getScrollViewsAt(this.currentLayout, event.x, event.y)[0]
@@ -1401,17 +1408,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const word = this.getWordSelection(anchor);
 		const clickCount = this.getClickCount(anchor, word);
 		const range = clickCount === 2 ? word : clickCount === 3 ? this.getLineSelection(anchor) : undefined;
-		this.selectionGranularity = range ? (clickCount === 2 ? "word" : "line") : "character";
-		this.selectionInitialRange = range;
+		this.startGesture({
+			kind: "selection",
+			unit: range ? { granularity: clickCount === 2 ? "word" : "line", range } : undefined,
+			dragged: false,
+			pressedUrl: range
+				? undefined
+				: getOsc8LinkAtColumn(
+						this.previousScreen[Math.max(0, Math.min(this.terminal.rows - 1, event.y))] ?? "",
+						Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
+					),
+			autoScroll: undefined,
+		});
 		this.selectionAnchor = range?.start ?? anchor;
 		this.selectionFocus = range?.end ?? anchor;
-		this.selectionDragged = false;
-		this.pressedUrl = range
-			? undefined
-			: getOsc8LinkAtColumn(
-					this.previousScreen[Math.max(0, Math.min(this.terminal.rows - 1, event.y))] ?? "",
-					Math.max(0, Math.min(this.terminal.columns - 1, event.x)),
-				);
 		this.requestRender();
 	}
 

@@ -23,6 +23,7 @@
 - Fixed fullscreen Kitty images in Orca showing only their first row. Orca's xterm.js image addon stores images in the cells they cover. `TuiAltScreen` now draws Kitty images after clearing and writing the rows they cover on every terminal, not only WezTerm ([#11835](https://github.com/earendil-works/pi/issues/11835))
 - Fixed `start()` after `stop()` drawing nothing, and ignoring later `requestRender()` calls until a forced render, when a render was pending at `stop()` or requested while stopped, for example by the key handler that stopped the TUI.
 - Fixed `TuiMainScreen` drawing changed lines at the wrong rows and leaving stale lines when restarted with `stop()` and `start()` without a forced render. The first frame after the restart now clears and redraws the screen, as `requestRender(true)` does.
+- Fixed a fullscreen scrollbar drag staying active when it was released over an overlay opened during the drag, such as transcript search. Pointer motion without a pressed button kept scrolling the transcript. The drag now keeps every button and motion event until its release.
 
 ## [1.5.0] - 2026-11-02
 

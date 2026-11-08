@@ -535,6 +535,37 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("ends a scrollbar drag released over an overlay opened during the drag", async () => {
+		const terminal = new VirtualTerminal(30, 10);
+		const tui = new TuiAltScreen(terminal);
+		const scrollView = new ScrollView(
+			new Text(Array.from({ length: 50 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ primary: true, scrollbar: "always" },
+		);
+		tui.setLayoutRoot(scrollView);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			terminal.sendInput("\x1b[<0;30;6M");
+			await terminal.waitForRender();
+			// The search panel opens while the drag is held, and the drag is released over it.
+			terminal.sendInput("\x1b[102;6u");
+			await terminal.waitForRender();
+			assert.ok(terminal.getViewport().some((line) => line.includes("Find in transcript")));
+			terminal.sendInput("\x1b[<32;10;2M");
+			terminal.sendInput("\x1b[<0;10;2m");
+			await terminal.waitForRender();
+			const releasedTop = scrollView.scrollTop;
+
+			// Pointer motion without a pressed button must not keep dragging the scrollbar.
+			terminal.sendInput("\x1b[<35;5;9M");
+			await terminal.waitForRender();
+			assert.strictEqual(scrollView.scrollTop, releasedTop);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	// #9758: wheel line counts can change at runtime; Alt keeps its multiplier.
 	it("applies runtime wheel line count updates", async () => {
 		const terminal = new VirtualTerminal(20, 4);
@@ -1870,6 +1901,103 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("cancels an active gesture and its auto-scroll on focus loss, restart, and a host selection reset", async () => {
+		const lines = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n");
+		const interruptions: Array<[string, (tui: TuiAltScreen, terminal: VirtualTerminal) => Promise<void> | void]> = [
+			["focus loss", (_tui, terminal) => terminal.sendInput("\x1b[O")],
+			[
+				"stop and start",
+				async (tui) => {
+					tui.stop();
+					// While stopped, a leftover auto-scroll would keep moving the transcript.
+					await new Promise((resolve) => setTimeout(resolve, 130));
+					tui.start();
+				},
+			],
+		];
+		const selectionInterruptions: typeof interruptions = [
+			...interruptions,
+			["host selection reset", (tui) => tui.resetTextSelection()],
+		];
+
+		for (const [name, interrupt] of selectionInterruptions) {
+			// A drag held at the viewport edge stops auto-scrolling, and its release copies nothing.
+			const terminal = new VirtualTerminal(20, 4);
+			const copied: string[] = [];
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				copySelection: async (text) => {
+					copied.push(text);
+					return true;
+				},
+			});
+			tui.addChild(new Text(lines, 0, 0));
+			tui.start();
+			try {
+				await terminal.waitForRender();
+				const initialTop = tui.viewportTop;
+				terminal.sendInput("\x1b[<0;1;3M");
+				terminal.sendInput("\x1b[<32;1;1M");
+				await new Promise((resolve) => setTimeout(resolve, 130));
+				assert.ok(tui.viewportTop < initialTop, name);
+				const interruptedTop = tui.viewportTop;
+				await interrupt(tui, terminal);
+				await new Promise((resolve) => setTimeout(resolve, 130));
+				assert.strictEqual(tui.viewportTop, interruptedTop, name);
+				terminal.sendInput("\x1b[<0;1;1m");
+				await terminal.waitForRender();
+				assert.deepStrictEqual(copied, [], name);
+			} finally {
+				tui.stop();
+			}
+		}
+
+		for (const [name, interrupt] of interruptions) {
+			// A scrollbar drag no longer follows the pointer.
+			const scrollbarTerminal = new VirtualTerminal(10, 10);
+			const scrollbarTui = new TuiAltScreen(scrollbarTerminal);
+			const scrollView = new ScrollView(new Text(lines, 0, 0), { primary: true, scrollbar: "always" });
+			scrollbarTui.setLayoutRoot(scrollView);
+			scrollbarTui.start();
+			try {
+				await scrollbarTerminal.waitForRender();
+				scrollbarTerminal.sendInput("\x1b[<0;10;6M");
+				const pressedTop = scrollView.scrollTop;
+				await interrupt(scrollbarTui, scrollbarTerminal);
+				// A restart drops the layout; render again so a surviving drag could reach the scrollbar.
+				await scrollbarTerminal.waitForRender();
+				scrollbarTerminal.sendInput("\x1b[<32;10;10M");
+				scrollbarTerminal.sendInput("\x1b[<0;10;10m");
+				assert.strictEqual(scrollView.scrollTop, pressedTop, name);
+			} finally {
+				scrollbarTui.stop();
+			}
+
+			// A captured component receives no further drag, release, or click.
+			const componentTerminal = new VirtualTerminal(20, 4);
+			const componentTui = new TuiAltScreen(componentTerminal);
+			const events: string[] = [];
+			componentTui.addChild({
+				render: () => ["control"],
+				invalidate: () => {},
+				handleMouse: (event: TuiMouseEvent) => {
+					events.push(event.type);
+					return event.type === "press" ? { handled: true, capture: true } : { handled: true };
+				},
+			});
+			componentTui.start();
+			try {
+				await componentTerminal.waitForRender();
+				componentTerminal.sendInput("\x1b[<0;1;1M");
+				await interrupt(componentTui, componentTerminal);
+				componentTerminal.sendInput("\x1b[<32;5;3M");
+				componentTerminal.sendInput("\x1b[<0;5;3m");
+				assert.deepStrictEqual(events, ["press"], name);
+			} finally {
+				componentTui.stop();
+			}
+		}
+	});
+
 	it("stacks flash messages and collapses them as they expire", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal);
@@ -1910,6 +2038,9 @@ describe("TuiAltScreen", () => {
 		assert.ok(selectionTop < 6, `expected auto-scroll above row 6, got ${selectionTop}`);
 		terminal.sendInput("\x1b[<0;1;1m");
 		await terminal.waitForRender();
+		// The release stops auto-scrolling, so the completed selection stops growing.
+		await new Promise((resolve) => setTimeout(resolve, 130));
+		assert.strictEqual(tui.viewportTop, selectionTop);
 
 		const selectedLines = Array.from({ length: 8 - selectionTop }, (_, index) => `line ${selectionTop + index + 1}`);
 		selectedLines.push("l");
@@ -2047,6 +2178,12 @@ describe("TuiAltScreen", () => {
 
 		assert.deepStrictEqual(events, ["press", "drag", "release"]);
 		assert.strictEqual(tui.getFocusedComponent(), component);
+
+		// The release ended the capture, so a later press below the component no longer reaches it.
+		terminal.sendInput("\x1b[<0;5;2M");
+		terminal.sendInput("\x1b[<0;5;2m");
+		await terminal.waitForRender();
+		assert.deepStrictEqual(events, ["press", "drag", "release"]);
 		tui.stop();
 	});
 
