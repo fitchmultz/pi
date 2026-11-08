@@ -161,11 +161,11 @@ export type Replayed = {
 	readonly tables: ReadonlyMap<string, TableRecord>;
 };
 
-/** Where a store stands: open, stopped by a backend error, or closed. */
+/** Where a store stands: open, stopped by a backend error, or closed (`done`: the close every `close` waits for). */
 type StoreState =
 	| { readonly kind: "open" }
 	| { readonly kind: "failed"; readonly error: unknown }
-	| { readonly kind: "closed" };
+	| { readonly kind: "closed"; readonly done: Promise<void> };
 
 const ORDER: readonly WriteOrder[] = ["retire", "create", "write"];
 
@@ -202,7 +202,6 @@ export class ChordStore implements Store {
 	#drained: (() => void) | undefined;
 	/** The open host's listener for `storage_failed` (told once) and batch; one host per store (rule 7). */
 	#attachment: Attachment | undefined;
-	#closing: Promise<void> | undefined;
 	/** The versions migrations of tables announced (`announceTable`), by SQL name, until their last commit. */
 	readonly #announced = new Map<string, number>();
 	/** The recorded tables, by SQL name; changed only after a step's `COMMIT`. */
@@ -450,13 +449,18 @@ export class ChordStore implements Store {
 	}
 
 	close(context: Context): Promise<void> {
-		this.#closing ??= this.#close();
-		return awaitWithContext(this.#closing, context);
+		if (this.#state.kind !== "closed") {
+			this.#state = { kind: "closed", done: this.#drain() };
+			for (const end of [...this.#held]) end();
+		}
+		return awaitWithContext(this.#state.done, context);
 	}
 
-	async #close(): Promise<void> {
-		this.#state = { kind: "closed" };
-		for (const end of [...this.#held]) end();
+	/**
+	 * The close's work: waits for the running step and the turns queued behind it, then for the reads and maintenance
+	 * writes underway, then closes the backend.
+	 */
+	async #drain(): Promise<void> {
 		await this.#tail;
 		if (this.#underway > 0) {
 			await new Promise<void>((resolve) => {

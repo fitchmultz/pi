@@ -18,7 +18,7 @@ import type { StagedWrite, Step } from "../../src/store/step.ts";
 import { type ChordStore, openStore, type Store } from "../../src/store/store.ts";
 import { defineTable } from "../../src/store/table.ts";
 import { stageTable } from "../../src/store/table-writes.ts";
-import { exported, faultyStore, holdNextCommit, metered, rejection } from "../support.ts";
+import { exported, faultyStore, flushed, holdNextCommit, metered, rejection } from "../support.ts";
 
 const ADDRESS = { namespace: "chord", owner: "app.store", kind: "notes", key: "" };
 const BASE = { version: 1, fingerprint: "0000000000000000", value: { n: 0 } };
@@ -341,6 +341,37 @@ describe("close", () => {
 		expect(await rejection(queued)).toMatchObject({ code: "released" });
 		await closed;
 		expect(await rejection(store.read(async () => 1, context))).toMatchObject({ code: "released" });
+	});
+
+	it("waits for a read underway before closing the backend; each caller waits for that close, a cancelled one only ends its own wait", async () => {
+		const db = await openNodeSqliteDatabase(":memory:");
+		const store = (await openStore(sqliteBackend(db), context)) as ChordStore;
+		const entered = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<void>();
+		let row: unknown;
+		const read = store.read(async (executor) => {
+			entered.resolve();
+			await gate.promise;
+			row = await executor.get("SELECT 1 AS one");
+		}, context);
+		await entered.promise;
+		// The first close's caller gives up its wait: the close it started goes on for the others.
+		const { context: cancellable, cancel } = withCancel(context);
+		const cancelled = store.close(cancellable);
+		const closes = [store.close(context), store.close(context)];
+		let settled = 0;
+		for (const each of closes) void each.then(() => settled++);
+		const stop = new Error("stop");
+		cancel(stop);
+		expect(await rejection(cancelled)).toBe(stop);
+		await flushed();
+		expect(settled).toBe(0);
+		gate.resolve();
+		// Settling after the close began, the read is released; its statement still ran on the open backend.
+		expect(await rejection(read)).toMatchObject({ code: "released" });
+		expect(row).toEqual({ one: 1 });
+		await Promise.all(closes);
+		await expect(db.get("SELECT 1")).rejects.toThrow();
 	});
 });
 
