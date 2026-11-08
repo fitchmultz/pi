@@ -56,13 +56,12 @@ export class ConversationTranscript {
 	readonly #ids = new Set<EntryId>();
 	/** Gaps in ID order; each is an immutable item, replaced when it shrinks. */
 	#gaps: Gap[] = [];
-	/** Whether anything was merged yet. */
-	#started = false;
 	/** Exclusive lower bound of the known range: entries at or below it are not loaded; `-Infinity` at the start. */
 	#low = Number.NEGATIVE_INFINITY;
 	/** Inclusive upper bound of the known range: the newest entry, or a later empty window's `before`. */
 	#tail = Number.NEGATIVE_INFINITY;
 	#items: readonly TranscriptItem[] = [];
+	/** The last view merged; undefined before the first merge. */
 	#last: ConversationView | undefined;
 	#view: TranscriptView | undefined;
 	#earlier: Promise<TranscriptView> | undefined;
@@ -91,7 +90,7 @@ export class ConversationTranscript {
 	 * undefined before the first merge. `conversation.watch(context, transcript.resume)`.
 	 */
 	get resume(): ConversationWindow | undefined {
-		if (!this.#started) return undefined;
+		if (this.#last === undefined) return undefined;
 		const newest = this.newest;
 		return newest === undefined ? {} : { from: idFromNumber<EntryId>(newest + 1) };
 	}
@@ -182,10 +181,9 @@ export class ConversationTranscript {
 		const items = fresh.map((entry): EntryItem => ({ kind: "entry", entry }));
 		if (items.length > 0) this.#entries = appended ? held.concat(items) : mergeById(held, items);
 		let rebuild = false;
-		if (!this.#started || (held.length === 0 && this.#gaps.length === 0 && lo >= this.#tail)) {
+		if (held.length === 0 && this.#gaps.length === 0 && lo >= this.#tail) {
 			// The first range, or one after an empty transcript: it is all the client knows.
-			rebuild = !this.#started || lo !== this.#low;
-			this.#started = true;
+			rebuild = lo !== this.#low;
 			this.#low = lo;
 			this.#tail = Math.max(this.#tail, hi);
 		} else if (lo > this.#tail) {
