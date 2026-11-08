@@ -135,7 +135,8 @@ await plugins.rollout([plugins.step("server", server), workers.step("workers")],
     step's kinds on a host listed with an error, or with a built kind no step shipped, stays dirty. Given a copy of a
     build (not the object `build` returned), it clears no marks.
   - `installDependencies(name, ctx)` (the install mark clears, the plugin turns dirty), `installPlugin(source, root,
-    ctx)` (`root` one of the roots; marks `set`), `close()` (the watcher stops).
+    ctx)` (`root` one of the roots; marks `set`), `close()` (the watcher stops for good: a build's discovery that
+    finishes later adds no watch).
 - **The watcher** (`fs.watch` on every directory of the roots, the base code and plugin directories linked from
   outside the roots, never on `node_modules` or `.git`; a directory appearing later under a watched one gets its watch,
   a root missing at `createPlugins` is not watched: the app builds on demand) marks, never applies: a changed file

@@ -53,6 +53,7 @@ export class PluginWatcher extends Source {
 	readonly #baseFiles = new Set<string>();
 	/** The watches of the directories holding those files, each of the directory alone. */
 	readonly #baseWatchers = new Map<string, FSWatcher>();
+	#closed = false;
 	/** The trees it watches: the roots, the base code, and plugin directories linked from outside the roots. */
 	readonly #trees = new Set<string>();
 	/** Its watches, one per directory of its trees. */
@@ -202,8 +203,9 @@ export class PluginWatcher extends Source {
 		this.#changed();
 	}
 
-	/** Stops watching. */
+	/** Stops watching for good: a discovery or base file arriving later adds no watch. */
 	close(): void {
+		this.#closed = true;
 		for (const watcher of [...this.#watchers.values(), ...this.#baseWatchers.values()]) watcher.close();
 		this.#watchers.clear();
 		this.#baseWatchers.clear();
@@ -243,7 +245,7 @@ export class PluginWatcher extends Source {
 
 	/** Watches directory `dir` alone (once) for base files: a change of one of them marks `base`. */
 	#watchBaseDir(dir: string): void {
-		if (this.#baseWatchers.has(dir) || this.#reported) return;
+		if (this.#baseWatchers.has(dir) || this.#closed) return;
 		let watcher: FSWatcher;
 		try {
 			watcher = watch(dir, (_event, file) => {
@@ -272,7 +274,7 @@ export class PluginWatcher extends Source {
 
 	/** Watches `dir` and, walking down, every directory under it but ignored ones (each not watched yet). */
 	#watchDirs(dir: string): void {
-		if (this.#watchers.has(dir) || this.#reported) return;
+		if (this.#watchers.has(dir) || this.#closed) return;
 		let watcher: FSWatcher;
 		try {
 			watcher = watch(dir, (_event, file) => {

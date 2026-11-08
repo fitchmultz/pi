@@ -26,6 +26,7 @@
 - SQLite refuses oversized input and write admissions without failing the Session. An already queued input whose encoded entry cannot fit settles `unanswered` with `input_too_large`, preserving the current answer and allowing valid queued inputs to continue. Actual commit and uncertain storage failures remain fatal.
 - Fixed `tool_search` not finding a deferred tool by property names and descriptions behind a local `$ref` in its parameters, as in MCP input schemas that put their models in `$defs`. Referenced definitions are read once, so recursive schemas do not loop, and definitions nothing references stay out of the search text ([#11803](https://github.com/earendil-works/pi/issues/11803))
 - Fixed every code mode run failing with `URI malformed` when any callable tool had a `$ref` with a malformed percent escape (`#/$defs/%E0`) in its schema, even scripts that do not call that tool. The parameter now renders as `unknown` in the tool's declaration ([#11803](https://github.com/earendil-works/pi/issues/11803))
+- Fixed a native `NodeExecutionEnv.watch` that falls back to polling while it starts, because the system is out of watches or file descriptors, scanning twice per poll interval and keeping a poll timer for one interval after `stop()`.
 
 ## [1.5.0] - 2026-11-02
 
