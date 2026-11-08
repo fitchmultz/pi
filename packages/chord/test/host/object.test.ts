@@ -1414,22 +1414,39 @@ describe('reload: fates (decision "Reload restarts every affected object")', () 
 	});
 });
 
+/**
+ * A dependency that is down until `up()`: `Flaky`, served by `facet`, whose native's open throws while it is down (a
+ * reference's `retry()` tries again), and `needsFlaky`, which serves `Pure` labelled "v2" holding `Flaky { id: 1 }`.
+ */
+function flakyDependency() {
+	const Flaky = local("app.flaky", { version: 1, params: { id: int() }, members: { name: str() } });
+	let failing = true;
+	const facet = defineFacet((h) =>
+		h.serve(Flaky, (_, self) => {
+			self.open(
+				async () => {
+					if (failing) throw new Error("flaky is down");
+					return null;
+				},
+				() => {},
+			);
+			return { name: constant("flaky") };
+		}),
+	);
+	const needsFlaky = (h: FacetHost) =>
+		h.serve(Pure, (_, self) => {
+			self.get(Flaky, { id: 1 });
+			return { n: constant(0), label: constant("v2"), bump: async () => 2 };
+		});
+	const up = () => {
+		failing = false;
+	};
+	return { Flaky, facet, needsFlaky, up };
+}
+
 describe("reload: a restart's readiness while the old attempt drains", () => {
 	it("shows a failed request while it lasts: a request that recovers shows the object live again, new calls wait", async () => {
-		const Flaky = local("app.flaky", { version: 1, params: { id: int() }, members: { name: str() } });
-		let failing = true;
-		const flaky = defineFacet((h) =>
-			h.serve(Flaky, (_, self) => {
-				self.open(
-					async () => {
-						if (failing) throw new Error("flaky is down");
-						return null;
-					},
-					() => {},
-				);
-				return { name: constant("flaky") };
-			}),
-		);
+		const { Flaky, facet: flaky, needsFlaky, up } = flakyDependency();
 		const gate = Promise.withResolvers<void>();
 		const gates = [gate.promise];
 		const host = createHost({ onError: () => {} });
@@ -1445,11 +1462,6 @@ describe("reload: a restart's readiness while the old attempt drains", () => {
 		await vi.waitFor(() => expect(down.state.value.kind).toBe("failed"));
 		const running = pure.bump(context);
 		await flushed();
-		const needsFlaky = (h: FacetHost) =>
-			h.serve(Pure, (_, self) => {
-				self.get(Flaky, { id: 1 });
-				return { n: constant(0), label: constant("v2"), bump: async () => 2 };
-			});
 		await host.reload(
 			[
 				{ name: "@test/app", facet: defineFacet(needsFlaky) },
@@ -1459,7 +1471,7 @@ describe("reload: a restart's readiness while the old attempt drains", () => {
 		);
 		// The successor's request failed: holders see it while it lasts (old work still runs on the old attempt).
 		expect(pure.state.value).toMatchObject({ kind: "failed", cause: { kind: "waiting" } });
-		failing = false;
+		up();
 		down.retry();
 		await vi.waitFor(() => expect(down.state.value.kind).toBe("live"));
 		// Recovered during the drain: the old attempt is shown again, and a new call waits for the new code.
@@ -1470,6 +1482,82 @@ describe("reload: a restart's readiness while the old attempt drains", () => {
 		expect(await next).toBe(2);
 		expect(pure.label.value).toBe("v2");
 		down.release();
+		await host.close(context);
+	});
+
+	it("follows a request that recovers after the old attempt's seal until its end: never a stale failure", async () => {
+		const { Flaky, facet: flaky, needsFlaky, up } = flakyDependency();
+		const closing = Promise.withResolvers<void>();
+		// The old code's native closes once `closing` resolves: until then its sealed attempt has not ended.
+		const v1 = defineFacet((h) =>
+			h.serve(Pure, (_, self) => {
+				self.open(
+					async () => null,
+					() => closing.promise,
+				);
+				return { n: constant(0), label: constant("v1"), bump: async () => 1 };
+			}),
+		);
+		const host = createHost({ onError: () => {} });
+		await host.load(
+			[
+				{ name: "@test/app", facet: v1 },
+				{ name: "@test/flaky", facet: flaky },
+			],
+			context,
+		);
+		const pure = await host.get(Pure, {}, context);
+		const down = host.hold(Flaky, { id: 1 }, context);
+		await vi.waitFor(() => expect(down.state.value.kind).toBe("failed"));
+		await host.reload(
+			[
+				{ name: "@test/app", facet: defineFacet(needsFlaky) },
+				{ name: "@test/flaky", facet: flaky },
+			],
+			context,
+		);
+		await flushed();
+		// A failed request counts as ready: the old attempt drained and was sealed; the successor shows the failure.
+		expect(pure.state.value).toMatchObject({ kind: "failed", cause: { kind: "waiting" } });
+		up();
+		down.retry();
+		await vi.waitFor(() => expect(down.state.value.kind).toBe("live"));
+		await flushed();
+		// Recovered while the old attempt's native closes: holders see the successor loading again.
+		expect(pure.state.value).toEqual({ kind: "loading" });
+		closing.resolve();
+		await vi.waitFor(() => expect(pure.state.value).toEqual({ kind: "live" }));
+		expect(pure.label.value).toBe("v2");
+		down.release();
+		await host.close(context);
+	});
+
+	it("binds once every fate of the reload started: a dependent restarted before its raised provider is never refused", async () => {
+		const Source = local("app.source", { version: 1, params: {}, members: { x: method(undefined, str()) } });
+		const SourceV2 = evolve(Source, (e) => e.addState("extra", str()));
+		const Reader = local("app.reader", { version: 1, params: {}, members: { read: method(undefined, str()) } });
+		const plugin = (raised: boolean) =>
+			defineFacet((h) => {
+				// Host-lifetime objects, made at load in this order: the reader's old code needs no source, so it goes live
+				// first and its fate comes first.
+				h.serve(Reader, (_, self) => {
+					if (!raised) return { read: async () => "old reader" };
+					const source = self.get(SourceV2, {});
+					return { read: async (ctx: Context) => `new reader -> ${await source.x(ctx)}` };
+				});
+				if (raised) h.serve(SourceV2, () => ({ extra: constant("x"), x: async () => "new source" }));
+				else h.serve(Source, () => ({ x: async () => "old source" }));
+			});
+		const host = createHost({ onError: () => {} });
+		await host.load([{ name: "@test/app", facet: plugin(false) }], context);
+		const reader = await host.get(Reader, {}, context);
+		const states = statesOf(await reader.state.watch(context));
+		const report = await host.reload([{ name: "@test/app", facet: plugin(true) }], context);
+		expect(report.objects.map(({ object }) => object)).toEqual(["app.reader", "app.source"]);
+		expect(await reader.read(context)).toBe("new reader -> new source");
+		await delivered();
+		// Its readiness bound the source's new code, never the old code, which does not serve the raised version.
+		expect(states.filter((state) => state.startsWith("failed"))).toEqual([]);
 		await host.close(context);
 	});
 });
@@ -1486,6 +1574,25 @@ describe("reload: a restart's old attempt (rules 1-4)", () => {
 		gate.resolve();
 		expect(await old).toBe(1);
 		expect(await pure.bump(context)).toBe(11);
+		await host.close(context);
+	});
+
+	it("ends with its object: a reload removing the type while it drains rejects its running call released at once", async () => {
+		const gate = Promise.withResolvers<void>();
+		const { host } = await loaded((h) => servePure(h, "v1", 1, [gate.promise]));
+		const pure = await host.get(Pure, {}, context);
+		let settled = false;
+		const old = rejection(pure.bump(context)).finally(() => {
+			settled = true;
+		});
+		await flushed();
+		await reloadApp(host, (h) => servePure(h, "v2", 10));
+		await host.reload([], context);
+		await flushed();
+		// Rejected by the removal, as a live object's running call is: not once its handler gets past the gate.
+		expect(settled).toBe(true);
+		expect(await old).toMatchObject({ code: "released" });
+		gate.resolve();
 		await host.close(context);
 	});
 
@@ -1669,6 +1776,55 @@ describe("reload: a restart's old attempt (rules 1-4)", () => {
 		expect(tools.value).toEqual(["b"]);
 		// One composition with the new table, never one without a contribution in between.
 		expect(compositions).toEqual([["b"]]);
+		await host.close(context);
+	});
+
+	it("keeps the contributions of an old attempt without natives past its seal, until its successor is live (F-c)", async () => {
+		const Tools = defineRegistry<string[], string[]>("app.tools", { version: 1 });
+		const registry = defineFacet((h) =>
+			h.serve(Tools, { compose: (table) => table.flatMap((entry) => entry.value) }),
+		);
+		const opened = Promise.withResolvers<void>();
+		const app = (tool: string, opening?: Promise<void>) =>
+			defineFacet((h) =>
+				h.serve(Pure, (_, self) => {
+					// Only the new code opens a native (the old attempt has none: F-c), once `opening` resolves; its attempt goes
+					// live then.
+					if (opening !== undefined) {
+						self.open(
+							async () => await opening,
+							() => {},
+						);
+					}
+					self.contribute(Tools, [tool]);
+					return { n: constant(0), label: constant(tool), bump: async () => 0 };
+				}),
+			);
+		const host = createHost({ onError: () => {} });
+		await host.load(
+			[
+				{ name: "@test/app", facet: app("a") },
+				{ name: "@test/tools", facet: registry },
+			],
+			context,
+		);
+		const pure = await host.get(Pure, {}, context);
+		const tools = await host.registry(Tools, context);
+		expect(tools.value).toEqual(["a"]);
+		await host.reload(
+			[
+				{ name: "@test/app", facet: app("b", opened.promise) },
+				{ name: "@test/tools", facet: registry },
+			],
+			context,
+		);
+		await flushed();
+		// The old attempt drained and ended (no longer shown live); its successor opens: readers still see its contribution.
+		expect(pure.state.value).toEqual({ kind: "loading" });
+		expect(tools.value).toEqual(["a"]);
+		opened.resolve();
+		await flushed();
+		expect(tools.value).toEqual(["b"]);
 		await host.close(context);
 	});
 });

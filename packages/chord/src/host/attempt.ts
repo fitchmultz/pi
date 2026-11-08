@@ -188,15 +188,14 @@ const NONE: readonly never[] = [];
 /** Running work of one kind (calls, routine calls, job invocations), with the bookkeeping each runs once. */
 type Work = Map<Promise<unknown>, (() => void) | undefined>;
 
-/** Its routines once started: aborted when they stop (its seal, a reload's handover or restart), and their running calls. */
+/** Its routines once started: aborted when they stop (its seal, or a restart draining it), and their running calls. */
 type RoutineRun = { readonly abort: AbortController; readonly calls: Work };
 
 /**
- * What a reload did to an attempt: `started` (a reload started it), `callsDrained` (a restart drains its calls: old
- * work runs on it until its seal, and its end's drain does not wait for them again), `routinesStopped` (its routines
- * stopped, and do not start late).
+ * What a reload did to an attempt: `started` (a reload started it), `callsDrained` (a restart drains it: its routines
+ * stopped, old work runs on it until its seal, and its end's drain does not wait for its calls again).
  */
-type Reloaded = { started: boolean; callsDrained: boolean; routinesStopped: boolean };
+type Reloaded = { started: boolean; callsDrained: boolean };
 
 /** A first dependency check that did not park: the shared answer. */
 const NOT_PARKED = { done: true, cause: undefined } as const;
@@ -707,7 +706,7 @@ export class Attempt implements StoreSelf, KeyDeclarer, RegistryWaiter {
 
 	/** Starts its routines, unless it was sealed meanwhile. */
 	#startRoutines(): void {
-		if (this.#abandoned !== undefined || this.#reloaded?.routinesStopped === true) return;
+		if (this.#abandoned !== undefined) return;
 		const { host, label } = this.#object;
 		const run: RoutineRun = { abort: new AbortController(), calls: new Map() };
 		this.#routineRun = run;
@@ -726,21 +725,17 @@ export class Attempt implements StoreSelf, KeyDeclarer, RegistryWaiter {
 		this.#routineRun?.abort.abort(reason);
 	}
 
-	/** Its routines stop (their ctx aborted); their running calls are waited for by the drain. */
-	stopRoutines(): void {
-		this.#reload().routinesStopped = true;
-		this.#stopRoutines(
-			new ChordError({ code: "released", reason: "ended", message: `${this.#object.label}: reloaded` }),
-		);
-	}
-
 	/**
 	 * A restart drains it: from now on it serves old work (calls caused by calls on old attempts, routed by its object)
-	 * until its seal, counted as the host's old work.
+	 * until its seal, counted as the host's old work, and its routines stop (their ctx aborted; their running calls drain
+	 * with its calls).
 	 */
 	beginDrain(): void {
 		this.#reload().callsDrained = true;
 		this.#object.host.oldWork.open();
+		this.#stopRoutines(
+			new ChordError({ code: "released", reason: "ended", message: `${this.#object.label}: reloaded` }),
+		);
 	}
 
 	/** Whether a restart drains it and it is not sealed yet: old work runs on it. */
@@ -782,7 +777,7 @@ export class Attempt implements StoreSelf, KeyDeclarer, RegistryWaiter {
 
 	/** What a reload did to it, made by the first such step. */
 	#reload(): Reloaded {
-		this.#reloaded ??= { started: false, callsDrained: false, routinesStopped: false };
+		this.#reloaded ??= { started: false, callsDrained: false };
 		return this.#reloaded;
 	}
 
