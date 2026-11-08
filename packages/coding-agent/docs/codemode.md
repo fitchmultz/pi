@@ -12,7 +12,7 @@ A script may start with an options line. It must be the first line; an options l
 // @options: {"max_output_tokens": 2000, "timeout_ms": 60000}
 ```
 
-- `max_output_tokens` (default 10000) limits the output. Longer output keeps its start and end. The result links to an **omitted output** file containing only the missing middle and a **full output** file containing the complete text. Read the omitted file to recover missing content without repeating the visible text; use `offset` and `limit` to page it. A script fails when its output passes 16777216 characters of text and base64 image data or 100000 `text()`, `image()`, and `console` calls; write large data to a file with a tool instead.
+- `max_output_tokens` (default 6000) limits the output. Longer output keeps its start and end. The result links to an **omitted output** file containing only the missing middle and a **full output** file containing the complete text. Read the omitted file to recover missing content without repeating the visible text; use `offset` and `limit` to page it. A script fails when its output passes 16777216 characters of text and base64 image data or 100000 `text()`, `image()`, and `console` calls; write large data to a file with a tool instead.
 - `timeout_ms` is a hard deadline for the whole script, including any wait for a free worker. It is unset by default. Image generation can take minutes, so do not set a short deadline for scripts that generate images.
 - `background` (default `false`) runs the script after the tool call returns. See [Background scripts](#background-scripts).
 

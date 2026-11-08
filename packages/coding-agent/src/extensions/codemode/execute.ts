@@ -305,7 +305,7 @@ export function readCodemodeStore(branch: readonly SessionEntry[]): Record<strin
 }
 
 /** Default token budget for script output. */
-const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 6000;
 /** Characters per token when estimating. */
 const CHARS_PER_TOKEN = 4;
 

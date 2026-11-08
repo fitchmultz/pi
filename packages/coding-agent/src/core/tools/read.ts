@@ -23,7 +23,7 @@ export const readToolSystemPromptContribution = {
 	snippet: "Read file contents",
 	guidelines: [
 		"Use read to examine files instead of cat or sed.",
-		"Reuse full instructions and reference docs already in the current context. Reread them when they change or compaction removes them; page unread sections rather than repeating the visible prefix.",
+		"Reuse docs already in context; reread only after they change or leave context, paging unread sections instead of the visible prefix.",
 	],
 } as const;
 
