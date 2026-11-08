@@ -313,6 +313,23 @@ function killProcessTree(pid: number): void {
 	}
 }
 
+/**
+ * Kill what is left in the process group of a command killed while it ran, once its process has exited (macOS only).
+ * macOS skips a process that is still being forked when it signals a group, so a kill that lands while a shell starts
+ * the next step of `a; b` misses that step, which then runs on. The exit is reported only after the fork returned, so
+ * the step is an ordinary group member by then. Linux signals a group under the lock that fork takes to add the child,
+ * so it misses none. Only the group is signalled: the command's pid is already reaped and may name another process,
+ * while the group's id is not reused as long as the group has members.
+ */
+function killProcessGroupAfterExit(pid: number): void {
+	if (process.platform !== "darwin") return;
+	try {
+		process.kill(-pid, "SIGKILL");
+	} catch {
+		// No signalable member remains.
+	}
+}
+
 function waitForChildProcess(
 	child: ChildProcess,
 	spillIsDraining: () => boolean,
@@ -632,7 +649,8 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	private shellPath?: string;
 	private shellEnv?: NodeJS.ProcessEnv;
 	private watchOptions: NodeWatchOptions;
-	private activeChildPids = new Set<number>();
+	/** How to kill each command `exec()` still runs, for `cleanup()`. */
+	private activeKills = new Set<() => void>();
 
 	constructor(options: { cwd: string; shellPath?: string; shellEnv?: NodeJS.ProcessEnv; watch?: NodeWatchOptions }) {
 		this.cwd = options.cwd;
@@ -729,8 +747,10 @@ export class NodeExecutionEnv implements ExecutionEnv {
 			let spillStart: Promise<void> | undefined;
 			let spillStream: WriteStream | undefined;
 			let spillBackpressured = false;
+			let killed = false;
 
 			const onAbort = () => {
+				killed = true;
 				if (child?.pid) killProcessTree(child.pid);
 			};
 			const failCallback = (error: unknown) => {
@@ -760,7 +780,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 				settled = true;
 				if (timeoutId) clearTimeout(timeoutId);
 				if (signal) signal.removeEventListener("abort", onAbort);
-				if (child?.pid) this.activeChildPids.delete(child.pid);
+				this.activeKills.delete(onAbort);
 				resolvePromise(result);
 			};
 			const pauseOutput = () => {
@@ -832,7 +852,11 @@ export class NodeExecutionEnv implements ExecutionEnv {
 					stdio: [stdinCommand === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 					windowsHide: true,
 				});
-				if (child.pid) this.activeChildPids.add(child.pid);
+				if (child.pid) this.activeKills.add(onAbort);
+				// A kill that landed while the command was starting a process can miss that process.
+				child.once("exit", () => {
+					if (killed && child?.pid) killProcessGroupAfterExit(child.pid);
+				});
 				if (stdinCommand !== undefined) {
 					child.stdin?.on("error", () => {});
 					child.stdin?.end(stdinCommand);
@@ -1244,8 +1268,8 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async cleanup(_context: Context): Promise<void> {
-		for (const pid of this.activeChildPids) killProcessTree(pid);
-		this.activeChildPids.clear();
+		for (const kill of this.activeKills) kill();
+		this.activeKills.clear();
 	}
 }
 export type { NodeWatchOptions } from "./node-watch.ts";

@@ -356,6 +356,21 @@ pub fn kill_tree(pid: u32) {
     }
 }
 
+/// Kill what is left in the process group of a command killed while it ran, once the command's process has exited
+/// (macOS only). macOS skips a process that is still being forked when it signals a group, so a kill that lands while a
+/// shell starts the next step of `a; b` misses that step, which then runs on. The exit is reported only after the fork
+/// returned, so the step is an ordinary group member by then. Linux signals a group under the lock that fork takes to
+/// add the child, so it misses none. Only the group is signalled: the command's pid is already reaped and may name
+/// another process, while the group's id is not reused as long as the group has members.
+pub fn kill_group_after_exit(pid: u32) {
+    if cfg!(target_os = "macos") {
+        // SAFETY: plain signal delivery.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+}
+
 /// The process group of a `process` program: what the program started there is killed once it exits.
 pub struct Group {
     pid: u32,

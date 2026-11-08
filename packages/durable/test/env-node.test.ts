@@ -763,6 +763,35 @@ describe("NodeExecutionEnv shell", () => {
 		},
 	);
 
+	// Descendants that inherit the pipes can outlive the shell (earendil-works/pi#5303 lost their output in coding-agent).
+	// exec() reads what they write while they keep writing; once they fall silent, a descendant that still holds the
+	// pipes no longer keeps it waiting.
+	it.skipIf(process.platform === "win32")(
+		"reads what descendants write after the shell exits and settles once they fall silent",
+		async () => {
+			const root = createTempDir();
+			const env = new NodeExecutionEnv({ cwd: root });
+			const started = Date.now();
+			try {
+				const collected = await collectShellOutput(
+					env,
+					"echo $$ > group.pid; sleep 3 & (for i in 1 2 3 4 5 6 7 8 9 10; do sleep 0.02; echo tick$i; done) & exit 3",
+					undefined,
+					BACKGROUND_CONTEXT,
+				);
+				expect(getOrThrow(collected.result)).toEqual({ exitCode: 3 });
+				expect(collected.output).toBe(Array.from({ length: 10 }, (_, index) => `tick${index + 1}\n`).join(""));
+				// Well before the silent `sleep 3` releases the pipes.
+				expect(Date.now() - started).toBeLessThan(2000);
+			} finally {
+				// `sleep 3` outlives exec(); end what is left of its process group.
+				try {
+					process.kill(-Number.parseInt(readFileSync(join(root, "group.pid"), "utf8"), 10), "SIGKILL");
+				} catch {}
+			}
+		},
+	);
+
 	it("cleanup terminates active shell processes", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });

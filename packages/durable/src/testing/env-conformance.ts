@@ -557,6 +557,48 @@ export function createEnvConformance(options: EnvConformanceOptions): readonly E
 				await running;
 			}
 		}),
+
+		createCase(
+			"exec abort and cleanup also stop the step the shell is starting",
+			async (env) => {
+				// Process groups are POSIX; Windows backends kill a process tree.
+				if (getOrThrow(await env.joinPath(["a", "b"], context)) === "a\\b") return;
+				// Each round stops the command at its first output, which arrives while the shell starts `sleep`. macOS can
+				// miss a process that is being forked when it kills a group; most rounds miss that moment, so several run.
+				for (const stop of ["abort", "cleanup"] as const) {
+					for (let round = 0; round < 10; round++) {
+						const pidFile = `group-${stop}-${round}.pid`;
+						const controller = new AbortController();
+						const result = await env.exec(
+							`echo $$ > ${pidFile}; echo started; sleep 5`,
+							{
+								onOutput: () => {
+									if (stop === "abort") controller.abort();
+									else void env.cleanup(context);
+								},
+							},
+							withAbortSignal(controller.signal, context),
+						);
+						if (stop === "abort") assert.strictEqual(errorCode(result), "aborted");
+						else assert.strictEqual(getOrThrow(result).exitCode, 137);
+						const group = getOrThrow(await env.readTextFile(pidFile, context)).trim();
+						const hasMembers = async () =>
+							getOrThrow(await env.exec(`kill -0 -- -${group} 2>/dev/null`, undefined, context)).exitCode === 0;
+						try {
+							// The whole group ends at once; a `sleep` that escaped the kill would stay for five seconds.
+							const goneBy = Date.now() + 1000;
+							while (await hasMembers()) {
+								assert.ok(Date.now() < goneBy, `process group ${group} still has members after ${stop}`);
+								await new Promise((resolve) => setTimeout(resolve, 20));
+							}
+						} finally {
+							getOrThrow(await env.exec(`kill -KILL -- -${group} 2>/dev/null; :`, undefined, context));
+						}
+					}
+				}
+			},
+			30_000,
+		),
 	];
 
 	if (options.listFiles) {

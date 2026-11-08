@@ -97,6 +97,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
 | Oversized public Durable input/write admissions must not fail the Session; host commits can opt into assembled-batch checks including document revisions. Queued input entry-size refusal settles only that input and preserves answers, tool work and valid siblings. SQLite checks exact rows with confirmed rollback, not an aggregate queue cap; post-effect compactions and real commit failures keep their fatal-storage semantics. Upstream's group commit fails the Session on any refused batch, so the check runs before a commit joins the writer's group, once every admitted write is published; the Session's storage cache and gated storage forward it | `packages/durable/src/{storage/sqlite/storage,session/session,session/cached-storage,session/keys,session/transaction,harness/harness,harness/inbox,harness/submissions,harness/compaction}.ts` | `packages/durable/test-workers/{input-admission,commit-admission,storage}.test.ts`, `packages/durable/test/harness-storage-failure.test.ts` |
 | Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
+| Cancelling a shell on macOS must also stop the step the shell was starting at that moment. A macOS group kill skips a process that is still being forked, and upstream kills the group only once; after a killed command's process exits, kill its group once more | `core/tools/bash.ts`, `utils/shell.ts`, `packages/durable/src/env/node.ts`, `packages/env/daemon/src/{exec,sys/unix,sys/windows}.rs` | `bash-abort-process-group.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
 | File forks must migrate legacy entries before replacing the source header, preserving indexed history and model context | `core/session-manager.ts` | `session-manager/fork-migration.test.ts` |
 | After a failed journal write, including the first write that creates the file, the next append or save must rewrite the journal from accepted memory so reopened history keeps its ancestry without duplicate or partial records. Appends never adopt a file another writer created at a new journal's path, a file rejected by `setSessionFile()` never receives the current session's entries, and a new session starts without the old failure ([#257](https://github.com/fitchmultz/pi/issues/257)) | `core/session-manager.ts` | `session-manager/file-operations.test.ts`, `suite/regressions/257-journal-write-failure.test.ts` |
 | Atomic private rewrites, canonical credential locks and preservation of unrelated settings | `utils/atomic-file.ts`, `core/{auth-storage,settings-manager,session-manager}.ts` | `file-safety.test.ts` |
@@ -217,8 +218,8 @@ re-claimed stored record IDs on every update, so the fork keeps that filter. The
 [2026-11-05 record](docs/upstream-sync-2026-11-05.md#performance) has the measurements.
 
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
-fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart and
-`background_command`, and no upstream publishing, binary (including Android APK) or
+fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart,
+`background_command`, bash abort and bash timeout, and no upstream publishing, binary (including Android APK) or
 issue-analysis workflows. Upstream's `scripts/preview-packages.mjs` is kept but unused;
 the preview script's tests still run. Nix builds
 retain upstream's derivation and locks with the batched install-phase packing above; automatic
@@ -415,8 +416,8 @@ npm run check
 ```
 
 Open the PR with `gh pr create --repo fitchmultz/pi`, follow CI to completion, fix failures and actionable review findings (or record evidence-backed rebuttals), and merge through repository rules. Refresh the canonical local checkout without overwriting unrelated work, install and verify changed resources, then remove only the task's clean worktree and obsolete branch.
-CI adds tmux for the real-terminal restart test, a macOS job for restart and
-`background_command`, and one Linux standalone build with the compiled extension regression.
+CI adds tmux for the real-terminal restart test, a macOS job for restart, `background_command`,
+bash abort and bash timeout, and one Linux standalone build with the compiled extension regression.
 The standalone step uses pinned Bun 1.3.14 and the existing package build.
 
 ## Install and activate

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT, withAbortSignal } from "@earendil-works/chord/context";
@@ -229,6 +229,67 @@ describe("RemoteExecutionEnv", () => {
 		expect(result.ok ? "ok" : result.error.code).toBe("timeout");
 		expect(Date.now() - started).toBeLessThan(3000);
 	});
+
+	// As NodeExecutionEnv does, the daemon reads what descendants write after the shell exits while they keep writing;
+	// once they fall silent, a descendant that still holds the pipes no longer keeps the command waiting.
+	it.skipIf(process.platform === "win32")(
+		"reads what descendants write after the shell exits and settles once they fall silent",
+		async () => {
+			const { env } = environment();
+			let output = "";
+			const started = Date.now();
+			try {
+				const result = await env.exec(
+					"echo $$ > group.pid; sleep 3 & (for i in 1 2 3 4 5 6 7 8 9 10; do sleep 0.02; echo tick$i; done) & exit 3",
+					{
+						onOutput: (text: string) => {
+							output += text;
+						},
+					},
+					context,
+				);
+				expect(getOrThrow(result)).toEqual({ exitCode: 3 });
+				expect(output).toBe(Array.from({ length: 10 }, (_, index) => `tick${index + 1}\n`).join(""));
+				// Well before the silent `sleep 3` releases the pipes.
+				expect(Date.now() - started).toBeLessThan(2000);
+			} finally {
+				// `sleep 3` outlives the command; end what is left of its process group.
+				try {
+					process.kill(-Number.parseInt(readFileSync(join(env.cwd, "group.pid"), "utf8"), 10), "SIGKILL");
+				} catch {}
+			}
+		},
+	);
+
+	// While the output link is backed up, the daemon's readers wait for it to drain. That wait is not silence: GitHub CI
+	// lost a command's final output when the post-exit grace expired during it (fitchmultz/pi#312).
+	it.skipIf(process.platform === "win32")(
+		"keeps reading after the shell exits while the output link is backed up",
+		async () => {
+			const { env } = environment();
+			// After the shell exits, a descendant writes more than the 4 MiB of unsent output at which the daemon's reader
+			// waits, then keeps writing a dot at a time while it waits.
+			const size = 4.5 * 1024 * 1024;
+			const dots = 300_000;
+			const stall = new Int32Array(new SharedArrayBuffer(4));
+			let output = "";
+			const result = await env.exec(
+				`(yes 0123456789abcdef | head -c ${size}; i=0; while [ $i -lt ${dots} ]; do printf .; i=$((i+1)); done; printf END) & exit 0`,
+				{
+					onOutput: (text: string) => {
+						// Blocking the event loop for a second, far longer than the grace, backs up the link behind it.
+						if (output === "") Atomics.wait(stall, 0, 0, 1000);
+						output += text;
+					},
+				},
+				context,
+			);
+			expect(getOrThrow(result)).toEqual({ exitCode: 0 });
+			expect(output.length).toBe(size + dots + "END".length);
+			expect(output.endsWith("END")).toBe(true);
+		},
+		30_000,
+	);
 
 	// The daemon used to die on Connection.close()'s SIGTERM before killing its commands.
 	it.skipIf(process.platform === "win32")("kills running commands when the connection closes", async () => {
