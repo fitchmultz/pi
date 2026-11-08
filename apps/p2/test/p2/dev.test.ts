@@ -553,7 +553,7 @@ test(
 	},
 );
 
-test("a forced dev restart reaps locked workers before resuming their stores", { timeout: 60_000 }, async () => {
+test("a forced dev restart ends a hung close at its deadline and resumes workers", { timeout: 60_000 }, async () => {
 	const directory = await mkdtemp(join(tmpdir(), "p2-dev-forced-restart-"));
 	const project = join(directory, "apps/p2");
 	const dataDir = join(directory, "data");
@@ -567,23 +567,25 @@ test("a forced dev restart reaps locked workers before resuming their stores", {
 	for (const name of ["packages", "node_modules", "tsconfig.json", "tsconfig.base.json"])
 		await symlink(new URL(`../../../../${name}`, import.meta.url).pathname, join(directory, name));
 
-	// The old server misses its shutdown deadline before SessionHosts.close, and its worker ignores IPC disconnect.
-	// This reproduces a detached lock owner that only the supervisor can reap.
+	// The old server's close hangs before it closes its workers, so only its close deadline ends it: through
+	// `process.exit`, whose exit hooks remove the macOS lock socket file its replacement needs. Its worker, never
+	// closed, stops itself once its server is gone.
 	const serverEntry = join(project, "src/hosts/server.ts");
-	await writeFile(
-		serverEntry,
-		(await readFile(serverEntry, "utf8"))
-			.replace('import { mkdirSync } from "node:fs";', 'import { existsSync, mkdirSync, rmSync } from "node:fs";')
-			.replace(
-				"\t\t\t\tawait hosts.close();",
-				'\t\t\t\tif (existsSync(join(dataDir, "test-hang-close"))) { rmSync(join(dataDir, "test-hang-close")); await new Promise<void>(() => {}); }\n\t\t\t\tawait hosts.close();',
-			),
-	);
-	const workerEntry = join(project, "src/hosts/worker.ts");
-	await writeFile(
-		workerEntry,
-		(await readFile(workerEntry, "utf8")).replace('process.once("disconnect", () => void stop());', ""),
-	);
+	let serverSource = await readFile(serverEntry, "utf8");
+	for (const [anchor, replacement] of [
+		[
+			'import { mkdirSync, readFileSync } from "node:fs";',
+			'import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";',
+		],
+		[
+			"\t\t\t\tawait workers.close(BACKGROUND_CONTEXT);",
+			'\t\t\t\tif (existsSync(join(dataDir, "test-hang-close"))) { rmSync(join(dataDir, "test-hang-close")); await new Promise<void>(() => {}); }\n\t\t\t\tawait workers.close(BACKGROUND_CONTEXT);',
+		],
+	]) {
+		assert.ok(serverSource.includes(anchor), `server.ts no longer has ${JSON.stringify(anchor)}`);
+		serverSource = serverSource.replace(anchor, replacement);
+	}
+	await writeFile(serverEntry, serverSource);
 	const probeDirectory = join(project, "plugins/dev-probe");
 	await mkdir(join(probeDirectory, "nested"), { recursive: true });
 	await pluginPackage(probeDirectory);
@@ -648,6 +650,7 @@ test("a forced dev restart reaps locked workers before resuming their stores", {
 		await writeFile(join(dataDir, "test-hang-close"), "hang once");
 		child.kill("SIGUSR2");
 		await poll(() => ports().length === 2, 30_000, "replacement server");
+		assert.match(log, /p2: the close did not finish within 8 s, exiting/);
 		await browser.close(BACKGROUND_CONTEXT);
 		browser = clientHost(ports()[1]!);
 		const replacement = browser.hold(Probe, { session: session.id }, BACKGROUND_CONTEXT);
@@ -684,7 +687,7 @@ test("a forced dev restart reaps locked workers before resuming their stores", {
 			try {
 				process.kill(-oldWorkerPid, "SIGKILL");
 			} catch {
-				// The fixed supervisor already reaped it.
+				// Gone already.
 			}
 		}
 		await rm(directory, { recursive: true, force: true });

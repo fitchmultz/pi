@@ -305,6 +305,33 @@ describe("FooterDataProvider reftable branch detection", () => {
 		}
 	});
 
+	it("ignores a branch query that finishes after the cwd changed", async () => {
+		vi.useFakeTimers();
+		const repoDir = createPlainReftableRepo(tempDir);
+		const outsideDir = join(tempDir, "outside");
+		mkdirSync(outsideDir);
+
+		const provider = new FooterDataProvider(repoDir);
+		try {
+			expect(provider.getGitBranch()).toBe("main");
+			// The startup refresh asks git; its answer waits for the next timer.
+			vi.advanceTimersToNextTimer();
+			expect(vi.mocked(execFile)).toHaveBeenCalledTimes(1);
+			provider.setCwd(outsideDir);
+			expect(provider.getGitBranch()).toBeNull();
+			const onBranchChange = vi.fn();
+			provider.onBranchChange(onBranchChange);
+
+			await vi.runAllTimersAsync();
+
+			expect(provider.getGitBranch()).toBeNull();
+			expect(onBranchChange).not.toHaveBeenCalled();
+		} finally {
+			provider.dispose();
+			vi.useRealTimers();
+		}
+	});
+
 	it("retries git watchers 5 seconds after an async fs.watch error", async () => {
 		vi.useFakeTimers();
 		const repoDir = createPlainRepo(tempDir);
