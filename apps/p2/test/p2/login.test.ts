@@ -13,6 +13,10 @@ import type { Host } from "../../src/runtime/chord.ts";
 import type { ServerResourceOptions } from "../../src/runtime/server.ts";
 import { type Fixture, startFixture, until } from "./helpers.ts";
 
+/** How the fixture provider's model-list refresh ends: it publishes, fails, or waits until it is cancelled. */
+let catalogRefresh: "publish" | "fail" | "wait" = "publish";
+let refreshWaiting = () => {};
+
 /** A faux provider with an API-key login (secret prompt) and an OAuth login (select, URL, device code, code). */
 const createFixtureModels: NonNullable<ServerResourceOptions["createModels"]> = (credentials, modelsStore) => {
 	const models = createModels({ credentials, modelsStore });
@@ -66,6 +70,13 @@ const createFixtureModels: NonNullable<ServerResourceOptions["createModels"]> = 
 					},
 				});
 			if (!context.allowNetwork) return;
+			if (catalogRefresh === "fail") throw new Error("Fixture model list unavailable");
+			if (catalogRefresh === "wait") {
+				refreshWaiting();
+				await new Promise((_resolve, reject) =>
+					context.signal.addEventListener("abort", () => reject(context.signal.reason), { once: true }),
+				);
+			}
 			const extra = { ...faux.models[0], id: "private-model", name: "Private fixture model" };
 			await context.publish({
 				persist: { models: [...faux.models, extra] },
@@ -165,6 +176,9 @@ describe("provider login (fixture provider)", () => {
 		const other = otherBrowser.hold(ProviderLogin, {}, BACKGROUND_CONTEXT);
 		const { attemptId } = await other.start({ providerId: "faux", authType: "oauth" }, BACKGROUND_CONTEXT);
 		await until(login.login, (current) => current?.attemptId === attemptId && current.prompt !== null);
+		// A late cancel of the first login must not end the second, which the same owner started in another tab.
+		await assert.rejects(login.cancel({ attemptId: first.attemptId }, BACKGROUND_CONTEXT), /no longer active/);
+		assert.equal(login.login.value?.status, "working");
 		// Both browsers hold the owner's sheet; once neither does (closed sheets, disconnects), the owner has left and the
 		// flow ends. The server's own service shows it (a new hold of the sheet would make the owner present again).
 		other.release();
@@ -178,5 +192,36 @@ describe("provider login (fixture provider)", () => {
 		const again = owner.hold(ProviderLogin, {}, BACKGROUND_CONTEXT);
 		assert.equal((await until(again.login, (current) => current?.attemptId === attemptId))?.status, "cancelled");
 		login = again;
+	});
+
+	it("stays signed in when the model-list refresh after storing the credential fails or is cancelled", async () => {
+		for (const ending of ["fail", "cancel"] as const) {
+			await login.logout({ providerId: "faux" }, BACKGROUND_CONTEXT);
+			assert.equal(login.providers.value[0]?.signedIn, null, `${ending}: signed out first`);
+			const waiting = new Promise<void>((resolve) => {
+				refreshWaiting = resolve;
+			});
+			catalogRefresh = ending === "fail" ? "fail" : "wait";
+			try {
+				const { attemptId } = await login.start({ providerId: "faux", authType: "api_key" }, BACKGROUND_CONTEXT);
+				await answer("secret", "private-api-key");
+				if (ending === "cancel") {
+					await waiting;
+					await login.cancel({ attemptId }, BACKGROUND_CONTEXT);
+				}
+				const done = await until(
+					login.login,
+					(current) => current?.attemptId === attemptId && current.status !== "working",
+				);
+				// The credential was stored before the refresh: signed in, with a warning about the model list.
+				assert.equal(done?.status, "success", ending);
+				assert.match(done?.message ?? "", /Model-list refresh did not complete/, ending);
+				const providers = await until(login.providers, (value) => Boolean(value?.[0]?.signedIn));
+				assert.equal(providers?.[0]?.signedIn, "api_key", ending);
+				await login.dismiss({ attemptId }, BACKGROUND_CONTEXT);
+			} finally {
+				catalogRefresh = "publish";
+			}
+		}
 	});
 });

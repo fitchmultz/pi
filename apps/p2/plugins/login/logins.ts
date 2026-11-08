@@ -16,8 +16,10 @@ type Attempt = {
 	done: Promise<void>;
 };
 
-/** The current login (one at a time) and the principal key of the owner that started it. */
-export type LoginsState = { readonly login: LoginState | null; readonly owner: string | null };
+/** The current login (one at a time) and the principal key of the owner that started it; dismissal keeps the key. */
+export type LoginsState =
+	| { readonly login: LoginState; readonly owner: string }
+	| { readonly login: null; readonly owner: string | null };
 
 /**
  * Provider logins (provider-owned api-key and OAuth flows over the shared credentials), one at a time. The flow runs
@@ -73,7 +75,7 @@ export class Logins {
 			done: Promise.resolve(),
 		};
 		this.active = attempt;
-		this.emit(owner, { type: "started", attemptId: attempt.id, providerId, authType });
+		this.emit({ type: "started", attemptId: attempt.id, owner, providerId, authType });
 		attempt.done = this.run(attempt, authType);
 		return attempt.id;
 	}
@@ -99,13 +101,14 @@ export class Logins {
 
 	private prompt(attempt: Attempt, input: AuthPrompt, whole: AbortSignal): Promise<string> {
 		const signal = input.signal ? AbortSignal.any([whole, input.signal]) : whole;
+		// A prompt after its attempt ended, or one its provider already withdrew, is refused unseen.
+		if (signal.aborted) return Promise.reject(signal.reason);
 		// pi-ai's method selectors use device_code (Codex) or device-code (Radius).
 		// Other selectors (accounts, organizations, etc.) still require the owner's answer.
 		if (attempt.remote && input.type === "select") {
 			const deviceCode = input.options.find((option) => /^device[-_]code$/.test(option.id));
 			if (deviceCode) {
-				if (signal.aborted) return Promise.reject(signal.reason);
-				this.emit(attempt.owner, {
+				this.emit({
 					type: "notice",
 					attemptId: attempt.id,
 					event: { type: "info", message: "Using device-code login on this remote connection." },
@@ -120,16 +123,12 @@ export class Logins {
 			const cleanup = () => {
 				signal.removeEventListener("abort", abort);
 				attempt.prompts.delete(id);
-				this.emit(attempt.owner, { type: "promptClosed", attemptId: attempt.id, promptId: id });
+				this.emit({ type: "promptClosed", attemptId: attempt.id, promptId: id });
 			};
 			const abort = () => {
 				cleanup();
 				reject(signal.reason);
 			};
-			if (signal.aborted) {
-				reject(signal.reason);
-				return;
-			}
 			attempt.prompts.set(id, {
 				prompt,
 				resolve: (value) => {
@@ -138,7 +137,7 @@ export class Logins {
 				},
 			});
 			signal.addEventListener("abort", abort, { once: true });
-			this.emit(attempt.owner, { type: "prompt", attemptId: attempt.id, prompt });
+			this.emit({ type: "prompt", attemptId: attempt.id, prompt });
 		});
 	}
 
@@ -156,7 +155,7 @@ export class Logins {
 					signal,
 					prompt: (prompt) => this.prompt(attempt, prompt, signal),
 					notify: (event) => {
-						if (!signal.aborted) this.emit(attempt.owner, { type: "notice", attemptId: attempt.id, event });
+						if (!signal.aborted) this.emit({ type: "notice", attemptId: attempt.id, event });
 					},
 				},
 				{ getDeviceId: () => deviceId },
@@ -169,14 +168,14 @@ export class Logins {
 			} catch {
 				message = "Signed in. Model-list refresh did not complete; use Refresh models to retry.";
 			}
-			this.emit(attempt.owner, {
+			this.emit({
 				type: "finished",
 				attemptId: attempt.id,
 				status: "success",
 				...(message ? { message } : {}),
 			});
 		} catch {
-			this.emit(attempt.owner, {
+			this.emit({
 				type: "finished",
 				attemptId: attempt.id,
 				status: committed ? "success" : signal.aborted ? "cancelled" : "error",
@@ -242,15 +241,12 @@ export class Logins {
 		await this.resources.refreshModels(providerId, this.lifetime.signal);
 	}
 
-	/** Applies `event` of `owner`'s login to the state, redacting the codes and URLs it shows from the logs. */
-	private emit(owner: string, event: LoginEvent): void {
+	/** Applies `event` to the state, redacting the codes and URLs it shows from the logs. */
+	private emit(event: LoginEvent): void {
 		if (event.type === "notice" && event.event.type === "device_code")
 			processLogs.redactor.addSecret(event.event.userCode);
 		if (event.type === "notice" && event.event.type === "auth_url") processLogs.redactor.addSecret(event.event.url);
-		this.current = {
-			owner: event.type === "started" ? owner : this.current.owner,
-			login: reduce(this.current.login, event),
-		};
+		this.current = reduce(this.current, event);
 		this.changed();
 	}
 
@@ -266,18 +262,26 @@ export class Logins {
 	}
 }
 
-/** The next state of the current login after `event`. */
-function reduce(state: LoginState | null, event: LoginEvent): LoginState | null {
+/** The next state after `event`: a start shows its login and owner; any other event updates only its attempt's login. */
+function reduce(current: LoginsState, event: LoginEvent): LoginsState {
 	if (event.type === "started")
 		return {
-			attemptId: event.attemptId,
-			providerId: event.providerId,
-			authType: event.authType,
-			status: "working",
-			prompt: null,
-			notices: [],
+			login: {
+				attemptId: event.attemptId,
+				providerId: event.providerId,
+				authType: event.authType,
+				status: "working",
+				prompt: null,
+				notices: [],
+			},
+			owner: event.owner,
 		};
-	if (state === null || state.attemptId !== event.attemptId) return state;
+	if (current.login === null || current.login.attemptId !== event.attemptId) return current;
+	return { login: reduceLogin(current.login, event), owner: current.owner };
+}
+
+/** The next state of an attempt's login after one of its later events. */
+function reduceLogin(state: LoginState, event: Exclude<LoginEvent, { type: "started" }>): LoginState {
 	switch (event.type) {
 		case "prompt":
 			return { ...state, prompt: event.prompt };
