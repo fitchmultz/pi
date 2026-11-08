@@ -1190,4 +1190,53 @@ describe("versions resolved by a reload (slice 7b §8)", () => {
 		expect(await record(jobs.store, run.id)).toBeUndefined();
 		await jobs.close();
 	});
+
+	it("a run blocked at its load counts once when it runs, after a failed activation and a reload dropping its job", async () => {
+		const open = await storeFile();
+		const jobs = await opened(await open(), () => new Promise(() => {}));
+		await jobs.imports.start({ path: "a" }, context);
+		await delivered();
+		await jobs.crash();
+		const store = await open();
+		const serve = (declare: (self: StoreSelf) => void) =>
+			defineFacet((h) =>
+				h.serve(Store, (_, self) => {
+					declare(self);
+					return {};
+				}),
+			);
+		const errors: HostError[] = [];
+		const host = createHost({ store, onError: (error) => errors.push(error), closeTimeout: 200 });
+		// Version 2 blocks the run at its load; then the activation fails at its native's open: no attempt went live.
+		const failing = serve((self) => {
+			self.open(
+				async () => {
+					throw new Error("open failed");
+				},
+				() => {},
+			);
+			self.job(ImportV2, { run: () => new Promise(() => {}) });
+		});
+		await host.load([{ name: "notes", facet: failing }], context);
+		expect(errors.map(({ kind }) => kind)).toContain("activation_failed");
+		// The code drops the job: its waiting runs are blocked (`version`) as its attempt goes live (`get` waits for it).
+		await host.reload([{ name: "notes", facet: serve(() => {}) }], context);
+		const ref = await host.get(Store, {}, context);
+		const invoked = Promise.withResolvers<void>();
+		const taking = serve((self) => {
+			self.job(Import, {
+				run: () => {
+					invoked.resolve();
+					return new Promise(() => {});
+				},
+			});
+		});
+		await host.reload([{ name: "notes", facet: taking }], context);
+		await invoked.promise;
+		// Running on code that takes it, it is counted once (keep-alive and the concurrency limit).
+		expect(host.activity.value.jobs).toBe(1);
+		ref.release();
+		await host.close(context);
+		await store.close(context);
+	});
 });
