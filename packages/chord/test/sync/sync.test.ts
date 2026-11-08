@@ -762,8 +762,11 @@ describe("FlushScheduler", () => {
 		expect(flushes).toEqual([4200]);
 		await time.advance(5000);
 		expect(flushes).toEqual([4200]);
+		scheduler.notify(false);
+		await time.advance(5000);
+		expect(flushes).toEqual([4200, 14200]);
 		await scheduler.close();
-		expect(flushes).toEqual([4200, 9200]);
+		expect(flushes).toEqual([4200, 14200, 14200]);
 	});
 
 	it("keeps the urgency of commits that arrived during a flush", async () => {
@@ -810,5 +813,59 @@ describe("FlushScheduler", () => {
 		expect(errors).toHaveLength(2);
 		await time.advance(60_000);
 		expect(attempts).toHaveLength(3);
+	});
+
+	it("closes after the flush underway with one more flush, and schedules nothing after it", async () => {
+		const time = clock();
+		const releases: (() => void)[] = [];
+		const flushes: number[] = [];
+		const scheduler = new FlushScheduler({
+			...time,
+			flush: () => {
+				flushes.push(time.now());
+				return new Promise<void>((resolve) => releases.push(resolve));
+			},
+			onError: (error) => {
+				throw error;
+			},
+		});
+		scheduler.notify(false);
+		await time.advance(5000);
+		scheduler.notify(true);
+		const closed = scheduler.close();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		// The final flush waits for the one underway.
+		expect(flushes).toEqual([5000]);
+		releases[0]!();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(flushes).toEqual([5000, 5000]);
+		releases[1]!();
+		await closed;
+		scheduler.notify(true);
+		await time.advance(60_000);
+		expect(flushes).toEqual([5000, 5000]);
+	});
+
+	it("cancels a scheduled retry on close, and rejects when the final flush fails", async () => {
+		const time = clock();
+		const attempts: number[] = [];
+		const errors: unknown[] = [];
+		const scheduler = new FlushScheduler({
+			...time,
+			flush: async () => {
+				attempts.push(time.now());
+				throw new Error("offline");
+			},
+			onError: (error) => errors.push(error),
+		});
+		scheduler.notify(true);
+		await time.advance(500);
+		expect(attempts).toEqual([200]);
+		await expect(scheduler.close()).rejects.toThrow("offline");
+		// The final flush's failure rejects `close()`; only the scheduled flush's went to `onError`.
+		expect(attempts).toEqual([200, 500]);
+		expect(errors).toHaveLength(1);
+		await time.advance(60_000);
+		expect(attempts).toEqual([200, 500]);
 	});
 });
