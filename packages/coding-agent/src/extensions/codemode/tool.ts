@@ -120,7 +120,7 @@ export interface CodemodeToolDetails {
 export const codemodeToolSystemPromptContribution = {
 	snippet: "Run JavaScript that calls other tools",
 	guidelines: [
-		"Batch independent tool calls in one response, directly or through codemode (Promise.allSettled). Use codemode to chain calls, loop, or filter large output. Keep dependent calls and shared-state mutations ordered.",
+		"Batch independent calls in one response using tools declared for direct calls, or use codemode (Promise.allSettled). Use codemode to chain calls, loop, or filter large output. Keep dependent calls and shared-state mutations ordered.",
 		"Emit only what the next decision needs: print long text with text(value), not whole allSettled receipts or JSON-wrapped files and logs.",
 	],
 } as const;
