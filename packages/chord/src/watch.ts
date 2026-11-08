@@ -113,9 +113,11 @@ abstract class WatchLifecycle<T, C extends { readonly kind: "value"; readonly va
 	readonly #closed = Promise.withResolvers<WatchEnd>();
 	#value: T;
 	#listener: Listener<C> | undefined;
-	#started = false;
-	#scheduled = false;
-	#running = false;
+	/**
+	 * Serialized delivery: `unstarted` until `start()`, `scheduled` while a microtask will drain, `running` while a drain
+	 * delivers (its call may run on after the watch ended), `idle` otherwise.
+	 */
+	#delivery: "unstarted" | "idle" | "scheduled" | "running" = "unstarted";
 	/** Set by `endAfterDelivery()`: the source sends nothing more; the watch ends `ended` once it delivered the rest. */
 	#ending = false;
 	/** Set once, by `#terminate()`. */
@@ -138,11 +140,11 @@ abstract class WatchLifecycle<T, C extends { readonly kind: "value"; readonly va
 	}
 
 	start(listener: Listener<C>): void {
-		if (this.#started) throw new Error("Watch is already started");
+		if (this.#delivery !== "unstarted") throw new Error("Watch is already started");
 		if (this.#end !== undefined) throw new Error("Watch is stopped");
-		this.#started = true;
 		this.#listener = listener;
-		this.#schedule();
+		this.#delivery = "idle";
+		this.pending();
 	}
 
 	stop(): Promise<WatchEnd> {
@@ -182,7 +184,7 @@ abstract class WatchLifecycle<T, C extends { readonly kind: "value"; readonly va
 	endAfterDelivery(): void {
 		if (this.#end !== undefined || this.#ending) return;
 		this.#ending = true;
-		if (!this.#running && this.pendingContext === undefined) this.#terminate(ENDED);
+		if (this.#delivery !== "running" && this.pendingContext === undefined) this.#terminate(ENDED);
 	}
 
 	/** Whether the watch still takes frames: it has not ended, and its source has not ended. */
@@ -199,18 +201,14 @@ abstract class WatchLifecycle<T, C extends { readonly kind: "value"; readonly va
 	/** Drop everything pending and every reference into the source; called once, on termination. */
 	protected abstract release(): void;
 
-	/** Something became pending: deliver it once started, never inline. */
+	/**
+	 * Something became pending, or `start()` installed the listener: deliver it on a later microtask, never inline; a
+	 * drain already scheduled or running takes it, and nothing is delivered before `start()` or after the end.
+	 */
 	protected pending(): void {
-		if (this.#started) this.#schedule();
-	}
-
-	#schedule(): void {
-		if (this.#scheduled || this.#running || this.#end !== undefined) return;
-		this.#scheduled = true;
-		queueMicrotask(() => {
-			this.#scheduled = false;
-			void this.#drain();
-		});
+		if (this.#delivery !== "idle" || this.#end !== undefined) return;
+		this.#delivery = "scheduled";
+		queueMicrotask(() => void this.#drain());
 	}
 
 	/**
@@ -218,8 +216,7 @@ abstract class WatchLifecycle<T, C extends { readonly kind: "value"; readonly va
 	 * ends once it delivered the rest and its last call returned.
 	 */
 	async #drain(): Promise<void> {
-		if (this.#running || this.#end !== undefined || !this.#started) return;
-		this.#running = true;
+		this.#delivery = "running";
 		try {
 			while (this.#end === undefined) {
 				const listener = this.#listener;
@@ -242,7 +239,7 @@ abstract class WatchLifecycle<T, C extends { readonly kind: "value"; readonly va
 				}
 			}
 		} finally {
-			this.#running = false;
+			this.#delivery = "idle";
 		}
 	}
 
