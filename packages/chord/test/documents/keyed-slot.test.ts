@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_CONTEXT as context } from "../../src/context/index.ts";
 import { keyed, local, obj, str } from "../../src/contracts/index.ts";
 import { ChordError } from "../../src/data/index.ts";
-import { defineState, type KeyedHandle, type SingletonHandle } from "../../src/documents/index.ts";
+import { defineState, type KeyedHandle, type SingletonHandle, type Tx } from "../../src/documents/index.ts";
 import { RETENTION_MS } from "../../src/documents/residency.ts";
 import type { StoreSelf } from "../../src/host/index.ts";
 import { ChordObject } from "../../src/host/object.ts";
@@ -419,6 +419,60 @@ describe("cold keyed loads on the line", () => {
 		}, context);
 		expect(await get).toEqual({ title: "y" });
 		expect(await notes().get("a", context)).toEqual({ title: "y" });
+		await host.close(context);
+	});
+
+	it.each([
+		[
+			"creates it",
+			{},
+			async (tx: Tx, notes: KeyedHandle<Note>) => {
+				(await tx.draft(notes, "k")).title = "y";
+			},
+		],
+		[
+			"retires it cold and drafts it anew",
+			{ k: "x" },
+			async (tx: Tx, notes: KeyedHandle<Note>) => {
+				await tx.retire(notes, "k");
+				(await tx.draft(notes, "k")).title = "y";
+			},
+		],
+	])("a consumer's pin loading behind a commit that %s reads the committed document", async (_, stored, write) => {
+		const store = await freshStore();
+		await seed(store, stored);
+		const Notes = local("app.store", { version: 1, params: {}, members: { notes: keyed(obj({ title: str() })) } });
+		const Viewer = local("app.viewer", {
+			version: 1,
+			params: { key: str() },
+			members: { note: obj({ title: str() }) },
+		});
+		let self: StoreSelf | undefined;
+		let notes: KeyedHandle<Note> | undefined;
+		const { host } = await loaded(
+			(h) => {
+				h.serve(Notes, (_, s) => {
+					self = s;
+					notes = s.state(Note);
+					return { notes };
+				});
+				h.serve(Viewer, ({ key }, s) => ({ note: s.get(Notes, {}).notes.at(key) }));
+			},
+			{ store },
+		);
+		await host.get(Notes, {}, context);
+		// The commit's store step keeps the line until it returns. Held there, it lets the viewer pin the key after the
+		// transaction's own reads and before the commit adopts the key, so the pin's load waits behind the commit.
+		const held = holdNextCommit(store);
+		const commit = self!.tx((tx) => write(tx, notes!), context);
+		await held.entered;
+		const viewer = host.get(Viewer, { key: "k" }, context);
+		await delivered();
+		held.release();
+		await commit;
+		expect((await viewer).note.value).toEqual({ title: "y" });
+		// The provider's own watch of the pinned key reads it too.
+		expect((await notes!.watch("k", context))?.value).toEqual({ title: "y" });
 		await host.close(context);
 	});
 
