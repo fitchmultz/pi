@@ -62,7 +62,17 @@ type Attempt = {
 	lastMessage: number;
 	cancelTimeout: () => void;
 	cancelWatch: () => void;
+	/** Cancels the overdue-ping check a wake scheduled for this open socket. */
+	cancelStaleCheck: () => void;
 };
+
+/** Attempt and decision callbacks act only while their own phase remains current. */
+type Phase =
+	| { kind: "attempt"; attempt: Attempt }
+	| { kind: "deciding"; woke: boolean }
+	| { kind: "waiting"; cancel: () => void }
+	| { kind: "idle" }
+	| { kind: "stopped" };
 
 /**
  * Keeps the page connected until stopped:
@@ -77,31 +87,33 @@ type Attempt = {
  *   late (a frozen or throttled page) first gives held messages WAKE_GRACE_MS to arrive.
  * - Every close is logged with its reason and close code: a 1006 that never opened is a refused handshake, one after
  *   opening a dropped connection.
+ * - `stop` is final: it cancels a pending retry, ignores a `canRetry` answer still to come, and closes the current
+ *   socket without calling `onConnected` again.
  */
 export function keepConnected(options: ReconnectOptions): { stop(): void } {
 	const env = options.environment;
 	let failures = 0;
-	let current: Attempt | undefined;
-	let cancelRetry: (() => void) | undefined;
-	/** Between a close and the decision to retry (canRetry is asynchronous). */
-	let deciding = false;
-	let wokeWhileDeciding = false;
-	let cancelStaleCheck: (() => void) | undefined;
-	let stopped = false;
+	let phase: Phase = { kind: "idle" };
 
 	const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
+	const isCurrent = (attempt: Attempt): boolean => phase.kind === "attempt" && phase.attempt === attempt;
+	const cancelTimers = (attempt: Attempt): void => {
+		attempt.cancelTimeout();
+		attempt.cancelWatch();
+		attempt.cancelStaleCheck();
+	};
 
 	/** Replaces `attempt` once it is silent longer than `limit`; reschedules itself while messages keep arriving. */
 	const watch = (attempt: Attempt, limit: number): void => {
 		const scheduledAt = attempt.lastMessage + limit + 1;
 		attempt.cancelWatch = env.after(Math.max(0, scheduledAt - env.now()), () => {
-			if (current !== attempt) return;
+			if (!isCurrent(attempt)) return;
 			const now = env.now();
 			const silent = now - attempt.lastMessage;
 			if (silent <= limit) watch(attempt, limit);
 			else if (now - scheduledAt > WAKE_GRACE_MS)
 				attempt.cancelWatch = env.after(WAKE_GRACE_MS, () => {
-					if (current !== attempt) return;
+					if (!isCurrent(attempt)) return;
 					if (env.now() - attempt.lastMessage <= limit) watch(attempt, limit);
 					else attempt.link?.close(`no message from the server for ${seconds(env.now() - attempt.lastMessage)}`);
 				});
@@ -110,7 +122,6 @@ export function keepConnected(options: ReconnectOptions): { stop(): void } {
 	};
 
 	const connect = (): void => {
-		cancelRetry = undefined;
 		const attempt: Attempt = {
 			link: undefined,
 			startedAt: env.now(),
@@ -118,11 +129,12 @@ export function keepConnected(options: ReconnectOptions): { stop(): void } {
 			lastMessage: env.now(),
 			cancelTimeout: () => {},
 			cancelWatch: () => {},
+			cancelStaleCheck: () => {},
 		};
-		current = attempt;
+		phase = { kind: "attempt", attempt };
 		const link = options.open({
 			opened: () => {
-				if (current !== attempt) return;
+				if (!isCurrent(attempt)) return;
 				attempt.openedAt = attempt.lastMessage = env.now();
 				attempt.cancelTimeout();
 				if (options.silenceTimeoutMs !== undefined) watch(attempt, options.silenceTimeoutMs);
@@ -146,75 +158,76 @@ export function keepConnected(options: ReconnectOptions): { stop(): void } {
 	};
 
 	const closed = (attempt: Attempt, reason: string): void => {
-		if (current !== attempt) return;
-		current = undefined;
-		attempt.cancelTimeout();
-		attempt.cancelWatch();
-		cancelStaleCheck?.();
-		cancelStaleCheck = undefined;
-		if (stopped) return;
+		if (!isCurrent(attempt)) return;
+		cancelTimers(attempt);
+		// The loop leaves the attempt before calling out, so a `stop` from `onConnected` ends this decision.
+		const decision: Extract<Phase, { kind: "deciding" }> = { kind: "deciding", woke: false };
+		phase = decision;
 		options.onConnected(false);
 		const now = env.now();
 		if (attempt.openedAt === undefined)
 			env.log(`Connection failed after ${seconds(now - attempt.startedAt)}: ${reason}`);
 		else env.log(`Connection lost after ${seconds(now - attempt.openedAt)} open: ${reason}`);
 		if (attempt.openedAt !== undefined && now - attempt.openedAt >= STABLE_MS) failures = 0;
-		deciding = true;
-		wokeWhileDeciding = false;
-		void options.canRetry().then(
-			(retry) => {
-				deciding = false;
-				if (retry) schedule(wokeWhileDeciding);
-			},
-			() => {
-				deciding = false;
-				schedule(wokeWhileDeciding);
-			},
-		);
+		const decided = (retry: boolean): void => {
+			if (phase !== decision) return;
+			if (retry) schedule(decision.woke);
+			else phase = { kind: "idle" };
+		};
+		void options.canRetry().then(decided, () => decided(true));
 	};
 
 	const schedule = (now: boolean): void => {
-		if (stopped) return;
 		const backoff = Math.min(RETRY_MAX_MS, RETRY_INITIAL_MS * 2 ** failures);
 		failures += 1;
 		// Offline, an attempt fails at once; the `online` wake retries sooner than this.
 		const delay = now ? 0 : env.online() ? backoff : RETRY_MAX_MS;
-		cancelRetry = env.after(delay, connect);
+		phase = { kind: "waiting", cancel: env.after(delay, connect) };
 	};
 
 	const wake = (): void => {
-		if (cancelRetry) {
-			cancelRetry();
-			connect();
-			return;
+		switch (phase.kind) {
+			case "waiting":
+				phase.cancel();
+				connect();
+				return;
+			case "deciding":
+				phase.woke = true;
+				return;
+			case "attempt": {
+				const { attempt } = phase;
+				// A connecting attempt has its own timeout.
+				if (attempt.openedAt === undefined) return;
+				attempt.cancelStaleCheck();
+				attempt.cancelStaleCheck = env.after(
+					Math.max(WAKE_GRACE_MS, attempt.lastMessage + STALE_MS + 1 - env.now()),
+					() => {
+						const silent = env.now() - attempt.lastMessage;
+						if (isCurrent(attempt) && silent > STALE_MS)
+							attempt.link?.close(`no message from the server for ${seconds(silent)}`);
+					},
+				);
+				return;
+			}
+			case "idle":
+			case "stopped":
+				return;
 		}
-		if (deciding) {
-			wokeWhileDeciding = true;
-			return;
-		}
-		const attempt = current;
-		// A connecting attempt has its own timeout.
-		if (attempt?.openedAt === undefined) return;
-		cancelStaleCheck?.();
-		const check = (): void => {
-			cancelStaleCheck = undefined;
-			const silent = env.now() - attempt.lastMessage;
-			if (current === attempt && silent > STALE_MS)
-				attempt.link?.close(`no message from the server for ${seconds(silent)}`);
-		};
-		cancelStaleCheck = env.after(Math.max(WAKE_GRACE_MS, attempt.lastMessage + STALE_MS + 1 - env.now()), check);
 	};
 
 	const removeWake = env.onWake(wake);
 	connect();
 	return {
 		stop: () => {
-			if (stopped) return;
-			stopped = true;
+			const previous = phase;
+			if (previous.kind === "stopped") return;
+			phase = { kind: "stopped" };
 			removeWake();
-			cancelRetry?.();
-			cancelRetry = undefined;
-			current?.link?.close("stopped");
+			if (previous.kind === "waiting") previous.cancel();
+			else if (previous.kind === "attempt") {
+				cancelTimers(previous.attempt);
+				previous.attempt.link?.close("stopped");
+			}
 		},
 	};
 }
