@@ -115,7 +115,7 @@ import { SessionMetrics, SessionStatus, WorkerControl } from "../status/contract
 import { type Child, conversationLocation, SubagentControl, Subagents } from "../subagents/contract.ts";
 import { SessionTree } from "../tree/contract.ts";
 import { Chat, ChatCosts, TranscriptEntries } from "./contract.ts";
-import { type Outgoing, outboxOf } from "./outbox.ts";
+import { type Message, type Outgoing, outboxOf } from "./outbox.ts";
 import { sessionStart } from "./session-start.ts";
 
 /** An upload the server answered with an error status. */
@@ -157,8 +157,8 @@ function outgoingItem(
 	id: string,
 	text: string,
 	files: readonly PickedFile[],
-	author: Outgoing["item"]["author"],
-): Outgoing["item"] {
+	author: Message["item"]["author"],
+): Message["item"] {
 	return {
 		type: "user",
 		key: `outgoing-${id}`,
@@ -170,7 +170,7 @@ function outgoingItem(
 }
 
 /** A transcript of only messages sent from here: what shows before the server has the conversation (a new session). */
-const outgoingTranscript = (messages: readonly Outgoing[]): Transcript => ({
+const outgoingTranscript = (messages: readonly Message[]): Transcript => ({
 	items: messages.map((message) => message.item),
 	earlier: false,
 	artifacts: [],
@@ -922,7 +922,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	const stats = useReadable(chat?.stats) ?? undefined;
 	// Messages sent from here that the server does not show yet (outbox.ts): shown as they will look, a person's
 	// message at the end, or a queued input while a run is busy. An accepted one is shown by the server once the view
-	// has an entry newer than any before it was sent, or, if a run was busy when its send started, once its queued input
+	// has an entry newer than any before it was sent, or, if a run was busy as its call went out, once its queued input
 	// is listed. One sent to an idle conversation is listed as queued only until the run it starts takes it, and the
 	// server's state can arrive before the send's answer: it stays a message until its entry shows, never turning into a
 	// queued row for a moment (the composer would move).
@@ -932,36 +932,35 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	const newest = useRef(newestEntry);
 	newest.current = newestEntry;
 	const busy = transcript?.busy ?? false;
-	// Where each message's first send started: the newest entry then, and whether no run was busy (written by the sender).
-	const started = useRef(new Map<string, { after: number; idle: boolean }>()).current;
 	const queuedIds = useMemo(() => new Set(transcript?.queued.map((item) => item.id)), [transcript]);
 	const shownByServer = useCallback(
-		(message: Outgoing) =>
-			message.sent !== undefined &&
-			((!started.get(message.id)?.idle && queuedIds.has(message.sent.submissionId)) ||
-				newestEntry > message.sent.after),
-		[started, queuedIds, newestEntry],
+		({ delivery }: Outgoing) =>
+			delivery.state === "accepted" &&
+			((!delivery.start.idle && queuedIds.has(delivery.submissionId)) || newestEntry > delivery.start.after),
+		[queuedIds, newestEntry],
 	);
-	useEffect(() => {
-		outbox.settle(shownByServer);
-		for (const id of started.keys()) if (!outgoing.some((message) => message.id === id)) started.delete(id);
-	}, [outbox, shownByServer, started, outgoing]);
-	// Not shown by the server yet; a message in flight whose entry has arrived before the answer already is.
+	// Also when a message is accepted: one whose entry arrived before the answer goes at once.
+	// biome-ignore lint/correctness/useExhaustiveDependencies: `outgoing` is the outbox's messages, which `settle` reads.
+	useEffect(() => outbox.settle(shownByServer), [outbox, shownByServer, outgoing]);
+	// Not shown by the server yet; a message tried whose entry has arrived before the answer already is.
 	const pending = useMemo(
 		() =>
-			outgoing.filter((message) => {
-				const start = started.get(message.id);
-				return !shownByServer(message) && (!start || newestEntry <= start.after);
-			}),
-		[outgoing, shownByServer, started, newestEntry],
+			outgoing.filter(
+				(message) =>
+					!shownByServer(message) &&
+					(message.delivery.state === "untried" || newestEntry <= message.delivery.start.after),
+			),
+		[outgoing, shownByServer, newestEntry],
 	);
 	const pendingQueued = useMemo(
-		() => (busy ? pending.filter((message) => !started.get(message.id)?.idle) : []),
-		[pending, busy, started],
+		() => (busy ? pending.filter(({ delivery }) => delivery.state === "untried" || !delivery.start.idle) : []),
+		[pending, busy],
 	);
 	// The server's queued inputs, without those still shown as messages sent from here.
 	const serverQueued = useMemo(() => {
-		const sentIds = new Set(pending.map((message) => message.sent?.submissionId));
+		const sentIds = new Set(
+			pending.flatMap(({ delivery }) => (delivery.state === "accepted" ? [delivery.submissionId] : [])),
+		);
 		return transcript?.queued.filter((item) => !sentIds.has(item.id)) ?? [];
 	}, [transcript, pending]);
 	// Before the server shows the conversation (a new session's first message), the messages sent from here show alone.
@@ -1045,13 +1044,9 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 			return;
 		}
 		outbox.connect({
-			send: async (message) => {
+			send: async (message, calling) => {
 				const { chat: current, host: client, sessionId: session, conversationId: conversation } = latest.current;
 				if (!current) throw new Error("not connected");
-				// The first try's: a retry after a lost answer must not count the entry the first one wrote.
-				const start = started.get(message.id) ?? { after: newest.current, idle: !latest.current.busy };
-				started.set(message.id, start);
-				const { after } = start;
 				// Uploads run side by side; one kept from an earlier try of this send is reused.
 				const attachments = await Promise.all(
 					message.files.map(async (file) => {
@@ -1067,6 +1062,8 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 				const text = message.text.startsWith("/")
 					? await expandComposerText(client, session, conversation, message.text)
 					: message.text;
+				// Only the call can reach the server: a message whose uploads or expansion failed stays untried, so shown.
+				calling({ after: newest.current, idle: !latest.current.busy });
 				const { submissionId } = await current.send(
 					{
 						text,
@@ -1077,7 +1074,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 					},
 					BACKGROUND_CONTEXT,
 				);
-				return { submissionId, after };
+				return submissionId;
 			},
 			refused,
 			restore: (message, error) => {
@@ -1088,10 +1085,10 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 			},
 		});
 		return () => outbox.connect(undefined);
-	}, [live, outbox, started, restore, setFiles, setReplyTo, setError]);
+	}, [live, outbox, restore, setFiles, setReplyTo, setError]);
 	// Leaving the page loses what the outbox has not delivered: the browser asks first.
 	useEffect(() => {
-		if (outgoing.every((message) => message.sent)) return;
+		if (outgoing.every((message) => message.delivery.state === "accepted")) return;
 		const warn = (event: BeforeUnloadEvent) => event.preventDefault();
 		window.addEventListener("beforeunload", warn);
 		return () => window.removeEventListener("beforeunload", warn);

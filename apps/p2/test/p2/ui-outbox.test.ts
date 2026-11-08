@@ -1,8 +1,11 @@
 // Sending never waits for the connection (plugins/chat/outbox.ts): with the page offline the composer stays, a sent
-// message shows at once like any other, and it reaches the server exactly once when the page is back online. And a
+// message shows at once like any other, and it reaches the server exactly once when the page is back online; one whose
+// answer was lost shows once in its conversation opened again, and one whose upload fails stays shown. And a
 // conversation opened before shows at once on a page that starts without a connection (src/web/conversation-cache.ts).
 
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import type { ConversationView } from "@earendil-works/pi-durable";
 import type { Host } from "@p2/app/v1";
@@ -15,19 +18,54 @@ import { type Fixture, holdIn, startFixture, until } from "./helpers.ts";
 
 /**
  * The page's WebSockets, with a switch: `__goOffline()` closes them and fails every new one (the app keeps retrying),
- * `__offline = false` lets the next retry through.
+ * `__offline = false` lets the next retry through. `__loseAnswerOf(text)` lets the next frame carrying `text` reach the
+ * server, but the page hears nothing after it (the answer among it) and goes offline a second later; `__framesWith`
+ * counts the frames sent with each such text.
  */
 const SWITCH = `(() => {
 	const Native = WebSocket;
 	const sockets = new Set();
+	const decoder = new TextDecoder();
+	let lose;
 	// A page can start offline (a cold start without a connection): set before it loads.
 	window.__offline = sessionStorage.getItem("offline") === "1";
+	window.__framesWith = {};
+	window.__loseAnswerOf = (text) => {
+		window.__framesWith[text] = 0;
+		lose = text;
+	};
 	window.WebSocket = class extends Native {
+		#deaf = false;
+		#heard = new Map();
 		constructor(url, protocols) {
 			// Offline: a path the server refuses, which closes at once as an unreachable server does.
 			super(window.__offline ? String(url).replace("/chord", "/offline") : url, protocols);
 			sockets.add(this);
 			this.addEventListener("close", () => sockets.delete(this));
+		}
+		// The page hears frames through its message listeners, which a deaf socket skips.
+		addEventListener(type, listener, options) {
+			if (type !== "message") return super.addEventListener(type, listener, options);
+			const heard = (event) => {
+				if (!this.#deaf) listener.call(this, event);
+			};
+			this.#heard.set(listener, heard);
+			return super.addEventListener(type, heard, options);
+		}
+		removeEventListener(type, listener, options) {
+			const heard = type === "message" ? this.#heard.get(listener) : undefined;
+			return super.removeEventListener(type, heard ?? listener, options);
+		}
+		send(data) {
+			super.send(data);
+			const texts = Object.keys(window.__framesWith);
+			if (!texts.length) return;
+			const frame = typeof data === "string" ? data : decoder.decode(data);
+			for (const text of texts) if (frame.includes(text)) window.__framesWith[text]++;
+			if (lose === undefined || !frame.includes(lose)) return;
+			lose = undefined;
+			this.#deaf = true;
+			setTimeout(() => window.__goOffline(), 1000);
 		}
 	};
 	window.__goOffline = () => {
@@ -37,12 +75,15 @@ const SWITCH = `(() => {
 })()`;
 const draft = (text: string) =>
 	`(()=>{const e=document.querySelector('.composer textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(e,${JSON.stringify(text)});e.dispatchEvent(new Event('input',{bubbles:true}));})()`;
-/** How many people's messages end with `text`. */
+/** How many people's messages show `text`. */
 const bubbles = (text: string) =>
-	`[...document.querySelectorAll('.messages .user .bubble')].filter((e) => e.textContent.trim().endsWith(${JSON.stringify(text)})).length`;
+	`[...document.querySelectorAll('.messages .user .bubble')].filter((e) => e.textContent.includes(${JSON.stringify(text)})).length`;
 const inputs = (view: ConversationView | null | undefined, text: string) =>
 	(view?.entries ?? []).filter((entry) => entry.kind === "p2.input" && JSON.stringify(entry.data).includes(text))
 		.length;
+/** The sidebar's row of the session titled `title`. */
+const row = (title: string) =>
+	`[...document.querySelectorAll('.drawer .session-main')].find((e) => e.querySelector('.session-title')?.textContent === ${JSON.stringify(title)})`;
 
 describe("offline in the browser", { skip: !browserTests }, () => {
 	let fixture: Fixture;
@@ -313,6 +354,124 @@ describe("offline in the browser", { skip: !browserTests }, () => {
 				"one session created",
 			);
 		} finally {
+			stop();
+			chat.release();
+		}
+	});
+
+	it("shows a message whose answer was lost once when its conversation opens again", async () => {
+		const sessions = await holdIn(owner, Sessions, {}, "owner");
+		const here = await sessions.create({ cwd: fixture.workspace, title: "Lost answer" }, BACKGROUND_CONTEXT);
+		const elsewhere = await sessions.create({ cwd: fixture.workspace, title: "Not here" }, BACKGROUND_CONTEXT);
+		const chat = await holdIn(owner, Chat, { session: here.id, conversation: 1 }, "participant");
+		const stop = follow(chat.view, () => {});
+		try {
+			await browser.metrics(1280, 900);
+			// The other conversation first, then this one inside the page: Back and Forward switch between them.
+			await browser.open(`http://127.0.0.1:${fixture.server.port}/s/${elsewhere.id}`);
+			await browser.wait(`${row("Lost answer")} && !document.querySelector('.offline')`);
+			await browser.evaluate(`${row("Lost answer")}.click()`);
+			await browser.wait(`location.pathname === '/s/${here.id}' && document.querySelector('.hero.small-hero')`);
+			const text = "sent, answer lost";
+			await browser.evaluate(`window.__loseAnswerOf(${JSON.stringify(text)})`);
+			await browser.evaluate(draft(text));
+			await browser.click("button[aria-label=Send]");
+			// The server has it and answers; the page never hears that, then goes offline.
+			await until(chat.view, (view) => JSON.stringify(view?.entries ?? []).includes(`Echo: ${text}`), 30_000);
+			await browser.wait(`Boolean(document.querySelector('.offline'))`);
+
+			// Away and back: the conversation's view opens again, now online, and its outbox sends the message again.
+			await browser.evaluate("history.back()");
+			await browser.wait(`location.pathname === '/s/${elsewhere.id}'`);
+			await browser.evaluate("window.__offline = false");
+			await browser.wait(`!document.querySelector('.offline')`);
+			await browser.evaluate(
+				`(() => { window.__shown = []; window.__sampler = setInterval(() => window.__shown.push(${bubbles(text)}), 10); })()`,
+			);
+			await browser.evaluate("history.forward()");
+			await browser.wait(
+				`location.pathname === '/s/${here.id}' && window.__framesWith[${JSON.stringify(text)}] === 2 && document.querySelector('.messages')?.textContent.includes(${JSON.stringify(`Echo: ${text}`)})`,
+			);
+			// The retry is admitted as the first send was; the transcript's entry is the one message shown.
+			await new Promise((resolve) => setTimeout(resolve, 1_000));
+			const shown = await browser.evaluate<number[]>("clearInterval(window.__sampler), window.__shown");
+			assert.ok(
+				shown.every((count) => count <= 1) && shown.at(-1) === 1,
+				`shown once: ${JSON.stringify([...new Set(shown)])}`,
+			);
+			assert.equal(inputs(chat.view.value, text), 1, "delivered once");
+		} finally {
+			stop();
+			chat.release();
+		}
+	});
+
+	it("keeps showing a message whose upload fails as newer entries arrive, also in its conversation opened again", async () => {
+		const sessions = await holdIn(owner, Sessions, {}, "owner");
+		const here = await sessions.create({ cwd: fixture.workspace, title: "Upload fails" }, BACKGROUND_CONTEXT);
+		const elsewhere = await sessions.create({ cwd: fixture.workspace, title: "Not there" }, BACKGROUND_CONTEXT);
+		const chat = await holdIn(owner, Chat, { session: here.id, conversation: 1 }, "participant");
+		const stop = follow(chat.view, () => {});
+		// Chrome fails the page's uploads while `failing`, as a dropped connection does.
+		let failing = true;
+		const uploads = (raw: unknown) => {
+			const message = JSON.parse(String(raw)) as { method?: string; params?: { requestId: string } };
+			if (message.method !== "Fetch.requestPaused" || !message.params) return;
+			const { requestId } = message.params;
+			void browser.call(
+				failing ? "Fetch.failRequest" : "Fetch.continueRequest",
+				failing ? { requestId, errorReason: "ConnectionFailed" } : { requestId },
+			);
+		};
+		browser.socket.on("message", uploads);
+		try {
+			await browser.metrics(1280, 900);
+			await browser.open(`http://127.0.0.1:${fixture.server.port}/s/${elsewhere.id}`);
+			await browser.wait(`${row("Upload fails")} && !document.querySelector('.offline')`);
+			await browser.evaluate(`${row("Upload fails")}.click()`);
+			await browser.wait(`location.pathname === '/s/${here.id}' && document.querySelector('.hero.small-hero')`);
+			writeFileSync(join(fixture.workspace, "photo.txt"), "attached\n");
+			const document = (await browser.call("DOM.getDocument")) as { root: { nodeId: number } };
+			const node = (await browser.call("DOM.querySelector", {
+				nodeId: document.root.nodeId,
+				selector: ".composer input[type=file]",
+			})) as { nodeId: number };
+			await browser.call("DOM.setFileInputFiles", {
+				nodeId: node.nodeId,
+				files: [join(fixture.workspace, "photo.txt")],
+			});
+			await browser.wait(`document.querySelector('.attachment-name')?.textContent === 'photo.txt'`);
+			await browser.call("Fetch.enable", { patterns: [{ urlPattern: "*/upload*" }] });
+			const text = "photo, upload fails";
+			await browser.evaluate(draft(text));
+			await browser.click("button[aria-label=Send]");
+			await browser.wait(`document.querySelector('.composer textarea').value === '' && ${bubbles(text)} === 1`);
+
+			// Another device writes to the conversation: newer entries, while the server does not have the message.
+			await chat.send({ text: "from another device", requestId: "another device" }, BACKGROUND_CONTEXT);
+			await browser.wait(`document.querySelector('.messages')?.textContent.includes('Echo: from another device')`);
+			assert.equal(await browser.evaluate<number>(bubbles(text)), 1, "shown as newer entries arrive");
+			// Away and back: the conversation's view opens again, and its outbox tries again.
+			await browser.evaluate("history.back()");
+			await browser.wait(`location.pathname === '/s/${elsewhere.id}'`);
+			await browser.evaluate("history.forward()");
+			await browser.wait(
+				`location.pathname === '/s/${here.id}' && document.querySelector('.messages')?.textContent.includes('Echo: from another device')`,
+			);
+			assert.equal(await browser.evaluate<number>(bubbles(text)), 1, "shown in its conversation opened again");
+			assert.equal(inputs(chat.view.value, text), 0, "the server does not have it");
+
+			// Uploads work again: the next try delivers it, shown once.
+			failing = false;
+			await until(chat.view, (view) => JSON.stringify(view?.entries ?? []).includes(`Echo: ${text}`), 30_000);
+			await browser.wait(
+				`document.querySelector('.messages')?.textContent.includes(${JSON.stringify(`Echo: ${text}`)})`,
+			);
+			assert.equal(await browser.evaluate<number>(bubbles(text)), 1, "shown once");
+			assert.equal(inputs(chat.view.value, text), 1, "delivered once");
+		} finally {
+			await browser.call("Fetch.disable");
+			browser.socket.off("message", uploads);
 			stop();
 			chat.release();
 		}

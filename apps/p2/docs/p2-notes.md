@@ -900,9 +900,12 @@ translated phone drawer and intercept chat taps.
   the error; Stop takes back what was not sent yet. The outbox lives for the page: leaving with unsent messages asks
   first. Who the page is (`useOwner`, a guest's grant) is kept while reconnecting, so the composer never turns into
   the "Connecting…" bar after a drop; only a page that never connected shows it. A message sent before the
-  conversation has loaded shows alone until it does. A message whose send started while no run was busy stays a
+  conversation has loaded shows alone until it does. A message whose call went out while no run was busy stays a
   message until its entry shows: the run it starts lists it as queued for a moment, and the server's state can arrive
   before the send's answer, so it would otherwise flash as a queued row above the composer and move it.
+  The outbox also keeps how far each message got (not tried, tried, accepted) and where its first call went out, so
+  a conversation opened again after a lost answer shows the message once. A message whose call has not gone out (its
+  upload failing) stays shown as newer entries arrive: the server cannot have it.
 - **A new session's first message** (`plugins/chat/session-start.ts`) does not wait either: Send on the new-session
   screen clears the composer and shows the message there at once, online or not, above the session's (empty) context
   bar, so the composer stays in place when the session opens; it is the same composer (see **Chat frame**), so it
