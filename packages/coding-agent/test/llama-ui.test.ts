@@ -9,6 +9,7 @@ import { stripAnsi } from "../src/utils/ansi.ts";
 
 const DOWN = "\x1b[B";
 const ENTER = "\r";
+const ESCAPE = "\x1b";
 
 function model(id: string): HuggingFaceModel {
 	return { id, downloads: 1000 };
@@ -21,17 +22,20 @@ function selectedId(view: Component): string | undefined {
 	return row?.split("→ ")[1]?.split(" ")[0];
 }
 
-// Opens the Hugging Face search with each query's results held until the test resolves them.
+// Opens the Hugging Face search with each query's results held until the test resolves them. Like fetch, a search
+// rejects when its signal aborts.
 async function openSearch(): Promise<{
 	view: Component;
 	type: (text: string) => Promise<void>;
 	finishSearch: (query: string, results: HuggingFaceModel[]) => Promise<void>;
+	signalOf: (query: string) => AbortSignal | undefined;
 	selected: Promise<string | undefined>;
 }> {
-	const pending = new Map<string, (results: HuggingFaceModel[]) => void>();
-	const search = (query: string) =>
-		new Promise<HuggingFaceModel[]>((resolve) => {
-			pending.set(query, resolve);
+	const pending = new Map<string, { resolve: (results: HuggingFaceModel[]) => void; signal: AbortSignal }>();
+	const search = (query: string, signal: AbortSignal) =>
+		new Promise<HuggingFaceModel[]>((resolve, reject) => {
+			pending.set(query, { resolve, signal });
+			signal.addEventListener("abort", () => reject(signal.reason), { once: true });
 		});
 	let view: Component | undefined;
 	let resolveSelected: (model: string | undefined) => void = () => {};
@@ -57,12 +61,13 @@ async function openSearch(): Promise<{
 		await vi.advanceTimersByTimeAsync(500);
 	};
 	const finishSearch = async (query: string, results: HuggingFaceModel[]) => {
-		const resolve = pending.get(query);
+		const resolve = pending.get(query)?.resolve;
 		if (!resolve) throw new Error(`no search pending for ${query}`);
 		resolve(results);
 		await vi.advanceTimersByTimeAsync(0);
 	};
-	return { view: shown, type, finishSearch, selected };
+	const signalOf = (query: string) => pending.get(query)?.signal;
+	return { view: shown, type, finishSearch, signalOf, selected };
 }
 
 describe("llama.cpp Hugging Face search", () => {
@@ -118,5 +123,26 @@ describe("llama.cpp Hugging Face search", () => {
 		await finishSearch("qwe", [model("qwen/new-GGUF"), model("qwen/a-GGUF")]);
 
 		expect(selectedId(view)).toBe("qwen/new-GGUF");
+	});
+
+	it("aborts a superseded search and does not show its failure", async () => {
+		const { view, type, finishSearch, signalOf } = await openSearch();
+		await type("qw");
+		await type("e");
+
+		expect(signalOf("qw")?.aborted).toBe(true);
+		expect(stripAnsi(view.render(120).join("\n"))).toContain("Searching Hugging Face…");
+		await finishSearch("qwe", firstResults);
+		expect(selectedId(view)).toBe("qwen/a-GGUF");
+	});
+
+	it("aborts the search in flight when closed", async () => {
+		const { view, type, signalOf, selected } = await openSearch();
+		await type("qw");
+
+		view.handleInput?.(ESCAPE);
+
+		expect(signalOf("qw")?.aborted).toBe(true);
+		await expect(selected).resolves.toBeUndefined();
 	});
 });

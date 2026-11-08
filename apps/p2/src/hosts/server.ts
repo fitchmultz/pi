@@ -150,19 +150,24 @@ export async function startServer(options: ServerOptions = {}): Promise<P2Server
 	// Listen first so plugins see the actual port, but capture requests/upgrades BEFORE listening.
 	// A reconnect can arrive while plugins load: without an upgrade listener Node treats it as
 	// a normal HTTP request, loses it, and leaves the browser waiting forever for its handshake.
-	let markLoaded!: () => void;
-	const loaded = new Promise<void>((resolve) => {
-		markLoaded = resolve;
-	});
+	// They wait for the load's outcome: a failed start drops them, as one still waiting would hold the failed start's
+	// `http.close` (and the lock) until its client gives up.
+	const load = Promise.withResolvers<boolean>();
 	const http = createServer();
 	http.on("request", (request: IncomingMessage, response: ServerResponse) => {
-		void loaded.then(() => handle(request, response));
+		void load.promise.then((loaded) => {
+			if (loaded) handle(request, response);
+			else response.destroy();
+		});
 	});
 	http.on("upgrade", (request, socket, head) => {
 		const path = new URL(request.url ?? "/", "http://localhost").pathname;
-		void loaded
-			.then(() => upgradePrincipal(request))
-			.catch(() => undefined)
+		void load.promise
+			.then((loaded) => {
+				// Dropped below, like an upgrade that failed.
+				if (!loaded) throw new Error("p2 failed to start");
+				return upgradePrincipal(request).catch(() => undefined);
+			})
 			.then(async (principal) => {
 				if (path === "/chord" && principal !== undefined) {
 					upgraded.set(request, principal);
@@ -326,6 +331,7 @@ export async function startServer(options: ServerOptions = {}): Promise<P2Server
 		);
 	} catch (error) {
 		processLogs.notice("server", `Server startup failed: ${error instanceof Error ? error.message : String(error)}`);
+		load.resolve(false);
 		await workers.close(BACKGROUND_CONTEXT).catch(() => {});
 		await host.close(BACKGROUND_CONTEXT).catch(() => {});
 		await store.close(BACKGROUND_CONTEXT).catch(() => {});
@@ -681,7 +687,7 @@ export async function startServer(options: ServerOptions = {}): Promise<P2Server
 				);
 		});
 	}
-	markLoaded();
+	load.resolve(true);
 	if (supervised) process.send?.({ type: "dev-ready" });
 	let closing: Promise<void> | undefined;
 	return {
@@ -730,10 +736,10 @@ const CLOSE_DEADLINE_MS = 8000;
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
 	// Provider logins and server plugins (e.g. the Radius gateway) fetch in this process too.
 	configureFetch();
-	const server = await startServer();
-	console.log(`p2: http://127.0.0.1:${server.port} (data ${server.dataDir})`);
 	// Every way out goes through `process.exit`: a signal's default action skips the exit hooks, which remove the
-	// macOS lock socket file (else the next start refuses) and kill the MCP servers' process groups.
+	// macOS lock socket file (else the next start refuses) and kill the MCP servers' process groups. So the signals are
+	// handled from the start on: one while the server starts closes it once started.
+	const starting = startServer();
 	let stopping = false;
 	const stop = (signal: NodeJS.Signals): void => {
 		if (stopping) {
@@ -745,7 +751,13 @@ if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.a
 			console.error(`p2: the close did not finish within ${CLOSE_DEADLINE_MS / 1000} s, exiting`);
 			process.exit(1);
 		}, CLOSE_DEADLINE_MS).unref();
-		void server.close().finally(() => process.exit(0));
+		// A start that fails exits with its error below.
+		void starting.then(
+			(server) => server.close().finally(() => process.exit(0)),
+			() => {},
+		);
 	};
 	for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => stop(signal));
+	const server = await starting;
+	console.log(`p2: http://127.0.0.1:${server.port} (data ${server.dataDir})`);
 }
