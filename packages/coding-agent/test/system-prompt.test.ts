@@ -122,7 +122,7 @@ describe("buildSystemPrompt", () => {
 			);
 			expect(prompt).toContain("environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md)");
 			expect(prompt).toContain(
-				"Before implementing harness changes, read the relevant docs and examples in full, following related cross-references.",
+				"Before implementing harness changes, read the documentation sections and examples that cover the APIs and behavior you will change, including the references those sections depend on. Read full documents only when the change spans their scope.",
 			);
 		});
 	});
