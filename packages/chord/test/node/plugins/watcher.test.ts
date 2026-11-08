@@ -1,6 +1,6 @@
 // Tests of the watcher (slice 7c §5, slice 12 §4): dirty marks from the files facets used and from plugin directories,
 // `install`, `set`, `base`, a change during a build keeping its mark, `node_modules` and `.git` ignored, real file
-// events, the marks as a JSON watchable, and single-file plugins' files.
+// events, the marks as a JSON watchable, single-file plugins' files, and no watch after close.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { realpath, rm, symlink, writeFile } from "node:fs/promises";
@@ -225,7 +225,31 @@ describe("the watcher and links", () => {
 		await vi.waitFor(() => expect(watcher.value).toMatchObject({ dirty: ["@test/a"] }), { timeout: 5_000 });
 		watcher.close();
 	});
+
+	it("watches nothing after close, though a discovery finishing later has a linked plugin directory", async () => {
+		const root = await realpath(await tempRoot());
+		const elsewhere = await realpath(await tempRoot());
+		const linked = await writePlugin(elsewhere, "linked", "@test/linked", { "server.ts": "", "lib/own.ts": "" });
+		await symlink(linked, join(root, "linked"), "dir");
+		const before = fsWatches();
+		const watcher = new PluginWatcher(
+			{ roots: [root], base: [], kinds: KINDS, failed: () => {} },
+			new Batch(() => {}, undefined),
+		);
+		// The app closes while a build's discovery still reads the roots.
+		const seen = watcher.discoverySnapshot();
+		const discovering = discoverPlugins([root], { kinds: KINDS }, context);
+		watcher.close();
+		watcher.know(await discovering, seen);
+		// A closed watch leaves the process's handles once libuv completes its close.
+		await vi.waitFor(() => expect(fsWatches()).toBeLessThanOrEqual(before), { timeout: 2_000 });
+	});
 });
+
+/** The fs.watch handles keeping this process alive. */
+function fsWatches(): number {
+	return process.getActiveResourcesInfo().filter((name) => name === "FSEventWrap").length;
+}
 
 /** The inotify watches this process holds (Linux): one line per watch in its inotify descriptors' fdinfo. */
 function inotifyWatches(): number {

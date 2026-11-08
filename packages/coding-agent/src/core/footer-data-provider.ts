@@ -218,9 +218,11 @@ export class FooterDataProvider {
 		}
 
 		this.refreshInFlight = true;
+		const gitPaths = this.gitPaths;
 		try {
 			const nextBranch = await this.resolveGitBranchAsync();
-			if (this.disposed) return;
+			// setCwd() during the query: the answer is for the previous directory.
+			if (this.disposed || this.gitPaths !== gitPaths) return;
 			if (this.cachedBranch !== undefined && this.cachedBranch !== nextBranch) {
 				this.cachedBranch = nextBranch;
 				this.notifyBranchChange();
