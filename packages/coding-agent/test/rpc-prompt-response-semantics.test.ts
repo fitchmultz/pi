@@ -303,7 +303,7 @@ describe("RPC prompt response semantics", () => {
 		"rejects missing saved tools before RPC acknowledgement and preserves context for %s repair",
 		async (repair) => {
 			const savedTool = {
-				name: "saved",
+				name: "mcp__server__saved",
 				label: "Saved",
 				description: "Reconnect tool",
 				defaultActive: false,
@@ -315,7 +315,7 @@ describe("RPC prompt response semantics", () => {
 				responseDelayMs: 0,
 				extensionsResult: await createTestExtensionsResult([(pi) => pi.registerTool(savedTool)]),
 			});
-			original.runtimeHost.session.setActiveToolsByName(["saved"]);
+			original.runtimeHost.session.setActiveToolsByName(["mcp__server__saved"]);
 			await original.runtimeHost.session.sendCustomMessage(
 				{ customType: "retained", content: "Consume exactly once", display: false },
 				{ deliverAs: "nextTurn" },

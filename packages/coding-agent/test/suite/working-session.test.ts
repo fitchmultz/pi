@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
 import { Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -119,6 +119,77 @@ describe("Native working sessions", () => {
 			expect(restored.state.pendingTools).toEqual([]);
 		} finally {
 			await restored.release();
+		}
+	});
+
+	it("waits only for saved MCP tools; a saved tool the restored runtime no longer registers drops at the next run", async () => {
+		const h = await createHarness();
+		harnesses.push(h);
+		const settingsManager = SettingsManager.inMemory({ cacheWarming: "off" });
+		const loader = async (registersRetired: boolean) => {
+			const resourceLoader = new DefaultResourceLoader({
+				cwd: h.tempDir,
+				agentDir: h.tempDir,
+				settingsManager,
+				extensionFactories: registersRetired
+					? [
+							(pi) =>
+								pi.registerTool({
+									name: "retired",
+									label: "Retired",
+									description: "Removed by an update",
+									parameters: Type.Object({}),
+									execute: async () => ({ content: [], details: {} }),
+								}),
+						]
+					: [],
+			});
+			await resourceLoader.reload();
+			return resourceLoader;
+		};
+		const initial = await createAgentSession({
+			cwd: h.tempDir,
+			agentDir: h.tempDir,
+			model: h.getModel(),
+			modelRuntime: h.session.modelRuntime,
+			settingsManager,
+			resourceLoader: await loader(true),
+			sessionManager: SessionManager.inMemory(h.tempDir),
+		});
+		h.setResponses([fauxAssistantMessage("declared")]);
+		await initial.session.prompt("declare the tool");
+		const hold = await initial.session.acquireWorkingSession();
+		await hold.release();
+		initial.session.dispose();
+		expect(hold.state.activeTools).toContain("retired");
+		// A managed restart into a runtime whose update removed the tool.
+		const { session } = await createAgentSession({
+			workingSession: hold.state,
+			modelRuntime: h.session.modelRuntime,
+			settingsManager,
+			resourceLoader: await loader(false),
+		});
+		try {
+			let declared: string[] = [];
+			let removed: string[] = [];
+			h.setResponses([
+				(context) => {
+					declared = getCurrentTools(context.messages).map(({ name }) => name);
+					removed = context.messages.flatMap((message) =>
+						message.role === "system" ? (message.toolsRemoved ?? []).map(({ name }) => name) : [],
+					);
+					return fauxAssistantMessage("continued");
+				},
+			]);
+			await session.prompt("continue after restart");
+			expect(declared).not.toContain("retired");
+			expect(removed).toEqual(["retired"]);
+			session.restoreWorkingSession({ ...hold.state, pendingTools: ["mcp__server__reconnecting"] });
+			await expect(session.prompt("before reconnect")).rejects.toThrow(
+				"Saved tools have not registered: mcp__server__reconnecting.",
+			);
+		} finally {
+			session.dispose();
 		}
 	});
 

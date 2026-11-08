@@ -2539,10 +2539,17 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
+	/**
+	 * Refuse a run while a restored working session waits for saved MCP tools, which register when
+	 * their servers reconnect. Other tools register during startup, so a saved tool still missing
+	 * here is no longer provided, such as one an update removed; the run drops it like any pending tool.
+	 */
 	private _assertRestoredToolsAvailable(): void {
-		if (this._restoredWorkingSession && this._pendingToolNames.size)
+		if (!this._restoredWorkingSession) return;
+		const reconnecting = [...this._pendingToolNames].filter((name) => isMcpToolName(name));
+		if (reconnecting.length)
 			throw new Error(
-				`Saved tools have not registered: ${[...this._pendingToolNames].join(", ")}. Wait for native reconnect or explicitly change the tool selection.`,
+				`Saved tools have not registered: ${reconnecting.join(", ")}. Wait for native reconnect or explicitly change the tool selection.`,
 			);
 	}
 
