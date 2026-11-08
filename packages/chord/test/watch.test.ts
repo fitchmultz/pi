@@ -791,13 +791,17 @@ describe("Watch ends", () => {
 		expect(recorded.detached).toBe(1);
 	});
 
-	it("wraps a thrown non-Error in an Error", async () => {
-		const { watch } = recordedWatch<JsonValue>(0);
-		watch.start(() => Promise.reject("plain"));
+	it("ends `listener_error` on a synchronous throw too, wrapping a thrown non-Error in an Error", async () => {
+		const { watch, recorded } = recordedWatch<JsonValue>(0);
+		// Thrown before the listener returns a promise: the same end and report, never an unhandled rejection.
+		watch.start(() => {
+			throw "plain";
+		});
 		watch.advance(frame(1, [["r", 1]]), context);
 		const end = await watch.closed;
 		expect(end.kind).toBe("listener_error");
 		expect(end.kind === "listener_error" && end.error.message).toBe("plain");
+		expect(recorded.reported).toEqual(["plain"]);
 	});
 });
 
