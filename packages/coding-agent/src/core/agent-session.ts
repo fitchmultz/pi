@@ -543,8 +543,6 @@ export class AgentSession {
 	 * `setActiveToolsByName()` deactivates a tool or the next agent run starts.
 	 */
 	private _pendingToolNames = new Set<string>();
-	/** Selection source for reconciling saved discovery deferrals on the next run. */
-	private _deferredToolSelection?: "explicit" | "transcript";
 	private _usesDefaultTools: boolean;
 	private _defaultToolModifiers: string[];
 	/** Original patterns retained for native working-session persistence. */
@@ -632,7 +630,6 @@ export class AgentSession {
 			includeAllExtensionTools: true,
 		});
 		if (this._usesDefaultTools) this._restoreToolsFromTranscript(this._defaultToolModifiers);
-		else this._deferredToolSelection = this._getDeferredToolNames().length ? "explicit" : undefined;
 		this.agent.beforeMutation = this.workingSessionGate.beforeMutation;
 		this.sessionManager.beforeMutation = this.workingSessionGate.beforeMutation;
 		this.settingsManager.beforeMutation = this.workingSessionGate.beforeMutation;
@@ -864,7 +861,6 @@ export class AgentSession {
 		this._pendingToolNames = new Set([...memory.activeTools, ...memory.pendingTools]);
 		this._refreshToolRegistry({ activeToolNames: memory.activeTools });
 		this._setActiveTools([...memory.activeTools, ...memory.pendingTools]);
-		this._deferredToolSelection = this._getDeferredToolNames().length ? "transcript" : undefined;
 		this._baseSystemPromptOptions = memory.prompt;
 		this._runSystemPromptOptions = memory.runPrompt;
 		for (const [name, value] of memory.flags)
@@ -2500,30 +2496,14 @@ export class AgentSession {
 		};
 	}
 
-	/** Each deferred-tool list extensions/instruction-groups recorded on the current raw branch, oldest first. */
-	private _getDeferredToolLists(): string[][] {
-		return this.sessionManager.getBranch().flatMap((entry) => {
-			if (entry.type !== "custom" || entry.customType !== "pi:instruction-groups") return [];
-			const inactive = (entry.data as { inactive?: unknown } | null)?.inactive;
-			return Array.isArray(inactive) ? [inactive.filter((name): name is string => typeof name === "string")] : [];
-		});
-	}
-
-	/** Selected tools deferred by extensions/instruction-groups on the current raw branch. */
-	private _getDeferredToolNames(): string[] {
-		return this._getDeferredToolLists().at(-1) ?? [];
-	}
-
 	/**
-	 * Restore declared tools and, when discovery is inactive or absent, the selected tools it deferred.
-	 * Tools reachable only from other tools do not depend on the active set.
+	 * Restore the active tool loadout declared by the session transcript, if it declares one.
+	 * Tools reachable only from other tools are never declared, but they do not depend on the active
+	 * set, so the transcript's declarations are the whole loadout.
 	 * @param modifiers `+name`/`-name` entries applied to the restored loadout.
 	 */
 	private _restoreToolsFromTranscript(modifiers: readonly string[] = []): void {
 		this._pendingToolNames.clear();
-		const deferredLists = this._getDeferredToolLists();
-		const deferred = deferredLists.at(-1) ?? [];
-		this._deferredToolSelection = deferred.length ? "transcript" : undefined;
 		// All system messages on the branch, including those before a compaction. Compaction snapshots
 		// are derived from these, so replaying them gives the current loadout.
 		const systemMessages = this.sessionManager
@@ -2531,14 +2511,12 @@ export class AgentSession {
 			.flatMap((entry) => (entry.type === "message" && entry.message.role === "system" ? [entry.message] : []));
 		// No recorded loadout: keep the current tools.
 		if (systemMessages.length === 0) return;
-		// Tools the branch ever added, removed or deferred. Removed tools stay inactive. A deferred tool was
-		// registered when the branch recorded its loadout; current deferrals follow discovery below.
-		const mentioned = new Set([
-			...systemMessages
+		// Tools the branch ever added or removed. Removed tools stay inactive.
+		const mentioned = new Set(
+			systemMessages
 				.flatMap((message) => [...(message.toolsAdded ?? []), ...(message.toolsRemoved ?? [])])
 				.map((tool) => tool.name),
-			...deferredLists.flat(),
-		]);
+		);
 		// Extension tools the branch never mentioned were registered after it recorded its loadout, so
 		// they are activated like newly registered tools. Built-in tools follow `defaultTools` instead.
 		const newTools = [...this._toolRegistry.keys()].filter(
@@ -2546,11 +2524,10 @@ export class AgentSession {
 				!mentioned.has(name) && !this._baseToolDefinitions.has(name) && this._isActivatedOnRegistration(name),
 		);
 		// The recorded loadout plus the new tools, with `--tools +name`/`-name` applied.
-		const declared = [...getCurrentTools(systemMessages).map((tool) => tool.name), ...newTools];
-		let names = applyToolModifiers(declared, modifiers);
-		if (!(names.includes("discover_tools") && this._toolRegistry.has("discover_tools"))) {
-			names = applyToolModifiers([...new Set([...declared, ...deferred])], modifiers);
-		}
+		const names = applyToolModifiers(
+			[...getCurrentTools(systemMessages).map((tool) => tool.name), ...newTools],
+			modifiers,
+		);
 		// Recorded tools that are not registered yet, such as MCP tools of servers still connecting, are
 		// activated when they register. Excluded tools never register, so they are not kept pending.
 		this._pendingToolNames = new Set(names.filter((name) => this._isAllowedTool(name)));
@@ -2639,23 +2616,6 @@ export class AgentSession {
 			await this._checkCompaction(lastAssistant, false);
 		}
 
-		// Retire old deferrals before discovery suppresses this run's selected tools.
-		if (this._deferredToolSelection) {
-			const deferred = this._getDeferredToolNames();
-			const active = new Set(this.getActiveToolNames());
-			const selected = new Set(
-				this._deferredToolSelection === "transcript"
-					? applyToolModifiers(
-							deferred.filter((name) => this._isAllowedTool(name)),
-							this._defaultToolModifiers,
-						)
-					: [...active, ...this._pendingToolNames],
-			);
-			const inactive = active.has("discover_tools") ? deferred.filter((name) => selected.has(name)) : [];
-			if (inactive.length !== deferred.length)
-				this.sessionManager.appendCustomEntry("pi:instruction-groups", { enabled: [], inactive });
-			this._deferredToolSelection = undefined;
-		}
 		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
 		const result = await this._extensionRunner.emitBeforeAgentStart(trigger, this._baseSystemPromptOptions);
 		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
@@ -4289,11 +4249,7 @@ export class AgentSession {
 				getAllTools: () => this.getAllTools(),
 				getSettings: () => this.settingsManager.getSettings(),
 				setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
-				refreshTools: (preserveSelection) => {
-					// State-only refresh retains the loadout; registration still rebuilds the registry.
-					if (preserveSelection) this._setActiveTools([...this.getActiveToolNames(), ...this._pendingToolNames]);
-					else this._refreshToolRegistry();
-				},
+				refreshTools: () => this._refreshToolRegistry(),
 				getCommands,
 				setModel: async (model) => {
 					if (!this._modelRuntime.hasConfiguredAuth(model.provider)) return false;
@@ -4547,7 +4503,6 @@ export class AgentSession {
 		// Reload replaces the extension runner the work depends on, so stop it before ownership changes.
 		await this._cancelBackgroundRuns("Extensions reloaded");
 		const oldRunner = this._extensionRunner;
-		const wasManaged = this.getActiveToolNames().includes("discover_tools");
 		const previousFlagValues = oldRunner.getFlagValues();
 		await emitSessionShutdownEvent(oldRunner, { type: "session_shutdown", reason: "reload" });
 		oldRunner.invalidate();
@@ -4573,12 +4528,6 @@ export class AgentSession {
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
-		if (wasManaged && !this.getActiveToolNames().includes("discover_tools")) {
-			const deferred = this._getDeferredToolNames();
-			this._deferredToolSelection = deferred.length ? "transcript" : undefined;
-			for (const name of deferred) if (this._isAllowedTool(name)) this._pendingToolNames.add(name);
-			this._setActiveTools([...this.getActiveToolNames(), ...deferred]);
-		}
 		await this._modelRuntime.refresh({ allowNetwork: false });
 
 		const hasBindings =

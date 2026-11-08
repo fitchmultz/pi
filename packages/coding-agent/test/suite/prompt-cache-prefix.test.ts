@@ -24,12 +24,7 @@ import { ModelRuntime } from "../../src/core/model-runtime.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
-import {
-	createCodemodeExtension,
-	type ExtensionAPI,
-	type InstructionGroupCollector,
-	instructionGroupsExtension,
-} from "../../src/index.ts";
+import { createCodemodeExtension, createToolSearchExtension, type ExtensionAPI } from "../../src/index.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../src/utils/ansi.ts";
@@ -45,35 +40,31 @@ interface Payload {
 
 // Serializers stop before transport; this is prefix evidence, not a live cache-hit measurement.
 it.each([
-	{ model: getBuiltinModel("openai", "gpt-6.1-sol"), systemPatches: true, toolAdditions: true, scriptOnly: false },
+	{ model: getBuiltinModel("openai", "gpt-6.1-sol"), toolAdditions: true, scriptOnly: false },
 	{
 		model: getBuiltinModel("openai-codex", "gpt-6.1-sol"),
-		systemPatches: true,
 		toolAdditions: true,
 		scriptOnly: false,
 	},
 	{
 		model: getBuiltinModel("cloudflare-ai-gateway", "gpt-6-astra"),
-		systemPatches: true,
 		toolAdditions: true,
 		scriptOnly: false,
 	},
-	{ model: getBuiltinModel("zai", "glm-5.3"), systemPatches: false, toolAdditions: false, scriptOnly: true },
+	{ model: getBuiltinModel("zai", "glm-5.3"), toolAdditions: false, scriptOnly: true },
 	{
 		model: getBuiltinModel("deepseek", "deepseek-flash"),
-		systemPatches: false,
 		toolAdditions: false,
 		scriptOnly: true,
 	},
 	{
 		model: getBuiltinModel("deepseek", "deepseek-v4-pro"),
-		systemPatches: true,
 		toolAdditions: false,
 		scriptOnly: false,
 	},
 ] as const)(
-	"$model.provider/$model.id preserves supported discovery prefixes and uses native fallback when needed",
-	async ({ model, systemPatches, toolAdditions, scriptOnly }) => {
+	"$model.provider/$model.id preserves supported tool-loading prefixes and uses native fallback when needed",
+	async ({ model, toolAdditions, scriptOnly }) => {
 		const captures: Payload[] = [];
 		const capture = async (context: TranscriptContext) => {
 			const options = {
@@ -93,55 +84,39 @@ it.each([
 		};
 		let owner!: ExtensionAPI;
 		const h = await createHarness({
-			initialActiveToolNames: scriptOnly ? ["codemode"] : [],
+			initialActiveToolNames: scriptOnly ? ["codemode"] : ["tool_search"],
 			extensionFactories: [
 				...(scriptOnly ? [createCodemodeExtension({ mode: "only" })] : []),
-				instructionGroupsExtension,
+				createToolSearchExtension(),
 				(pi) => {
 					owner = pi;
 					pi.registerTool({
 						name: "browse",
 						label: "Browse",
 						description: "Inspect a page",
-						exposure: scriptOnly ? "deferred" : "direct",
+						exposure: "deferred",
 						parameters: Type.Object({}),
 						execute: async () => ({ content: [{ type: "text", text: "page inspected" }], details: undefined }),
-					});
-					pi.events.on("pi:instruction-groups", (data) => {
-						const collector = data as InstructionGroupCollector;
-						collector.register({
-							name: "browser",
-							description: "Browser",
-							tools: ["browse"],
-							instructions: () => "Inspect before acting.",
-						});
-						collector.register({
-							name: "later",
-							description: "Late connection",
-							tools: ["late"],
-							instructions: () => "Full late guidance.",
-						});
 					});
 				},
 			],
 		});
 		try {
 			await h.session.bindExtensions({});
-			const discovery = (args: { enable?: string[] }) =>
+			// Scripts reach deferred tools without loading them; the model loads them with tool_search.
+			const step = (query: string, script: string) =>
 				fauxAssistantMessage(
-					scriptOnly
-						? fauxToolCall("codemode", { code: `return await tools.discover_tools(${JSON.stringify(args)});` })
-						: fauxToolCall("discover_tools", args),
+					scriptOnly ? fauxToolCall("codemode", { code: script }) : fauxToolCall("tool_search", { query }),
 					{ stopReason: "toolUse" },
 				);
 			h.setResponses([
 				async (context) => {
 					await capture(context);
-					return discovery({});
+					return step("weather forecast", 'return await searchTools("weather forecast");');
 				},
 				async (context) => {
 					await capture(context);
-					return discovery({ enable: ["browser"] });
+					return step("inspect page", "return await tools.browse({});");
 				},
 				async (context) => {
 					await capture(context);
@@ -156,8 +131,8 @@ it.each([
 					return fauxAssistantMessage("reconnected");
 				},
 			]);
-			await h.session.prompt("Enable browser");
-			await h.session.prompt("Continue after enabling");
+			await h.session.prompt("Load browser");
+			await h.session.prompt("Continue after loading");
 			owner.registerTool({
 				name: "late",
 				label: "Late",
@@ -174,22 +149,16 @@ it.each([
 				JSON.stringify(messages(before)),
 			);
 			expect(JSON.stringify(listed.tools)).toBe(JSON.stringify(before.tools));
-			if (systemPatches) {
-				for (let index = 1; index < captures.length; index++) {
-					const previous = captures[index - 1];
-					const current = captures[index];
-					expect(JSON.stringify(messages(current).slice(0, messages(previous).length))).toBe(
-						JSON.stringify(messages(previous)),
-					);
-					expect(current.instructions).toBe(before.instructions);
-				}
-				expect(JSON.stringify(messages(reconnected).slice(messages(continued).length))).toContain(
-					"- later: Late connection",
+			// Loading a tool and registering a deferred one later only append to the request.
+			for (let index = 1; index < captures.length; index++) {
+				const previous = captures[index - 1];
+				const current = captures[index];
+				expect(JSON.stringify(messages(current).slice(0, messages(previous).length))).toBe(
+					JSON.stringify(messages(previous)),
 				);
-			} else {
-				expect(JSON.stringify(messages(reconnected)[0])).toContain("- later: Late connection");
-				expect(JSON.stringify(messages(reconnected)[0])).not.toBe(JSON.stringify(messages(continued)[0]));
+				expect(current.instructions).toBe(before.instructions);
 			}
+			expect(JSON.stringify(reconnected.tools)).toBe(JSON.stringify(continued.tools));
 			if (toolAdditions || scriptOnly) {
 				for (const payload of captures) expect(JSON.stringify(payload.tools)).toBe(JSON.stringify(before.tools));
 				if (toolAdditions) {
@@ -203,16 +172,10 @@ it.each([
 				for (const payload of captures.slice(2))
 					expect(JSON.stringify(payload.tools)).toBe(JSON.stringify(enabled.tools));
 			}
-			expect(JSON.stringify(before)).toContain("- browser: Browser");
-			expect(JSON.stringify(before)).toContain(scriptOnly ? "codemode: " : "discover_tools: ");
-			if (scriptOnly) expect(JSON.stringify(before)).not.toContain("discover_tools: ");
-			expect(JSON.stringify(before)).not.toContain("Inspect before acting.");
-			expect(JSON.stringify(enabled)).toContain("Inspect before acting.");
-			for (const payload of [enabled, continued, reconnected])
-				expect(JSON.stringify(payload).split("Inspect before acting.")).toHaveLength(2);
+			expect(JSON.stringify(before)).toContain(scriptOnly ? "codemode: " : "tool_search: ");
 			expect(JSON.stringify(before)).not.toContain('"name":"browse"');
 			expect(JSON.stringify(listed)).not.toContain('"name":"browse"');
-			expect(JSON.stringify(continued)).not.toContain("- later: Late connection");
+			if (scriptOnly) expect(JSON.stringify(enabled)).toContain("page inspected");
 			expect(h.session.getActiveToolNames().includes("browse")).toBe(!scriptOnly);
 			expect(h.session.getActiveToolNames()).not.toContain("late");
 		} finally {
@@ -322,32 +285,18 @@ it.each([
 		const h = await createHarness({
 			models: [{ id: "journal-driver", reasoning: true }],
 			settings: { cacheWarming: "off", compaction: { enabled: false } },
-			initialActiveToolNames: [],
+			initialActiveToolNames: ["tool_search"],
 			extensionFactories: [
-				instructionGroupsExtension,
+				createToolSearchExtension(),
 				(pi) => {
 					owner = pi;
 					pi.registerTool({
 						name: "browse",
 						label: "Browse",
 						description: "Inspect a page",
+						exposure: "deferred",
 						parameters: Type.Object({ url: Type.String() }),
 						execute: async () => ({ content: [{ type: "text", text: "inspected" }], details: undefined }),
-					});
-					pi.events.on("pi:instruction-groups", (data) => {
-						const collector = data as InstructionGroupCollector;
-						collector.register({
-							name: "browser",
-							description: "Browser",
-							tools: ["browse"],
-							instructions: () => "Inspect before acting.",
-						});
-						collector.register({
-							name: "later",
-							description: "Late connection",
-							tools: ["late"],
-							instructions: () => "Full late guidance.",
-						});
 					});
 				},
 			],
@@ -526,7 +475,9 @@ it.each([
 			h.setResponses([
 				async (context) => {
 					await capture(context);
-					return fauxAssistantMessage(fauxToolCall("discover_tools", {}), { stopReason: "toolUse" });
+					return fauxAssistantMessage(fauxToolCall("tool_search", { query: "weather forecast" }), {
+						stopReason: "toolUse",
+					});
 				},
 				async (context) => {
 					await capture(context);
@@ -534,7 +485,7 @@ it.each([
 				},
 				async (context) => {
 					await capture(context);
-					return fauxAssistantMessage(fauxToolCall("discover_tools", { enable: ["browser"] }), {
+					return fauxAssistantMessage(fauxToolCall("tool_search", { query: "inspect page" }), {
 						stopReason: "toolUse",
 					});
 				},
@@ -562,16 +513,17 @@ it.each([
 				},
 			]);
 			await h.session.prompt("Prime");
-			await h.session.prompt("Discover browser");
+			await h.session.prompt("Load browser");
 			owner.registerTool({
 				name: "browse",
 				label: "Browse",
 				description: "Find an element",
+				exposure: "deferred",
 				parameters: Type.Object({ selector: Type.String() }),
 				execute: async () => ({ content: [{ type: "text", text: "found" }], details: undefined }),
 			});
 			await h.session.prompt("Use the new definition");
-			h.session.setActiveToolsByName(["discover_tools"]);
+			h.session.setActiveToolsByName(["tool_search"]);
 			await h.session.prompt("Withdraw browser");
 			await h.session.prompt("Continue at low effort");
 			owner.registerTool({
@@ -596,14 +548,12 @@ it.each([
 			}
 			const [prime, listed, append, discovered, redefined, removed, low, reconnected] = captures;
 			const blocks = (payload: NativePayload) => payload.messages.flatMap((message) => message.content);
-			expect(JSON.stringify(prime.system)).toContain("- browser: Browser");
-			expect(JSON.stringify(prime.system)).toContain("discover_tools: ");
-			expect(JSON.stringify(prime)).not.toContain("Inspect before acting.");
-			expect(JSON.stringify(listed)).not.toContain("Inspect before acting.");
-			for (const payload of [discovered, redefined, removed, low, reconnected])
-				expect(JSON.stringify(payload).split("Inspect before acting.")).toHaveLength(2);
-			expect(JSON.stringify(low)).not.toContain("- later: Late connection");
-			expect(JSON.stringify(reconnected)).toContain("- later: Late connection");
+			expect(JSON.stringify(prime.system)).toContain("tool_search: ");
+			// A search that matches nothing declares nothing.
+			expect(JSON.stringify(listed)).not.toContain('"name":"browse"');
+			// A deferred tool registered later changes neither the instructions nor the declarations.
+			expect(reconnected.system).toEqual(prime.system);
+			expect(reconnected.tools).toEqual(low.tools);
 			expect(h.session.getActiveToolNames()).not.toContain("late");
 			const betas = [
 				"inline-tools-2026-09-15",
@@ -626,7 +576,7 @@ it.each([
 					expect(JSON.stringify(payload.system)).toBe(JSON.stringify(prime.system));
 				}
 				expect(prime.tools).toEqual([
-					expect.objectContaining({ name: "discover_tools" }),
+					expect.objectContaining({ name: "tool_search" }),
 					expect.objectContaining({ name: "__pi_deferred_placeholder__", defer_loading: true }),
 				]);
 				expect(prime.tools?.[0].defer_loading).toBeUndefined();

@@ -438,11 +438,6 @@ export {
 export { createBackgroundCommandExtension } from "./extensions/background-command/index.ts";
 export { type CodemodeExtensionOptions, createCodemodeExtension } from "./extensions/codemode/index.ts";
 export type { CodemodeStoreEntryData, CodemodeToolDetails } from "./extensions/codemode/tool.ts";
-export {
-	default as instructionGroupsExtension,
-	type InstructionGroup,
-	type InstructionGroupCollector,
-} from "./extensions/instruction-groups/index.ts";
 export type { LoadedMcpConfig, McpExposure, McpServerConfig, McpServerEntry } from "./extensions/mcp/config.ts";
 export { createMcpExtension, type McpExtensionOptions, type McpTransportFactory } from "./extensions/mcp/index.ts";
 export { createToolSearchExtension } from "./extensions/tool-search/index.ts";
