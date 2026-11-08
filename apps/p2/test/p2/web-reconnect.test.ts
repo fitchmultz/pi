@@ -231,9 +231,17 @@ describe("web reconnect", () => {
 		assert.equal(socket?.link.closedWith, undefined);
 	});
 
-	it("stops when told not to retry", async () => {
-		const t = setup({ canRetry: () => Promise.resolve(false) });
+	it("stops when told not to retry, also when woken while deciding", async () => {
+		let release: ((value: boolean) => void) | undefined;
+		const t = setup({
+			canRetry: () =>
+				new Promise((resolve) => {
+					release = resolve;
+				}),
+		});
 		t.drop();
+		t.wake();
+		release?.(false);
 		await t.advance(RETRY_MAX_MS * 2);
 		t.wake();
 		assert.equal(t.sockets.length, 1);
@@ -304,6 +312,28 @@ describe("web reconnect", () => {
 		t.freeze(120_000);
 		await t.advance(WAKE_GRACE_MS);
 		assert.match(dead?.link.closedWith ?? "", /no message from the server for 121.0 s/);
+	});
+
+	it("stops for good while waiting to retry or deciding whether to", async () => {
+		const waiting = setup();
+		waiting.drop();
+		await waiting.advance(RETRY_INITIAL_MS - 1);
+		waiting.stop();
+		await waiting.advance(RETRY_MAX_MS * 2);
+		assert.equal(waiting.sockets.length, 1);
+
+		let release: ((value: boolean) => void) | undefined;
+		const deciding = setup({
+			canRetry: () =>
+				new Promise((resolve) => {
+					release = resolve;
+				}),
+		});
+		deciding.drop();
+		deciding.stop();
+		release?.(true);
+		await deciding.advance(RETRY_MAX_MS * 2);
+		assert.equal(deciding.sockets.length, 1);
 	});
 
 	it("stops: closes the socket, retries nothing and ignores wakes", async () => {
