@@ -120,8 +120,8 @@ export interface CodemodeToolDetails {
 export const codemodeToolSystemPromptContribution = {
 	snippet: "Run JavaScript that calls other tools",
 	guidelines: [
-		"Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls.",
-		"Emit only the results needed for the current decision, not whole Promise.allSettled receipts. Print long text directly with text(value), with labels in separate text() calls, rather than JSON-wrapping file contents or logs.",
+		"Use codemode to batch independent calls (Promise.allSettled), chain calls, or filter large output.",
+		"Emit only what the next decision needs: print long text with text(value), not whole allSettled receipts or JSON-wrapped files and logs.",
 	],
 } as const;
 
@@ -130,7 +130,7 @@ export const CODEMODE_DOCS_PATH = join(getDocsPath(), "codemode.md");
 
 const DESCRIPTION_INTRO = `Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, file system, network, or timers.
 - \`await tools.<name>({ ...args })\` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure. A tool whose declaration returns an object resolves on failure too when it returned that object; check its fields. Calls still running when the script ends are cancelled.
-- Optional first line: \`// @options: {"max_output_tokens": 10000, "timeout_ms": 60000}\`
+- Optional first line: \`// @options: {"max_output_tokens": 6000, "timeout_ms": 60000}\`
 - Add \`"background": true\` to the options line (\`// @options: {"background": true}\`) to return a receipt and deliver the script's result as a message when it finishes, instead of waiting for it in this tool call.`;
 
 /** One line per global. The details live in {@link CODEMODE_DOCS_PATH}. */

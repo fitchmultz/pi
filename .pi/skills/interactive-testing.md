@@ -1,6 +1,7 @@
 ---
 name: interactive-testing
 description: Test and debug pi's interactive mode in a controlled tmux terminal. Use for TUI behavior checks and interactive release smoke tests.
+disable-model-invocation: true
 ---
 
 # Testing pi Interactive Mode with tmux

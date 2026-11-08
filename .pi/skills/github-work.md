@@ -1,6 +1,7 @@
 ---
 name: github-work
 description: Work on GitHub issues and pull requests of this repo. Use when asked to investigate, analyze, fix, or review an issue or PR, and when asked to wrap up such work (changelog, comment, commit, push, close).
+disable-model-invocation: true
 ---
 
 # Working on GitHub issues and PRs

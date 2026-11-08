@@ -52,9 +52,8 @@ export function createBackgroundCommandTool(
 			"Start a detached shell command, inspect status/output, or cancel it. Jobs and raw logs survive Pi exit/restart. Automatic completion reports status and logFile, with no output on success and up to 2KB/20 lines otherwise. Delivered after the foreground tool batch or when this session is idle or resumed. Explicit status includes up to 16KB/100 lines; read logFile for full output.",
 		promptSnippet: "Run long commands without blocking; receive completion automatically, including after restart",
 		promptGuidelines: [
-			"Use background_command for long tests, builds, and watches such as gh pr checks --watch. Do not add & or poll repeatedly; read logFile for full output.",
-			"Do independent work or end the turn while waiting. Completion resumes live sessions unless the user cancelled the agent.",
-			"Print sessions may exit before a job finishes. Use bash if the same print invocation must wait for its result; otherwise resume the saved session later.",
+			"Use background_command for long builds, tests and watches instead of & or polling; completion resumes the session, so keep working or end the turn.",
+			"Print-mode runs can exit before a job finishes; use bash when that run needs the result.",
 		],
 		parameters: schema,
 		constrainedSampling: { type: "json_schema", strict: "prefer" },

@@ -1,6 +1,7 @@
 ---
 name: add-llm-provider
 description: Checklist for adding a new LLM provider to packages/ai. Covers core types, provider implementation, lazy registration, model generation, the full test matrix, coding-agent wiring, and docs.
+disable-model-invocation: true
 ---
 
 # Adding a New LLM Provider (packages/ai)
