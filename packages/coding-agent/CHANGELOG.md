@@ -13,6 +13,7 @@
 
 ### Added
 
+- Codemode results now link to an omitted-only output file as well as the full output, so recovering truncated text does not repeat the visible head and tail. Native guidance also directs agents to emit selected results as plain text and reuse instructions still in context.
 - Added `pi --build-info` to print the resolved runtime path, runtime versions, and existing immutable fork release receipt as JSON.
 - Added `ctx.managedHost` and `session_shutdown` `disposition` so extensions can keep owned work across managed restarts and stop it only on exit. See [Work that outlives a worker](docs/restart.md#work-that-outlives-a-worker).
 - Added a sorted, permission-filtered instruction-group capability index to initial prompts and a static `discover_tools` hint. Listing and enabling groups leave the index and discovery declaration unchanged.

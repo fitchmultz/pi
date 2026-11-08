@@ -392,9 +392,9 @@ function formatError(result: Extract<CodemodeResult, { ok: false }>, calls: read
 }
 
 /** Write the full text output to a temp file, like bash does for truncated output. */
-async function spillOutput(text: string): Promise<{ path: string } | { error: string }> {
+async function spillOutput(text: string, prefix = "pi-codemode"): Promise<{ path: string } | { error: string }> {
 	try {
-		return { path: await writeOutputFile("pi-codemode", ".txt", text) };
+		return { path: await writeOutputFile(prefix, ".txt", text) };
 	} catch (error) {
 		return { error: error instanceof Error ? error.message : String(error) };
 	}
@@ -446,23 +446,29 @@ async function saveImages(items: (TextContent | ImageContent)[]): Promise<(TextC
 /**
  * Apply the token budget: when the combined text exceeds it, the text items become one
  * item that keeps the start and end of the text, and images follow it. The full text is written to
- * a temp file.
+ * a temp file, with a separate file for just the omitted middle.
  */
 async function truncateOutput(
 	items: (TextContent | ImageContent)[],
 	maxTokens: number,
-): Promise<{ items: (TextContent | ImageContent)[]; fullOutputPath?: string }> {
+): Promise<
+	{ items: (TextContent | ImageContent)[] } & Pick<CodemodeToolDetails, "fullOutputPath" | "omittedOutputPath">
+> {
 	const texts = items.filter((item): item is TextContent => item.type === "text").map((item) => item.text);
 	const combined = texts.join("\n");
 	const budget = maxTokens * CHARS_PER_TOKEN;
 	if (texts.length === 0 || combined.length <= budget) return { items };
 	const headChars = Math.floor(budget / 2);
 	const tailChars = budget - headChars;
-	const removed = combined.length - headChars - tailChars;
 	const head = sliceHead(combined, headChars);
 	const tail = sliceTail(combined, tailChars);
-	let text = `Warning: truncated output (original token count: ${Math.ceil(combined.length / CHARS_PER_TOKEN)})\nTotal output lines: ${combined.split("\n").length}\n\n${head}…${Math.ceil(removed / CHARS_PER_TOKEN)} tokens truncated…${tail}`;
-	const spilled = await spillOutput(combined);
+	const omitted = combined.slice(head.length, combined.length - tail.length);
+	let text = `Warning: truncated output (original token count: ${Math.ceil(combined.length / CHARS_PER_TOKEN)})\nTotal output lines: ${combined.split("\n").length}\n\n${head}…${Math.ceil(omitted.length / CHARS_PER_TOKEN)} tokens truncated…${tail}`;
+	const [spilled, recovery] = await Promise.all([spillOutput(combined), spillOutput(omitted, "pi-codemode-omitted")]);
+	text +=
+		"path" in recovery
+			? `\n\n[Omitted output: ${recovery.path} (read this to recover only the missing middle; use offset/limit to page)]`
+			: `\n\n[Could not save the omitted output: ${recovery.error}]`;
 	text +=
 		"path" in spilled
 			? `\n\n[Full output: ${spilled.path} (read with offset/limit)]`
@@ -470,6 +476,7 @@ async function truncateOutput(
 	return {
 		items: [{ type: "text", text }, ...items.filter((item) => item.type === "image")],
 		...("path" in spilled ? { fullOutputPath: spilled.path } : {}),
+		...("path" in recovery ? { omittedOutputPath: recovery.path } : {}),
 	};
 }
 
@@ -700,6 +707,7 @@ function startScript(
 		const header = `${result.ok ? "Script completed" : "Script failed"}\nWall time ${wallTime} seconds\nOutput:\n`;
 		const details = snapshot();
 		if (truncated.fullOutputPath) details.fullOutputPath = truncated.fullOutputPath;
+		if (truncated.omittedOutputPath) details.omittedOutputPath = truncated.omittedOutputPath;
 		return {
 			content: [{ type: "text", text: header }, ...output],
 			details,

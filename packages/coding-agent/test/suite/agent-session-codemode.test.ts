@@ -610,7 +610,7 @@ describe("codemode options and store", () => {
 		expect(n).toBeLessThan(512);
 	});
 
-	it("truncates output to the token budget and spills the full text", async () => {
+	it("recovers omitted output without rereading the visible head and tail", async () => {
 		const harness = await setup();
 		const result = await run(
 			harness,
@@ -619,8 +619,11 @@ describe("codemode options and store", () => {
 		const details = result.details as unknown as CodemodeToolDetails;
 		const path = details.fullOutputPath;
 		if (!path) throw new Error("No spill file");
+		const omittedPath = details.omittedOutputPath;
 		try {
 			const text = resultText(result);
+			expect(omittedPath).toBeTypeOf("string");
+			if (!omittedPath) throw new Error("No omitted-output file");
 			expect(text).toMatch(/^Warning: truncated output/);
 			expect(text).toContain("row 0\n");
 			expect(text).toContain("tokens truncated");
@@ -633,12 +636,24 @@ describe("codemode options and store", () => {
 			expect(readFileSync(path, "utf8")).toBe(
 				Array.from({ length: 100 }, (_, i) => `==> text ${i + 1}/100 <==\nrow ${i}`).join("\n"),
 			);
+			const visible = /\n\n([\s\S]*?)…\d+ tokens truncated…([\s\S]*?)\n\n\[Omitted output:/.exec(text);
+			if (!visible) throw new Error("No visible head and tail");
+			harness.session.setActiveToolsByName(["codemode", "read"]);
+			const recovery = await run(harness, `text(await tools.read({ path: ${JSON.stringify(omittedPath)} }));`);
+			expect(recovery.isError).toBe(false);
+			const omitted = resultText(recovery);
+			expect(omitted).toContain("row 50\n");
+			expect(omitted).not.toContain("row 0\n");
+			expect(omitted).not.toContain("row 99\n");
+			expect(visible[1] + omitted + visible[2]).toBe(readFileSync(path, "utf8"));
 		} finally {
 			rmSync(path, { force: true });
+			if (omittedPath) rmSync(omittedPath, { force: true });
 		}
 
 		const small = await run(harness, "return { ok: true };");
 		expect((small.details as unknown as CodemodeToolDetails).fullOutputPath).toBeUndefined();
+		expect((small.details as unknown as CodemodeToolDetails).omittedOutputPath).toBeUndefined();
 	});
 
 	// #10678: joining the text items was quadratic, about 10 s here for the item limit.
@@ -647,7 +662,10 @@ describe("codemode options and store", () => {
 		const startedAt = performance.now();
 		const result = await run(harness, 'for (let i = 0; i < 100000; i++) text("");');
 		const elapsed = performance.now() - startedAt;
-		rmSync((result.details as unknown as CodemodeToolDetails).fullOutputPath ?? "", { force: true });
+		const details = result.details as unknown as CodemodeToolDetails;
+		for (const path of [details.fullOutputPath, details.omittedOutputPath]) {
+			if (path) rmSync(path, { force: true });
+		}
 		expect(result.isError).toBe(false);
 		expect(resultText(result)).toContain("==> text 100000/100000 <==");
 		expect(elapsed).toBeLessThan(5000);
