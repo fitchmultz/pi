@@ -258,8 +258,13 @@ conversation and whenever the command registry changes (a facet reload), like ov
 
 The launcher polls the bundle version every second. A changed hash prepares a new worker while the old one remains
 active; once ready, it copies bounded UI state (selection, drafts, send retry IDs, display toggles, reading position),
-swaps the fixed-origin connection and terminates the old worker. Failed preparation retains the old worker.
-`/reload` also creates a fresh worker, even for an unchanged hash. There is no local watcher or local facet reload.
+swaps the fixed-origin connection, activates the new worker at the terminal's current size and terminates the old
+worker. Failed preparation retains the old worker: a new worker that fails before the swap, also after it was ready,
+is never adopted. `/reload` also creates a fresh worker, even for an unchanged hash and while a version check runs.
+A swap while a local program has the terminal (the external editor) writes nothing to it; the new worker's modes are
+applied when the terminal returns. Closing meanwhile waits until the program gives the terminal back, so the launcher's
+end-of-run message and prompt follow it, and leaves the terminal as lending left it. Closing while a new bundle
+downloads starts no worker. There is no local watcher or local facet reload.
 Network drops reconnect with bounded exponential backoff; Chord rebinds the held references. A connection that died
 without a close (a laptop that slept while Radius dropped it) is found by the worker's Chord heartbeat within 30 s:
 `linkClosed` makes the launcher drop that socket (`tui-launcher.test.ts`, silent link).
@@ -282,7 +287,9 @@ loader registration, inherited descriptors, raw streams, huge
 heap/ArrayBuffer allocations), plus deterministic adversarial/fuzz output filtering. `tui-launcher.test.ts` covers
 web-equivalent admission, a real server/bundled-worker/pi-tui session with fake replies, server defaults under local preferences,
 queues/stop, resized rendering, replacement/state preservation, failed build rollback, reconnect, denied capability
-requests/cookie secrecy and concurrent shutdown during worker preparation. `tui-commands.test.ts` covers the
+requests/cookie secrecy and concurrent shutdown during worker preparation; with fake bundles, a new worker failing
+after it was ready, shutdown during a bundle download, `/reload` during a version check, a swap or shutdown while the
+terminal is lent (shutdown waits for it) and a resize while a new worker starts. `tui-commands.test.ts` covers the
 command registry (when grammar, privileged/transcript/plugin/slash collisions, pi `keybindings.json` overrides, registry
 reload, overlay precedence, palette, `/hotkeys`); `tui-theme.test.ts` per-runtime themes, terminal colors, the launcher's
 preference loader and hot reload, and the data-only `preferences`/`capabilities`/`terminalColors` messages. Run these

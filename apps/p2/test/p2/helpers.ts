@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { request } from "node:http";
+import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,7 +20,7 @@ import {
 } from "@earendil-works/chord";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { NativeWatchable, Watchable } from "@earendil-works/chord/watch";
-import { WebSocket as NodeWebSocket } from "ws";
+import { WebSocket as NodeWebSocket, WebSocketServer } from "ws";
 import type { WebManifest } from "../../src/hosts/bundles.ts";
 import { type P2Server, type ServerOptions, startServer } from "../../src/hosts/server.ts";
 import { WEB_MANIFEST_PATH } from "../../src/hosts/web.ts";
@@ -567,4 +568,36 @@ export async function webBundle(port: number, headers: Record<string, string> = 
 	const response = await http(port, WEB_MANIFEST_PATH, { headers });
 	assert.equal(response.status, 200, response.body);
 	return JSON.parse(response.body) as WebManifest;
+}
+
+/**
+ * A server of TUI bundles for launcher tests: `/__p2_tui` names `source()` by its hash, other paths serve it, and the
+ * launcher's `/chord` socket is accepted. `respond` sends each response when the test wants it (a slow network, a held
+ * download).
+ */
+export async function tuiBundleServer(
+	t: { after(fn: () => unknown): void },
+	source: () => string,
+	respond: (path: string, send: () => void) => void = (_path, send) => send(),
+): Promise<URL> {
+	const server = createServer((incoming, response) => {
+		const body = source();
+		const version = createHash("sha256").update(body).digest("hex");
+		const manifest = incoming.url === "/__p2_tui";
+		response.setHeader("Content-Type", manifest ? "application/json" : "text/javascript");
+		respond(incoming.url ?? "", () =>
+			response.end(manifest ? JSON.stringify({ version, bundle: `/__p2_tui/${version}.mjs` }) : body),
+		);
+	});
+	const sockets = new WebSocketServer({ server });
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const address = server.address();
+	assert(address && typeof address === "object");
+	t.after(async () => {
+		for (const socket of sockets.clients) socket.terminate();
+		await new Promise<void>((resolve) => sockets.close(() => resolve()));
+		server.closeAllConnections();
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	});
+	return new URL(`http://127.0.0.1:${address.port}`);
 }

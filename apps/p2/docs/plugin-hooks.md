@@ -343,7 +343,7 @@ All in `src/runtime/tui-renderers.ts:16-45`; consumed by the chat surface (`plug
 `ctx.grant(action, payload)` asks the visitor's launcher (`src/hosts/tui-actions.ts:376-700`). Only `C` and `gesture`
 actions can be requested; `K` actions fire on the visitor's own key and may ask the worker for data through
 `runtime.launcherAnswers` (`src/runtime/tui.ts:197`, `plugins/chat/tui-commands.ts:139`). Anything else is denied
-(`src/hosts/tui-client.ts:226-259`).
+(`src/hosts/tui-client.ts:230-263`).
 
 | Action | Kind | Payload | Owner only |
 | --- | --- | --- | --- |

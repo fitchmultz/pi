@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import * as diagnostics from "node:diagnostics_channel";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -15,10 +16,12 @@ import { Sharing } from "../../plugins/sharing/contract.ts";
 import { startServer } from "../../src/hosts/server.ts";
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
 import { claimOwner } from "../../src/hosts/tui-config.ts";
+import type { LauncherAction } from "../../src/hosts/tui-grants.ts";
+import { TERMINAL_RESET } from "../../src/hosts/tui-modes.ts";
 import { TERMINAL_COLOR_QUERY } from "../../src/hosts/tui-terminal-colors.ts";
 import { cookieTransport, type TuiTransport } from "../../src/hosts/tui-transport.ts";
 import { DARK_THEME } from "../../src/tui/theme/builtin-themes.ts";
-import { holdIn, http, poll, startFixture, until } from "./helpers.ts";
+import { holdIn, http, poll, startFixture, tuiBundleServer, until } from "./helpers.ts";
 
 const supported = Number(process.versions.node.split(".")[0]) >= 26;
 type Snapshot = { session?: string; drafts: [string, string][]; screen: string };
@@ -467,5 +470,244 @@ test(
 		await rejected;
 		assert(exited);
 		assert.equal(stopped, 1);
+	},
+);
+
+/** A launcher on a `tuiBundleServer` serving `source()`; its terminal writes and reported failures are recorded. */
+async function bundleLauncher(
+	t: { after(fn: () => unknown): void },
+	source: () => string,
+	options: {
+		respond?: (path: string, send: () => void) => void;
+		pollMs?: number;
+		actions?: Record<string, LauncherAction>;
+	} = {},
+) {
+	const url = await tuiBundleServer(t, source, options.respond);
+	const terminal = new VirtualTerminal();
+	const writes: string[] = [];
+	const write = terminal.write.bind(terminal);
+	terminal.write = (data) => {
+		writes.push(data);
+		write(data);
+	};
+	const failures: string[] = [];
+	const client = await startTuiClient({
+		terminal,
+		url,
+		pollMs: options.pollMs ?? 60000,
+		colorQueryMs: 10,
+		actions: options.actions,
+		onFailure: (message) => failures.push(message),
+	});
+	t.after(() => client.close());
+	return { client, terminal, writes, failures };
+}
+
+/** Counts the worker threads Node starts from now on (its experimental `worker_threads` diagnostics channel). */
+function countWorkers(t: { after(fn: () => unknown): void }): { readonly started: number } {
+	const count = { started: 0 };
+	const started = () => {
+		count.started++;
+	};
+	diagnostics.subscribe("worker_threads", started);
+	t.after(() => diagnostics.unsubscribe("worker_threads", started));
+	return count;
+}
+
+test(
+	"a new worker that fails before its swap, also once it is ready, leaves the active worker in place",
+	{ skip: !supported, timeout: 30000 },
+	async (t) => {
+		// The active worker answers the swap's snapshot after a second (the launcher waits 3 s); `p` gets an answer.
+		const active = `export default ({send,onMessage})=>onMessage(async message=>{
+			if(message.kind==='snapshot'){await new Promise(r=>setTimeout(r,1000));return null;}
+			if(message.kind==='activate')send({kind:'output',data:'\\x1b[?1049hACTIVE'});
+			if(message.kind==='input'&&message.data==='p')send({kind:'output',data:' ALIVE'});
+		});`;
+		let source = active;
+		const { client, terminal, writes, failures } = await bundleLauncher(t, () => source);
+		await poll(() => writes.join("").includes("ACTIVE"));
+		const worker = client.sandbox!.worker;
+		const version = client.version;
+		const candidates = {
+			"failed during setup": "export default ()=>{throw new Error('failed during setup')};",
+			// Ready at once, then failing while the active worker prepares its snapshot.
+			"failed after ready":
+				"export default ({onMessage})=>{onMessage(()=>null);setTimeout(()=>{throw new Error('failed after ready')},50);};",
+		};
+		for (const [failure, candidate] of Object.entries(candidates)) {
+			writes.length = 0;
+			source = candidate;
+			await assert.rejects(client.reload(), new RegExp(failure));
+			assert.equal(client.sandbox!.worker, worker, failure);
+			assert.equal(client.version, version);
+			assert.equal(writes.join(""), "", "the active worker's screen and modes stay");
+			terminal.sendInput("p");
+			await poll(() => writes.join("").includes("ALIVE"), 5000, `the active worker after "${failure}"`);
+		}
+		assert.deepEqual(failures, []);
+	},
+);
+
+test("closing while a new bundle downloads starts no worker", { skip: !supported, timeout: 30000 }, async (t) => {
+	const first =
+		"export default ({send,onMessage})=>onMessage(message=>{if(message.kind==='activate')send({kind:'output',data:'FIRST'})});";
+	let source = first;
+	let download: (() => void) | undefined;
+	const { client, writes } = await bundleLauncher(t, () => source, {
+		// The new bundle downloads until the test lets it finish.
+		respond: (path, send) => {
+			if (path === "/__p2_tui" || source === first) send();
+			else download = send;
+		},
+	});
+	await poll(() => writes.join("").includes("FIRST"));
+	const workers = countWorkers(t);
+	source = `${first}//new`;
+	const reloading = client.reload();
+	await poll(() => download !== undefined);
+	await client.close();
+	download!();
+	await reloading;
+	assert.equal(workers.started, 0);
+});
+
+test(
+	"a reload asked for while a version check is in flight starts a fresh worker",
+	{ skip: !supported, timeout: 30000 },
+	async (t) => {
+		// `r` asks for a reload, as `/reload` does.
+		const source = `export default ({send,onMessage})=>onMessage(message=>{
+			if(message.kind==='snapshot')return null;
+			if(message.kind==='activate')send({kind:'output',data:'READY'});
+			if(message.kind==='input'&&message.data==='r')send({kind:'reload'});
+		});`;
+		let checks = 0;
+		const { client, terminal, writes, failures } = await bundleLauncher(t, () => source, {
+			pollMs: 1000,
+			// Version checks answer after 300 ms, so a reload can arrive meanwhile (through Radius, each opens a connection).
+			respond: (path, send) => {
+				if (path === "/__p2_tui") {
+					checks++;
+					setTimeout(send, 300);
+				} else send();
+			},
+		});
+		await poll(() => writes.join("").includes("READY"));
+		const worker = client.sandbox!.worker;
+		const before = checks;
+		await poll(() => checks > before, 5000, "a version check in flight");
+		terminal.sendInput("r");
+		await poll(() => client.sandbox!.worker !== worker, 5000, "a fresh worker");
+		assert.deepEqual(failures, []);
+	},
+);
+
+test(
+	"a swap or close while a local program has the terminal leaves it alone, and close waits for it",
+	{ skip: !supported, timeout: 30000 },
+	async (t) => {
+		const worker = (name: string) => `export default ({send,onMessage})=>onMessage(message=>{
+			if(message.kind==='snapshot')return null;
+			if(message.kind==='activate')send({kind:'output',data:'\\x1b[?1049h\\x1b[?2004h${name}'});
+			if(message.kind==='redraw')send({kind:'output',data:'${name} redrawn'});
+		});`;
+		let source = worker("first");
+		let giveBack: ((code: number) => void) | undefined;
+		// Runs before the launcher's close hook: a failure while the terminal is lent must not leave that close waiting.
+		t.after(() => giveBack?.(0));
+		let action: Promise<void> | undefined;
+		const { client, terminal, writes } = await bundleLauncher(t, () => source, {
+			actions: {
+				// Ctrl+G lends the terminal as the external editor does, until the test gives it back with the editor's exit
+				// code; a failed edit then shows the launcher's notice.
+				"test.lend": {
+					kind: "K",
+					key: "app.editor.external",
+					run: (context) => {
+						action = (async () => {
+							const code = await context.releaseTerminal(
+								() =>
+									new Promise<number>((resolve) => {
+										giveBack = resolve;
+									}),
+							);
+							if (code !== 0) await context.ui.notice("The editor failed", 10);
+						})();
+						return action;
+					},
+				},
+			},
+		});
+		let stops = 0;
+		const stop = terminal.stop.bind(terminal);
+		terminal.stop = () => {
+			stops++;
+			stop();
+		};
+		const lend = async () => {
+			giveBack = undefined;
+			terminal.sendInput("\x07");
+			await poll(() => giveBack !== undefined);
+			writes.length = 0;
+		};
+		await poll(() => writes.join("").includes("first"));
+		await lend();
+		source = worker("second");
+		await client.reload();
+		assert.equal(writes.join(""), "", "the local program's terminal is left alone");
+		giveBack!(0);
+		await poll(() => writes.join("").includes("second redrawn"));
+		assert(writes[0]?.startsWith("\x1b[?1049h\x1b[?2004h"), "the new worker's modes come back with the terminal");
+		await action;
+		// Closing (a crash, revoked access, a signal) while it is lent waits for the program, because the host prints and
+		// prompts next. Lending already undid the modes and stopped the terminal; a failed edit's notice afterwards must
+		// not turn them back on, or they stay on in the visitor's shell.
+		await lend();
+		let exited = false;
+		client.sandbox!.worker.once("exit", () => {
+			exited = true;
+		});
+		let closed = false;
+		const closing = client.close().then(() => {
+			closed = true;
+		});
+		await poll(() => exited);
+		assert.equal(closed, false, "close waits until the local program gives the terminal back");
+		assert.equal(writes.join(""), "", "nothing is written to the lent terminal");
+		giveBack!(1);
+		await closing;
+		await action;
+		const output = writes.join("");
+		assert(output.includes("The editor failed"), "the failed edit's notice was shown");
+		assert(!output.includes(TERMINAL_RESET), "close does not reset the returned terminal again");
+		assert(!output.includes("\x1b[?2004h"), "the notice restores none of the closed worker's modes");
+		assert.equal(stops, 2, "only the two lends stop the terminal");
+	},
+);
+
+test(
+	"a new worker activates at the terminal's size, also after a resize while it started",
+	{ skip: !supported, timeout: 30000 },
+	async (t) => {
+		// Says the size it activates at; `delay` keeps its start busy, as a large bundle does.
+		const worker = (name: string, delay = 0) => `const until=Date.now()+${delay};while(Date.now()<until){}
+		export default ({input,send,onMessage})=>{let size=input.columns+'x'+input.rows;onMessage(message=>{
+			if(message.kind==='snapshot')return null;
+			if(message.kind==='resize')size=message.columns+'x'+message.rows;
+			if(message.kind==='activate')send({kind:'output',data:'${name} at '+size});
+		})};`;
+		let source = worker("first");
+		const { client, terminal, writes } = await bundleLauncher(t, () => source);
+		await poll(() => writes.join("").includes("first at 80x24"));
+		const workers = countWorkers(t);
+		source = worker("second", 500);
+		const reloading = client.reload();
+		await poll(() => workers.started === 1, 5000, "the new worker");
+		terminal.resize(100, 30);
+		await reloading;
+		await poll(() => writes.join("").includes("second at"));
+		assert.match(writes.join(""), /second at 100x30/);
 	},
 );
