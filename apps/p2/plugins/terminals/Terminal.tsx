@@ -1001,7 +1001,11 @@ class TerminalSession {
 				if (target) {
 					this.#emit({ current: undefined });
 					this.#request((control) => control.attach({ terminalId: target.id }, BACKGROUND_CONTEXT), true);
-				} else if (this.#autoOpen) this.open();
+				} else {
+					// A shown terminal missing from the list closed while this viewer was away, or ended with its host.
+					this.#showNone();
+					if (this.#autoOpen) this.open();
+				}
 				this.#autoOpen = false;
 				return;
 			}
@@ -1062,11 +1066,7 @@ class TerminalSession {
 				});
 				if (!terminals.length) this.#onEmpty();
 				if (this.#state.current?.id !== event.terminalId) return;
-				this.#vt?.free();
-				this.#vt = undefined;
-				this.#rows.replaceChildren();
-				this.#cursor.hidden = true;
-				this.#emit({ current: undefined });
+				this.#showNone();
 				const next = terminals.filter((terminal) => !terminal.exited).at(-1);
 				if (next) this.attach(next.id);
 				return;
@@ -1080,6 +1080,16 @@ class TerminalSession {
 			case "hello":
 				return;
 		}
+	}
+
+	/** Shows no terminal: the current one's screen goes. */
+	#showNone(): void {
+		this.#vt?.free();
+		this.#vt = undefined;
+		this.#rows.replaceChildren();
+		this.#cursor.hidden = true;
+		this.#scrollbar.hidden = true;
+		this.#emit({ current: undefined });
 	}
 
 	#discardQueue(): void {
