@@ -9,9 +9,9 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
-import lockfile from "proper-lockfile";
 import { createModelDataManifest } from "../packages/ai/scripts/model-data.ts";
 import { removeForkNpmLogs } from "../packages/coding-agent/src/utils/fork-npm-cache.ts";
+import { lockForkSelector } from "../packages/coding-agent/src/utils/fork-release-store.ts";
 import { smokeTestCodingAgent } from "./coding-agent-smoke.mjs";
 import { produceArtifactSet } from "./package-artifacts.mjs";
 import {
@@ -434,13 +434,27 @@ test("an installed CLI smoke failure leaves selector/config/journals intact", as
 	assert.deepEqual(readdirSync(f.releases), [".owner-selector"]);
 });
 
-test("never overwrites an existing incomplete release or an unrelated selector file", async (t) => {
+test("never reuses or rebuilds a killed installation's candidate, or overwrites an unrelated selector file", async (t) => {
 	const f = fixture(t);
+	const complete = join(f.root, "complete-package");
+	writePackageFixture(complete);
+	// Kill a real installation during validation, after its package files are complete.
+	const killed = spawnSync(tools.node, ["--input-type=module", "-e", `
+import { cpSync } from "node:fs";
+import { installRelease } from ${JSON.stringify(new URL("./install-fork.mjs", import.meta.url).href)};
+await installRelease(${JSON.stringify({ releases: f.releases, selector: f.selector, receipt: receipt() })}, (directory) => {
+	cpSync(${JSON.stringify(complete)}, directory, { recursive: true });
+	process.kill(process.pid, "SIGKILL");
+});
+`], { env: f.env, encoding: "utf8" });
+	assert.equal(killed.signal, "SIGKILL", killed.stderr);
 	const candidate = join(f.releases, releaseIdentity(receipt()));
-	mkdirSync(candidate, { recursive: true });
-	writeFileSync(join(candidate, "untouched"), "incomplete from a previous invocation");
+	assert.equal(existsSync(join(candidate, "fork-release.json")), false);
+	const contents = readdirSync(candidate, { recursive: true }).sort();
+	// Locks are never stolen; remove the killed installer's lock as the recovery docs describe.
+	rmSync(`${f.selector}.lock`, { recursive: true, force: true });
 	await assert.rejects(installRelease({ ...f, receipt: receipt() }, () => assert.fail("must not rebuild in place")), /ENOENT/);
-	assert.equal(readFileSync(join(candidate, "untouched"), "utf8"), "incomplete from a previous invocation");
+	assert.deepEqual(readdirSync(candidate, { recursive: true }).sort(), contents);
 	assertPreserved(f);
 	const valid = await installRelease({ ...f, receipt: receipt("d"), stage: true }, installFixture(f));
 	const realSelector = join(f.root, "real-package");
@@ -657,7 +671,7 @@ test("prune cannot delete a runtime selected after its protection snapshot", asy
 test("installation, activation, rollback and pruning honor the updater's selector lock", async (t) => {
 	const f = fixture(t);
 	const candidate = validatedRelease(f, "1", 1_000);
-	const release = await lockfile.lock(f.selector, { realpath: false, stale: Infinity, update: 1000 });
+	const release = await lockForkSelector(f.selector);
 	try {
 		await assert.rejects(installRelease({ ...f, receipt: receipt() }, () => assert.fail("must not build")), { code: "ELOCKED" });
 		for (const args of [

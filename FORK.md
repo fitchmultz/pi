@@ -166,6 +166,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | Disposal and reload use the runner's default stale-context message. Runner and runtime lifetimes stay separate: a reused resource loader can give a new runner live contexts while earlier extension APIs remain stale | `core/agent-session.ts`, `core/extensions/runner.ts` | `agent-session-runtime-events.test.ts`, `suite/regressions/{2860-replaced-session-context,5943-session-start-notify,7193-event-bus-lifecycle}.test.ts` |
 | MCP status and error share one union; closed derives from shutdown. Client, discovery and pending-connect ownership stay independent | `extensions/mcp/{runtime,index}.ts` | `mcp-extension.test.ts` |
 | Bash tool output keeps its raw bytes in one memory, open-file or closed-file state. Decoder finish stays separate from file closure, and a closed file keeps its path | `core/tools/output-accumulator.ts` | `{private-spill,bash-spill,tools}.test.ts` |
+| One function defines the selector mutation lock that fork updates and every installer operation share: `<selector>.lock`, never stolen based on age | `utils/{fork-release-store,fork-update}.ts`, `scripts/install-fork.mjs` | `scripts/install-fork.test.mjs`, `fork-update.test.ts` |
 
 ### Performance deltas
 
