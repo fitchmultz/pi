@@ -1900,9 +1900,6 @@ export interface ExtensionAPI {
 	 */
 	setActiveTools(toolNames: string[]): void;
 
-	/** Rebuild tools and re-run prepareLoadout without replacing the active selection or pending restored tools. */
-	refreshTools(): void;
-
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
 
@@ -2271,7 +2268,7 @@ export type GetCommandsHandler = () => SlashCommandInfo[];
 
 export type SetActiveToolsHandler = (toolNames: string[]) => void;
 
-export type RefreshToolsHandler = (preserveSelection?: boolean) => void;
+export type RefreshToolsHandler = () => void;
 
 export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
 

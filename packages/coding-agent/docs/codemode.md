@@ -90,20 +90,6 @@ The `codemode` description lists tools with their TypeScript declarations, group
 
 While `codemode` is active, `codemode.mode` in [settings](settings.md#tools) decides how the other tools are presented. With `on` (default) declared tools stay declared, and their descriptions say how to call them from scripts. With `only` they are hidden from the model and listed in the `codemode` description instead, so the model calls them through scripts. Tool declarations in the `codemode` description, `describeTool()`, and `ALL_TOOLS` carry the tools' prompt guidelines, since the system prompt rules only cover declared tools.
 
-### Discover instruction groups
-
-Load an instruction group from a script:
-
-```js
-await tools.discover_tools({ enable: ["browser"] });
-```
-
-The call returns a short receipt. Discovery delivers the full instructions separately
-to the model before its next request, even if the script omits the result from its
-output. The model can then use the group's tools in a later script. Discovery and
-first use remain separate model turns; the instruction message adds no model turn.
-See [Instruction groups](instruction-groups.md).
-
 ## Store values
 
 `store(key, value)` keeps a JSON value under a string key for later `codemode` calls; storing `undefined` deletes the key. `load(key)` returns the value, or `undefined`. Writes are kept only when the script succeeds: each successful script that stores values appends a `codemode-store` custom entry to the session, so resumed sessions keep the values and each branch sees only the values written on its path.

@@ -151,16 +151,13 @@ The MCP resource tools (`list_mcp_resources`, `list_mcp_resource_templates`, `re
 | `find` | Find paths using glob patterns |
 | `ls` | List directory contents |
 
-Built-in extensions also add the following tools. `background_command` starts, inspects, and cancels [durable background shell commands](sdk.md#background-commands); it is enabled by default for new CLI sessions. `discover_tools` is active by default when its builtin is loaded. Explicit tool allowlists, saved selections, and exclusions still apply; `--no-extensions` disables both, and `--no-builtin-tools` does not disable extension tools. `codemode` and `tool_search` are off by default; the MCP extension turns them on when an MCP server needs them (see [MCP](mcp.md#control-tool-exposure)). To enable them yourself, name them in `--tools` or `defaultTools`.
+Built-in extensions also add the following tools. `background_command` starts, inspects, and cancels [durable background shell commands](sdk.md#background-commands); it is enabled by default for new CLI sessions. Explicit tool allowlists, saved selections, and exclusions still apply; `--no-extensions` disables it, and `--no-builtin-tools` does not disable extension tools. `codemode` and `tool_search` are off by default; the MCP extension turns them on when an MCP server needs them (see [MCP](mcp.md#control-tool-exposure)). To enable them yourself, name them in `--tools` or `defaultTools`.
 
 | Built-in extension | Purpose |
 |---|---|
 | `background_command` | Start, inspect, and cancel durable background shell commands that survive Pi exit and report completion later |
 | `codemode` | Run JavaScript that calls the other tools, for example in parallel with `Promise.allSettled`; only the script's output reaches the model |
 | `tool_search` | Search tools that are not declared to the model (`codemode` and `deferred` exposure, such as MCP tools) and declare the matches for the next call |
-| `discover_tools` | List instruction groups or enable their full instructions before using grouped tools in a later turn; never activates tools |
-
-See [Instruction Groups](instruction-groups.md) for owner registration, persistence, and eager fallback when discovery is inactive.
 
 ### Enable codemode
 

@@ -16,14 +16,11 @@
 - Codemode results now link to an omitted-only output file as well as the full output, so recovering truncated text does not repeat the visible head and tail. Native guidance also directs agents to emit selected results as plain text and reuse instructions still in context.
 - Added `pi --build-info` to print the resolved runtime path, runtime versions, and existing immutable fork release receipt as JSON.
 - Added `ctx.managedHost` and `session_shutdown` `disposition` so extensions can keep owned work across managed restarts and stop it only on exit. See [Work that outlives a worker](docs/restart.md#work-that-outlives-a-worker).
-- Added a sorted, permission-filtered instruction-group capability index to initial prompts and a static `discover_tools` hint. Listing and enabling groups leave the index and discovery declaration unchanged.
 - Added complete native working-session save and restore through the SDK and `--working-session`, with private local control and completed-exit receipts. See [Native working sessions](docs/working-session.md).
 - Added `registerProviderAuthFallback()` for ephemeral provider-scoped authentication with native credential precedence, catalogs and transport. See [Provider authentication fallback](docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider).
 - Added opt-in `ignoreStoredCredentials` provider registration and `ModelRuntime.supportsIgnoreStoredCredentials` feature detection for routing providers; explicit keys and persistent login/logout remain unchanged.
 - Added opt-in, deduplicated diagnostics for extension handlers blocking synchronously for over 100 ms and custom footer renders exceeding 16 ms. Set `PI_EXTENSION_PERFORMANCE=1`; awaited work is excluded.
 - Added JSON selection to the `read` tool. `json: { path?, fields? }` selects a JSON Pointer target and, optionally, immediate object keys before paging and output limits. See [JSON selection with read](docs/sdk.md#json-selection-with-read).
-- Added the replaceable `discover_tools` builtin for full on-demand extension instructions, with deferred activation, prior-turn read gating, and branch-aware persistence and compaction repair. SDK hosts can opt in with `instructionGroupsExtension`.
-- Added support for `discover_tools` in codemode scripts, with full instructions delivered separately from script output before grouped tools can run.
 - Added managed Node CLI restarts via `pi restart` and `/restart`, with final-idle complete native-state resume, staged runtime and extension activation, and one-shot startup rollback. Journal-only handoffs are refused. See [Managed restarts](docs/restart.md).
 - Added optional `compactView` (off by default), `/compact-view` (alias `/cv`), and off/on/hybrid settings to group tools and operational updates behind expandable Activity rows without changing session content. Bare commands cycle off → on → hybrid → off. Hybrid opens groups by default while keeping cards compact.
 - Added the `background_command` builtin extension for durable detached shell jobs, bounded status output, timeout/cancellation, deduplicated completion delivery after tool batches, while idle, or on resume, and the public `pi-change-working-dir` execution-directory protocol.
@@ -74,7 +71,6 @@
 - Fixed quitting an unready restarted worker rolling back to the previous worker instead of exiting, including when its shutdown handlers outlast the startup deadline.
 - Fixed messages sent while Pi quits, such as a child completion arriving during a shutdown hook, starting a new turn. A managed restart then failed its final capture and stopped unfinished children; quit now admits shutdown persistence but no new or steered turn.
 - Fixed non-strict session shutdowns waiting on unresponsive provider aborts, interactive startup prompts bypassing the working-session save gate or losing compact-view expansion on restore, and managed launcher `SIGINT`/`SIGHUP` forwarding when the worker runs outside the terminal process group.
-- Fixed journal resume, tree navigation and builtin-disabling reload losing selected tools deferred by instruction discovery; eager fallback preserves explicit selections, exclusions and later deselection across subsequent resumes without changing historical declarations.
 - Fixed newer fetched or cached legacy Kimi Coding catalogs reverting the native OpenAI protocol and tool/thinking compatibility after offline hydration.
 - Fixed stale footer branches when a branch change is missed during Git watcher startup.
 - Fixed model refreshes rereading every provider's model catalog once per provider, which slowed startup and raised memory use, more so when an extension registered or overrode a provider. Each refresh now reads a provider's catalog a fixed number of times.
@@ -87,6 +83,7 @@
 - Fixed native working-session restore losing `--tools +name/-name` modifiers on reload; malformed saved modifier lists are rejected before factories.
 - Fixed background-command completion recovery failing on session journals larger than Node's string limit; recovery streams entries once per delivery lease and cancels cleanly on shutdown.
 - Fixed native working-session restore losing wildcard tool restrictions, disabled builtin selection such as `--no-mcp`, and pending tools already registered on reconnect; malformed saved hidden-tool lists are rejected before factories.
+- Fixed managed restarts refusing every request when an update removed a saved tool, such as the retired `discover_tools`. A restored working session still waits for saved MCP tools to reconnect; other missing saved tools no longer hold requests and return if an extension registers them later.
 - Fixed source builds failing with TypeScript casing errors on macOS checkouts reached through differently cased paths; builds use canonical working directories and resolve workspace declarations through package exports.
 - Fixed standalone Bun binaries failing to resolve extension dependency entrypoints: manifests now supply `main`, `exports` and Bun conditions, including transitive imports. Unexported dependency subpaths are now rejected as under Node; use public entrypoints. Project bunfig preloads remain disabled.
 - Fixed `pi update --fork` failing on Termux when Android denies hard-link publication of the release-store ownership claim; exclusive creation still prevents competing selectors from sharing a store.
@@ -123,7 +120,6 @@
 - Fixed compact and hybrid views rendering nonempty assistants twice per frame to check emptiness ([#237](https://github.com/fitchmultz/pi/issues/237)).
 - Fixed the Gondolin example extension installing node-forge 1.4.0 (GHSA-86w9-cpqp-85rv) and undici 6.26.0 by updating it to Gondolin 0.14.0. Gondolin now blocks guest HTTP and TLS requests to loopback, private and link-local addresses by default.
 - Fixed fork updates and installs losing npm error logs and redownloading dependencies on retry. Both now share a private npm cache and retain failed-attempt logs ([#285](https://github.com/fitchmultz/pi/issues/285)). See [Fork installation](docs/quickstart.md#fork-installation).
-- Fixed full instruction groups being duplicated in later prompts and after compaction when their discovery result was still present. Changed owner instructions are delivered once without rewriting prior context; tool-selection and read-before-use checks remain in effect.
 - Fixed the grep tool's `glob` matching from the folder pi was started in instead of from `path`: with `path: "repo"`, `glob: "migrations/main/*.js"` returned `No matches found` even though `repo/migrations/main/a.js` exists. Globs are now relative to `path`, the same form grep prints its results in, also when `path` is a symlink. A leading `./` (`./src/*.ts`) is ignored instead of matching nothing ([#11807](https://github.com/earendil-works/pi/issues/11807), [#10998](https://github.com/earendil-works/pi/issues/10998))
 - Fixed prompt template arguments dropping apostrophes and merging words: an apostrophe inside a word, as in `doesn't`, no longer opens a quote; a quote with no closing match is kept as text; and `\"` inside `"..."` (or `\'` inside `'...'`) gives a literal quote ([#11861](https://github.com/earendil-works/pi/issues/11861))
 - Fixed inherited autocomplete failures exiting Pi. An extension autocomplete provider or slash-command argument completion that rejects now shows no suggestions instead of ending the session with an uncaught exception, and later completions keep working.
@@ -156,6 +152,10 @@
 - Fixed the edit tool rewriting the line endings of untouched lines in files with mixed CRLF/LF or lone CR line endings, and running out of memory on large files after the file was already written; the diff now covers only the changed lines and their surroundings and is computed before writing ([#8544](https://github.com/earendil-works/pi/issues/8544))
 - Fixed `/mcp` showing `Failed to refresh tools: MCP connection closed` instead of why an MCP server disconnected, such as a stdio server's error output, when the connection dropped while its tools were being refreshed.
 - Fixed quitting right after `/mcp reconnect` leaving a stdio MCP server that ignores SIGTERM running. Ending a session now waits for MCP connections dropped by a reconnect, sign-out or required sign-in to finish closing, as it already did for current connections.
+
+### Removed
+
+- Removed the `discover_tools` builtin, its `instructionGroupsExtension` export and the `pi.refreshTools()` extension method. Extensions keep optional tools out of the prompt with `exposure: "deferred"`, and `tool_search` loads them on demand. On resume, a tool that discovery hid before it was ever declared comes back like a newly registered tool.
 
 ## [1.5.0] - 2026-11-02
 

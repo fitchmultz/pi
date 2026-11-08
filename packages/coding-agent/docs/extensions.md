@@ -1944,10 +1944,6 @@ Typical `sourceInfo` values:
 
 `pi.setActiveTools()` ignores unknown and `hidden` tools. Tools with `codemode` or `deferred` exposure stay callable from codemode scripts whether active or not.
 
-### pi.refreshTools()
-
-Re-run `prepareLoadout` after changing extension state without replacing the active selection or discarding unregistered tools pending working-session restoration. Tool registration already refreshes the loadout.
-
 ### pi.setModel(model)
 
 Set the model for the current session. The change is recorded in session history and restored when that session is resumed, but it does not change the configured `defaultProvider` or `defaultModel` used by new sessions. Returns `false` if authentication is not configured for the model's provider. See [models.md](models.md) for configuring custom models.
@@ -2797,8 +2793,6 @@ pi.on("tool_call", async (event, ctx) => {
 A tool that orchestrates other tools can adjust what the model sees while it is active with `prepareLoadout(loadout)`. It runs whenever the active tools change and receives the declared tools, the callable tools, and every registered tool with its exposure, namespace, and prompt guidelines. It returns replacement `descriptions` for declared tools (including its own) and `hiddenDeclarations`: active tools whose declarations requests leave out while they stay active and callable. The default system prompt leaves hidden tools out of its tool list and rules, and names no tool in the skills hint when the file reader is hidden, so the orchestrating tool should present their guidelines itself. `codemode` uses only this hook, `exposure`, `reachesTools`, and `ctx.executeTool()`, so another tool can implement the same behavior under a different name.
 
 A tool that reaches other tools declares which ones a call may reach with `reachesTools(input)`: `"all"`, or the words of the input that may name them, where a word refers to every tool or namespace whose name it contains. `codemode` returns `"all"` for scripts that search or list tools and the words of the script otherwise; `tool_search` always returns `"all"`. Extensions that register tools late use it from their `tool_call` handler to finish registering the tools a call needs before it runs, as the MCP extension does for servers that are still connecting. The MCP extension also activates `codemode` or `tool_search` for MCP tools only when the tool of that name declares `reachesTools`.
-
-For optional full instructions, register a group through the synchronous `pi:instruction-groups` event collector. The built-in `discover_tools` defers selected grouped tools until enabled, then restores their declarations positionally and delivers full instructions before they can run in a later turn. It never widens tool permissions; owners supply eager instructions when discovery is inactive. See [Instruction Groups](instruction-groups.md).
 
 ### Calling Other Tools
 

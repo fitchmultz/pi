@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
 import { Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -119,6 +119,85 @@ describe("Native working sessions", () => {
 			expect(restored.state.pendingTools).toEqual([]);
 		} finally {
 			await restored.release();
+		}
+	});
+
+	it("waits only for saved MCP tools; other saved tools stay pending without holding requests", async () => {
+		const h = await createHarness();
+		harnesses.push(h);
+		const settingsManager = SettingsManager.inMemory({ cacheWarming: "off" });
+		const savedTool = (name: string, exposure: "direct" | "deferred") => ({
+			name,
+			label: name,
+			description: name,
+			exposure,
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [], details: {} }),
+		});
+		let restoredApi: ExtensionAPI | undefined;
+		const loader = async (restored: boolean) => {
+			const resourceLoader = new DefaultResourceLoader({
+				cwd: h.tempDir,
+				agentDir: h.tempDir,
+				settingsManager,
+				// After the restart an update has removed `retired`, and an extension registers `late` only
+				// after the first request, like an MCP adapter tool whose server connects then.
+				extensionFactories: [
+					restored
+						? (pi) => {
+								restoredApi = pi;
+							}
+						: (pi) => {
+								pi.registerTool(savedTool("retired", "direct"));
+								pi.registerTool(savedTool("late", "deferred"));
+							},
+				],
+			});
+			await resourceLoader.reload();
+			return resourceLoader;
+		};
+		const initial = await createAgentSession({
+			cwd: h.tempDir,
+			agentDir: h.tempDir,
+			model: h.getModel(),
+			modelRuntime: h.session.modelRuntime,
+			settingsManager,
+			resourceLoader: await loader(false),
+			sessionManager: SessionManager.inMemory(h.tempDir),
+		});
+		initial.session.setActiveToolsByName([...initial.session.getActiveToolNames(), "late"]);
+		h.setResponses([fauxAssistantMessage("declared")]);
+		await initial.session.prompt("declare the tools");
+		const hold = await initial.session.acquireWorkingSession();
+		await hold.release();
+		initial.session.dispose();
+		expect(hold.state.activeTools).toEqual(expect.arrayContaining(["retired", "late"]));
+		const { session } = await createAgentSession({
+			workingSession: hold.state,
+			modelRuntime: h.session.modelRuntime,
+			settingsManager,
+			resourceLoader: await loader(true),
+		});
+		try {
+			const declared: string[][] = [];
+			const respond = (context: { messages: AgentMessage[] }) => {
+				declared.push(getCurrentTools(context.messages).map(({ name }) => name));
+				return fauxAssistantMessage("continued");
+			};
+			h.setResponses([respond, respond]);
+			await session.prompt("continue after restart");
+			restoredApi?.registerTool(savedTool("late", "deferred"));
+			await session.prompt("after the late registration");
+			expect(declared[0]).not.toContain("retired");
+			expect(declared[0]).not.toContain("late");
+			expect(declared[1]).toContain("late");
+			expect(declared[1]).not.toContain("retired");
+			session.restoreWorkingSession({ ...hold.state, pendingTools: ["mcp__server__reconnecting"] });
+			await expect(session.prompt("before reconnect")).rejects.toThrow(
+				"Saved tools have not registered: mcp__server__reconnecting.",
+			);
+		} finally {
+			session.dispose();
 		}
 	});
 
