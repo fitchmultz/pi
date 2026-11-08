@@ -135,9 +135,9 @@ export class Documents {
 	}
 
 	/**
-	 * Loads, in one line job, every persisted singleton not loaded yet and every pinned key not loaded since it was
-	 * pinned (an attempt's activation, before it goes live, rule 6); `undefined` when nothing is persisted. A failure
-	 * fails the activation.
+	 * Loads, in one line job, every persisted singleton not loaded yet and every pinned key whose value is not known yet
+	 * (an attempt's activation, before it goes live, rule 6); `undefined` when nothing is persisted. A failure fails the
+	 * activation.
 	 */
 	load(context: Context): Promise<void> | undefined {
 		const persisted = [...this.#slots.values()].filter((slot) => slot.persisted !== undefined);

@@ -166,7 +166,7 @@ export class KeyedSlot implements DocumentSlot, PersistedSlot {
 		};
 	}
 
-	/** Loads pinned `key` on the line unless it was loaded since it was pinned (a consumer's `at(key)`, slice 6a §12). */
+	/** Loads pinned `key` on the line unless its value is known (a consumer's `at(key)`, slice 6a §12). */
 	async ensure(raw: string, context: Context): Promise<void> {
 		const key = this.key(raw);
 		if (this.#sources.get(key)?.ready !== false) return;
@@ -187,7 +187,7 @@ export class KeyedSlot implements DocumentSlot, PersistedSlot {
 		return storedText(key, this.#keyWhat);
 	}
 
-	/** Loads every pinned key not loaded since it was pinned (activation, holding the line). */
+	/** Loads every pinned key whose value is not known yet (activation, holding the line). */
 	async loadDeclared(context: Context): Promise<void> {
 		for (const [key, source] of this.#sources) if (!source.ready) await this.load(key, context);
 	}
@@ -283,8 +283,13 @@ export class KeyedSlot implements DocumentSlot, PersistedSlot {
 			resident.stored = stored;
 			resident.version = version;
 		}
-		if (source === undefined) this.#touch(resident);
-		else source.written(before!, prepared);
+		if (source === undefined) {
+			this.#touch(resident);
+			return;
+		}
+		// A pin whose load waits behind this commit reads the document: that load finds the key in memory and returns.
+		source.ready = true;
+		source.written(before!, prepared);
 	}
 
 	/** Retires the document at `key` (inside the batch): out of memory, its source reads `initial()` with the flag. */
@@ -386,7 +391,7 @@ export class KeySource extends AddressSource {
 	readonly key: string;
 	/** Its pins: at 0 the slot forgets it. */
 	pins = 0;
-	/** Whether the key was loaded since it was pinned (always, in memory): its value is known. */
+	/** Whether its value is known: the key was loaded or written since it was pinned (always, in memory). */
 	ready: boolean;
 	#initial: JsonObject;
 
