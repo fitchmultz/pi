@@ -348,6 +348,20 @@ describe("in-order handling", () => {
 			expect(handled).toEqual(["release 0"]);
 		});
 
+		it("drops the held messages behind one that closes the link while they are handled (a protocol error)", async () => {
+			const { peer, handled, finish, reports, isClosed } = await holding();
+			peer.send({ kind: "release", hold: 0 });
+			peer.send({ kind: "release", hold: 1 });
+			peer.send({ kind: "hello", protocol: PROTOCOL_VERSION, incarnation: RAW_PEER, calls: 256 });
+			peer.send({ kind: "release", hold: 2 });
+			await transported();
+			finish().resolve();
+			await transported();
+			expect(reports).toEqual([new Error("handshake: a second hello")]);
+			expect(isClosed()).toBe(true);
+			expect(handled).toEqual(["release 0", "release 1"]);
+		});
+
 		it("keeps no held message once the link closed (GC)", async () => {
 			const { peer, finish, refs } = await (async () => {
 				const { peer, finish } = await holding();
