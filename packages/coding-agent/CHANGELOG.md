@@ -38,6 +38,7 @@
 
 ### Changed
 
+- Scoped harness documentation guidance to the affected APIs and behavior, and clarified that independent tool calls can be batched directly or through codemode while dependent calls and shared-state mutations stay ordered.
 - Consolidated duplicated compaction, resource-ignore and sleep helpers: re-exported `calculateContextTokens` and `ContextUsageEstimate` from `@earendil-works/pi-ai`, derived compaction and branch-summary token defaults from `SETTINGS_DEFAULTS`, composed checkpoint summary prompts from a shared builder, extracted `.gitignore`/`.ignore`/`.fdignore` rule loading into `core/resource-ignore.ts`, and replaced the duplicate `utils/sleep.ts` wrapper with `timers/promises`.
 - Published settings, models, keybindings, and theme schemas using upstream's shared runtime definitions; the fork settings schema retains boolean and `"hybrid"` compact activity preferences.
 - Reduced repeated session-history work, assistant/tree rendering and native read, grep, edit and image processing.
