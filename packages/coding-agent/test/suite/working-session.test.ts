@@ -122,27 +122,36 @@ describe("Native working sessions", () => {
 		}
 	});
 
-	it("waits only for saved MCP tools; a saved tool the restored runtime no longer registers drops at the next run", async () => {
+	it("waits only for saved MCP tools; other saved tools stay pending without holding requests", async () => {
 		const h = await createHarness();
 		harnesses.push(h);
 		const settingsManager = SettingsManager.inMemory({ cacheWarming: "off" });
-		const loader = async (registersRetired: boolean) => {
+		const savedTool = (name: string, exposure: "direct" | "deferred") => ({
+			name,
+			label: name,
+			description: name,
+			exposure,
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [], details: {} }),
+		});
+		let restoredApi: ExtensionAPI | undefined;
+		const loader = async (restored: boolean) => {
 			const resourceLoader = new DefaultResourceLoader({
 				cwd: h.tempDir,
 				agentDir: h.tempDir,
 				settingsManager,
-				extensionFactories: registersRetired
-					? [
-							(pi) =>
-								pi.registerTool({
-									name: "retired",
-									label: "Retired",
-									description: "Removed by an update",
-									parameters: Type.Object({}),
-									execute: async () => ({ content: [], details: {} }),
-								}),
-						]
-					: [],
+				// After the restart an update has removed `retired`, and an extension registers `late` only
+				// after the first request, like an MCP adapter tool whose server connects then.
+				extensionFactories: [
+					restored
+						? (pi) => {
+								restoredApi = pi;
+							}
+						: (pi) => {
+								pi.registerTool(savedTool("retired", "direct"));
+								pi.registerTool(savedTool("late", "deferred"));
+							},
+				],
 			});
 			await resourceLoader.reload();
 			return resourceLoader;
@@ -153,37 +162,36 @@ describe("Native working sessions", () => {
 			model: h.getModel(),
 			modelRuntime: h.session.modelRuntime,
 			settingsManager,
-			resourceLoader: await loader(true),
+			resourceLoader: await loader(false),
 			sessionManager: SessionManager.inMemory(h.tempDir),
 		});
+		initial.session.setActiveToolsByName([...initial.session.getActiveToolNames(), "late"]);
 		h.setResponses([fauxAssistantMessage("declared")]);
-		await initial.session.prompt("declare the tool");
+		await initial.session.prompt("declare the tools");
 		const hold = await initial.session.acquireWorkingSession();
 		await hold.release();
 		initial.session.dispose();
-		expect(hold.state.activeTools).toContain("retired");
-		// A managed restart into a runtime whose update removed the tool.
+		expect(hold.state.activeTools).toEqual(expect.arrayContaining(["retired", "late"]));
 		const { session } = await createAgentSession({
 			workingSession: hold.state,
 			modelRuntime: h.session.modelRuntime,
 			settingsManager,
-			resourceLoader: await loader(false),
+			resourceLoader: await loader(true),
 		});
 		try {
-			let declared: string[] = [];
-			let removed: string[] = [];
-			h.setResponses([
-				(context) => {
-					declared = getCurrentTools(context.messages).map(({ name }) => name);
-					removed = context.messages.flatMap((message) =>
-						message.role === "system" ? (message.toolsRemoved ?? []).map(({ name }) => name) : [],
-					);
-					return fauxAssistantMessage("continued");
-				},
-			]);
+			const declared: string[][] = [];
+			const respond = (context: { messages: AgentMessage[] }) => {
+				declared.push(getCurrentTools(context.messages).map(({ name }) => name));
+				return fauxAssistantMessage("continued");
+			};
+			h.setResponses([respond, respond]);
 			await session.prompt("continue after restart");
-			expect(declared).not.toContain("retired");
-			expect(removed).toEqual(["retired"]);
+			restoredApi?.registerTool(savedTool("late", "deferred"));
+			await session.prompt("after the late registration");
+			expect(declared[0]).not.toContain("retired");
+			expect(declared[0]).not.toContain("late");
+			expect(declared[1]).toContain("late");
+			expect(declared[1]).not.toContain("retired");
 			session.restoreWorkingSession({ ...hold.state, pendingTools: ["mcp__server__reconnecting"] });
 			await expect(session.prompt("before reconnect")).rejects.toThrow(
 				"Saved tools have not registered: mcp__server__reconnecting.",

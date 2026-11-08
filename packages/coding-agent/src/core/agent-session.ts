@@ -2541,8 +2541,8 @@ export class AgentSession {
 
 	/**
 	 * Refuse a run while a restored working session waits for saved MCP tools, which register when
-	 * their servers reconnect. Other tools register during startup, so a saved tool still missing
-	 * here is no longer provided, such as one an update removed; the run drops it like any pending tool.
+	 * their servers reconnect. Other saved tools do not hold a run: an extension can register one at
+	 * any time, and one an update removed never registers. They stay pending (see `_startRun`).
 	 */
 	private _assertRestoredToolsAvailable(): void {
 		if (!this._restoredWorkingSession) return;
@@ -2584,8 +2584,9 @@ export class AgentSession {
 		this._failedResponse = undefined;
 		this._recordSelection();
 		// The run records the loadout in the transcript; restored tools that did not register by now
-		// are dropped, so a tool that never registers does not stay pending.
-		this._pendingToolNames.clear();
+		// are dropped, so a tool that never registers does not stay pending. A restored working session
+		// keeps its saved tools pending instead, so one an extension registers after this run returns.
+		if (!this._restoredWorkingSession) this._pendingToolNames.clear();
 		try {
 			await this.agent.prompt(messages);
 			while (!this._agentRunAbortRequested) {
