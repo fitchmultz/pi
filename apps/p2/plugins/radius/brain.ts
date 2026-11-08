@@ -1008,7 +1008,11 @@ export class RadiusBrain {
 	#openWebSocket(id: string, head: RequestHead, headers: Record<string, string>, target: Target): void {
 		const upstream = this.#loopback(head, headers, target);
 		const queued: { payload: Buffer; text: boolean }[] = [];
+		// Whether the socket to Radius is congested, kept while the loopback socket connects: `ws` ignores a pause until
+		// the socket is open, so a channel opened while congested starts paused once it opens.
+		let congested = false;
 		upstream.on("open", () => {
+			if (congested) upstream.pause();
 			for (const item of queued.splice(0)) upstream.send(item.text ? item.payload.toString("utf8") : item.payload);
 		});
 		upstream.on("message", (data: Buffer, isBinary) => {
@@ -1030,6 +1034,7 @@ export class RadiusBrain {
 			close: () => upstream.close(),
 			credit: () => {},
 			congested: (paused) => {
+				congested = paused;
 				// Stops reading the loopback socket; the server's own backlog checks then see a slow reader.
 				if (upstream.readyState !== WebSocket.OPEN) return;
 				if (paused) upstream.pause();

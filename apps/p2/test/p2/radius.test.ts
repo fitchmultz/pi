@@ -219,6 +219,94 @@ test(
 	},
 );
 
+const STEADY_SAMPLES = 25;
+
+/**
+ * `read()` once STEADY_SAMPLES samples in a row, 10 ms apart, found it unchanged. Used on how much a loopback source
+ * has sent: it writes only as the brain reads, so the count holds still only while the brain does not read it.
+ * Counting samples rather than time keeps an event-loop stall, which stops the brain and the sampling alike, from
+ * passing for a pause.
+ */
+async function steady(read: () => number): Promise<number> {
+	let value = read();
+	for (let same = 0; same < STEADY_SAMPLES; ) {
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		const now = read();
+		same = now === value ? same + 1 : 0;
+		value = now;
+	}
+	return value;
+}
+
+/**
+ * An HTTP service on a free port that answers every request with `body`, written as fast as the reader reads it:
+ * `answers` are its answers so far, each with how much of the body it has sent.
+ */
+async function bodyService(t: TestContext, body: Buffer) {
+	const answers: { sent: number }[] = [];
+	const service = createServer((_request, response) => {
+		const answer = { sent: 0 };
+		answers.push(answer);
+		response.writeHead(200);
+		// Each chunk once the last one was written, so `sent` grows only as the reader takes them.
+		const next = () => {
+			const chunk = body.subarray(answer.sent, answer.sent + 64 * 1024);
+			if (!chunk.length) {
+				response.end();
+				return;
+			}
+			response.write(chunk, (error) => {
+				if (error) return;
+				answer.sent += chunk.length;
+				next();
+			});
+		};
+		next();
+	});
+	await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
+	const address = service.address();
+	assert(address && typeof address !== "string");
+	t.after(() => new Promise<void>((resolve) => service.close(() => resolve())));
+	return { port: address.port, answers };
+}
+
+/**
+ * Congests the brain's socket to Radius: the relay stops reading while a forward's large body goes out, until the
+ * brain stops reading that body with part of it unsent.
+ */
+async function congest(t: TestContext, f: Awaited<ReturnType<typeof fixture>>): Promise<void> {
+	const size = 16 * 1024 * 1024;
+	const service = await bodyService(t, randomBytes(size));
+	const forward = await f.forwards.add(service.port, "congestion", [f.server.port]);
+	f.radius.reading(false);
+	f.open("/congestion", { forward: forward.id, window: 2 * size });
+	await poll(() => service.answers.length === 1);
+	assert.ok((await steady(() => service.answers[0].sent)) < size, "the socket to Radius never congested");
+}
+
+test(
+	"Radius HTTP bodies wait for credit and for a congested socket alike: credit returned while congested resumes nothing",
+	{ timeout: 45_000 },
+	async (t) => {
+		const f = await fixture(t);
+		const large = randomBytes(16 * 1024 * 1024);
+		const service = await bodyService(t, large);
+		const web = await f.forwards.add(service.port, "large", [f.server.port]);
+		const id = f.open("/large", { forward: web.id });
+		const received = () =>
+			f.radius.frames.filter((frame) => frame.id === id).reduce((sum, frame) => sum + frame.payload.length, 0);
+		// Its window is used up: it waits for credit.
+		await poll(() => received() === 64 * 1024);
+		await congest(t, f);
+		// Credit for all of it arrives while the socket is still congested: the brain still does not read it.
+		f.radius.send({ version: 2, type: "credit", connection_id: id, bytes: large.length });
+		const sent = await steady(() => service.answers[0].sent);
+		assert.ok(sent < large.length / 2, `sent while congested: ${sent} bytes`);
+		f.radius.reading(true);
+		assert.deepEqual(await f.radius.body(id), large);
+	},
+);
+
 test(
 	"Radius forwards relay HTTP/WebSockets, rewrite origins/redirects and refuse private anonymous requests",
 	{ timeout: 30_000 },
@@ -295,17 +383,35 @@ test(
 	},
 );
 
-/** A WebSocket service on a free port that echoes text and answers `flood <bytes>` with that much binary output. */
+/**
+ * A WebSocket service on a free port that echoes text and answers `flood <bytes>` with that many random bytes, as
+ * binary messages of 64 KiB sent as fast as the reader reads them: `floods` are those answers so far, each with how
+ * much of it has been sent.
+ */
 async function echoService(t: TestContext) {
 	const service = createServer();
 	const sockets = new WebSocketServer({ server: service });
+	const floods: { output: Buffer; sent: number }[] = [];
 	sockets.on("connection", (socket) =>
 		socket.on("message", (data, binary) => {
 			const text = String(data);
-			if (!binary && text.startsWith("flood ")) {
-				const chunk = randomBytes(64 * 1024);
-				for (let sent = 0; sent < Number(text.slice(6)); sent += chunk.length) socket.send(chunk);
-			} else socket.send(`echo ${text}`);
+			if (binary || !text.startsWith("flood ")) {
+				socket.send(`echo ${text}`);
+				return;
+			}
+			const flood = { output: randomBytes(Number(text.slice(6))), sent: 0 };
+			floods.push(flood);
+			// Each message once the last one was written, so `sent` grows only as the reader takes them.
+			const next = () => {
+				const message = flood.output.subarray(flood.sent, flood.sent + 64 * 1024);
+				if (!message.length) return;
+				socket.send(message, (error) => {
+					if (error) return;
+					flood.sent += message.length;
+					next();
+				});
+			};
+			next();
 		}),
 	);
 	await new Promise<void>((resolve) => service.listen(0, "127.0.0.1", resolve));
@@ -315,8 +421,31 @@ async function echoService(t: TestContext) {
 		for (const socket of sockets.clients) socket.terminate();
 		await new Promise<void>((resolve) => service.close(() => resolve()));
 	});
-	return address.port;
+	return { port: address.port, floods };
 }
+
+test(
+	"Radius v4: a WebSocket channel opened while the socket to Radius is congested starts paused, and loses nothing",
+	{ timeout: 45_000 },
+	async (t) => {
+		const f = await fixture(t);
+		const service = await echoService(t);
+		const web = await f.forwards.add(service.port, "web", [f.server.port]);
+		await congest(t, f);
+		// A channel opens now, and its service answers at once with a flood.
+		const id = f.open("/bulk", { forward: web.id, kind: "ws" });
+		const flood = 16 * 1024 * 1024;
+		f.radius.sendData(id, Buffer.from(`flood ${flood}`), 2);
+		await poll(() => service.floods.length === 1);
+		// The brain does not read it while congested: the output waits at the service.
+		const sent = await steady(() => service.floods[0].sent);
+		assert.ok(sent < flood / 2, `sent while congested: ${sent} bytes`);
+		f.radius.reading(true);
+		const received = () => f.radius.frames.filter((frame) => frame.id === id).map((frame) => frame.payload);
+		await poll(() => received().reduce((sum, payload) => sum + payload.length, 0) === flood, 30_000);
+		assert.ok(Buffer.concat(received()).equals(service.floods[0].output), "the relay got other bytes than were sent");
+	},
+);
 
 test("Radius v5 gives each WebSocket channel its own socket to the relay", { timeout: 30_000 }, async (t) => {
 	const f = await fixture(t, undefined, { channels: true });
@@ -340,7 +469,7 @@ test(
 	{ timeout: 30_000 },
 	async (t) => {
 		const f = await fixture(t, undefined, { channels: true });
-		const port = await echoService(t);
+		const { port } = await echoService(t);
 		const web = await f.forwards.add(port, "web", [f.server.port]);
 		const bulkId = f.open("/bulk", { forward: web.id, kind: "ws" });
 		const echoId = f.open("/echo", { forward: web.id, kind: "ws" });
