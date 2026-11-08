@@ -11,11 +11,10 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import lockfile from "proper-lockfile";
 import { getPackageDir, isBunRuntime, PACKAGE_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./child-process.ts";
 import { forkNpmEnvironment, removeForkNpmLogs } from "./fork-npm-cache.ts";
-import { claimForkReleaseStore } from "./fork-release-store.ts";
+import { claimForkReleaseStore, lockForkSelector } from "./fork-release-store.ts";
 import { getTermuxBash } from "./termux.ts";
 
 /** Bootstrap a pinned fork checkout; the fork installer owns validation and atomic selection. */
@@ -90,11 +89,7 @@ export async function runForkUpdate(): Promise<void> {
 		capture(command, [...args]);
 	}
 
-	let releaseLock: (() => Promise<void>) | undefined = await lockfile.lock(selector, {
-		realpath: false,
-		stale: Infinity,
-		update: 1000,
-	});
+	let releaseLock: (() => Promise<void>) | undefined = await lockForkSelector(selector);
 	let temporary: string | undefined;
 	try {
 		validateSelector();

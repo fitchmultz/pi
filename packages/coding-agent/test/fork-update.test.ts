@@ -25,6 +25,7 @@ import { PACKAGE_NAME, VERSION } from "../src/config.ts";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
 import * as childProcess from "../src/utils/child-process.ts";
+import { lockForkSelector } from "../src/utils/fork-release-store.ts";
 import { runForkUpdate } from "../src/utils/fork-update.ts";
 
 const platforms = ["darwin", "linux", "android"];
@@ -159,6 +160,10 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 			if (command === "git" && args[0] === "fetch") {
 				fetched++;
 				expect(args).toEqual(["fetch", "--depth=1", "https://github.com/fitchmultz/pi.git", "refs/heads/main"]);
+				expect(
+					existsSync(`${selector}.lock`),
+					"the update must hold the shared lock until the installer hand-off",
+				).toBe(true);
 				return spawn(command, ["fetch", "--depth=1", source, "refs/heads/main"], options);
 			}
 			if (args[0]?.endsWith("npm-cli.js")) {
@@ -457,6 +462,18 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		await expect(runForkUpdate()).rejects.toThrow("does not select this running Pi installation");
 		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
 		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it("fails before fetching or claiming the store while an installer holds the selector lock", async () => {
+		const release = await lockForkSelector(selector);
+		try {
+			await expect(runForkUpdate()).rejects.toMatchObject({ code: "ELOCKED" });
+		} finally {
+			await release();
+		}
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+		expect(readlinkSync(selector)).toBe(oldPackage);
+		expect(existsSync(join(root, "real-home/.local/share/pi-fork/releases/.owner-selector"))).toBe(false);
 	});
 
 	it("refuses a store owned by another selector before fetching or changing the installation", async () => {

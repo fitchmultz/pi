@@ -10,10 +10,9 @@ import { findPackageJSON } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import lockfile from "proper-lockfile";
 import { validateModelDataDirectory } from "../packages/ai/scripts/model-data.ts";
 import { forkNpmEnvironment, removeForkNpmLogs } from "../packages/coding-agent/src/utils/fork-npm-cache.ts";
-import { claimForkReleaseStore } from "../packages/coding-agent/src/utils/fork-release-store.ts";
+import { claimForkReleaseStore, lockForkSelector } from "../packages/coding-agent/src/utils/fork-release-store.ts";
 import { getTermuxBash } from "../packages/coding-agent/src/utils/termux.ts";
 import { codingAgentName, smokeTestCodingAgent } from "./coding-agent-smoke.mjs";
 import { wireConsumer } from "./local-package-install.mjs";
@@ -204,8 +203,7 @@ function replaceSymlink(target, selector) {
 
 async function withMutationLock(releases, selector, action) {
 	mkdirSync(dirname(selector), { recursive: true });
-	// Synchronous builds can block heartbeats. Never steal a lock based on age.
-	const release = await lockfile.lock(selector, { realpath: false, stale: Infinity, update: 1000 });
+	const release = await lockForkSelector(selector);
 	try {
 		selectorTarget(selector);
 		selectorTarget(`${selector}.previous`);
@@ -275,6 +273,8 @@ function activateLockedRelease(releases, identity, selector, { rollback = false,
 		console.warn("Explicit rollback: catalog downgrade check skipped.");
 	}
 	mkdirSync(dirname(selector), { recursive: true });
+	// Record the rollback target before selecting: an interruption between the two renames then
+	// leaves the old selection in place rather than a new selection with a stale .previous.
 	if (previous) {
 		selectorTarget(`${selector}.previous`); // Never overwrite an unrelated real file.
 		replaceSymlink(previous, `${selector}.previous`);
