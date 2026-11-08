@@ -540,7 +540,8 @@ export class InteractiveMode {
 	private readonly entriesRenderedByBoundaryCompaction = new Set<string>();
 	private streamingMessage: AssistantMessage | undefined = undefined;
 
-	// Tool execution tracking: toolCallId -> component
+	// Rows of the current run whose results are not saved yet, by tool call ID. Transcript rebuilds place these rows
+	// instead of re-creating them from history, which lacks their partial output, timer and unsaved result.
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 
 	// Tool output expansion state
@@ -2205,6 +2206,7 @@ export class InteractiveMode {
 
 					this.chatContainer.clear();
 					this.renderInitialMessages();
+					this.showUnsavedRows();
 					if (result.editorText && !this.editor.getText().trim()) {
 						this.editor.setText(result.editorText);
 					}
@@ -3765,6 +3767,7 @@ export class InteractiveMode {
 						});
 					}
 					this.renderSessionEntries(retainedEntries.filter((entry) => entriesAfterCompaction.has(entry.id)));
+					this.showUnsavedRows();
 					for (const entryId of entriesAfterCompaction) this.entriesRenderedByBoundaryCompaction.add(entryId);
 					this.footer.invalidate();
 					this.ui.requestRender();
@@ -3848,6 +3851,8 @@ export class InteractiveMode {
 
 			case "message_end":
 				if (event.message.role === "user") break;
+				// The session saves the result right after this event; from then on, history renders the row.
+				if (event.message.role === "toolResult") this.pendingTools.delete(event.message.toolCallId);
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					let errorMessage: string | undefined;
@@ -3933,8 +3938,8 @@ export class InteractiveMode {
 				if (event.isError) this.maybeShowInstallChangeWarning();
 				const component = this.pendingTools.get(event.toolCallId);
 				if (component) {
+					// Keep the row in pendingTools until its result is saved; parallel rounds save results at their end.
 					component.updateResult({ ...event.result, isError: event.isError, durationMs: event.durationMs });
-					this.pendingTools.delete(event.toolCallId);
 					this.ui.requestRender();
 				}
 				break;
@@ -4020,6 +4025,7 @@ export class InteractiveMode {
 							usage: event.result.usage,
 						});
 					}
+					this.showUnsavedRows();
 					this.footer.invalidate();
 				} else if (event.errorMessage) {
 					if (event.reason === "manual") {
@@ -4328,7 +4334,6 @@ export class InteractiveMode {
 		messageMeta?: Map<AgentMessage, { id: string; timestamp: string }>,
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
-		this.pendingTools.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		// Cache misses are not persisted, unlike successful cache-warming usage.
 		// Re-derive estimates from each message's ancestry, including retained pre-compaction messages.
@@ -4366,6 +4371,12 @@ export class InteractiveMode {
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
+						// A live row keeps its partial output, timer and unsaved result; history only places it.
+						const liveComponent = this.pendingTools.get(content.id);
+						if (liveComponent) {
+							this.chatContainer.addChild(liveComponent);
+							continue;
+						}
 						const component = new ToolExecutionComponent(
 							content.name,
 							content.id,
@@ -4422,8 +4433,10 @@ export class InteractiveMode {
 			}
 		}
 
-		for (const [toolCallId, component] of renderedPendingTools) {
-			this.pendingTools.set(toolCallId, component);
+		// No result can arrive for a call without a live row or saved result, e.g. after quitting while it ran.
+		// Show the error that the model gets for it (see transformMessages in pi-ai).
+		for (const component of renderedPendingTools.values()) {
+			component.updateResult({ content: [{ type: "text", text: "No result provided" }], isError: true });
 		}
 		this.ui.requestRender();
 	}
@@ -4630,6 +4643,20 @@ export class InteractiveMode {
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
 		this.renderSessionEntries(this.sessionManager.buildContextEntries());
+		this.showUnsavedRows();
+	}
+
+	/**
+	 * After a transcript rebuild within the session, show again what it has not saved yet: the response still
+	 * streaming, the rows of its tool calls and a running `!` command. The rebuild already placed rows of saved calls.
+	 */
+	private showUnsavedRows(): void {
+		const rows: (Component | undefined)[] = [this.streamingComponent, ...this.pendingTools.values()];
+		// A command started while the agent works waits in the pending area, which rebuilds keep.
+		if (this.bashComponent && !this.pendingBashComponents.includes(this.bashComponent)) rows.push(this.bashComponent);
+		for (const row of rows) {
+			if (row && !this.chatContainer.children.includes(row)) this.chatContainer.addChild(row);
+		}
 	}
 
 	// =========================================================================
@@ -6083,6 +6110,7 @@ export class InteractiveMode {
 						// Update UI
 						this.chatContainer.clear();
 						this.renderInitialMessages();
+						this.showUnsavedRows();
 						if (result.editorText && !this.editor.getText().trim()) {
 							this.editor.setText(result.editorText);
 						}

@@ -238,7 +238,17 @@ test(
 		await t.test("archiving the session closes its terminals", async () => {
 			await sessions.archive({ id: session.id }, BACKGROUND_CONTEXT);
 			const service = (await fixture.server.host.registry(TerminalServices, BACKGROUND_CONTEXT)).value!.service;
-			assert.deepEqual(await service.call({ op: "list", sessionId: session.id }), { kind: "list", windows: [] });
+			const list = () => service.call({ op: "list", sessionId: session.id });
+			// Archiving answers once the session is marked archived; its job closes the terminals afterwards.
+			await poll(
+				async () => {
+					const result = await list();
+					return result.kind === "list" && result.windows.length === 0;
+				},
+				20_000,
+				"the archive job to close the session's terminals",
+			);
+			assert.deepEqual(await list(), { kind: "list", windows: [] });
 			await poll(() => listed().length === 0);
 		});
 

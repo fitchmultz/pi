@@ -48,6 +48,7 @@ function createTreeUI() {
 		clearStatusIndicator: vi.fn(),
 		restoreQueuedMessagesToEditor: vi.fn(),
 		renderInitialMessages: vi.fn(),
+		showUnsavedRows: vi.fn(),
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		flushCompactionQueue: vi.fn(async () => {}),

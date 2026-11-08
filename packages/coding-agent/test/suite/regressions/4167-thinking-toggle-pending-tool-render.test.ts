@@ -153,6 +153,14 @@ describe("InteractiveMode.renderSessionEntries", () => {
 		).renderSessionEntries;
 		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
 
+		// The call is running when the transcript is rebuilt from its saved assistant message.
+		await handleEvent.call(fakeThis, {
+			type: "tool_execution_start",
+			toolCallId: TOOL_CALL_ID,
+			toolName: TOOL_NAME,
+			args: { delayMs: 10_000 },
+		});
+		fakeThis.chatContainer.clear();
 		renderSessionEntries.call(fakeThis, createSessionEntries([createAssistantToolCallMessage()]));
 
 		expect(fakeThis.pendingTools.has(TOOL_CALL_ID)).toBe(true);
@@ -164,6 +172,7 @@ describe("InteractiveMode.renderSessionEntries", () => {
 			result: { content: [{ type: "text", text: "FINAL_RESULT" }], details: undefined },
 			isError: false,
 		});
+		await handleEvent.call(fakeThis, { type: "message_end", message: createToolResultMessage("FINAL_RESULT") });
 
 		expect(fakeThis.pendingTools.has(TOOL_CALL_ID)).toBe(false);
 		expect(renderChat(fakeThis.chatContainer)).toContain("FINAL_RESULT");
