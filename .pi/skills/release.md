@@ -1,7 +1,6 @@
 ---
 name: release
 description: Prepare, publish, verify, and recover pi releases. Use for release preparation, local release smoke tests, publishing, and failed release CI or announcements.
-disable-model-invocation: true
 ---
 
 # Releasing pi
