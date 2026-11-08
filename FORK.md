@@ -173,6 +173,7 @@ supported behavior. Preserve their ownership guarantees when integrating equival
 | Bash tool output keeps its raw bytes in one memory, open-file or closed-file state. Decoder finish stays separate from file closure, and a closed file keeps its path | `core/tools/output-accumulator.ts` | `{private-spill,bash-spill,tools}.test.ts` |
 | One function defines the selector mutation lock that fork updates and every installer operation share: `<selector>.lock`, never stolen based on age | `utils/{fork-release-store,fork-update}.ts`, `scripts/install-fork.mjs` | `scripts/install-fork.test.mjs`, `fork-update.test.ts` |
 | p2's browser connection loop has one attempt/deciding/waiting/idle/stopped phase. Each attempt owns its timers, a wake while `canRetry` decides is remembered, and stop is final in every phase; the backoff count stays separate | `apps/p2/src/web/reconnect.ts` | `apps/p2/test/p2/{web-reconnect,ui-reconnect}.test.ts` |
+| The Chord store's closed state holds its one close. The first `close` refuses new work and ends exports; every caller joins that close, and a cancelled wait ends only its own. The close waits for admitted commits and reads underway before closing the backend; the backend-failure latch and batch divergence stay separate facts | `packages/chord/src/store/store.ts` | `packages/chord/test/store/{store,export,apply-batch}.test.ts` |
 
 ### Performance deltas
 
