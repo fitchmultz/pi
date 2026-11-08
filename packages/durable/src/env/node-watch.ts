@@ -194,7 +194,8 @@ export class NodeFileWatcher implements FileWatcher {
 			if (error instanceof BudgetExceeded) throw new FileError("invalid", error.message);
 			throw error;
 		}
-		watcher.#schedulePoll();
+		// A switch to polling while opening scheduled its own poll.
+		if (mode === "polling") watcher.#schedulePoll();
 		return watcher;
 	}
 
