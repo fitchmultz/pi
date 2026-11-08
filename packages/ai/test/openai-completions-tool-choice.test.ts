@@ -1126,13 +1126,13 @@ describe("openai-completions tool_choice", () => {
 		);
 
 		const eventTypes: string[] = [];
-		const toolEventsByContentIndex = new Map<number, string[]>();
+		const blockEventsByContentIndex = new Map<number, string[]>();
 		for await (const event of s) {
 			eventTypes.push(event.type);
-			if (event.type === "toolcall_start" || event.type === "toolcall_delta" || event.type === "toolcall_end") {
-				const events = toolEventsByContentIndex.get(event.contentIndex) ?? [];
+			if ("contentIndex" in event) {
+				const events = blockEventsByContentIndex.get(event.contentIndex) ?? [];
 				events.push(event.type);
-				toolEventsByContentIndex.set(event.contentIndex, events);
+				blockEventsByContentIndex.set(event.contentIndex, events);
 			}
 		}
 
@@ -1147,26 +1147,39 @@ describe("openai-completions tool_choice", () => {
 		expect(eventTypes.filter((type) => type === "toolcall_start")).toHaveLength(4);
 		expect(eventTypes.filter((type) => type === "toolcall_delta")).toHaveLength(9);
 		expect(eventTypes.filter((type) => type === "toolcall_end")).toHaveLength(4);
-		expect(toolEventsByContentIndex.get(2)).toEqual([
+		expect(blockEventsByContentIndex.get(0)).toEqual([
+			"thinking_start",
+			"thinking_delta",
+			"thinking_delta",
+			"thinking_end",
+		]);
+		expect(blockEventsByContentIndex.get(1)).toEqual([
+			"text_start",
+			"text_delta",
+			"text_delta",
+			"text_delta",
+			"text_end",
+		]);
+		expect(blockEventsByContentIndex.get(2)).toEqual([
 			"toolcall_start",
 			"toolcall_delta",
 			"toolcall_delta",
 			"toolcall_end",
 		]);
-		expect(toolEventsByContentIndex.get(3)).toEqual([
+		expect(blockEventsByContentIndex.get(3)).toEqual([
 			"toolcall_start",
 			"toolcall_delta",
 			"toolcall_delta",
 			"toolcall_delta",
 			"toolcall_end",
 		]);
-		expect(toolEventsByContentIndex.get(4)).toEqual([
+		expect(blockEventsByContentIndex.get(4)).toEqual([
 			"toolcall_start",
 			"toolcall_delta",
 			"toolcall_delta",
 			"toolcall_end",
 		]);
-		expect(toolEventsByContentIndex.get(5)).toEqual([
+		expect(blockEventsByContentIndex.get(5)).toEqual([
 			"toolcall_start",
 			"toolcall_delta",
 			"toolcall_delta",
