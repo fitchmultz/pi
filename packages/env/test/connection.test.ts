@@ -209,7 +209,11 @@ const poll = setInterval(() => {
 
 describe("Connection of a ready daemon", () => {
 	it("fails pending requests as soon as the daemon exits, even while its pipes stay open", async () => {
-		const connection = connect(fakeDaemon("result"));
+		let starts = 0;
+		const connection = connect(() => {
+			starts++;
+			return fakeDaemon("result");
+		});
 		await connection.info();
 		const started = Date.now();
 		const outcome = await connection.request("lstat", { path: "/" }).then(
@@ -221,6 +225,39 @@ describe("Connection of a ready daemon", () => {
 		expect(outcome.message).toBe("pi-env connection lost");
 		// The process the daemon started holds its pipes for 3 s; the request must not wait for them.
 		expect(Date.now() - started).toBeLessThan(2000);
+		// The daemon may have acted on the request, so its outcome stays unknown: it is not sent again to a new daemon.
+		expect(starts).toBe(1);
+	});
+});
+
+describe("Connection close", () => {
+	it("never starts a daemon whose command resolves after close, and stays closed", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-env-close-"));
+		const started = join(directory, "started");
+		const command = Promise.withResolvers<readonly string[]>();
+		let computed = 0;
+		const connection = new Connection({
+			command: () => {
+				computed++;
+				return command.promise;
+			},
+		});
+		connections.push(connection);
+		try {
+			// Closed while the command is computed, as `sshConnection` detects and deploys before each start.
+			const waiting = startError(connection);
+			connection.close();
+			command.resolve([process.execPath, "-e", `require("node:fs").writeFileSync(${JSON.stringify(started)}, "")`]);
+			const error = await waiting;
+			expect(error.message).toBe("Connection closed");
+			// Not a lost connection, which a watcher would open again.
+			expect(isConnectionLost(error)).toBe(false);
+			expect(existsSync(started)).toBe(false);
+			await expect(connection.request("lstat", { path: "/" })).rejects.toThrow("Connection closed");
+			expect(computed).toBe(1);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });
 
