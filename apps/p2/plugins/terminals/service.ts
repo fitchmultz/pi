@@ -28,17 +28,25 @@ import {
  */
 export const TERMINAL_PING_MS = 15_000;
 
+/** A view's attachment to the host, with the frames it sent while no viewer socket was open and their size in bytes. */
+type ViewAttachment = {
+	readonly host: TerminalAttachment;
+	readonly queue: (TerminalEvent | Uint8Array)[];
+	queued: number;
+};
+
 /** One server attachment. Closing it never stops the host or its programs. */
 export class TerminalView {
 	readonly session: string;
 	readonly #directory: string;
 	readonly #app: string;
-	/** The current attachment; a new one is made by the next `ready` after it ended. */
-	#attachment: TerminalAttachment | undefined;
+	/**
+	 * The current attachment; a new one is made by the next `ready` after it ended. The next `bind` delivers its queued
+	 * frames; an ended attachment's frames end with it, so a socket never gets those of an earlier one.
+	 */
+	#attachment: ViewAttachment | undefined;
 	readonly #version: string;
 	#socket?: WebSocket;
-	#queue: (TerminalEvent | Uint8Array)[] = [];
-	#queued = 0;
 	#list?: ReturnType<typeof Promise.withResolvers<TerminalInfo[]>>;
 	#serial: Promise<unknown> = Promise.resolve();
 	#closed = false;
@@ -52,31 +60,31 @@ export class TerminalView {
 
 	ready(): Promise<void> {
 		if (!this.#attachment) {
-			const attachment = attachTerminalHost(
+			const host = attachTerminalHost(
 				this.#directory,
 				this.#app,
 				(frame) => this.#frame(frame),
 				() => {
-					if (this.#attachment !== attachment) return;
+					if (this.#attachment?.host !== host) return;
 					this.#attachment = undefined;
 					this.#socket?.close(1011, "Terminal host disconnected");
 				},
 			);
-			this.#attachment = attachment;
+			this.#attachment = { host, queue: [], queued: 0 };
 		}
-		return this.#attachment.ready;
+		return this.#attachment.host.ready;
 	}
 
 	/** Detaches from the host (it and its programs live on). */
 	#detach(): void {
 		const attachment = this.#attachment;
 		this.#attachment = undefined;
-		attachment?.detach();
+		attachment?.host.detach();
 	}
 
 	#write(message: object | Uint8Array): void {
 		if (!this.#attachment) throw new Error("Terminal host is disconnected");
-		this.#attachment.write(message);
+		this.#attachment.host.write(message);
 	}
 
 	#frame(frame: unknown): void {
@@ -105,23 +113,24 @@ export class TerminalView {
 				return;
 			}
 			this.#socket.send(frame instanceof Uint8Array ? frame : JSON.stringify(frame));
-		} else {
-			this.#queued += bytes;
-			if (this.#queued > MAX_BACKLOG) {
-				this.#detach();
-				this.#queue = [];
-				this.#queued = 0;
-				return;
-			}
-			this.#queue.push(frame);
+			return;
 		}
+		// No attachment: an overflow just detached it while its socket's chunk is still being read; the rest goes with it.
+		const attachment = this.#attachment;
+		if (!attachment) return;
+		attachment.queued += bytes;
+		if (attachment.queued > MAX_BACKLOG) this.#detach();
+		else attachment.queue.push(frame);
 	}
 
 	bind(socket: WebSocket): void {
 		this.#socket?.terminate();
 		this.#socket = socket;
-		for (const frame of this.#queue.splice(0)) this.#forward(frame);
-		this.#queued = 0;
+		const attachment = this.#attachment;
+		if (attachment) {
+			for (const frame of attachment.queue.splice(0)) this.#forward(frame);
+			attachment.queued = 0;
+		}
 		// Keepalive; see TERMINAL_PING_MS.
 		const ping = setInterval(() => {
 			if (socket.readyState === WebSocket.OPEN) socket.send('{"type":"ping"}');
@@ -144,8 +153,6 @@ export class TerminalView {
 			clearInterval(ping);
 			if (this.#socket !== socket) return;
 			this.#socket = undefined;
-			this.#queue = [];
-			this.#queued = 0;
 			this.#detach();
 		});
 	}
