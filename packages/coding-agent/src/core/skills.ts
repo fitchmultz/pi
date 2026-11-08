@@ -319,6 +319,7 @@ export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "b
 			: fileReadTool === "bash"
 				? "Use bash to load a skill's file when the task matches its description."
 				: "Load a skill's file when the task matches its description.",
+		"Apply loaded skills without rereading them for every file or step. Reload a skill when it changes or its full instructions are no longer in context.",
 		"Resolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.",
 		"",
 		"<available_skills>",

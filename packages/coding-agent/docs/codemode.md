@@ -12,7 +12,7 @@ A script may start with an options line. It must be the first line; an options l
 // @options: {"max_output_tokens": 2000, "timeout_ms": 60000}
 ```
 
-- `max_output_tokens` (default 10000) limits the output. Longer output keeps its start and end, and the full text is written to a temp file whose path is included in the result. A script fails when its output passes 16777216 characters of text and base64 image data or 100000 `text()`, `image()`, and `console` calls; write large data to a file with a tool instead.
+- `max_output_tokens` (default 10000) limits the output. Longer output keeps its start and end. The result links to an **omitted output** file containing only the missing middle and a **full output** file containing the complete text. Read the omitted file to recover missing content without repeating the visible text; use `offset` and `limit` to page it. A script fails when its output passes 16777216 characters of text and base64 image data or 100000 `text()`, `image()`, and `console` calls; write large data to a file with a tool instead.
 - `timeout_ms` is a hard deadline for the whole script, including any wait for a free worker. It is unset by default. Image generation can take minutes, so do not set a short deadline for scripts that generate images.
 - `background` (default `false`) runs the script after the tool call returns. See [Background scripts](#background-scripts).
 
@@ -72,6 +72,19 @@ What a call resolves to depends on the tool:
 - Other tools, such as `edit` and `write`, resolve to their text output.
 
 A call that fails, is blocked, or gets invalid arguments rejects with an `Error` that carries the tool's error text. Use `Promise.allSettled()` to keep the results of the calls that succeed.
+
+Select the fields needed for the current decision before calling `text()`. For long text, print a label and the text separately. Wrapping file contents or logs in JSON escapes their newlines, which makes the saved output harder to page. Handle rejected calls explicitly instead of printing whole settled-result envelopes.
+
+```js
+const results = await Promise.allSettled(paths.map((path) => tools.read({ path })));
+for (let i = 0; i < results.length; i++) {
+	text(paths[i]);
+	const result = results[i];
+	text(result.status === "fulfilled" ? result.value : String(result.reason));
+}
+```
+
+Reuse instructions and reference documents whose full text remains in context. After a change or compaction, read the missing material again. Full output remains available for inspection; these practices do not change tool limits or hide errors.
 
 The `codemode` description lists tools with their TypeScript declarations, grouped by namespace (for example one MCP server). Tools with `deferred` exposure, which includes MCP tools with the default `codemode` exposure, are not listed, so the description stays the same while MCP servers connect. Listed declarations share a budget of 3000 estimated tokens (`codemode.inlineBudget` in [settings](settings.md#tools)). Scripts find the other tools with `searchTools()`, `describeTool()`, `describeNamespace()`, or by filtering `ALL_TOOLS`.
 

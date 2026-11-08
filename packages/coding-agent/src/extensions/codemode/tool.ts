@@ -113,12 +113,15 @@ export interface CodemodeToolDetails {
 	background?: { runId: string };
 	/** Temp file with the full text output, when the output was truncated. */
 	fullOutputPath?: string;
+	/** Temp file containing only the text omitted between the visible head and tail. */
+	omittedOutputPath?: string;
 }
 
 export const codemodeToolSystemPromptContribution = {
 	snippet: "Run JavaScript that calls other tools",
 	guidelines: [
 		"Use codemode to batch independent tool calls (Promise.allSettled), chain them, or filter large output, instead of many separate calls.",
+		"Emit only the results needed for the current decision, not whole Promise.allSettled receipts. Print long text directly with text(value), with labels in separate text() calls, rather than JSON-wrapping file contents or logs.",
 	],
 } as const;
 

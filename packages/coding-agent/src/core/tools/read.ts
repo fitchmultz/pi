@@ -21,7 +21,10 @@ const readSchema = Type.Object({
 
 export const readToolSystemPromptContribution = {
 	snippet: "Read file contents",
-	guidelines: ["Use read to examine files instead of cat or sed."],
+	guidelines: [
+		"Use read to examine files instead of cat or sed.",
+		"Reuse full instructions and reference docs already in the current context. Reread them when they change or compaction removes them; page unread sections rather than repeating the visible prefix.",
+	],
 } as const;
 
 export type ReadToolInput = Static<typeof readSchema>;
