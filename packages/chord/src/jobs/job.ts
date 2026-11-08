@@ -109,6 +109,11 @@ export type AnyJobImplementation = {
 	readonly finish?: (outcome: AnyOutcome, tx: Tx) => void | Promise<void>;
 };
 
+/** Where a job's attempt stands: `declared` until it is live, then `sealed` with the seal's error and cut reason. */
+type JobState =
+	| { readonly kind: "declared" | "live" }
+	| { readonly kind: "sealed"; readonly error: ChordError; readonly reason: CutReason };
+
 /** Failed finishes in a row after which a run is blocked. */
 const FINISH_ATTEMPTS = 5;
 
@@ -122,12 +127,13 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 	readonly #definition: JobDefinition<unknown, unknown, unknown>;
 	readonly #implementation: AnyJobImplementation;
 	readonly #owner: JobOwner;
-	/** `declared` until the attempt is live (starts are refused), `sealed` once it is sealed. */
-	#state: "declared" | "live" | "sealed" = "declared";
+	/**
+	 * `declared` until the attempt is live (starts are refused), `sealed` once it is sealed: a reservation committing
+	 * after it cuts its run off with the seal's error and cut reason.
+	 */
+	#state: JobState = { kind: "declared" };
 	/** Runs whose `run` runs on this attempt. */
 	readonly #invocations = new Set<JobRun>();
-	/** The seal's error and cut reason, once sealed: a reservation committing after it cuts its run off with them. */
-	#sealed: { readonly error: ChordError; readonly reason: CutReason } | undefined;
 	/** Runs whose finish runs on this attempt. */
 	readonly #finishing = new Set<JobRun>();
 
@@ -188,8 +194,8 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 
 	/** The attempt went live: starts are taken, and the records' waiting runs are invoked or finished here. */
 	live(): void {
-		if (this.#state !== "declared") return;
-		this.#state = "live";
+		if (this.#state.kind !== "declared") return;
+		this.#state = { kind: "live" };
 		this.#records.attach(this);
 	}
 
@@ -204,14 +210,14 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 		if (tx.documents !== this.#owner.documents) {
 			throw new Error(`${this.#owner.documents.label}: a transaction starts only its own object's jobs`);
 		}
-		if (this.#state === "sealed") {
+		if (this.#state.kind === "sealed") {
 			throw new ChordError({
 				code: "released",
 				reason: "ended",
 				message: `${this.#records.name}: its attempt ended`,
 			});
 		}
-		if (this.#state === "declared") {
+		if (this.#state.kind === "declared") {
 			throw new ChordError({ code: "not_ready", message: `${this.#records.name}: its object is not live yet` });
 		}
 		return this.#records.stage(tx, args, context, options);
@@ -223,9 +229,8 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 	 * resumed, R3), and the runs finishing here wait for it.
 	 */
 	seal(error: ChordError, reason: CutReason): void {
-		if (this.#state === "sealed") return;
-		this.#state = "sealed";
-		this.#sealed = { error, reason };
+		if (this.#state.kind === "sealed") return;
+		this.#state = { kind: "sealed", error, reason };
 		this.#records.detach(this, this.#finishing);
 		this.#finishing.clear();
 		for (const run of this.#invocations) this.#records.cut(run, error, reason);
@@ -240,7 +245,7 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 	 */
 	invoke(run: JobRun): void {
 		const invocation = run.begin();
-		if (!this.#records.persisted || run.phase === "running") {
+		if (!this.#records.persisted || run.phase.kind === "running") {
 			this.#start(run, invocation);
 			return;
 		}
@@ -249,11 +254,12 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 			.tx((tx) => this.#records.reserve(tx, run), token, context)
 			.then(
 				() => {
-					if (this.#state !== "sealed") {
+					const state = this.#state;
+					if (state.kind !== "sealed") {
 						this.#start(run, invocation);
 						return;
 					}
-					this.#records.cut(run, this.#sealed!.error, this.#sealed!.reason);
+					this.#records.cut(run, state.error, state.reason);
 					// No `run` started: nothing else ends it, and an abort joined to it returns.
 					invocation.ended();
 				},
@@ -263,7 +269,7 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 					// Refused because this attempt was sealed (at admission, or queued past the seal): the run is pending still,
 					// for the next live attempt (this one is detached already). Any other failure (the store closed or failed,
 					// the object ended) is not retried here: retrying on this attempt would only fail again.
-					if (this.#state === "sealed") this.#records.requeue(run);
+					if (this.#state.kind === "sealed") this.#records.requeue(run);
 				},
 			);
 		this.#owner.admit(reserving);
@@ -325,12 +331,12 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 	}
 
 	/**
-	 * Runs the finish of `run`, whose outcome is recorded: `finish` with the cleanup in one transaction under the
+	 * Runs the finish of `run` with its recorded `outcome`: `finish` with the cleanup in one transaction under the
 	 * attempt's token, retried with backoff after a throw (reported), blocked after five in a row. The attempt's seal
 	 * stops it without a report or a count; the next live attempt finishes the run.
 	 */
-	finish(run: JobRun): void {
-		const work = this.#finish(run);
+	finish(run: JobRun, outcome: AnyOutcome): void {
+		const work = this.#finish(run, outcome);
 		this.#owner.admit(work);
 	}
 
@@ -358,21 +364,23 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 	 * `run`'s finish phase in its span: each failed try a `chord.retry` event with its backoff; ends `ok`, `error`
 	 * (blocked) or `aborted` (the attempt's seal).
 	 */
-	async #finish(run: JobRun): Promise<void> {
+	async #finish(run: JobRun, recorded: AnyOutcome): Promise<void> {
 		const span = this.#phaseSpan(run, "finish");
 		const { context } = this.#owner;
 		let outcome: "ok" | "error" | "aborted" = "error";
 		try {
-			outcome = await this.#finishTries(run, span, span === undefined ? context : withTelemetry(span.span, context));
+			const traced = span === undefined ? context : withTelemetry(span.span, context);
+			outcome = await this.#finishTries(run, recorded, span, traced);
 		} finally {
 			span?.span.setAttributes({ outcome });
 			span?.end();
 		}
 	}
 
-	/** The tries of `run`'s finish under `context`, retried with backoff; how the phase ended. */
+	/** The tries of finishing `run` with `outcome` under `context`, retried with backoff; how the phase ended. */
 	async #finishTries(
 		run: JobRun,
+		outcome: AnyOutcome,
 		span: OpenSpan<"chord.job"> | undefined,
 		context: Context,
 	): Promise<"ok" | "error" | "aborted"> {
@@ -386,15 +394,15 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 						async (tx) => {
 							const staging = this.#records.staging(tx);
 							staging.finishing = run;
-							await this.#implementation.finish?.(this.#records.outcomeOf(run, context), tx);
-							this.#records.change(tx, { kind: "delete", run });
+							await this.#implementation.finish?.(this.#records.outcomeOf(run, outcome, context), tx);
+							this.#records.change(tx, { kind: "delete", run, outcome });
 						},
 						token,
 						context,
 					);
 					return "ok";
 				} catch (error) {
-					if (this.#state === "sealed") return "aborted";
+					if (this.#state.kind === "sealed") return "aborted";
 					this.#records.report({ kind: "job_finish_failed", id: run.id, error });
 					// The count is the run's (stored for a persisted job): failures count across a crash.
 					const finishFailures = run.finishFailures + 1;

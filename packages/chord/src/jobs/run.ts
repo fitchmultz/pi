@@ -1,7 +1,7 @@
-// One run of a job (§15, slice 6b §4.1): its record (id, version, key, args, phase, restarts, finish failures, abort
-// mark, outcome), its current invocation (the fence of its seal token, its abort signal, the end an abort joins: one
-// per invocation, as a persisted run is invoked again after a seal, R3), its `running` entry and the `Run` handle its
-// callers wait on.
+// One run of a job (§15, slice 6b §4.1): its record (id, version, key, args, its phase with what that holds: the
+// recorded outcome, a blocked run's reason; restarts, finish failures, abort mark), its current invocation (the fence
+// of its seal token, its abort signal, the end an abort joins: one per invocation, as a persisted run is invoked again
+// after a seal, R3), its `running` entry and the `Run` handle its callers wait on.
 
 import type { Context } from "../context/index.ts";
 import type { ChordError } from "../data/index.ts";
@@ -25,12 +25,22 @@ export interface Run<O> {
 export type AnyOutcome = Outcome<JsonValue, unknown, JsonValue | undefined>;
 
 /**
- * Where a run's record stands. A persisted run is `pending` from its start's commit until its reservation commit
- * (`running`, then its `run` starts), `stopped` once a clean stop cut it off; an in-memory run is `running` from its
- * start's commit. `finishing` once its outcome is recorded, `blocked` after five failed finishes or for another
- * version.
+ * Where a run's record stands, with what each phase holds. A persisted run is `pending` from its start's commit until
+ * its reservation commit (`running`, then its `run` starts), `stopped` once a clean stop cut it off; an in-memory run
+ * is `running` from its start's commit. `finishing` once its outcome is recorded: the outcome is kept, so `finish` is
+ * retried without running `run` again. `blocked` after five failed finishes or for another version, with its reason
+ * and its outcome if one was recorded; `atLoad` marks a persisted run blocked for its version at its load, whose state
+ * document was not decoded (read once a reload's code takes it).
  */
-export type Phase = "pending" | "running" | "stopped" | "finishing" | "blocked";
+export type RunPhase =
+	| { readonly kind: "pending" | "running" | "stopped" }
+	| { readonly kind: "finishing"; readonly outcome: AnyOutcome }
+	| {
+			readonly kind: "blocked";
+			readonly reason: BlockedReason;
+			readonly outcome: AnyOutcome | undefined;
+			readonly atLoad: boolean;
+	  };
 
 /**
  * Why a run is blocked: its `finish` failed five times in a row, or its version is not the code's (stored by another
@@ -59,11 +69,9 @@ export class JobRun {
 	readonly handle: Run<AnyOutcome>;
 	/** Its args and outcome mapped forwards to the job's current version (once per run and version), when older. */
 	mapped: { readonly version: number; readonly args: JsonValue; outcome?: AnyOutcome } | undefined;
-	/** A persisted run blocked for its version at its load: the phase its record had, resumed when unblocked. */
-	blockedPhase: Phase | undefined;
 	/** Its current invocation, from its reservation (or its start in memory) on; a later one replaces it. */
 	invocation: Invocation | undefined;
-	phase: Phase;
+	phase: RunPhase;
 	/** A persisted run's crashes in a row while running (D6); reset by a state change. */
 	restarts = 0;
 	/** Failed finishes in a row (stored for a persisted run, so they count across a crash). */
@@ -72,15 +80,12 @@ export class JobRun {
 	abortMarked = false;
 	/** A persisted run cut off by a crash or a clean stop, to be resumed per its job's `resume` (no new start). */
 	resuming = false;
-	blocked: BlockedReason | undefined;
 	/**
 	 * The start's trace carrier, when the adapter propagates (stored for a persisted run): its run and finish spans are
 	 * children of it, in a new attempt and a new process too (a carrier, not the span: a settled span starts no
 	 * recorded children).
 	 */
 	readonly trace: { readonly [key: string]: string } | undefined;
-	/** What it ended with, once recorded (finishing and blocked). */
-	outcome: AnyOutcome | undefined;
 	/** Its entry in `running`, while its record exists; replaced when its record or state document changes. */
 	entry: JsonValue | undefined;
 	/** Its waiters: apart from the run, so a handle kept by a caller keeps only how the run settled. */
@@ -92,7 +97,7 @@ export class JobRun {
 		fingerprint: string,
 		key: string | undefined,
 		args: JsonValue,
-		phase: Phase,
+		phase: RunPhase,
 		trace?: { readonly [key: string]: string },
 	) {
 		this.id = id;
@@ -113,14 +118,14 @@ export class JobRun {
 	 */
 	entryFor(state: JsonValue | undefined, args: JsonValue): JsonValue {
 		const { id, version, key, phase } = this;
-		if (phase === "blocked") return { id, version, phase, reason: this.blocked! };
+		if (phase.kind === "blocked") return { id, version, phase: phase.kind, reason: phase.reason };
 		return {
 			id,
 			version,
 			...(key === undefined ? {} : { key }),
 			args,
 			...(state === undefined ? {} : { state }),
-			phase: phase === "finishing" ? "finishing" : "running",
+			phase: phase.kind === "finishing" ? "finishing" : "running",
 		};
 	}
 

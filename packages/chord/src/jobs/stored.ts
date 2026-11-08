@@ -1,13 +1,14 @@
 // A persisted run's record (slice 6b §4.1, D5): the document each unsettled run of a persisted job keeps in its
-// object's store (namespace `chord.jobs`, kind the job name, key the run id), and the conversion of an outcome to and
-// from it. Errors are stored in the wire error format, so a `PluginError`'s code, message and details survive.
+// object's store (namespace `chord.jobs`, kind the job name, key the run id), and the conversion of a run's phase and
+// outcome to and from it. Errors are stored in the wire error format, so a `PluginError`'s code, message and details
+// survive.
 
 import type { JsonObject } from "../documents/index.ts";
 import type { JsonValue } from "../json.ts";
 import { errorFromWire, wireError } from "../link/internal.ts";
 import type { WireError } from "../link/message.ts";
 import type { JobError } from "./definition.ts";
-import type { AnyOutcome, BlockedReason, JobRun, Phase } from "./run.ts";
+import type { AnyOutcome, BlockedReason, JobRun, RunPhase } from "./run.ts";
 
 /** How a run failed, as stored: a thrown error in the wire format, an abort, the restart limit. */
 export type StoredJobError =
@@ -20,20 +21,23 @@ export type StoredOutcome =
 	| { readonly kind: "done"; readonly result: JsonValue }
 	| { readonly kind: "failed"; readonly error: StoredJobError };
 
-/** The record document of one unsettled persisted run. */
+/** The record document of one unsettled persisted run: its phase with what that holds (`StoredPhase`). */
 export type StoredRun = {
 	readonly version: number;
 	readonly fingerprint: string;
 	readonly args: JsonValue;
 	readonly key?: string;
 	readonly trace?: { readonly [key: string]: string };
-	readonly phase: Phase;
 	readonly restarts: number;
 	readonly finishFailures: number;
 	readonly abort?: true;
-	readonly blocked?: BlockedReason;
-	readonly outcome?: StoredOutcome;
-};
+} & StoredPhase;
+
+/** A record's phase and what it holds: a finishing run's outcome, a blocked run's reason and outcome if recorded. */
+type StoredPhase =
+	| { readonly phase: "pending" | "running" | "stopped" }
+	| { readonly phase: "finishing"; readonly outcome: StoredOutcome }
+	| { readonly phase: "blocked"; readonly blocked: BlockedReason; readonly outcome?: StoredOutcome };
 
 /**
  * The record documents' version and fingerprint (Chord's own documents: no definition, no `migrate`; a new record
@@ -41,39 +45,44 @@ export type StoredRun = {
  */
 export const RUN_RECORD = { version: 1, fingerprint: "chord.job-run.1" } as const;
 
-/** What a change sets on a run's record; the rest is the run's own. */
+/** What a change sets on a run's record (and on the run, as its commit adopts it); the rest is the run's own. */
 export type StoredFields = {
-	readonly phase?: Phase;
+	readonly phase?: RunPhase;
 	readonly restarts?: number;
 	readonly finishFailures?: number;
 	readonly abortMarked?: true;
-	readonly blocked?: BlockedReason;
-	readonly outcome?: AnyOutcome;
 };
 
 /** `run`'s record as stored with `fields` changed (its own version and fingerprint). */
 export function storedRun(run: JobRun, fields: StoredFields = {}): StoredRun {
 	const { version, fingerprint, args, key, trace } = run;
-	const { phase, restarts, finishFailures, abortMarked, blocked, outcome } = { ...pick(run), ...fields };
-	return {
+	const { phase = run.phase, restarts = run.restarts, finishFailures = run.finishFailures } = fields;
+	const own = {
 		version,
 		fingerprint,
 		args,
 		...(key === undefined ? {} : { key }),
 		...(trace === undefined ? {} : { trace }),
-		phase,
+	};
+	const counts = {
 		restarts,
 		finishFailures,
-		...(abortMarked ? { abort: true as const } : {}),
-		...(blocked === undefined ? {} : { blocked }),
-		...(outcome === undefined ? {} : { outcome: storedOutcome(outcome) }),
+		...((fields.abortMarked ?? run.abortMarked) ? { abort: true as const } : {}),
 	};
-}
-
-/** The fields of `run` a record stores that change. */
-function pick(run: JobRun): Required<Omit<StoredFields, "blocked" | "outcome" | "abortMarked">> & StoredFields {
-	const { phase, restarts, finishFailures, blocked, outcome } = run;
-	return { phase, restarts, finishFailures, ...(run.abortMarked ? { abortMarked: true } : {}), blocked, outcome };
+	// The stored key order: the run's own, its phase, its counts and abort mark, then what its phase holds.
+	switch (phase.kind) {
+		case "pending":
+		case "running":
+		case "stopped":
+			return { ...own, phase: phase.kind, ...counts };
+		case "finishing":
+			return { ...own, phase: phase.kind, ...counts, outcome: storedOutcome(phase.outcome) };
+		case "blocked": {
+			const { reason, outcome } = phase;
+			const stored = outcome === undefined ? {} : { outcome: storedOutcome(outcome) };
+			return { ...own, phase: phase.kind, ...counts, blocked: reason, ...stored };
+		}
+	}
 }
 
 /** An outcome as stored: a result as it is (JSON: persisted jobs refuse `bytes()`), an error in the wire format. */
@@ -86,13 +95,25 @@ function storedError(error: JobError): StoredJobError {
 	return error.kind === "threw" ? { kind: "threw", error: wireError(error.error) } : error;
 }
 
+/** The phase `record` stands for (`atLoad` false), an outcome rebuilt with the run's `id` and its `state`. */
+export function phaseOf(record: StoredRun, id: string, state: JsonValue | undefined): RunPhase {
+	switch (record.phase) {
+		case "pending":
+		case "running":
+		case "stopped":
+			return { kind: record.phase };
+		case "finishing":
+			return { kind: "finishing", outcome: outcomeOf(record.outcome, id, record.args, state) };
+		case "blocked": {
+			const { blocked: reason, outcome } = record;
+			const rebuilt = outcome === undefined ? undefined : outcomeOf(outcome, id, record.args, state);
+			return { kind: "blocked", reason, outcome: rebuilt, atLoad: false };
+		}
+	}
+}
+
 /** The outcome a stored one stands for, rebuilt as the in-memory one (`id`, `args` and `state` from the run). */
-export function outcomeOf(
-	stored: StoredOutcome,
-	id: string,
-	args: JsonValue,
-	state: JsonValue | undefined,
-): AnyOutcome {
+function outcomeOf(stored: StoredOutcome, id: string, args: JsonValue, state: JsonValue | undefined): AnyOutcome {
 	if (stored.kind === "done") return { id, args, state, kind: "done", result: stored.result };
 	const { error } = stored;
 	const rebuilt: JobError = error.kind === "threw" ? { kind: "threw", error: errorFromWire(error.error) } : error;
