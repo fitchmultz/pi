@@ -458,10 +458,11 @@ npm start
   entry, and denies guest/unattributed turns. It lists every forward and explicitly names all public endpoints,
   asks the model to obtain confirmation before publishing. As in Pi Mobile (67cdb4ca4) it may change or close any
   forward: open on an already forwarded port keeps its address and opener and takes the new name and visibility,
-  whoever opened it; close stops any forward. Archiving awaits the `SessionArchived` cleanup contributions; startup
-  removes any archived-session forwards left by an interrupted archive. A remote-environment session cannot open
-  (mobile's message names the env); list and close work. The transcript shows mobile's `ports` card (summary,
-  **Open … →** / **Public link →** from `details.forward`).
+  whoever opened it; close stops any forward. Archiving runs the `SessionArchived` cleanup contributions in its job
+  after the row is archived, without `archive` waiting for them; startup removes any archived-session forwards left
+  by an interrupted archive. A remote-environment session cannot open (mobile's message names the env); list and
+  close work. The transcript shows mobile's `ports` card (summary, **Open … →** / **Public link →** from
+  `details.forward`).
 - `test/p2/ports.test.ts` covers persistence, validation, ownership, fake-provider tool calls, reload, guest denial
   and archive cleanup. `test/p2/radius.test.ts` uses only a disposable localhost fake gateway/relay: remote-owner
   admission and provider access, HTTP credit in both directions, congestion, forwards, redirects, WebSockets,
