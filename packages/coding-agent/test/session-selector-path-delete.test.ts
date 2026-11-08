@@ -250,6 +250,35 @@ describe("session selector path/delete interactions", () => {
 		await flushPromises();
 	});
 
+	it("aborts the load in flight when the selector is left", async () => {
+		let allSignal: AbortSignal | undefined;
+		let cancelled = false;
+
+		const selector = new SessionSelectorComponent(
+			async () => [makeSession({ id: "current" })],
+			(_onProgress, signal) => {
+				allSignal = signal;
+				return createDeferred<SessionInfo[]>().promise;
+			},
+			() => {},
+			() => {
+				cancelled = true;
+			},
+			() => {},
+			() => {},
+			{ keybindings },
+		);
+		await flushPromises();
+
+		const list = selector.getSessionList();
+		list.handleInput("\t"); // current -> all (starts async load)
+		expect(allSignal?.aborted).toBe(false);
+		list.handleInput("\x1b"); // Escape leaves the selector
+
+		expect(cancelled).toBe(true);
+		expect(allSignal?.aborted).toBe(true);
+	});
+
 	it("threads sessions when parent and child paths use different symlink aliases", async () => {
 		const paths = createSymlinkedSessionPaths();
 		tempDirs.push(paths.baseDir);
