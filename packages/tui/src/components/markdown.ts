@@ -127,9 +127,19 @@ function hasQuotedMathSyntax(text: string): boolean {
 		}
 	}
 	if (!/\\[A-Za-z]+/.test(beforeQuote)) return false;
+	let groups = 0;
 	let quotes = 0;
-	for (let index = quote; index >= 0; index = findClosingDelimiter(text, '"', index + 1)) {
-		quotes++;
+	for (let index = 0; index < text.length; index++) {
+		const character = text[index];
+		if (character === "\\") {
+			index++;
+		} else if (character === "{") {
+			groups++;
+		} else if (character === "}") {
+			groups--;
+		} else if (character === '"' && groups === 0) {
+			quotes++;
+		}
 	}
 	return quotes % 2 === 0;
 }
