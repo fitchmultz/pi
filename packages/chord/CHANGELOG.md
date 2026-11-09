@@ -52,6 +52,7 @@
 - Chord v2's `workers.state` no longer shows a stopping worker as `running`: when a stop began while the worker's `ready` was on its way (a `stop` from the app's `principal` hook, say), its state went `starting`, `stopping`, then `running` until it exited, so the rollout step and the app kit's `exportData` could treat it as running. Its `ready` still settles the start; the worker stays `stopping` until its exit.
 - Chord v2's keyed members no longer leave a key unreadable when a commit writes it while a consumer's `at(key)` pin is still loading: a transaction that created the key, or retired it and drafted it anew, while the consumer was activating let the consumer go live with the key reading `not_ready` ("read before it was loaded"), and every watch of the key, the provider's own `watch(key)` included, rejected the same way until all of the key's pins ended. The pin now reads the committed document.
 - Chord v2's plugins component no longer watches linked plugin directories after `close()`: a build whose discovery finished after the close added persistent watches that kept the process alive.
+- Chord v2's persisted jobs no longer drop a blocked run from their count twice: a run blocked at its load (another job version) whose activation then failed (a native's open throwing, say) was blocked again by a reload that dropped its job, so `host.activity.jobs` fell below zero and, once a reload declared the job again, its `concurrency` limit let one run too many start. Such a run now stays blocked as it was.
 
 ## [1.5.0] - 2026-11-02
 

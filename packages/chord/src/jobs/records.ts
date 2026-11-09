@@ -201,7 +201,8 @@ export class JobRecords {
 		this.#job = undefined;
 		const waiting = [...this.#waiting];
 		this.#waiting.clear();
-		for (const run of waiting) void this.record(run, { kind: "block", run, reason: "version" });
+		// `#need` blocks each (`version`) unless blocked already: a run blocked at its load waits here too, uncounted.
+		for (const run of waiting) this.#need(run);
 	}
 
 	/**
