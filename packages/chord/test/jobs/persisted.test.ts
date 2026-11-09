@@ -95,6 +95,8 @@ type Opened = {
 	readonly self: StoreSelf;
 	/** `ref.retry()` of the store object. */
 	retry(): Promise<void>;
+	/** A reload to code declaring `declared` instead (another declaration of `Import`): the store object restarts. */
+	reload(declared: typeof Import): Promise<void>;
 	close(): Promise<void>;
 	/** A crash: the store's backend closes under the live host, which is left behind. */
 	crash(): Promise<void>;
@@ -112,37 +114,34 @@ async function opened(
 	const finished: ImportOutcome[] = [];
 	const host = createHost({ store, telemetry, onError: (error) => errors.push(error), closeTimeout: 200 });
 	let found: Pick<Opened, "imports" | "abandoned" | "self"> | undefined;
-	await host.load(
-		[
-			{
-				name: "notes",
-				facet: defineFacet((h) =>
-					h.serve(Store, (_, self) => {
-						const imports = self.job(declared, {
-							run,
-							finish: async (outcome) => {
-								finish?.(outcome);
-								finished.push(outcome);
-							},
-						});
-						const abandoned = self.job(Abandoned, {
-							run: async () => ({ count: 0 }),
-							finish: async (outcome) => void finished.push(outcome as unknown as ImportOutcome),
-						});
-						found = { imports, abandoned, self };
-						return {};
-					}),
-				),
-			},
-		],
-		context,
-	);
+	const facet = (job: typeof Import) =>
+		defineFacet((h) =>
+			h.serve(Store, (_, self) => {
+				const imports = self.job(job, {
+					run,
+					finish: async (outcome) => {
+						finish?.(outcome);
+						finished.push(outcome);
+					},
+				});
+				const abandoned = self.job(Abandoned, {
+					run: async () => ({ count: 0 }),
+					finish: async (outcome) => void finished.push(outcome as unknown as ImportOutcome),
+				});
+				found = { imports, abandoned, self };
+				return {};
+			}),
+		);
+	await host.load([{ name: "notes", facet: facet(declared) }], context);
 	return {
 		store,
 		errors,
 		finished,
 		...found!,
 		retry: async () => (await host.hold(Store, {}, context)).retry(),
+		reload: async (job) => {
+			await host.reload([{ name: "notes", facet: facet(job) }], context);
+		},
 		close: async () => {
 			await host.close(context);
 			await store.close(context);
@@ -736,7 +735,7 @@ describe("finish failures", () => {
 		await jobs.crash();
 		jobs = await opened(await open(), async () => ({ count: 1 }));
 		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(jobs.finished).toMatchObject([{ kind: "done", result: { count: 1 } }]);
+		expect(jobs.finished).toMatchObject([{ kind: "done", result: { count: 1 }, state: { done: 0 } }]);
 		await jobs.close();
 	});
 });
@@ -1111,18 +1110,23 @@ describe("GC", () => {
 });
 
 describe("versions resolved by a reload (slice 7b §8)", () => {
-	it("a persisted run blocked for its version at its load is resumed by the reload that brings its version", async () => {
+	it.each([
+		["rerun", { kind: "done", result: { count: 7 } }],
+		["abandon", { kind: "failed", error: { kind: "aborted", reason: "restart" } }],
+	] as const)("a run blocked at its load resumes (%s) once a reload brings its version", async (resume, ended) => {
+		// A crash cut it off while running: the reload that takes it resumes it per its job's `resume`, as after any crash.
+		const declared = defineJob("notes.import", { ...importOptions(), persist: { resume } });
 		const open = await storeFile();
-		const jobs = await opened(await open(), () => new Promise(() => {}));
+		const jobs = await opened(await open(), () => new Promise(() => {}), undefined, declared);
 		const run = await jobs.imports.start({ path: "a" }, context);
 		await delivered();
 		await jobs.crash();
 		const store = await open();
 		const finished: ImportOutcome[] = [];
-		const serve = (declared: typeof Import) =>
+		const serve = (job: typeof Import) =>
 			defineFacet((h) =>
 				h.serve(Store, (_, self) => {
-					self.job(declared, {
+					self.job(job, {
 						run: async () => ({ count: 7 }),
 						finish: async (outcome) => void finished.push(outcome),
 					});
@@ -1134,11 +1138,56 @@ describe("versions resolved by a reload (slice 7b §8)", () => {
 		await delivered();
 		expect(finished).toEqual([]);
 		expect(await record(store, run.id)).toMatchObject({ version: 1, phase: "running" });
-		await host.reload([{ name: "notes", facet: serve(Import) }], context);
-		await sleepMs(20);
-		expect(finished).toMatchObject([{ id: run.id, kind: "done", result: { count: 7 } }]);
+		await host.reload([{ name: "notes", facet: serve(declared) }], context);
+		await vi.waitFor(() => expect(finished).toMatchObject([{ id: run.id, ...ended }]));
 		expect(await record(store, run.id)).toBeUndefined();
 		await host.close(context);
 		await store.close(context);
+	});
+
+	it("a finishing run blocked by a reload keeps its outcome across a crash: the reload that takes it only finishes it", async () => {
+		const open = await storeFile();
+		const failed = Promise.withResolvers<void>();
+		let jobs = await opened(
+			await open(),
+			async (_args, ctx) => {
+				await ctx.state.change((draft) => {
+					draft.done = 5;
+				}, ctx);
+				return { count: 1 };
+			},
+			() => {
+				failed.resolve();
+				throw new Error("finish failed");
+			},
+		);
+		const run = await jobs.imports.start({ path: "a" }, context);
+		await failed.promise;
+		// Version 2 has no adapter for it: blocked (`version`), its outcome kept. `reload` returns before the new attempt
+		// is live: the restart first drains the finish's backoff (bounded by closeTimeout).
+		await jobs.reload(ImportV2);
+		await vi.waitFor(async () =>
+			expect(await record(jobs.store, run.id)).toMatchObject({
+				version: 1,
+				phase: "blocked",
+				blocked: "version",
+				outcome: { kind: "done", result: { count: 1 } },
+			}),
+		);
+		await jobs.crash();
+		let reran = false;
+		const rerun = async () => {
+			reran = true;
+			return { count: 7 };
+		};
+		jobs = await opened(await open(), rerun, undefined, ImportV2);
+		// Blocked at its load (its state document not decoded), until a reload brings its version: then only finished.
+		const outcome = jobs.imports.outcome(run.id, context);
+		await jobs.reload(Import);
+		expect(await outcome).toMatchObject({ kind: "done", result: { count: 1 } });
+		expect(reran).toBe(false);
+		expect(jobs.finished).toMatchObject([{ id: run.id, kind: "done", result: { count: 1 }, state: { done: 5 } }]);
+		expect(await record(jobs.store, run.id)).toBeUndefined();
+		await jobs.close();
 	});
 });
