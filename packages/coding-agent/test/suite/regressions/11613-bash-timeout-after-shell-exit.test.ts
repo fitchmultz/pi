@@ -17,12 +17,9 @@ describe.skipIf(process.platform === "win32")("issue #11613 bash timeout after t
 	const bashTool = createBashTool(tmpdir());
 
 	async function runExpectingTimeout(command: string, timeout: number): Promise<string> {
-		const error = await bashTool.execute("test-11613", { command, timeout }).then(
-			() => undefined,
-			(err: unknown) => err,
-		);
-		expect(error).toBeInstanceOf(Error);
-		return (error as Error).message;
+		const result = await bashTool.execute("test-11613", { command, timeout }).catch((err: unknown) => err);
+		expect(result).toBeInstanceOf(Error);
+		return (result as Error).message;
 	}
 
 	it("reports the shell's exit code when background processes kept writing until the timeout", async () => {
