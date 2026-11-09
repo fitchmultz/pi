@@ -96,6 +96,7 @@ describe("offline in the browser", { skip: !browserTests }, () => {
 			.hold(Models, {}, BACKGROUND_CONTEXT)
 			.setDefault({ provider: "faux", modelId: "faux-1", thinkingLevel: "off" }, BACKGROUND_CONTEXT);
 		browser = await Browser.start();
+		await browser.signIn(fixture.owner);
 		await browser.call("Page.addScriptToEvaluateOnNewDocument", { source: SWITCH });
 	});
 	after(async () => {

@@ -3,6 +3,9 @@ import {
 	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
+	getCacheWarmingDelayMs,
+	getPromptCacheTtlMs,
+	isCacheWarmingReplayable,
 	type Model,
 	type ModelsSimpleStreamOptions,
 	normalizeContext,
@@ -19,9 +22,6 @@ import {
 	type CacheWarmRequest,
 	formatCacheWarmingStatus,
 	formatCacheWarmingUsage,
-	getCacheWarmingDelayMs,
-	getPromptCacheTtlMs,
-	isReplayable,
 } from "../src/core/cache-warmer.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
@@ -595,7 +595,9 @@ describe("cache warming", () => {
 			expect(session.messages).toEqual(history);
 			if (fixture.refreshRetention) {
 				expect.soft(session.cacheWarmingStatus?.state).toBe("scheduled");
-				expect.soft(session.cacheWarmingStatus?.nextWarmAt).toBe(Date.now() + refreshed.delayMs);
+				expect
+					.soft(session.cacheWarmingStatus?.nextWarmAt)
+					.toBe(Date.now() + Math.min(expected.delayMs, refreshed.delayMs));
 				expect.soft(session.cacheWarmingStatus?.decision?.missCost).toBeCloseTo(refreshed.missCost, 10);
 				expect(session.cacheWarmingStatus?.decision?.expectedSavings).toBeCloseTo(refreshed.expectedSavings);
 			} else {
@@ -665,10 +667,10 @@ describe("cache warming", () => {
 			[270_000, 50_000, undefined],
 		);
 		expect([
-			isReplayable(budgetModel, { reasoning: "medium" }),
-			isReplayable(budgetModel, undefined),
-			isReplayable(adaptiveModel, { reasoning: "medium" }),
-			isReplayable(openaiModel, { reasoning: "medium" }),
+			isCacheWarmingReplayable(budgetModel, { reasoning: "medium" }),
+			isCacheWarmingReplayable(budgetModel, undefined),
+			isCacheWarmingReplayable(adaptiveModel, { reasoning: "medium" }),
+			isCacheWarmingReplayable(openaiModel, { reasoning: "medium" }),
 		]).toEqual([false, true, true, true]);
 	});
 

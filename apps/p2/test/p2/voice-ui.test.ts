@@ -104,6 +104,7 @@ describe("voice mode in the browser", { skip: !browserTests }, () => {
 		]);
 		// The microphone is allowed, as once its prompt is answered; a test can refuse it (Chromium's fake media UI can't).
 		await permitMicrophone("granted");
+		await browser.signIn(fixture.owner);
 	});
 	after(async () => {
 		await browser?.close();

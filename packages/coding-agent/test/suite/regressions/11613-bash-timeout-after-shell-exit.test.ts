@@ -17,19 +17,15 @@ describe.skipIf(process.platform === "win32")("issue #11613 bash timeout after t
 	const bashTool = createBashTool(tmpdir());
 
 	async function runExpectingTimeout(command: string, timeout: number): Promise<string> {
-		const error = await bashTool.execute("test-11613", { command, timeout }).then(
-			() => undefined,
-			(err: unknown) => err,
-		);
-		expect(error).toBeInstanceOf(Error);
-		return (error as Error).message;
+		const result = await bashTool.execute("test-11613", { command, timeout }).catch((err: unknown) => err);
+		expect(result, JSON.stringify(result)).toBeInstanceOf(Error);
+		return (result as Error).message;
 	}
 
 	it("reports the shell's exit code when background processes kept writing until the timeout", async () => {
-		const message = await runExpectingTimeout(
-			"(while true; do echo tick; sleep 0.02; done) & sleep 0.2; echo boom >&2; exit 3",
-			1,
-		);
+		// One steady writer avoids shell-loop gaps triggering idle-pipe completion before the deadline.
+		const writer = `${JSON.stringify(process.execPath)} -e 'setInterval(() => process.stdout.write("tick\\n"), 20)'`;
+		const message = await runExpectingTimeout(`${writer} & sleep 0.2; echo boom >&2; exit 3`, 1);
 		expect(message).toContain("boom");
 		expect(message).toMatch(
 			/Command timed out after 1 seconds\. The shell exited with code 3 after 0\.\d seconds, but background processes it started kept writing output until the timeout\.$/,

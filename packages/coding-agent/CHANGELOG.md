@@ -55,8 +55,10 @@
 
 - The default model for the `anthropic` provider is now Claude Opus 5.5 (`claude-opus-5-5`) instead of Claude Opus 4.8
 - Default models moved to newer models at the same or a lower price: `amazon-bedrock` Claude Opus 5.5, `azure` GPT-6.1 Sol, `google` and `google-vertex` Gemini 4 Argon, `vercel-ai-gateway` GLM 5.3, `baseten` GLM 5.3, `minimax` and `minimax-cn` MiniMax-M3, `qwen-token-plan` and `qwen-token-plan-cn` Qwen3.8 Max, `opencode-go` Kimi K3.1 Pro, and Kimi K2.7 Code instead of Kimi K2.6 for `moonshotai`, `moonshotai-cn`, `huggingface`, `opencode`, `openrouter`, `cloudflare-workers-ai` and `cloudflare-ai-gateway`
+- `cacheWarming` now defaults to `"idle"` instead of `"streaming"`: pi also keeps eligible prompt caches warm for up to 30 minutes between agent runs, but only when a refresh is expected to pay for itself. Set `"cacheWarming": "streaming"` in global settings for the previous behavior
 - Consecutive cache warms now show as one `Cache warmed: $<total>` line with the cumulative cost instead of one line per warm
 - The OpenAI Codex provider is shown as "OpenAI Codex" again instead of "OpenAI Codex (legacy)" in `/login` and the model selector
+- The `/login` and `/logout` provider lists and `/login <provider>` completions now show the preferred partners Radius and OpenRouter first, then all other providers alphabetically. In the provider lists, partners are marked with `✦`, the selected Radius row shimmers in the Radius logo colors and the selected OpenRouter row glows in OpenRouter's brand color (lime on dark themes, violet on light themes)
 
 ### Fixed
 
@@ -116,6 +118,7 @@
 - Fixed cancellation during post-run recovery or pre-settlement being reported as a finished run; `agent_settled.aborted` now remains `true` ([#10607](https://github.com/earendil-works/pi/issues/10607)).
 - Fixed cache overlap estimates crossing abandoned branches or presenting unknown read prices and expiry as measured facts. Recorded usage and cost totals remain complete.
 - Fixed cache warming using ambient rather than resolved credential retention and omitting one-hour writes and prompt-length pricing tiers. Native preparation drives scheduling; refreshes resolve current auth and headers and recheck context and dispatch deadlines.
+- Fixed cache warming treating a request for longer retention as an upgrade of an existing shorter-lived cache entry. Refreshes keep the shorter lifetime while using current retention for price estimates.
 - Fixed queued managed restarts to wait until admitted native work, including extension commands and handlers, completes.
 - Fixed custom extension UI leaking components that finish during factory initialization and losing editor text typed while an asynchronous factory is pending.
 - Fixed model-catalog compatibility checks crashing on npm 12's keyed `npm pack --json` metadata; release checks and workspace packing share the existing validation.

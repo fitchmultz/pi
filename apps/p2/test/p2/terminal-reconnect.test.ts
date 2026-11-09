@@ -34,6 +34,7 @@ test(
 				await (await holdIn(owner, Sessions, {}, "owner")).create({ cwd: fixture.workspace }, BACKGROUND_CONTEXT)
 			).id;
 			browser = await Browser.start();
+			await browser.signIn(fixture.owner);
 			const page = browser;
 			await page.call("Page.addScriptToEvaluateOnNewDocument", {
 				source: `
