@@ -135,7 +135,7 @@ function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 		if (
 			closingQuote >= 0 &&
 			!endsAtQuotedWord &&
-			!(nestedExpansion && SHELL_EXPANSION_START_REGEX.test(source.slice(mathEnd))) &&
+			!((nestedExpansion || math.text.endsWith(quote)) && SHELL_EXPANSION_START_REGEX.test(source.slice(mathEnd))) &&
 			((quotes > 0 && !SHELL_EXPANSION_START_REGEX.test(source.slice(mathEnd))) ||
 				math.raw.startsWith("$$") ||
 				/^\p{P}*$/u.test(source.slice(mathEnd, closingQuote)))
@@ -206,18 +206,17 @@ function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 	if (!hasExpansion) {
 		return undefined;
 	}
-	// Keep native math's consumed span too, so preserving a shell word does not re-parse its tail.
+	// Keep native math's consumed span too, without probing dollars owned by codespans or links.
 	let rawEnd = index;
-	for (let dollar = 1; dollar >= 0 && dollar < index; dollar = findClosingDelimiter(source, "$", dollar + 1)) {
-		const candidate = dollar === 1 ? math : tokenizeInlineLatex(source.slice(dollar));
-		if (!candidate) {
-			continue;
-		}
-		rawEnd = Math.max(rawEnd, dollar + candidate.raw.length);
-		if (candidate.pending) {
+	let offset = 0;
+	for (const token of shellMathParser.Lexer.lexInline(source, shellMathParser.defaults)) {
+		if (offset >= index) {
 			break;
 		}
-		dollar += candidate.raw.length - 1;
+		offset += token.raw.length;
+		if (token.type === "latex") {
+			rawEnd = Math.max(rawEnd, offset);
+		}
 	}
 	const raw = source.slice(0, rawEnd);
 	return { type: "text", raw, text: raw };
@@ -399,14 +398,22 @@ function removeHtmlCommentBlocks(tokens: Token[]): void {
 	}
 }
 
-const markdownParser = new Marked();
-markdownParser.setOptions({
-	tokenizer: new MarkdownTokenizer(),
-});
-markdownParser.use({
-	tokenizer: { emStrong: markedCjkFriendly().tokenizer?.emStrong },
-	extensions: [...LATEX_MARKDOWN_EXTENSIONS],
-});
+function createMarkdownParser(extensions: readonly TokenizerExtension[]): Marked {
+	const parser = new Marked();
+	parser.setOptions({
+		tokenizer: new MarkdownTokenizer(),
+	});
+	parser.use({
+		tokenizer: { emStrong: markedCjkFriendly().tokenizer?.emStrong },
+		extensions: [...extensions],
+	});
+	return parser;
+}
+
+const shellMathParser = createMarkdownParser(
+	LATEX_MARKDOWN_EXTENSIONS.filter((extension) => extension.name !== "quotedShellWord"),
+);
+const markdownParser = createMarkdownParser(LATEX_MARKDOWN_EXTENSIONS);
 
 /**
  * Default text styling for markdown content.
