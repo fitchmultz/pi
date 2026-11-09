@@ -112,27 +112,72 @@ function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 	if ((quote !== '"' && quote !== "'") || source[1] !== "$") {
 		return undefined;
 	}
-	const closingIndex = findClosingDelimiter(source, quote, 1);
-	const raw = closingIndex < 0 ? source : source.slice(0, closingIndex + 1);
-	if (raw.includes("\n")) {
+	const math = tokenizeInlineLatex(source.slice(1));
+	if (math && !math.pending && source[math.raw.length + 1] === quote && !source.startsWith(`${quote}$$${quote}`)) {
 		return undefined;
 	}
-	const content = closingIndex < 0 ? raw.slice(1) : raw.slice(1, -1);
+
+	let activeQuote: string | undefined = quote;
+	const expansions: { closing: ")" | "}"; quote: string | undefined }[] = [];
 	let hasExpansion = false;
-	for (let index = content.indexOf("$"); index >= 0; index = content.indexOf("$", index + 1)) {
-		if (isEscaped(content, index)) {
-			continue;
+	let index = 1;
+	for (; index < source.length; index++) {
+		const character = source[index];
+		const next = source[index + 1];
+		if (!activeQuote && expansions.length === 0 && /\s/.test(character)) {
+			break;
 		}
-		const next = content[index + 1];
-		if (next === undefined && closingIndex < 0) {
-			continue;
-		}
-		if (next === undefined || !/[A-Za-z_({]/.test(next)) {
+		if (character === "\n") {
 			return undefined;
 		}
-		hasExpansion = true;
+		if (character === "\\" && activeQuote !== "'") {
+			index++;
+			continue;
+		}
+		if (character === activeQuote) {
+			activeQuote = undefined;
+			continue;
+		}
+		if (!activeQuote) {
+			if (character === '"' || character === "'") {
+				activeQuote = character;
+				continue;
+			}
+			const expansion = expansions[expansions.length - 1];
+			if (expansion && character === expansion.closing) {
+				expansions.pop();
+				activeQuote = expansion.quote;
+				continue;
+			}
+			if (character === "(" && expansion?.closing === ")") {
+				expansions.push({ closing: ")", quote: undefined });
+				continue;
+			}
+		}
+		if (character !== "$") {
+			continue;
+		}
+		if (expansions.length === 0 && activeQuote === quote) {
+			if (next === undefined) {
+				continue;
+			}
+			if (!/[A-Za-z_({0-9@*#?$!-]/.test(next)) {
+				return undefined;
+			}
+			hasExpansion = true;
+			if (next === "$") {
+				index++;
+				continue;
+			}
+		}
+		if (activeQuote !== "'" && (next === "(" || next === "{")) {
+			expansions.push({ closing: next === "(" ? ")" : "}", quote: activeQuote });
+			activeQuote = undefined;
+			index++;
+		}
 	}
-	return hasExpansion ? { type: "text", raw, text: raw } : undefined;
+	const raw = source.slice(0, index);
+	return hasExpansion && !raw.includes("\n") ? { type: "text", raw, text: raw } : undefined;
 }
 
 function tokenizeInlineLatex(source: string): LatexToken | undefined {
@@ -229,7 +274,7 @@ const LATEX_MARKDOWN_EXTENSIONS: readonly TokenizerExtension[] = [
 		name: "quotedShellWord",
 		level: "inline",
 		start(source) {
-			const match = /["']/.exec(source);
+			const match = /["']\$/.exec(source);
 			return match?.index;
 		},
 		tokenizer: tokenizeQuotedShellWord,

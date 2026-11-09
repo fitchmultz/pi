@@ -860,11 +860,23 @@ describe("Markdown component", () => {
 		});
 
 		it("keeps math inside quotes and immediately before identifiers", () => {
-			const source = String.raw`"$x/y$" and $x/y$z, $a:b$c, $\text{"yes"}$bar, $\frac{a}{b}$x.`;
-			const lines = new Markdown(source, 0, 0, defaultMarkdownTheme)
-				.render(160)
-				.map((line) => stripAnsi(line).trimEnd());
-			assert.deepStrictEqual(lines, ['"x/y" and x/yz, a:bc, "yes"bar, a/bx.']);
+			const cases = [
+				[
+					String.raw`"$x/y$" and "$$x^2$$", $x/y$z, $a:b$c, $\text{"yes"}$bar, $\frac{a}{b}$x.`,
+					'"x/y" and "x²", x/yz, a:bc, "yes"bar, a/bx.',
+				],
+				["The derivative is '$f'(x) = x^2$'.", "The derivative is 'f'(x) = x²'."],
+				[
+					String.raw`The expression "$x^2 + \text{"yes"}$" is supported.`,
+					'The expression "x² + "yes"" is supported.',
+				],
+			];
+			for (const [source, expected] of cases) {
+				const lines = new Markdown(source, 0, 0, defaultMarkdownTheme)
+					.render(160)
+					.map((line) => stripAnsi(line).trimEnd());
+				assert.deepStrictEqual(lines, [expected], source);
+			}
 		});
 
 		it("renders display dollar delimiters without Markdown escape corruption", () => {
@@ -978,6 +990,18 @@ A=
 				'echo "$(pwd)" "$(whoami)"',
 				'echo "$prefix/bin/node" "$home/.local/bin/pi"',
 				'printf "%s\\n" "$HOME" "$PATH" "$SHELL"',
+				'echo "$?" "$$"',
+				'echo "$$" "$$"',
+				'printf "%s\\n" "$@" "$#"',
+				'echo "$!" "$-" "$*"',
+				`echo "\${PATH/"$HOME"/$PWD}"`,
+				`echo "$(printf '%s\\n' "$HOME")" "$PATH"`,
+				'"$(find . -name "*.ts" -o -name "*.js")"',
+				'echo "$(basename "`pwd`")"',
+				'echo "$(echo "**bold**")"',
+				'echo "$(echo "[x](y)")"',
+				'echo "$HOME"/\\$USER',
+				'echo "$HOME"/\\*',
 			];
 			for (const shellSource of shellSources) {
 				const shellLines = new Markdown(shellSource, 0, 0, defaultMarkdownTheme)
