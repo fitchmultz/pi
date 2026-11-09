@@ -21,7 +21,7 @@ shared implementations where they cover it.
 | Paths | Resolution |
 | --- | --- |
 | `apps/p2/src/hosts/server.ts` | Adopt local-owner sign-in and the startup token. Keep cleanup when plugin loading fails and when a signal arrives during startup. |
-| `apps/p2/test/p2/ui-{mobile-fixes,parity,sheets}.test.ts` | Use authenticated local-owner fixtures and keep both sides' assertions. |
+| `apps/p2/test/p2/{ui-parity,ui-sheets,voice-ui}.test.ts` | Use authenticated local-owner fixtures and retain the voice test's microphone permission setup. |
 | `packages/ai/src/api/anthropic-messages.ts` | Adopt upstream's shared strict-tool limits. Retain request-wide schema budgets, session fallback behavior, and passive cache tracing. |
 | `packages/chord/src/node/plugins/watcher.ts` and its test | Adopt content hashes and ancestor-watch renewal. Keep close final for both tree and individual-directory watches. |
 | `packages/chord/test/node/workers/workers.test.ts` | Keep early-start, lazy-build, and close-order cases together with the fork's ready-crossing-stop regression. |
@@ -74,6 +74,22 @@ and all three page tests pass with these isolated settings in real Chrome on mac
   secret handling, and sheet parity. One bundle-reload test timed out in that run;
   it passed alone on both the candidate and untouched upstream. Three remote-environment
   cases retained their native skips.
+- Linux Node 26.13.0 and real Chromium: 113 p2 tests passed, with two remote-sandbox
+  skips and no failures. This includes native terminal reconnects, server-start cleanup,
+  TUI worker replacement, owner and foreign-request authentication, Discord's faux-provider
+  flow, cache warming, activity panels, and mobile interactions.
+- macOS managed restart, background-command, Bash cancellation, and timeout checks passed
+  all 106 tests. The Linux TUI package suite also passed as an unprivileged user.
+- The broad Linux package sweep completed. All package groups except coding-agent passed,
+  including Durable's normal, zero-retention, Store, and Workers runs. Coding-agent
+  passed 3,830 tests and failed three permission assertions while running as root.
+  Both affected test files then passed all 139 tests as an unprivileged user, with no
+  source changes. The initial sweep exited with status 1, not a full-suite pass.
+
+Hosted GitHub Actions cannot run: an explicit workflow dispatch returned
+`Actions has been disabled for this repository.` The repository's read APIs still report
+Actions enabled. No Actions settings were changed. Local results and independent reviews
+are recorded separately and do not claim a hosted CI pass.
 
 ## UI evidence
 
