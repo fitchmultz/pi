@@ -582,8 +582,9 @@ export function createEnvConformance(options: EnvConformanceOptions): readonly E
 						if (stop === "abort") assert.strictEqual(errorCode(result), "aborted");
 						else assert.strictEqual(getOrThrow(result).exitCode, 137);
 						const group = getOrThrow(await env.readTextFile(pidFile, context)).trim();
+						// No `--` before the group: after a signal option, dash and BusyBox `kill` read `--` as a process ID.
 						const hasMembers = async () =>
-							getOrThrow(await env.exec(`kill -0 -- -${group} 2>/dev/null`, undefined, context)).exitCode === 0;
+							getOrThrow(await env.exec(`kill -0 -${group} 2>/dev/null`, undefined, context)).exitCode === 0;
 						try {
 							// The whole group ends at once; a `sleep` that escaped the kill would stay for five seconds.
 							const goneBy = Date.now() + 1000;
@@ -592,7 +593,7 @@ export function createEnvConformance(options: EnvConformanceOptions): readonly E
 								await new Promise((resolve) => setTimeout(resolve, 20));
 							}
 						} finally {
-							getOrThrow(await env.exec(`kill -KILL -- -${group} 2>/dev/null; :`, undefined, context));
+							getOrThrow(await env.exec(`kill -KILL -${group} 2>/dev/null; :`, undefined, context));
 						}
 					}
 				}
