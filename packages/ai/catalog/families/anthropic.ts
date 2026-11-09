@@ -15,12 +15,12 @@ export function supportsClaudeMidConvoEffort(modelId: string): boolean {
 	return (
 		/^claude-opus-(?:5|5[.-]5)(?:-\d{8})?$/.test(id) ||
 		/^claude-(?:sonnet|haiku)-5[.-]5(?:-\d{8})?$/.test(id) ||
-		/^claude-(?:fable|mythos)-5(?:[.-]1)(?:-\d{8})?$/.test(id)
+		/^claude-(?:fable|mythos)-5[.-][12](?:-\d{8})?$/.test(id)
 	);
 }
 
 // Claude models that accept `thinking: {type: "disabled"}` alongside per-message effort.
-// Opus 5.5, Sonnet 5.5, Fable 5.1, and Mythos 5.1 reject it.
+// Opus 5.5, Sonnet 5.5, Fable 5.1/5.2, and Mythos 5.1/5.2 reject it.
 // https://platform.claude.com/docs/en/build-with-claude/thinking#configuring-thinking
 const DISABLED_THINKING_MODELS = new Set(["claude-opus-5", "claude-haiku-5-5", "claude-haiku-5.5"]);
 
@@ -29,7 +29,7 @@ export function supportsClaudeMidConvoSystemMessages(modelId: string): boolean {
 	return (
 		/^claude-opus-(?:4[.-]8|5(?:[.-]5)?)(?:-\d{8})?$/.test(modelId) ||
 		/^claude-(?:sonnet|haiku)-5[.-]5(?:-\d{8})?$/.test(modelId) ||
-		/^claude-(?:fable|mythos)-5(?:[.-]1)?(?:-\d{8})?$/.test(modelId)
+		/^claude-(?:fable|mythos)-5(?:[.-][12])?(?:-\d{8})?$/.test(modelId)
 	);
 }
 
@@ -82,6 +82,10 @@ const TEMPERATURE_UNSUPPORTED = [
 	"sonnet.5",
 	"haiku-5-5",
 	"haiku-5.5",
+	"fable-5-2",
+	"fable-5.2",
+	"mythos-5-2",
+	"mythos-5.2",
 ];
 const MAX_EFFORT_ONLY = ["opus-4-6", "opus-4.6", "sonnet-4-6", "sonnet-4.6"];
 const XHIGH_AND_MAX_EFFORT = [

@@ -8,6 +8,7 @@
 
 ### Added
 
+- Added Claude Fable 5.2 on Anthropic and Cloudflare AI Gateway, including adaptive thinking and mid-conversation system, tool, and effort updates.
 - Added optional non-secret `AssistantMessage.cacheIdentity` metadata for provider-scoped credential and cache-owner diagnostics.
 - Added an optional `Models.streamSimple()` prepared-request observer, forwarded by `withClientIdentity()`, for effective cache policy and dispatch timing without resolving auth twice.
 

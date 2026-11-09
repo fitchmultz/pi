@@ -243,6 +243,38 @@ describe("Anthropic mid-conversation effort", () => {
 		expect(getModel("anthropic", "claude-opus-5").compat?.allowedFallbackModels).toBeUndefined();
 	});
 
+	it.each(["anthropic", "cloudflare-ai-gateway"] as const)(
+		"preserves Fable 5.2 thinking and positional updates on %s",
+		async (provider) => {
+			const model = getModel(provider, "claude-fable-5-2");
+			expect(model).toMatchObject({
+				contextWindow: 1000000,
+				maxTokens: 128000,
+				cost: { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10 },
+				thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" },
+				compat: {
+					forceAdaptiveThinking: true,
+					supportsTemperature: false,
+					supportsMidConvoSystemMessages: true,
+					supportsMidConvoToolChanges: true,
+					supportsMidConvoEffort: true,
+				},
+			});
+			const { payload, message } = await capture(
+				model,
+				{ messages: [user("one", 1), assistant(model, "low"), user("two", 2)] },
+				{ effort: "xhigh" },
+			);
+			expect(payload.output_config).toEqual({ effort: "low" });
+			expect(effortMessages(payload).map((entry) => entry.output_config?.effort)).toEqual(["low", "xhigh"]);
+			expect(payload.thinking).toMatchObject({
+				type: "adaptive",
+				block_binding: { prefix_mismatch_behavior: "drop_block" },
+			});
+			expect(message.providerThinkingLevel).toBe("xhigh");
+		},
+	);
+
 	it("supports off only on managed models that accept disabled thinking", () => {
 		for (const id of ["claude-opus-5", "claude-haiku-5-5"] as const) {
 			const model = getModel("anthropic", id);

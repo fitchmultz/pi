@@ -105,46 +105,49 @@ describe("published model catalog hydration", () => {
 		expect(readFileSync(join(dataDir, "test-provider.json"), "utf8")).toBe(provider);
 	});
 
-	it("hydrates published Cloudflare defaults for raw model consumers while preserving explicit metadata", () => {
-		const { dataDir, packageRoot, values } = createFixture("cloudflare-ai-gateway");
-		const catalogPath = join(packageRoot, "catalog.json");
-		const model = {
-			...chatModel(values),
-			id: "claude-opus-5-5",
-			api: "anthropic-messages",
-			baseUrl: "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/anthropic",
-		};
-		writeFileSync(catalogPath, JSON.stringify({ "cloudflare-ai-gateway": [model] }));
-		hydrateModelCatalog(packageRoot, catalogPath);
-		const providerPath = join(dataDir, "cloudflare-ai-gateway.json");
-		const groups: Record<string, Record<string, unknown>> = JSON.parse(readFileSync(providerPath, "utf8"));
-		expect(groups["anthropic-messages"]["chat:claude-opus-5-5"]).toMatchObject({
-			promptCache: { short: 300, long: 3600 },
-			compat: {
-				supportsMidConvoSystemMessages: true,
-				supportsMidConvoToolChanges: true,
-				supportsMidConvoEffort: true,
-				forceAdaptiveThinking: true,
-			},
-			thinkingLevelMap: { off: null },
-		});
-		expect(() => validateModelDataDirectory(readModelDataStructure(packageRoot), dataDir)).not.toThrow();
+	it.each(["claude-opus-5-5", "claude-fable-5-2"])(
+		"hydrates published Cloudflare %s defaults while preserving explicit metadata",
+		(id) => {
+			const { dataDir, packageRoot, values } = createFixture("cloudflare-ai-gateway");
+			const catalogPath = join(packageRoot, "catalog.json");
+			const model = {
+				...chatModel(values),
+				id,
+				api: "anthropic-messages",
+				baseUrl: "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/anthropic",
+			};
+			writeFileSync(catalogPath, JSON.stringify({ "cloudflare-ai-gateway": [model] }));
+			hydrateModelCatalog(packageRoot, catalogPath);
+			const providerPath = join(dataDir, "cloudflare-ai-gateway.json");
+			const groups: Record<string, Record<string, unknown>> = JSON.parse(readFileSync(providerPath, "utf8"));
+			expect(groups["anthropic-messages"][`chat:${id}`]).toMatchObject({
+				promptCache: { short: 300, long: 3600 },
+				compat: {
+					supportsMidConvoSystemMessages: true,
+					supportsMidConvoToolChanges: true,
+					supportsMidConvoEffort: true,
+					forceAdaptiveThinking: true,
+				},
+				thinkingLevelMap: { off: null },
+			});
+			expect(() => validateModelDataDirectory(readModelDataStructure(packageRoot), dataDir)).not.toThrow();
 
-		writeFileSync(
-			catalogPath,
-			JSON.stringify({
-				"cloudflare-ai-gateway": [{ ...model, promptCache: {}, compat: { supportsMidConvoToolChanges: false } }],
-			}),
-		);
-		hydrateModelCatalog(packageRoot, catalogPath);
-		const restored: Record<string, Record<string, Record<string, unknown>>> = JSON.parse(
-			readFileSync(providerPath, "utf8"),
-		);
-		expect(restored["anthropic-messages"]["chat:claude-opus-5-5"].promptCache).toEqual({});
-		expect(restored["anthropic-messages"]["chat:claude-opus-5-5"].compat).toMatchObject({
-			supportsMidConvoToolChanges: false,
-		});
-	});
+			writeFileSync(
+				catalogPath,
+				JSON.stringify({
+					"cloudflare-ai-gateway": [{ ...model, promptCache: {}, compat: { supportsMidConvoToolChanges: false } }],
+				}),
+			);
+			hydrateModelCatalog(packageRoot, catalogPath);
+			const restored: Record<string, Record<string, Record<string, unknown>>> = JSON.parse(
+				readFileSync(providerPath, "utf8"),
+			);
+			expect(restored["anthropic-messages"][`chat:${id}`].promptCache).toEqual({});
+			expect(restored["anthropic-messages"][`chat:${id}`].compat).toMatchObject({
+				supportsMidConvoToolChanges: false,
+			});
+		},
+	);
 
 	it("groups models by API and keys them by type and id", () => {
 		const { packageRoot, values } = createFixture();

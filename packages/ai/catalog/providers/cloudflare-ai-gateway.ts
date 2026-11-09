@@ -53,11 +53,22 @@ export default defineProvider({
 			baseUrl: CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
 			map: routeGatewayModel,
 		});
+		const ids = new Set(models.map((model) => model.id));
+		// Fable 5.2 is available on the passthrough before models.dev lists it for
+		// the gateway. Reuse Anthropic's limits and pricing, without its host-specific defaults.
+		const fable = ctx
+			.providerModels("anthropic")
+			.filter((model) => model.id === "claude-fable-5-2" && !ids.has(model.id))
+			.map((model) => ({
+				...model,
+				provider: "cloudflare-ai-gateway",
+				baseUrl: CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
+				compat: { sendSessionAffinityHeaders: true },
+			}));
 		// The gateway proxies Workers AI through its OpenAI-compatible /compat endpoint,
 		// but models.dev may omit or intermittently drop those `workers-ai/*` entries
 		// from the AI Gateway catalog. Mirror the Workers AI catalog under the documented
 		// prefix so the gateway keeps its OpenAI-compatible models stable.
-		const ids = new Set(models.map((model) => model.id));
 		const mirrored = modelsDevModels(ctx, "cloudflare-workers-ai", {
 			api: "openai-completions",
 			baseUrl: CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
@@ -65,7 +76,7 @@ export default defineProvider({
 			include: (source) => !ids.has(`workers-ai/${source.id}`),
 			map: (model) => ({ ...model, id: `workers-ai/${model.id}` }),
 		});
-		return [...models, ...mirrored];
+		return [...models, ...fable, ...mirrored];
 	},
 	compat: {
 		"openai-completions": {
