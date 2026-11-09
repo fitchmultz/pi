@@ -18,7 +18,7 @@ describe.skipIf(process.platform === "win32")("issue #11613 bash timeout after t
 
 	async function runExpectingTimeout(command: string, timeout: number): Promise<string> {
 		const result = await bashTool.execute("test-11613", { command, timeout }).catch((err: unknown) => err);
-		expect(result).toBeInstanceOf(Error);
+		expect(result, JSON.stringify(result)).toBeInstanceOf(Error);
 		return (result as Error).message;
 	}
 

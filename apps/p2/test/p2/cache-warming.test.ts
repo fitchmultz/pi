@@ -1,5 +1,5 @@
 // Cache warming (plugins/cache-warming): a conversation's last request is sent again with one output token before its
-// prompt cache entry expires, while pi's policy says it pays off. The warmers run on mocked timers with fake models;
+// prompt cache entry expires, while pi's policy says it pays off. The warmers use native Models with an offline provider;
 // a worker runs them end to end with the fake provider given a short cache lifetime.
 
 import assert from "node:assert/strict";
@@ -7,20 +7,24 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mock, test } from "node:test";
-import type {
-	CacheWarmingPhase,
-	Context,
-	Model,
-	Models,
-	ModelsSimpleStreamOptions,
-	SimpleStreamOptions,
-	StopReason,
+import {
+	type Api,
+	type CacheRetention,
+	type CacheWarmingPhase,
+	createAssistantMessageEventStream,
+	createModels,
+	createProvider,
+	type Model,
+	type ModelsSimpleStreamOptions,
+	type SimpleStreamOptions,
+	type StopReason,
+	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId, ConversationView, LiveState, UsageState } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@p2/app/v1";
 import type { ModelRequest } from "@p2/app/v1/worker";
-import { type CacheWarmingMode, ConversationWarmers } from "../../plugins/cache-warming/warmer.ts";
+import { type CacheWarmingMode, ConversationWarmers, type WarmerHost } from "../../plugins/cache-warming/warmer.ts";
 import { Chat } from "../../plugins/chat/contract.ts";
 import { Sessions } from "../../plugins/sessions/contract.ts";
 import { holdIn, startFixture, until } from "./helpers.ts";
@@ -43,10 +47,11 @@ const REQUEST = {
 	model: MODEL,
 	messages: [{ role: "user" as const, content: "hello", timestamp: 1 }],
 	options: { sessionId: "provider-session", reasoning: "high" as const },
+	cache: { retention: "short", ttlMs: 300_000, dispatchedAt: 0 },
 } satisfies ModelRequest;
 
-/** Warmers on mocked timers; `phase` is what the host reports, `sent` the refreshes the fake models received. */
-function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idle") {
+/** Warmers on mocked timers; `phase` is what the host reports, `sent` the refreshes the offline provider received. */
+function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idle", model: Model<Api> = MODEL) {
 	mock.timers.enable({ apis: ["setTimeout", "Date"] });
 	const state = {
 		mode,
@@ -54,15 +59,46 @@ function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idl
 		alive: 0,
 		sent: [] as ModelsSimpleStreamOptions[],
 		recorded: 0,
+		retention: "short" as CacheRetention,
+		authReady: Promise.resolve(),
+		failed: false,
 	};
-	const models = {
-		completeSimple: async (_model: Model<"pi-messages">, context: Context, options: ModelsSimpleStreamOptions) => {
-			assert.deepEqual(context.messages, REQUEST.messages);
-			state.sent.push(options);
-			return { ...fauxAssistantMessage([]), stopReason: options.signal?.aborted ? "aborted" : "length" };
-		},
-	} as unknown as Models;
-	const warmers = new ConversationWarmers({
+	const respond = (_model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions) => {
+		options?.signal?.throwIfAborted();
+		assert.deepEqual(context.messages, REQUEST.messages);
+		assert.ok(options);
+		state.sent.push(options);
+		const message = {
+			...fauxAssistantMessage([]),
+			stopReason: state.failed ? ("error" as const) : ("length" as const),
+		};
+		const stream = createAssistantMessageEventStream();
+		if (message.stopReason === "error") stream.push({ type: "error", reason: "error", error: message });
+		else {
+			stream.push({ type: "start", partial: message });
+			stream.push({ type: "done", reason: "length", message });
+		}
+		stream.end();
+		return stream;
+	};
+	const models = createModels();
+	models.setProvider(
+		createProvider({
+			id: model.provider,
+			models: [model],
+			auth: {
+				apiKey: {
+					name: "Test",
+					resolve: async () => {
+						await state.authReady;
+						return { auth: {}, env: { PI_CACHE_RETENTION: state.retention } };
+					},
+				},
+			},
+			api: { stream: respond, streamSimple: respond },
+		}),
+	);
+	const host: WarmerHost = {
 		mode: () => state.mode,
 		phase: async () => state.phase,
 		record: async () => {
@@ -71,7 +107,8 @@ function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idl
 		keepAlive: (delta) => {
 			state.alive += delta;
 		},
-	});
+	};
+	const warmers = new ConversationWarmers(host);
 	t.after(() => {
 		warmers.close();
 		mock.timers.reset();
@@ -81,10 +118,23 @@ function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idl
 		promptTokens: number,
 		stopReason: StopReason = "toolUse",
 		options: SimpleStreamOptions = REQUEST.options,
+		dispatchedAt = Date.now(),
 	) => {
 		const message = fauxAssistantMessage([]);
 		const usage = { ...message.usage, input: 2, cacheRead: promptTokens - 1002, cacheWrite: 1000 };
-		warmers.start(CONVERSATION, { ...message, stopReason, usage }, { ...REQUEST, options }, models);
+		const retention = options.cacheRetention ?? state.retention;
+		const seconds = retention === "none" ? undefined : model.promptCache?.[retention];
+		warmers.start(
+			CONVERSATION,
+			{ ...message, stopReason, usage },
+			{
+				...REQUEST,
+				model,
+				options,
+				cache: { retention, ttlMs: seconds === undefined ? undefined : seconds * 1000, dispatchedAt },
+			},
+			models,
+		);
 	};
 	/** Advances the clock by `ms` and lets the refreshes it fired finish (they arm the next timer when done). */
 	const advance = async (ms: number) => {
@@ -96,7 +146,7 @@ function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idl
 		for (let refresh = 0; refresh < 100 && state.alive > 0; refresh++) await advance(270_000);
 		return state.sent.length;
 	};
-	return { state, warmers, start, advance, runOut };
+	return { state, host, warmers, start, advance, runOut };
 }
 
 test("refreshes every 270 s with the request's options and one output token, and counts the spend", async (t) => {
@@ -116,6 +166,80 @@ test("refreshes every 270 s with the request's options and one output token, and
 	assert.equal(state.recorded, 1);
 	await advance(270_000);
 	assert.equal(state.sent.length, 2);
+});
+
+test("does not refresh an expired entry when a timer arrives late", async (t) => {
+	const { state, start, advance } = setup(t);
+	start(600_000);
+	await advance(600_000);
+	assert.equal(state.sent.length, 0);
+	assert.equal(state.alive, 0);
+});
+
+test("schedules from the prepared dispatch rather than the response or replay options", async (t) => {
+	const previous = process.env.PI_CACHE_RETENTION;
+	process.env.PI_CACHE_RETENTION = "long";
+	t.after(() => {
+		if (previous === undefined) delete process.env.PI_CACHE_RETENTION;
+		else process.env.PI_CACHE_RETENTION = previous;
+	});
+	const { state, start, advance } = setup(t);
+	await advance(200_000);
+	start(600_000, "toolUse", REQUEST.options, 0);
+	await advance(69_000);
+	assert.equal(state.sent.length, 0);
+	await advance(1_000);
+	assert.equal(state.sent.length, 1);
+});
+
+test("rechecks expiry after the host's phase decision", async (t) => {
+	const { state, host, start, advance } = setup(t);
+	const decision = Promise.withResolvers<CacheWarmingPhase | undefined>();
+	t.mock.method(host, "phase", () => decision.promise);
+	start(600_000);
+	await advance(270_000);
+	await advance(30_001);
+	decision.resolve("idle");
+	await advance(0);
+	assert.equal(state.sent.length, 0);
+	assert.equal(state.alive, 0);
+});
+
+test("cancels a refresh whose native auth preparation outlasts the entry", async (t) => {
+	const { state, start, advance } = setup(t);
+	const auth = Promise.withResolvers<void>();
+	state.authReady = auth.promise;
+	start(600_000);
+	await advance(270_000);
+	await advance(30_001);
+	auth.resolve();
+	await advance(0);
+	assert.equal(state.sent.length, 0);
+	assert.equal(state.alive, 0);
+});
+
+test("does not assume asking for long retention upgrades an existing five-minute entry", async (t) => {
+	const { state, start, advance } = setup(t);
+	start(600_000);
+	state.retention = "long";
+	await advance(270_000);
+	assert.equal(state.sent.length, 1);
+	await advance(270_000);
+	assert.equal(state.sent.length, 2);
+	assert.equal(state.recorded, 2);
+});
+
+test("keeps retrying a failed refresh while the original entry is still valid", async (t) => {
+	const { state, start, advance } = setup(t, "idle", { ...MODEL, promptCache: { short: 11 } });
+	state.failed = true;
+	start(600_000);
+	await advance(1_000);
+	assert.equal(state.sent.length, 1);
+	assert.equal(state.recorded, 0);
+	state.failed = false;
+	await advance(1_000);
+	assert.equal(state.sent.length, 2);
+	assert.equal(state.recorded, 1);
 });
 
 test("warms up to an hour while streaming and 30 minutes while idle; mode streaming stops when idle", async (t) => {

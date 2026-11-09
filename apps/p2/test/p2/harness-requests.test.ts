@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { type AssistantMessage, envApiKeyAuth, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { defineExtension, GenerationTask, hook } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT, whenLive } from "@p2/app/v1";
 import { createP2Models } from "../../plugins/models/models.ts";
@@ -32,6 +32,28 @@ const MODEL = { provider: "faux", modelId: "faux-1" };
 test("afterResponse hooks find the request that produced their message, once", async (t) => {
 	const dataDir = mkdtempSync(join(tmpdir(), "p2-harness-requests-"));
 	t.after(() => rmSync(dataDir, { recursive: true, force: true }));
+	const previousRetention = process.env.PI_CACHE_RETENTION;
+	process.env.PI_CACHE_RETENTION = "long";
+	t.after(() => {
+		if (previousRetention === undefined) delete process.env.PI_CACHE_RETENTION;
+		else process.env.PI_CACHE_RETENTION = previousRetention;
+	});
+	const credentials = new InMemoryCredentialStore();
+	await credentials.modify("faux", async () => ({
+		type: "api_key",
+		key: "test",
+		env: { PI_CACHE_RETENTION: "short" },
+	}));
+	const models = createP2Models(true, { credentials });
+	const provider = models.getProvider("faux");
+	assert.ok(provider);
+	const catalog = provider.getModels().map((model) => ({ ...model, promptCache: { short: 300, long: 3600 } }));
+	models.setProvider({
+		...provider,
+		getModels: () => catalog,
+		getAllModels: () => catalog,
+		auth: { apiKey: envApiKeyAuth("Test", []) },
+	});
 	let parts: HarnessParts | undefined;
 	const seen: { message: AssistantMessage; request: ModelRequest | undefined; again: ModelRequest | undefined }[] = [];
 	const probe = defineExtension({
@@ -47,7 +69,7 @@ test("afterResponse hooks find the request that produced their message, once", a
 	});
 	const facets = [
 		defineFacet((_host, self) =>
-			self.contribute(HarnessConfig, { default: { models: () => createP2Models(true), settings: () => ({}) } }),
+			self.contribute(HarnessConfig, { default: { models: () => models, settings: () => ({}) } }),
 		),
 		defineFacet((_host, self) => self.contribute(Extensions, { probe })),
 	];
@@ -72,6 +94,7 @@ test("afterResponse hooks find the request that produced their message, once", a
 		BACKGROUND_CONTEXT,
 	);
 	const holder = host.hold(HarnessHost, {}, BACKGROUND_CONTEXT);
+	let submittedAt = 0;
 	try {
 		await whenLive(holder);
 		parts = (await host.registry(HarnessNative, BACKGROUND_CONTEXT)).value!;
@@ -79,6 +102,7 @@ test("afterResponse hooks find the request that produced their message, once", a
 		durable.resume();
 		// One user input: the fake model answers it in one request.
 		const root = await durable.root(BACKGROUND_CONTEXT);
+		submittedAt = Date.now();
 		await (await root.submit({ type: "input", content: "hello" }, BACKGROUND_CONTEXT)).wait(BACKGROUND_CONTEXT);
 		await durable.waitForIdle(BACKGROUND_CONTEXT);
 	} finally {
@@ -104,4 +128,10 @@ test("afterResponse hooks find the request that produced their message, once", a
 	assert.equal(request.options.signal, undefined);
 	assert.equal(request.options.telemetry, undefined);
 	assert.equal(request.options.onPayload, undefined);
+	assert.equal(request.options.apiKey, undefined);
+	assert.equal(request.options.env, undefined);
+	assert.ok(request.cache);
+	assert.equal(request.cache.retention, "short");
+	assert.equal(request.cache.ttlMs, 300_000);
+	assert.ok(request.cache.dispatchedAt >= submittedAt && request.cache.dispatchedAt <= message.timestamp);
 });

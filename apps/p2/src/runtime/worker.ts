@@ -6,7 +6,15 @@ import type { Context } from "@earendil-works/chord/context";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonValue } from "@earendil-works/chord/json";
 import type { Watchable, WatchCall, WatchHandle } from "@earendil-works/chord/watch";
-import type { Api, AssistantMessage, Message, Model } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	type CacheRetention,
+	getEffectiveCacheRetention,
+	getPromptCacheTtlMs,
+	type Message,
+	type Model,
+} from "@earendil-works/pi-ai";
 import type { Models, ModelsSimpleStreamOptions } from "@earendil-works/pi-ai/models";
 import {
 	type ConversationId,
@@ -345,6 +353,14 @@ export type ModelRequest = {
 	readonly model: Model<Api>;
 	readonly messages: readonly Message[];
 	readonly options: ModelsSimpleStreamOptions;
+	/** Cache policy and time observed at provider dispatch, without retaining prepared credentials or headers. */
+	readonly cache:
+		| {
+				readonly retention: CacheRetention;
+				readonly ttlMs: number | undefined;
+				readonly dispatchedAt: number;
+		  }
+		| undefined;
 };
 
 /** The session's Harness (the core's contribution once it is open). */
@@ -805,13 +821,21 @@ function openHarness(self: Self, init: WorkerInit, location: SessionLocation, st
 
 /** `models.streamSimple` that remembers each request by its terminal message, for `HarnessParts.requestOf`. */
 function remembering(models: Models, requests: WeakMap<AssistantMessage, ModelRequest>): Models["streamSimple"] {
-	return (model, context, options) => {
-		const stream = models.streamSimple(model, context, options);
+	return (model, context, options, onPrepared) => {
+		let cache: ModelRequest["cache"];
+		const stream = models.streamSimple(model, context, options, (preparedModel, preparedOptions) => {
+			cache = {
+				retention: getEffectiveCacheRetention(preparedModel, preparedOptions),
+				ttlMs: getPromptCacheTtlMs(preparedModel, preparedOptions),
+				dispatchedAt: Date.now(),
+			};
+			onPrepared?.(preparedModel, preparedOptions);
+		});
 		// Registered before the caller awaits result(): the entry exists when Durable's afterResponse hooks run.
 		// result() never rejects; pi-ai encodes failures as `stopReason: "error"`.
 		void stream.result().then((message) => {
 			const { signal: _signal, telemetry: _telemetry, onPayload: _onPayload, ...kept } = options ?? {};
-			requests.set(message, { model, messages: context.messages, options: kept });
+			requests.set(message, { model, messages: context.messages, options: kept, cache });
 		});
 		return stream;
 	};

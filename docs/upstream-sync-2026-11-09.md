@@ -36,6 +36,18 @@ prompt-length pricing tiers, and warming trace attribution. Coding-agent still s
 the prepared request without replacing its replay options. Estimates remain catalog estimates,
 not claims about provider-wrapper or service-tier prices.
 
+p2 observes prepared cache retention through pi-ai's optional `Models.streamSimple()` callback,
+after native auth and header preparation. The Harness retains only retention, lifetime, and
+dispatch time; replay options remain unresolved. This fixes a reproduced five-minute request
+being scheduled as a one-hour request when stored credential environment values differ from
+the process environment.
+
+Each p2 refresh rechecks entry expiry after the host's phase decision and after auth preparation.
+Timers run from dispatch, not response completion. A successful refresh uses the shorter of
+the old and newly requested lifetimes. Anthropic documents that reading a five-minute entry
+[restarts its five-minute lifetime even when the new request asks for one hour](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#mixing-different-ttls).
+Failed refreshes retain best-effort retries while the current entry is still valid.
+
 The default is upstream's `idle`: warming may continue after the run settles, within the
 existing 30-minute idle window and savings threshold. An explicit `off` or `streaming`
 setting remains authoritative. No user settings file is changed by this integration.
@@ -86,10 +98,11 @@ and all three page tests pass with these isolated settings in real Chrome on mac
   Both affected test files then passed all 139 tests as an unprivileged user, with no
   source changes. The initial sweep exited with status 1, not a full-suite pass.
 
-Hosted GitHub Actions cannot run: an explicit workflow dispatch returned
-`Actions has been disabled for this repository.` The repository's read APIs still report
-Actions enabled. No Actions settings were changed. Local results and independent reviews
-are recorded separately and do not claim a hosted CI pass.
+Hosted GitHub Actions initially rejected dispatches because workflows on the fork were paused,
+despite the repository's enabled setting. The owner re-enabled them. Hosted build, package,
+standalone CLI, public-consumer, and MCP checks passed on the diagnostic head. The Mac job
+passed 105 of 106 tests; the remaining shell-timeout failure is under investigation.
+This is not a complete hosted CI pass.
 
 ## UI evidence
 

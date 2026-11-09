@@ -333,7 +333,16 @@ export interface Models {
 		options?: ModelsApiStreamOptions<TApi>,
 	): Promise<AssistantMessage>;
 
-	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream;
+	/**
+	 * `onPrepared` observes the resolved model/options after auth and header preparation, immediately before provider
+	 * dispatch. Treat them as read-only; do not retain or replay prepared options containing credentials.
+	 */
+	streamSimple(
+		model: Model<Api>,
+		context: Context,
+		options?: ModelsSimpleStreamOptions,
+		onPrepared?: (model: Model<Api>, options: SimpleStreamOptions) => void,
+	): AssistantMessageEventStream;
 	completeSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): Promise<AssistantMessage>;
 	streamDeferred(
 		model: Model<Api>,
@@ -964,13 +973,19 @@ class ModelsImpl implements MutableModels {
 		return this.stream(model, context, options).result();
 	}
 
-	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream {
+	streamSimple(
+		model: Model<Api>,
+		context: Context,
+		options?: ModelsSimpleStreamOptions,
+		onPrepared?: (model: Model<Api>, options: SimpleStreamOptions) => void,
+	): AssistantMessageEventStream {
 		const transcript = normalizeContext(context);
 		return lazyStream(
 			model,
 			async () => {
 				const provider = this.requireChatProvider(model);
 				const { requestModel, requestOptions } = await this.applyAuth(model, options);
+				onPrepared?.(requestModel, requestOptions as SimpleStreamOptions);
 				return provider.streamSimple(requestModel, transcript, requestOptions as SimpleStreamOptions);
 			},
 			observeModelRequest(model, options, false),

@@ -1,8 +1,10 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { stream as streamCompletions, streamSimple as streamSimpleCompletions } from "../src/api/openai-completions.ts";
-import { createModels, createProvider } from "../src/models.ts";
-import type { FetchFunction, Model, ProviderHeaders } from "../src/types.ts";
+import { InMemoryCredentialStore } from "../src/auth/credential-store.ts";
+import { envApiKeyAuth } from "../src/auth/helpers.ts";
+import { createModels, createProvider, type ModelsSimpleStreamOptions } from "../src/models.ts";
+import type { Api, FetchFunction, Model, ProviderHeaders, SimpleStreamOptions } from "../src/types.ts";
 import {
 	type ClientIdentity,
 	formatUserAgent,
@@ -156,6 +158,68 @@ describe("client identity", () => {
 });
 
 describe("client identity in requests", () => {
+	it("observes prepared requests through Models and its identity wrapper without changing replay options", async () => {
+		const credentials = new InMemoryCredentialStore();
+		await credentials.modify("openrouter", async () => ({
+			type: "api_key",
+			key: "stored",
+			env: { PI_CACHE_RETENTION: "short" },
+		}));
+		const read = vi.spyOn(credentials, "read");
+		const model = completionsModel("openrouter", "https://openrouter.ai/api/v1");
+		const models = createModels({ credentials });
+		models.setProvider(
+			createProvider({
+				id: "openrouter",
+				auth: { apiKey: envApiKeyAuth("Test", []) },
+				models: [model],
+				api: { stream: streamCompletions, streamSimple: streamSimpleCompletions },
+			}),
+		);
+		for (const target of [models, withClientIdentity(models, { attribution: ACME })]) {
+			const order: string[] = [];
+			const capture = capturingFetch();
+			const options: ModelsSimpleStreamOptions = {
+				fetch: async (input, init) => {
+					order.push("fetch");
+					return capture.fetch(input, init);
+				},
+				transformHeaders: async (headers) => {
+					order.push("headers");
+					return { ...headers, "X-Prepared": "yes" };
+				},
+			};
+			const onPrepared = vi.fn((_model: Model<Api>, _options: SimpleStreamOptions) => {
+				order.push("prepared");
+			});
+			const result = await target.streamSimple(model, context, options, onPrepared).result();
+			expect(result.stopReason).toBe("stop");
+			expect(onPrepared).toHaveBeenCalledOnce();
+			const [preparedModel, preparedOptions] = onPrepared.mock.calls[0]!;
+			expect(preparedModel).toBe(model);
+			expect(preparedOptions).toMatchObject({
+				apiKey: "stored",
+				env: { PI_CACHE_RETENTION: "short" },
+				headers: { "X-Prepared": "yes" },
+			});
+			expect(preparedOptions).not.toHaveProperty("transformHeaders");
+			expect(capture.headers().get("authorization")).toBe("Bearer stored");
+			expect(capture.headers().get("x-prepared")).toBe("yes");
+			expect(order).toEqual(["headers", "prepared", "fetch"]);
+			expect(options.apiKey).toBeUndefined();
+			expect(options.env).toBeUndefined();
+			expect(options.transformHeaders).toBeDefined();
+			const controller = new AbortController();
+			const fetch = vi.fn<FetchFunction>();
+			const cancelled = await target
+				.streamSimple(model, context, { signal: controller.signal, fetch }, () => controller.abort())
+				.result();
+			expect(cancelled.stopReason).toBe("aborted");
+			expect(fetch).not.toHaveBeenCalled();
+		}
+		expect(read).toHaveBeenCalledTimes(4);
+	});
+
 	it("delegates mutable availability with provider-local auth diagnostics unchanged", async () => {
 		const models = createModels();
 		const healthy = completionsModel("healthy", "https://example.test/v1");

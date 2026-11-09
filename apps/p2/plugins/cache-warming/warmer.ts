@@ -39,10 +39,15 @@ type Run = {
 	readonly models: Models;
 	/** Prompt size of the request, as the provider reported it. */
 	readonly promptTokens: number;
-	readonly delayMs: number;
+	timing: CacheTiming;
 	readonly startedAt: number;
 	readonly controller: AbortController;
 	timer?: ReturnType<typeof setTimeout>;
+};
+
+type CacheTiming = NonNullable<ModelRequest["cache"]> & {
+	readonly ttlMs: number;
+	readonly delayMs: number;
 };
 
 /**
@@ -68,21 +73,20 @@ export class ConversationWarmers {
 		if (message.stopReason === "error" || message.stopReason === "aborted") return;
 		// Mode "off" uninstalls the hook; a run already armed stops at its next refresh.
 		if (!isCacheWarmingReplayable(request.model, request.options)) return;
-		const ttlMs = getPromptCacheTtlMs(request.model, request.options);
-		const delayMs = ttlMs === undefined ? undefined : getCacheWarmingDelayMs(ttlMs);
-		if (delayMs === undefined) return;
+		const timing = cacheTiming(request.cache);
+		if (timing === undefined || Date.now() >= timing.dispatchedAt + timing.ttlMs) return;
 		const { input, cacheRead, cacheWrite } = message.usage;
 		const run: Run = {
 			request,
 			models,
 			promptTokens: input + cacheRead + cacheWrite,
-			delayMs,
+			timing,
 			startedAt: Date.now(),
 			controller: new AbortController(),
 		};
 		this.#runs.set(conversationId, run);
 		this.#host.keepAlive(1);
-		run.timer = setTimeout(() => void this.#refresh(conversationId, run), delayMs);
+		this.#arm(conversationId, run, timing.dispatchedAt + timing.delayMs);
 	}
 
 	/** Stop warming the conversation; a refresh in flight is aborted. */
@@ -100,27 +104,60 @@ export class ConversationWarmers {
 		for (const conversationId of [...this.#runs.keys()]) this.stop(conversationId);
 	}
 
+	#arm(conversationId: ConversationId, run: Run, dueAt: number): void {
+		run.timer = setTimeout(() => void this.#refresh(conversationId, run), Math.max(0, dueAt - Date.now()));
+	}
+
 	async #refresh(conversationId: ConversationId, run: Run): Promise<void> {
+		let refreshed: { timing: CacheTiming | undefined } | undefined;
 		try {
-			if (!(await this.#wanted(conversationId, run))) {
+			if (!(await this.#wanted(conversationId, run)) || Date.now() >= run.timing.dispatchedAt + run.timing.ttlMs) {
 				if (this.#runs.get(conversationId) === run) this.stop(conversationId);
 				return;
 			}
 			const { model, messages, options } = run.request;
-			const message = await run.models.completeSimple(
-				model,
-				{ messages: [...messages] },
-				getCacheWarmingRequestOptions(options, run.controller.signal),
-			);
+			let timing: CacheTiming | undefined;
+			const message = await run.models
+				.streamSimple(
+					model,
+					{ messages: [...messages] },
+					getCacheWarmingRequestOptions(options, run.controller.signal),
+					(preparedModel, preparedOptions) => {
+						if (this.#runs.get(conversationId) !== run) return;
+						// Auth preparation can itself wait past the old entry's lifetime.
+						if (Date.now() >= run.timing.dispatchedAt + run.timing.ttlMs) {
+							this.stop(conversationId);
+							return;
+						}
+						timing = cacheTiming(
+							{
+								retention: getEffectiveCacheRetention(preparedModel, preparedOptions),
+								ttlMs: getPromptCacheTtlMs(preparedModel, preparedOptions),
+								dispatchedAt: Date.now(),
+							},
+							run.timing.ttlMs,
+						);
+					},
+				)
+				.result();
 			if (this.#runs.get(conversationId) !== run) return;
-			if (message.stopReason !== "error" && message.stopReason !== "aborted")
+			if (message.stopReason !== "error" && message.stopReason !== "aborted") {
+				refreshed = { timing };
 				await this.#host.record(conversationId, message);
+			}
 		} catch (error) {
 			// Warming is best effort: a failed refresh never touches the conversation, the next one may succeed.
 			if (!run.controller.signal.aborted) console.error("p2 cache-warming: refreshing failed:", error);
 		}
-		if (this.#runs.get(conversationId) === run)
-			run.timer = setTimeout(() => void this.#refresh(conversationId, run), run.delayMs);
+		if (this.#runs.get(conversationId) !== run) return;
+		if (refreshed !== undefined) {
+			if (refreshed.timing === undefined) {
+				this.stop(conversationId);
+				return;
+			}
+			run.timing = refreshed.timing;
+			this.#arm(conversationId, run, run.timing.dispatchedAt + run.timing.delayMs);
+		} else this.#arm(conversationId, run, Date.now() + run.timing.delayMs);
 	}
 
 	/** Whether this refresh is still wanted: the run current, in its phase's window, and paying off. */
@@ -131,12 +168,15 @@ export class ConversationWarmers {
 		if (phase === undefined || (phase === "idle" && mode === "streaming")) return false;
 		const maxAge = phase === "idle" ? CACHE_WARMING_MAX_IDLE_AGE_MS : CACHE_WARMING_MAX_AGE_MS;
 		if (Date.now() > run.startedAt + maxAge) return false;
-		const { action } = evaluateCacheWarming(
-			run.request.model,
-			run.promptTokens,
-			phase,
-			getEffectiveCacheRetention(run.request.model, run.request.options),
-		);
+		const { action } = evaluateCacheWarming(run.request.model, run.promptTokens, phase, run.timing.retention);
 		return action === "warm" && this.#runs.get(conversationId) === run;
 	}
+}
+
+/** Timing for the entry a request refreshed; a cache hit cannot be assumed to upgrade its existing lifetime. */
+function cacheTiming(cache: ModelRequest["cache"], previousTtlMs?: number): CacheTiming | undefined {
+	if (cache?.ttlMs === undefined) return undefined;
+	const ttlMs = Math.min(cache.ttlMs, previousTtlMs ?? cache.ttlMs);
+	const delayMs = getCacheWarmingDelayMs(ttlMs);
+	return delayMs === undefined ? undefined : { ...cache, ttlMs, delayMs };
 }

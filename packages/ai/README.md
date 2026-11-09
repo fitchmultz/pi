@@ -18,6 +18,7 @@ Unified LLM API with provider collections, automatic auth resolution, token and 
 - [Auth](#auth)
   - [How Auth Resolves](#how-auth-resolves)
   - [Transforming Request Headers](#transforming-request-headers)
+   - [Observing Prepared Requests](#observing-prepared-requests)
   - [Client Identity](#client-identity)
   - [Credential Store](#credential-store)
   - [Environment Variables](#environment-variables)
@@ -430,6 +431,14 @@ provider auth headers -> model.headers -> explicit options.headers -> transformH
 Header names are merged case-insensitively. Explicit headers override auth/model headers, and the transform has final control; returning `null` for a header suppresses lower-level defaults that support deletion.
 
 `transformHeaders` belongs to `Models`, not `Provider`. A `Models` implementation must consume it and remove it before calling `Provider.stream*()`. Provider implementations continue receiving ordinary `ApiStreamOptions` or `SimpleStreamOptions` and never handle the transform themselves. Use this option instead of calling `getAuth(model)` before `stream*()`, which would resolve request auth twice.
+
+### Observing Prepared Requests
+
+`models.streamSimple(model, context, options, onPrepared)` accepts an optional synchronous observer. It receives the resolved `Model` and `SimpleStreamOptions` after authentication and `transformHeaders`, immediately before provider dispatch. This lets hosts observe effective cache policy and dispatch time without resolving auth twice.
+
+The observer receives credentials and prepared headers. Treat its arguments as read-only. Retain only derived, non-secret values, and use the original options for future requests so authentication runs again. An observer that throws ends the request through the stream's normal error result.
+
+`withClientIdentity()` forwards the observer. Custom `Models` wrappers must forward this fourth argument too. `Provider.streamSimple()` and `Models.completeSimple()` keep their existing signatures.
 
 ### Client Identity
 
