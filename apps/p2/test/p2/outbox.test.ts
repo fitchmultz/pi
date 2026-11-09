@@ -2,9 +2,9 @@
 // on connection failures with their own request IDs, and put back into the composer when the server refuses them.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Outbox, type Outgoing, type Sender } from "../../plugins/chat/outbox.ts";
+import { type Message, Outbox, type Sender } from "../../plugins/chat/outbox.ts";
 
-const message = (id: string): Outgoing => ({
+const message = (id: string): Message => ({
 	id,
 	text: `text ${id}`,
 	files: [],
@@ -21,12 +21,13 @@ function sender(fail: (id: string, call: number) => "refuse" | "drop" | undefine
 	const restored: string[] = [];
 	let calls = 0;
 	const value: Sender = {
-		send: async (outgoing) => {
+		send: async (outgoing, calling) => {
+			calling({ after: 0, idle: true });
 			const outcome = fail(outgoing.id, ++calls);
 			if (outcome === "refuse") throw new Error("refused");
 			if (outcome === "drop") throw new Error("connection lost");
 			sent.push(outgoing.id);
-			return { submissionId: sent.length, after: 0 };
+			return sent.length;
 		},
 		refused: (error) => error instanceof Error && error.message === "refused",
 		restore: (outgoing) => restored.push(outgoing.id),
@@ -50,7 +51,7 @@ describe("outbox", () => {
 		assert.deepEqual(sent, ["a", "b"]);
 		// Accepted messages stay shown until the transcript shows them.
 		assert.deepEqual(
-			outbox.snapshot().map((entry) => entry.sent?.submissionId),
+			outbox.snapshot().map(({ delivery }) => (delivery.state === "accepted" ? delivery.submissionId : undefined)),
 			[1, 2],
 		);
 		outbox.settle((entry) => entry.id === "a");
@@ -74,6 +75,44 @@ describe("outbox", () => {
 		assert.deepEqual(restored, ["b"]);
 	});
 
+	it("keeps where a message's first call went out, for a view opened again", async () => {
+		const outbox = new Outbox(fast);
+		const view = (send: Sender["send"]): Sender => ({ send, refused: () => false, restore: () => {} });
+		outbox.add(message("a"));
+		// The first view's upload fails: no call went out, so the server cannot have the message.
+		outbox.connect(
+			view(async () => {
+				throw new Error("upload failed");
+			}),
+		);
+		await tick();
+		outbox.connect(undefined);
+		assert.deepEqual(outbox.snapshot()[0]?.delivery, { state: "untried" });
+		// The next view's call reaches the server, but its answer is lost with the connection.
+		outbox.connect(
+			view(async (_, calling) => {
+				calling({ after: 7, idle: true });
+				throw new Error("connection lost");
+			}),
+		);
+		await tick();
+		outbox.connect(undefined);
+		assert.deepEqual(outbox.snapshot()[0]?.delivery, { state: "tried", start: { after: 7, idle: true } });
+		// The view opened again already shows the message's entry and the run it started: its own start would count them.
+		outbox.connect(
+			view(async (_, calling) => {
+				calling({ after: 9, idle: false });
+				return 3;
+			}),
+		);
+		await tick();
+		assert.deepEqual(outbox.snapshot()[0]?.delivery, {
+			state: "accepted",
+			start: { after: 7, idle: true },
+			submissionId: 3,
+		});
+	});
+
 	it("gives a message back after failing again and again while connected", async () => {
 		const outbox = new Outbox(fast);
 		let calls = 0;
@@ -93,9 +132,10 @@ describe("outbox", () => {
 		const outbox = new Outbox(fast);
 		let release: () => void = () => {};
 		const value: Sender = {
-			send: () =>
+			send: (_, calling) =>
 				new Promise((resolve) => {
-					release = () => resolve({ submissionId: 1, after: 0 });
+					calling({ after: 0, idle: true });
+					release = () => resolve(1);
 				}),
 			refused: () => false,
 			restore: () => {},

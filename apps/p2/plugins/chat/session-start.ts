@@ -11,7 +11,7 @@
  * connection is tried again, at most `GIVE_UP` times while connected.
  */
 import type { ModelChoice } from "@p2/app/v1/web";
-import { GIVE_UP, type Outgoing, outboxOf, retryDelay } from "./outbox.ts";
+import { GIVE_UP, type Message, outboxOf, retryDelay } from "./outbox.ts";
 
 /**
  * The session's ID, where and with which model it starts (as chosen at the first Send), and the messages it starts
@@ -21,7 +21,7 @@ export type Start = {
 	readonly session: string;
 	readonly location: { readonly env: string | null; readonly cwd: string };
 	readonly choice: ModelChoice;
-	readonly messages: readonly Outgoing[];
+	readonly messages: readonly Message[];
 };
 
 /** How the connected new-session screen creates the session, and what it does with the outcome. */
@@ -33,7 +33,7 @@ export type Creator = {
 	/** The session exists and its main conversation's outbox has the messages. */
 	created(session: string): void;
 	/** Puts the messages of a refused creation back into the composer, saying why. */
-	restore(messages: readonly Outgoing[], error: unknown): void;
+	restore(messages: readonly Message[], error: unknown): void;
 };
 
 export class SessionStart {
@@ -57,7 +57,7 @@ export class SessionStart {
 	snapshot = (): Start | undefined => this.#start;
 
 	/** Adds `message`; the first one's `place` decides the session's ID, where and with which model it starts. */
-	add(message: Outgoing, place: Omit<Start, "messages">): void {
+	add(message: Message, place: Omit<Start, "messages">): void {
 		this.#set(
 			this.#start
 				? { ...this.#start, messages: [...this.#start.messages, message] }

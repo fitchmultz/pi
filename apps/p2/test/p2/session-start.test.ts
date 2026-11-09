@@ -3,10 +3,10 @@
 // when the server refuses the creation.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { type Outgoing, outboxOf } from "../../plugins/chat/outbox.ts";
+import { type Message, outboxOf } from "../../plugins/chat/outbox.ts";
 import { type Creator, SessionStart } from "../../plugins/chat/session-start.ts";
 
-const message = (id: string): Outgoing => ({
+const message = (id: string): Message => ({
 	id,
 	text: `text ${id}`,
 	files: [],
