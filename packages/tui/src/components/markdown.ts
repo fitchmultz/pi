@@ -154,7 +154,7 @@ function planQuotedShellSpans(source: string, prefix: readonly Token[], context:
 	// Native math may have consumed a word's opener before this extension's first callback.
 	const fullSource = prefix.map((token) => token.raw).join("") + source;
 	const native = [];
-	const formatStarts = new Set<number>();
+	const formatStarts = new Map<number, Token>();
 	let offset = 0;
 	for (const token of [...prefix, ...lexer.inlineTokens(source)]) {
 		const end = offset + token.raw.length;
@@ -164,7 +164,7 @@ function planQuotedShellSpans(source: string, prefix: readonly Token[], context:
 			token.type !== "escape" &&
 			!(token.type === "latex" && (token.pending || SHELL_PARAMETER_BEFORE_QUOTE_REGEX.test(token.text)))
 		) {
-			formatStarts.add(offset);
+			formatStarts.set(offset, token);
 		}
 		offset = end;
 	}
@@ -187,8 +187,12 @@ function planQuotedShellSpans(source: string, prefix: readonly Token[], context:
 		) {
 			candidates.lastIndex = parent.end;
 			if (parent.token.type === "latex" && parent.end === start + 2) {
-				const closingQuote = findClosingDelimiter(fullSource, fullSource[start], start + 2);
-				if (closingQuote >= 0) candidates.lastIndex = closingQuote + 1;
+				// A native math prime does not own the next quoted word's opener.
+				const word = scanQuotedShellWord(fullSource.slice(start), start, formatStarts, "native-prefix");
+				if (word && !word.quote) {
+					const closingQuote = findClosingDelimiter(fullSource, fullSource[start], start + 2);
+					if (closingQuote >= 0) candidates.lastIndex = closingQuote + 1;
+				}
 			}
 			continue;
 		}
@@ -234,7 +238,7 @@ function planQuotedShellSpans(source: string, prefix: readonly Token[], context:
 				continue;
 			}
 		}
-		const word = scanQuotedShellWord(wordSource, start, formatStarts);
+		const word = scanQuotedShellWord(wordSource, start, formatStarts, "shell-word");
 		if (!word) continue;
 		// An unmatched single quote can be a math prime, not an unfinished shell word.
 		if (
@@ -262,12 +266,14 @@ function planQuotedShellSpans(source: string, prefix: readonly Token[], context:
 function scanQuotedShellWord(
 	source: string,
 	sourceOffset: number,
-	formatStarts: ReadonlySet<number>,
+	formatStarts: ReadonlyMap<number, Token>,
+	ownership: "native-prefix" | "shell-word",
 ): { end: number; quote: string | undefined } | undefined {
 	const quote = source[0];
 	let activeQuote: string | undefined = quote;
 	const expansions: { closing: ")" | "}"; quote: string | undefined }[] = [];
 	let hasExpansion = false;
+	let primeMathStart: number | undefined;
 	let index = 1;
 	for (; index < source.length; index++) {
 		const character = source[index];
@@ -280,9 +286,21 @@ function scanQuotedShellWord(
 		}
 		if (character === activeQuote) {
 			activeQuote = undefined;
-			if (expansions.length === 0 && formatStarts.has(sourceOffset + index + 1)) {
-				index++;
-				break;
+			if (expansions.length === 0) {
+				const format = formatStarts.get(sourceOffset + index + 1);
+				if (format) {
+					if (
+						ownership === "shell-word" &&
+						(format.type !== "latex" ||
+							!SHELL_EXPANSION_START_REGEX.test(format.text) ||
+							!/["']/.test(format.text))
+					) {
+						index++;
+						break;
+					}
+					// A cross-word math token can contain shell quotes; an unmatched single quote can still be a prime.
+					if (format.type === "latex" && format.text.endsWith("'")) primeMathStart ??= index + 1;
+				}
 			}
 			continue;
 		}
@@ -317,6 +335,9 @@ function scanQuotedShellWord(
 			activeQuote = undefined;
 			index++;
 		}
+	}
+	if (activeQuote === "'" && primeMathStart !== undefined) {
+		return { end: primeMathStart, quote: undefined };
 	}
 	return hasExpansion ? { end: index, quote: activeQuote } : undefined;
 }
