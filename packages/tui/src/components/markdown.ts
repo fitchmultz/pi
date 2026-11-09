@@ -116,6 +116,7 @@ function looksLikePendingDollarMath(source: string): boolean {
 }
 
 const SHELL_EXPANSION_START_REGEX = /^[A-Za-z_({0-9@*#?$!-]/;
+const SHELL_PARAMETER_BEFORE_QUOTE_REGEX = /^[0-9@*#?$!-]["']$/;
 
 interface QuotedShellSpans {
 	sourceLength: number;
@@ -131,7 +132,7 @@ function tokenizeQuotedShellWord(this: TokenizerThis, source: string, tokens: To
 	}
 	let cached = quotedShellSpans.get(tokens);
 	if (!cached) {
-		cached = { sourceLength: source.length, spans: findQuotedShellSpans(source, this), next: 0 };
+		cached = planQuotedShellSpans(source, tokens, this);
 		quotedShellSpans.set(tokens, cached);
 	}
 	const offset = cached.sourceLength - source.length;
@@ -146,21 +147,31 @@ function tokenizeQuotedShellWord(this: TokenizerThis, source: string, tokens: To
 	return { type: "text", raw, text: raw };
 }
 
-function findQuotedShellSpans(source: string, context: TokenizerThis): QuotedShellSpans["spans"] {
+function planQuotedShellSpans(source: string, prefix: readonly Token[], context: TokenizerThis): QuotedShellSpans {
 	const lexer = new shellMathParser.Lexer(shellMathParser.defaults);
 	lexer.tokens.links = context.lexer.tokens.links;
 	lexer.state = { ...context.lexer.state };
+	// Native math may have consumed a word's opener before this extension's first callback.
+	const fullSource = prefix.map((token) => token.raw).join("") + source;
 	const native = [];
+	const formatStarts = new Set<number>();
 	let offset = 0;
-	for (const token of lexer.inlineTokens(source)) {
+	for (const token of [...prefix, ...lexer.inlineTokens(source)]) {
 		const end = offset + token.raw.length;
 		native.push({ start: offset, end, token });
+		if (
+			token.type !== "text" &&
+			token.type !== "escape" &&
+			!(token.type === "latex" && (token.pending || SHELL_PARAMETER_BEFORE_QUOTE_REGEX.test(token.text)))
+		) {
+			formatStarts.add(offset);
+		}
 		offset = end;
 	}
 	const spans: QuotedShellSpans["spans"] = [];
 	const candidates = /["']\$/g;
 	let nativeIndex = 0;
-	for (let match = candidates.exec(source); match; match = candidates.exec(source)) {
+	for (let match = candidates.exec(fullSource); match; match = candidates.exec(fullSource)) {
 		const start = match.index;
 		while (native[nativeIndex]?.end <= start) {
 			nativeIndex++;
@@ -175,9 +186,13 @@ function findQuotedShellSpans(source: string, context: TokenizerThis): QuotedShe
 			(!previous || previous.end <= parent.start)
 		) {
 			candidates.lastIndex = parent.end;
+			if (parent.token.type === "latex" && parent.end === start + 2) {
+				const closingQuote = findClosingDelimiter(fullSource, fullSource[start], start + 2);
+				if (closingQuote >= 0) candidates.lastIndex = closingQuote + 1;
+			}
 			continue;
 		}
-		const wordSource = source.slice(start);
+		const wordSource = fullSource.slice(start);
 		const quote = wordSource[0];
 		const math = tokenizeInlineLatex(wordSource.slice(1));
 		const quotedPid = wordSource.startsWith(`${quote}$$${quote}`);
@@ -219,10 +234,16 @@ function findQuotedShellSpans(source: string, context: TokenizerThis): QuotedShe
 				continue;
 			}
 		}
-		const word = scanQuotedShellWord(wordSource);
+		const word = scanQuotedShellWord(wordSource, start, formatStarts);
 		if (!word) continue;
 		// An unmatched single quote can be a math prime, not an unfinished shell word.
-		if (math && quote === "'" && word.quote && math.text.endsWith("'") && !/^[0-9@*#?$!-]'$/.test(math.text))
+		if (
+			math &&
+			quote === "'" &&
+			word.quote &&
+			math.text.endsWith("'") &&
+			!SHELL_PARAMETER_BEFORE_QUOTE_REGEX.test(math.text)
+		)
 			continue;
 		const wordEnd = start + word.end;
 		let end = wordEnd;
@@ -235,10 +256,14 @@ function findQuotedShellSpans(source: string, context: TokenizerThis): QuotedShe
 		// Visit actual word boundaries even when a native math token reaches into the following word.
 		candidates.lastIndex = wordEnd;
 	}
-	return spans;
+	return { sourceLength: fullSource.length, spans, next: 0 };
 }
 
-function scanQuotedShellWord(source: string): { end: number; quote: string | undefined } | undefined {
+function scanQuotedShellWord(
+	source: string,
+	sourceOffset: number,
+	formatStarts: ReadonlySet<number>,
+): { end: number; quote: string | undefined } | undefined {
 	const quote = source[0];
 	let activeQuote: string | undefined = quote;
 	const expansions: { closing: ")" | "}"; quote: string | undefined }[] = [];
@@ -255,6 +280,10 @@ function scanQuotedShellWord(source: string): { end: number; quote: string | und
 		}
 		if (character === activeQuote) {
 			activeQuote = undefined;
+			if (expansions.length === 0 && formatStarts.has(sourceOffset + index + 1)) {
+				index++;
+				break;
+			}
 			continue;
 		}
 		if (!activeQuote) {
