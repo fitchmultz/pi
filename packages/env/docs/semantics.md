@@ -51,7 +51,8 @@ env conformance suite and `test/differential.test.ts` check each rule below.
 - Environment: with `inheritEnv` (default), the daemon's environment, then `shellEnv`, then `env`; without it, only
   `env`.
 - Each command gets a new session (process group), default signal dispositions and an empty signal mask. Timeout,
-  abort and `cleanup()` kill the group with `SIGKILL`.
+  abort and `cleanup()` kill the group with `SIGKILL`. A macOS group kill can miss a process that is being forked at
+  that moment, so on macOS the group is killed once more after the killed command's process has exited.
 - After the process exits, output is still collected until both pipes end, or 100 ms pass without output; the timeout
   still applies meanwhile. Waiting for link backpressure to clear does not count as silence. The pipes are closed
   when the command settles, even if a descendant keeps them open.

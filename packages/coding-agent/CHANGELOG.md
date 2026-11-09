@@ -158,6 +158,7 @@
 - Fixed the edit tool rewriting the line endings of untouched lines in files with mixed CRLF/LF or lone CR line endings, and running out of memory on large files after the file was already written; the diff now covers only the changed lines and their surroundings and is computed before writing ([#8544](https://github.com/earendil-works/pi/issues/8544))
 - Fixed `/mcp` showing `Failed to refresh tools: MCP connection closed` instead of why an MCP server disconnected, such as a stdio server's error output, when the connection dropped while its tools were being refreshed.
 - Fixed quitting right after `/mcp reconnect` leaving a stdio MCP server that ignores SIGTERM running. Ending a session now waits for MCP connections dropped by a reconnect, sign-out or required sign-in to finish closing, as it already did for current connections.
+- Fixed aborting or timing out a bash command on macOS sometimes leaving the next command of a list such as `long_step; next_step` running after the abort was reported, when the abort landed while the shell was starting that command. pi now kills the command's process group once more after the shell exits.
 
 ### Removed
 

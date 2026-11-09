@@ -447,6 +447,7 @@ pub fn run(
         // On Windows the group kill spawns taskkill, which can fail under the same limit; kill the child directly.
         let _ = child.kill();
         let _ = child.wait();
+        sys::kill_group_after_exit(pid);
         groups.lock().unwrap().remove(&pid);
         Failure::new("spawn_error", error.to_string())
     };
@@ -556,6 +557,10 @@ pub fn run(
             }
             Ok(Message::Eof(stream)) => ended[stream] = true,
             Ok(Message::Exit(exit)) => {
+                // A kill that landed while the command was starting a process can miss that process.
+                if killed {
+                    sys::kill_group_after_exit(pid);
+                }
                 status = Some(Ok(exit));
             }
             Ok(Message::WaitFailed(error)) => {

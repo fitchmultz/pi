@@ -7,6 +7,7 @@ import { waitForChildProcess } from "../../utils/child-process.ts";
 import {
 	getShellConfig,
 	getShellEnv,
+	killProcessGroupAfterExit,
 	killProcessTree,
 	type ShellConfig,
 	trackDetachedChildPid,
@@ -136,8 +137,11 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			if (child.pid) trackDetachedChildPid(child.pid);
 			const startedAt = performance.now();
 			let shellExitedAfterMs: number | undefined;
+			let killed = false;
 			child.once("exit", () => {
 				shellExitedAfterMs = performance.now() - startedAt;
+				// A kill that landed while the shell was starting its next step can miss that step.
+				if (killed && child.pid) killProcessGroupAfterExit(child.pid);
 			});
 			let timedOut = false;
 			let exitedBeforeDeadlineAfterMs: number | undefined;
@@ -145,6 +149,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			let outputError: Error | undefined;
 			let pendingOutput: Promise<void> | undefined;
 			const onAbort = () => {
+				killed = true;
 				if (child.pid) killProcessTree(child.pid);
 			};
 			const failOutput = (error: unknown) => {
@@ -178,7 +183,7 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 						exitedBeforeDeadlineAfterMs = shellExitedAfterMs;
 						// Also when the shell already exited: on Unix the group kill still reaches background
 						// processes holding the pipes. Windows cannot find them once the shell pid is gone.
-						if (child.pid) killProcessTree(child.pid);
+						onAbort();
 					}, timeoutMs);
 				}
 				// Stream stdout and stderr.

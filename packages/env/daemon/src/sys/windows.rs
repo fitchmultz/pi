@@ -685,6 +685,9 @@ pub fn kill_tree(pid: u32) {
         .spawn();
 }
 
+/// Nothing to do: a group kill that misses a process being forked is macOS behaviour (see the Unix version).
+pub fn kill_group_after_exit(_pid: u32) {}
+
 /// The job object of a `process` program: what is left in it is killed once the program exits, and when the daemon
 /// ends (the job is closed with it). It is nested in the daemon's job.
 pub struct Group {

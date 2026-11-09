@@ -262,3 +262,20 @@ export function killProcessTree(pid: number): void {
 		}
 	}
 }
+
+/**
+ * Kill what is left in the process group of a command killed while its shell ran, once the shell has exited (macOS
+ * only). macOS skips a process that is still being forked when it signals a group, so a kill that lands while the
+ * shell starts the next step of `a; b` misses that step, which then runs on. The shell's exit is reported only after
+ * its fork returned, so the step is an ordinary group member by then. Linux signals a group under the lock that fork
+ * takes to add the child, so it misses none. Only the group is signalled: the shell's pid is already reaped and may
+ * name another process, while the group's id is not reused as long as the group has members.
+ */
+export function killProcessGroupAfterExit(pid: number): void {
+	if (process.platform !== "darwin") return;
+	try {
+		process.kill(-pid, "SIGKILL");
+	} catch {
+		// No signalable member remains.
+	}
+}

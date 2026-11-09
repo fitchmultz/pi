@@ -113,7 +113,7 @@ jobs:
           ./test.sh -- npm run test:scripts
           ./test.sh -- npm run test --if-present "${args[@]}"
 
-  # Fork: restart and background_command depend on macOS process groups, signals and Unix sockets.
+  # Fork: restart, background_command, bash abort and bash timeout depend on macOS process groups, signals and Unix sockets.
   macos-restart-background:
     # Avoid the arm64 capacity constraints behind macos-latest.
     runs-on: macos-26-intel
@@ -139,10 +139,10 @@ jobs:
           cd "$(dirname "$root")/$(basename "$root" | tr '[:lower:]' '[:upper:]')"
           npm run build
 
-      - name: Restart and background_command tests
+      - name: Restart, background_command, bash abort and bash timeout tests
         working-directory: packages/coding-agent
         # Avoid CPU/I/O contention between the large-journal and launcher subprocess tests.
-        run: ../../test.sh -- node ../../node_modules/vitest/dist/cli.js --run --no-file-parallelism restart background-command
+        run: ../../test.sh -- node ../../node_modules/vitest/dist/cli.js --run --no-file-parallelism restart background-command bash-abort-process-group 11613-bash-timeout-after-shell-exit
 
       - name: Case-insensitive workspace build and release liveness
         run: ./test.sh -- node --test scripts/workspace-build.test.mjs scripts/fork-release-liveness.test.mjs

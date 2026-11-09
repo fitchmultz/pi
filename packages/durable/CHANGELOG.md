@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- The env conformance suite now checks that aborting POSIX shell commands stops all process-group descendants without letting waiting shells run later steps. Custom environments may need changes to pass.
+- The env conformance suite now checks that aborting POSIX shell commands stops all process-group descendants without letting waiting shells run later steps, and that abort and `cleanup()` also kill a step the shell was starting at that moment: the command's process group must be empty within a second after the command settles. Custom environments may need changes to pass.
 
 ### Added
 
@@ -22,7 +22,7 @@
 ### Fixed
 
 - Fuzzy edits preserve untouched text on the same line, Unicode boundaries and literal carriage returns. Editing invalid UTF-8 now fails without rewriting the file ([#10655](https://github.com/earendil-works/pi/issues/10655)).
-- An aborted or timed-out `NodeExecutionEnv.exec()` shell command on macOS no longer runs its later steps after the current step is killed.
+- An aborted or timed-out `NodeExecutionEnv.exec()` shell command on macOS no longer lets a waiting shell go on to its later steps after the current step is killed. A step that the shell was starting when the kill landed, which that kill can miss, is now killed as soon as `NodeExecutionEnv` sees the shell exit; the same applies when `cleanup()` kills the command.
 - SQLite refuses oversized input and write admissions without failing the Session. An already queued input whose encoded entry cannot fit settles `unanswered` with `input_too_large`, preserving the current answer and allowing valid queued inputs to continue. Actual commit and uncertain storage failures remain fatal.
 - Fixed `tool_search` not finding a deferred tool by property names and descriptions behind a local `$ref` in its parameters, as in MCP input schemas that put their models in `$defs`. Referenced definitions are read once, so recursive schemas do not loop, and definitions nothing references stay out of the search text ([#11803](https://github.com/earendil-works/pi/issues/11803))
 - Fixed every code mode run failing with `URI malformed` when any callable tool had a `$ref` with a malformed percent escape (`#/$defs/%E0`) in its schema, even scripts that do not call that tool. The parameter now renders as `unknown` in the tool's declaration ([#11803](https://github.com/earendil-works/pi/issues/11803))
