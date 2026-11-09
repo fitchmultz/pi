@@ -119,14 +119,19 @@ function hasQuotedMathSyntax(text: string): boolean {
 	if (text.startsWith("(") || text.startsWith("{")) return false;
 	const quote = findClosingDelimiter(text, '"', 0);
 	const beforeQuote = quote < 0 ? text : text.slice(0, quote);
-	const primes = /\w+('+)/.exec(beforeQuote);
-	if (primes && primes.index + primes[0].length - primes[1].length === findClosingDelimiter(text, "'", 0)) {
-		const tail = text.slice(primes.index + primes[0].length);
-		if (/^[(_^]/.test(tail) || (primes[1].length > 1 && (!tail || looksLikePendingDollarMath(tail)))) {
+	const prime = /\w+'/.exec(beforeQuote);
+	if (prime && prime.index + prime[0].length - 1 === findClosingDelimiter(beforeQuote, "'", 0)) {
+		const tail = beforeQuote.slice(prime.index + prime[0].length);
+		if (/^[(_^]/.test(tail) || findClosingDelimiter(tail, "'", 0) >= 0) {
 			return true;
 		}
 	}
-	return /\\[A-Za-z]+/.test(beforeQuote);
+	if (!/\\[A-Za-z]+/.test(beforeQuote)) return false;
+	let quotes = 0;
+	for (let index = quote; index >= 0; index = findClosingDelimiter(text, '"', index + 1)) {
+		quotes++;
+	}
+	return quotes % 2 === 0;
 }
 
 const SHELL_EXPANSION_START_REGEX = /^[A-Za-z_({0-9@*#?$!-]/;
