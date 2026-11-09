@@ -866,6 +866,9 @@ describe("Markdown component", () => {
 					'"x/y" and "x²", x/yz, a:bc, "yes"bar, a/bx.',
 				],
 				["The derivative is '$f'(x) = x^2$'.", "The derivative is 'f'(x) = x²'."],
+				["The derivative is '$f'(x) = x^2$.'", "The derivative is 'f'(x) = x².'"],
+				['The response was "$x^2$!"', 'The response was "x²!"'],
+				['The response was "$x$?"', 'The response was "x?"'],
 				[
 					String.raw`The expression "$x^2 + \text{"yes"}$" is supported.`,
 					'The expression "x² + "yes"" is supported.',
@@ -1002,6 +1005,9 @@ A=
 				'echo "$(echo "[x](y)")"',
 				'echo "$HOME"/\\$USER',
 				'echo "$HOME"/\\*',
+				'find "$HOME" -name "*.ts" -o -name "*.js"',
+				'case "$X" in *linux*) echo linux ;; esac',
+				'ls "$HOME" */*.txt',
 			];
 			for (const shellSource of shellSources) {
 				const shellLines = new Markdown(shellSource, 0, 0, defaultMarkdownTheme)

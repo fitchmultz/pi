@@ -113,7 +113,18 @@ function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 		return undefined;
 	}
 	const math = tokenizeInlineLatex(source.slice(1));
-	if (math && !math.pending && source[math.raw.length + 1] === quote && !source.startsWith(`${quote}$$${quote}`)) {
+	if (!math || math.pending) {
+		return undefined;
+	}
+	const mathEnd = math.raw.length + 1;
+	const closingQuote = findClosingDelimiter(source, quote, mathEnd);
+	const endsAtQuotedWord = math.text.endsWith(quote) && /\s/.test(math.text[math.text.length - 2] ?? "");
+	if (
+		closingQuote >= 0 &&
+		/^\p{P}*$/u.test(source.slice(mathEnd, closingQuote)) &&
+		!endsAtQuotedWord &&
+		!source.startsWith(`${quote}$$${quote}`)
+	) {
 		return undefined;
 	}
 
