@@ -107,6 +107,34 @@ function looksLikePendingDollarMath(source: string): boolean {
 	return /\\[A-Za-z]+|[_^=+*/<>()[\]|±≤≥≠≈∈→⇒∞∫∑√-]/.test(source);
 }
 
+function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
+	const quote = source[0];
+	if ((quote !== '"' && quote !== "'") || source[1] !== "$") {
+		return undefined;
+	}
+	const closingIndex = findClosingDelimiter(source, quote, 1);
+	const raw = closingIndex < 0 ? source : source.slice(0, closingIndex + 1);
+	if (raw.includes("\n")) {
+		return undefined;
+	}
+	const content = closingIndex < 0 ? raw.slice(1) : raw.slice(1, -1);
+	let hasExpansion = false;
+	for (let index = content.indexOf("$"); index >= 0; index = content.indexOf("$", index + 1)) {
+		if (isEscaped(content, index)) {
+			continue;
+		}
+		const next = content[index + 1];
+		if (next === undefined && closingIndex < 0) {
+			continue;
+		}
+		if (next === undefined || !/[A-Za-z_({]/.test(next)) {
+			return undefined;
+		}
+		hasExpansion = true;
+	}
+	return hasExpansion ? { type: "text", raw, text: raw } : undefined;
+}
+
 function tokenizeInlineLatex(source: string): LatexToken | undefined {
 	let opening = "";
 	let closing = "";
@@ -197,6 +225,15 @@ function tokenizeBlockLatex(source: string): LatexToken | undefined {
 }
 
 const LATEX_MARKDOWN_EXTENSIONS: readonly TokenizerExtension[] = [
+	{
+		name: "quotedShellWord",
+		level: "inline",
+		start(source) {
+			const match = /["']/.exec(source);
+			return match?.index;
+		},
+		tokenizer: tokenizeQuotedShellWord,
+	},
 	{
 		name: "latexBlock",
 		level: "block",

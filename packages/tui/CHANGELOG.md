@@ -16,6 +16,7 @@
 ### Fixed
 
 - Fixed fullscreen Kitty images disappearing after a terminal resize when the terminal clears cached image data during a screen erase.
+- Fixed inline math stripping dollar signs, braces and shell operators from quoted shell arguments.
 - Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
 - Fixed a rejected `getSuggestions()` call stopping all later autocomplete requests and escaping as an unhandled rejection, which ends Node processes by default. `Editor` now handles a failed lookup like one with no suggestions, including a rejection with the abort reason after a newer request supersedes it.
 

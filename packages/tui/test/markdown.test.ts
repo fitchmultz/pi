@@ -859,6 +859,14 @@ describe("Markdown component", () => {
 			assert.deepStrictEqual(lines, ["A map ℂ³ → ℂ³, xy, x-y, -x, 1/2, →, and s → ∞."]);
 		});
 
+		it("keeps math inside quotes and immediately before identifiers", () => {
+			const source = String.raw`"$x/y$" and $x/y$z, $a:b$c, $\text{"yes"}$bar, $\frac{a}{b}$x.`;
+			const lines = new Markdown(source, 0, 0, defaultMarkdownTheme)
+				.render(160)
+				.map((line) => stripAnsi(line).trimEnd());
+			assert.deepStrictEqual(lines, ['"x/y" and x/yz, a:bc, "yes"bar, a/bx.']);
+		});
+
 		it("renders display dollar delimiters without Markdown escape corruption", () => {
 			const markdown = new Markdown(
 				String.raw`Before
@@ -958,11 +966,45 @@ A=
 
 			assert.deepStrictEqual(lines, ["Costs $5 and $10 or $8k–$12k; use $x$, $HOME, and $" + "{PATH}."]);
 
-			const shellVariables = "Paths: $HOME/$USER and $XDG_CONFIG_HOME/$APP_CONFIG";
-			const shellLines = new Markdown(shellVariables, 0, 0, defaultMarkdownTheme)
-				.render(80)
-				.map((line) => stripAnsi(line).trimEnd());
-			assert.deepStrictEqual(shellLines, [shellVariables]);
+			const shellSources = [
+				"Paths: $HOME/$USER and $XDG_CONFIG_HOME/$APP_CONFIG",
+				'"$PREFIX/bin/node" "$HOME/.local/bin/pi" --model local-glm/glm-5.3-flash --thinking high',
+				'export PATH="$HOME/.local/bin:$PATH"',
+				'echo "$HOME/bin/$USER"',
+				'echo "$HOME" "$USER"',
+				`echo "\${HOME}/bin:\${PATH}"`,
+				'echo "$HOME" and "$PATH"',
+				'echo "$HOME" && echo "$PWD"',
+				'echo "$(pwd)" "$(whoami)"',
+				'echo "$prefix/bin/node" "$home/.local/bin/pi"',
+				'printf "%s\\n" "$HOME" "$PATH" "$SHELL"',
+			];
+			for (const shellSource of shellSources) {
+				const shellLines = new Markdown(shellSource, 0, 0, defaultMarkdownTheme)
+					.render(160)
+					.map((line) => stripAnsi(line).trimEnd());
+				assert.deepStrictEqual(shellLines, [shellSource], shellSource);
+			}
+		});
+
+		it("preserves quoted shell expansions while streaming and wrapping", () => {
+			const source = '"$PREFIX/bin/node" "$HOME/.local/bin/pi" --model local-glm/glm-5.3-flash --thinking high';
+			const markdown = new Markdown("", 0, 0, defaultMarkdownTheme);
+			for (let end = 1; end <= source.length; end++) {
+				const prefix = source.slice(0, end);
+				markdown.setText(prefix);
+				assert.deepStrictEqual(
+					markdown.render(160).map((line) => stripAnsi(line).trimEnd()),
+					[prefix.trimEnd()],
+				);
+			}
+			for (const width of [20, 40, 80]) {
+				const text = markdown
+					.render(width)
+					.map((line) => stripAnsi(line).trimEnd())
+					.join("");
+				assert.strictEqual(text.replace(/\s/g, ""), source.replace(/\s/g, ""));
+			}
 		});
 
 		it("preserves unsupported and incomplete LaTeX exactly", () => {
