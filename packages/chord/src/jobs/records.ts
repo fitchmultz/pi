@@ -5,7 +5,7 @@
 // the close writer when a clean stop cuts its runs off. Across a reload (slice 7b §8) the records take the new
 // declaration's definition and every run keeps its version: an older one is mapped forwards through `accepts`, one
 // without an adapter (or newer, or of a job the code no longer declares) is blocked `version` until a reload brings
-// matching code.
+// matching code. A recorded result keeps the version whose code returned it, and is mapped forwards from that one.
 
 import { type Context, withoutAbortSignal } from "../context/index.ts";
 import { ChordError } from "../data/index.ts";
@@ -19,13 +19,13 @@ import type { JsonValue } from "../json.ts";
 import type { StagedWrite } from "../store/step.ts";
 import type { ChordStore } from "../store/store.ts";
 import { carrierOf } from "../telemetry.ts";
-import type { JobDefinition, JobError } from "./definition.ts";
+import type { JobDefinition, JobError, JobVersion } from "./definition.ts";
 import type { CutReason, Job, StartOptions } from "./job.ts";
 import { type LoadedRecord, PersistedRuns } from "./persisted.ts";
-import { type AnyOutcome, type BlockedReason, JobRun, type Run, type RunPhase } from "./run.ts";
+import { type AnyOutcome, type BlockedReason, JobRun, type Recorded, type Run, type RunPhase } from "./run.ts";
 import { RunStates } from "./run-states.ts";
 import { Running } from "./running.ts";
-import { phaseOf, type StoredFields, storedRun } from "./stored.ts";
+import { isOf, phaseOf, type StoredFields, storedRun } from "./stored.ts";
 
 /** What a job's records need of their object. */
 export type RecordsOwner = {
@@ -42,9 +42,9 @@ export type RecordsOwner = {
 	held(deadline: number): void;
 };
 
-/** How a run's invocation ended, before its outcome is recorded. */
+/** How a run's invocation ended, before its outcome is recorded: a result with the job version that returned it. */
 export type Settled =
-	| { readonly kind: "done"; readonly result: unknown }
+	| { readonly kind: "done"; readonly result: unknown; readonly by: JobVersion }
 	| { readonly kind: "failed"; readonly error: JobError };
 
 /** A loaded run and the change its activation writes, if any. */
@@ -58,7 +58,7 @@ type RecordChange =
 	 * reservation, a load).
 	 */
 	| { readonly kind: "update"; readonly run: JobRun; readonly fields: StoredFields }
-	| { readonly kind: "outcome"; readonly run: JobRun; readonly outcome: AnyOutcome }
+	| { readonly kind: "outcome"; readonly run: JobRun; readonly recorded: Recorded }
 	| { readonly kind: "block"; readonly run: JobRun; readonly reason: BlockedReason }
 	/** A blocked run is retried (a reload): back to `phase` (finishing with its outcome, or to be invoked). */
 	| { readonly kind: "unblock"; readonly run: JobRun; readonly phase: RunPhase }
@@ -207,8 +207,9 @@ export class JobRecords {
 
 	/**
 	 * A reload brought new code (its attempt is live): blocked runs are retried, once: a `finish_failed` one finishes
-	 * again, a `version` one whose version the code now takes (its own, or an older one with an adapter) is invoked or
-	 * finished; the others stay blocked. A persisted run blocked at its load has its state document read first.
+	 * again, a `version` one whose version (and its result's) the code now takes (its own, or an older one with an
+	 * adapter) is invoked or finished; the others stay blocked. A persisted run blocked at its load has its state
+	 * document read first.
 	 */
 	async retryBlocked(context: Context): Promise<void> {
 		if (!this.#declared || this.#ended !== undefined) return;
@@ -233,10 +234,10 @@ export class JobRecords {
 					for (const run of retried) {
 						const { phase } = run;
 						if (this.#runs.get(run.id) !== run || phase.kind !== "blocked") continue;
-						const { outcome } = phase;
+						const { recorded } = phase;
 						const unblocked: RunPhase =
-							outcome !== undefined
-								? { kind: "finishing", outcome }
+							recorded !== undefined
+								? { kind: "finishing", recorded }
 								: this.#persisted === undefined
 									? RUNNING
 									: PENDING;
@@ -262,19 +263,28 @@ export class JobRecords {
 		states.create(run.id, value, stored);
 		// Its recorded outcome was rebuilt at its load without its state.
 		const { phase } = run;
-		if (phase.kind === "blocked" && phase.outcome !== undefined) {
-			run.phase = { ...phase, outcome: { ...phase.outcome, state: value } };
+		if (phase.kind === "blocked" && phase.recorded !== undefined) {
+			const { recorded } = phase;
+			run.phase = { ...phase, recorded: { ...recorded, outcome: { ...recorded.outcome, state: value } } };
 		}
 	}
 
 	/**
 	 * Whether the current code takes `run`: of its version and fingerprint, or of an older version its `accepts` maps
-	 * forwards; a newer one (a rollback) or an older one without an adapter is not (`blocked { version }`).
+	 * forwards, and so is its recorded result (of the version that returned it); a newer one (a rollback) or an older one
+	 * without an adapter is not (`blocked { version }`).
 	 */
 	#takes(run: JobRun): boolean {
+		const { phase } = run;
+		const recorded = phase.kind === "finishing" || phase.kind === "blocked" ? phase.recorded : undefined;
+		return this.#takesVersion(run) && (recorded === undefined || this.#takesVersion(recorded));
+	}
+
+	/** Whether the current code takes what job version `of` made: of its version and fingerprint, or older and adapted. */
+	#takesVersion(of: JobVersion): boolean {
 		const { definition } = this;
-		if (run.version === definition.version) return run.fingerprint === definition.fingerprint;
-		return run.version < definition.version && definition.accepts[run.version] !== undefined;
+		if (of.version === definition.version) return of.fingerprint === definition.fingerprint;
+		return of.version < definition.version && definition.accepts[of.version] !== undefined;
 	}
 
 	/**
@@ -292,18 +302,29 @@ export class JobRecords {
 	}
 
 	/**
-	 * `run`'s recorded `outcome` as the current code's `finish` gets it: an older run's args and result mapped forwards
-	 * (once per run), its state document migrated to the current state definition.
+	 * `run`'s `recorded` outcome as the current code's `finish` gets it, once per run: an older run's args mapped
+	 * forwards and its state document migrated to the current state definition; its result mapped forwards from the
+	 * version that returned it, as is when the current code returned it (the run invoked on it after a reload).
 	 */
-	outcomeOf(run: JobRun, outcome: AnyOutcome, context: Context): AnyOutcome {
+	outcomeOf(run: JobRun, recorded: Recorded, context: Context): AnyOutcome {
 		const { definition } = this;
+		const { outcome } = recorded;
+		// A run of the current version has a result of it too: older code never runs it, and `#takes` blocks a newer one.
 		if (run.version === definition.version) return outcome;
 		const args = this.argsOf(run, definition);
 		const mapped = run.mapped!;
 		if (mapped.outcome !== undefined) return mapped.outcome;
+		const { version } = recorded;
 		const result =
 			outcome.kind === "done"
-				? { kind: "done" as const, result: definition.accepts[run.version]!.result(outcome.result as never) }
+				? {
+						kind: "done" as const,
+						// `#takes` found the adapter of an older result's version.
+						result:
+							version === definition.version
+								? outcome.result
+								: definition.accepts[version]!.result(outcome.result as never),
+					}
 				: { kind: "failed" as const, error: outcome.error };
 		const state = this.#states?.migrated(run.id, context) ?? outcome.state;
 		mapped.outcome = { id: outcome.id, args, state, ...result };
@@ -439,11 +460,11 @@ export class JobRecords {
 
 	/**
 	 * A persisted job's runs, loaded once per object at its first activation (slice 6b §4.2), again only after a load
-	 * failed (design §9): each record read; a record of another version or fingerprint blocked (`version`) as stored,
-	 * its state document left undecoded; the others' state documents read and decoded, a run cut off while `running`
-	 * counted (`restarts + 1`; at the limit it ends `restart_limit`, reported `job_interrupted`), `stopped` and
-	 * `pending` ones made `pending` again. The runs and their activation changes are adopted in one commit, all before
-	 * anything runs; a failure leaves nothing loaded.
+	 * failed (design §9): each record read; a record of another version or fingerprint (its run's or its result's)
+	 * blocked (`version`) as stored, its state document left undecoded; the others' state documents read and decoded, a
+	 * run cut off while `running` counted (`restarts + 1`; at the limit it ends `restart_limit`, reported
+	 * `job_interrupted`), `stopped` and `pending` ones made `pending` again. The runs and their activation changes are
+	 * adopted in one commit, all before anything runs; a failure leaves nothing loaded.
 	 */
 	async load(context: Context): Promise<void> {
 		const persisted = this.#persisted;
@@ -462,12 +483,10 @@ export class JobRecords {
 		}
 		this.#loaded = true;
 		for (const { run, change } of restored) {
-			if (
-				change?.kind === "outcome" &&
-				change.outcome.kind === "failed" &&
-				change.outcome.error.kind === "restart_limit"
-			) {
-				this.report({ kind: "job_interrupted", id: run.id, restarts: change.outcome.error.restarts });
+			if (change?.kind !== "outcome") continue;
+			const { outcome } = change.recorded;
+			if (outcome.kind === "failed" && outcome.error.kind === "restart_limit") {
+				this.report({ kind: "job_interrupted", id: run.id, restarts: outcome.error.restarts });
 			}
 		}
 		for (const { run } of restored) this.#need(run);
@@ -685,14 +704,13 @@ export class JobRecords {
 
 	/**
 	 * The run a loaded record stands for and the change its activation writes (D6): a record of another version or
-	 * fingerprint blocked as stored (its state document only found, never decoded: slice 7 maps it); otherwise its state
-	 * document read and decoded (migrated), pinned while it is unsettled, a crash counted, at the limit its outcome,
-	 * marked resuming unless blocked or finishing.
+	 * fingerprint, its run's or its result's (a rollback), blocked as stored (its state document only found, never
+	 * decoded: slice 7 maps it); otherwise its state document read and decoded (migrated), pinned while it is unsettled,
+	 * a crash counted, at the limit its outcome, marked resuming unless blocked or finishing.
 	 */
 	async #restored(loaded: LoadedRecord, context: Context): Promise<Restored> {
 		const { id, record } = loaded;
-		const { definition } = this;
-		if (record.version !== definition.version || record.fingerprint !== definition.fingerprint) {
+		if (!isOf(record, this.definition)) {
 			// What is stored of its state (also when this version declares none), so an abort drops it with the record.
 			await this.#persisted!.findBlockedState(id, context);
 			// Its outcome as stored, without its undecoded state, for the reload that brings its version (`retryBlocked`).
@@ -714,8 +732,8 @@ export class JobRecords {
 					return { run, change: { kind: "update", run, fields: { phase: PENDING, restarts } } };
 				}
 				run.restarts = restarts;
-				const outcome = this.#outcome(run, { kind: "failed", error: { kind: "restart_limit", restarts } });
-				return { run, change: { kind: "outcome", run, outcome } };
+				const recorded = this.#recorded(run, { kind: "failed", error: { kind: "restart_limit", restarts } });
+				return { run, change: { kind: "outcome", run, recorded } };
 			}
 			case "stopped":
 				run.resuming = true;
@@ -734,8 +752,7 @@ export class JobRecords {
 		try {
 			await documents.tx(
 				(tx) => {
-					const outcome = this.#outcome(run, ended);
-					this.change(tx, { kind: "outcome", run, outcome });
+					this.change(tx, { kind: "outcome", run, recorded: this.#recorded(run, ended) });
 					// What its state holds is stored before the outcome is recorded (D8).
 					const adopt =
 						this.#persisted === undefined ? undefined : this.#states?.stageHeld(run.id, this.#store(tx));
@@ -754,9 +771,17 @@ export class JobRecords {
 		this.#need(run);
 	}
 
-	/** `run`'s outcome for `ended`, with its args and its state as it is now. */
-	#outcome(run: JobRun, ended: Settled): AnyOutcome {
-		return { id: run.id, args: run.args, state: this.stateOf(run.id), ...ended };
+	/**
+	 * `run`'s recorded outcome for `ended`, with its args and its state as it is now: a result of the version that
+	 * returned it, a failure of the run's own.
+	 */
+	#recorded(run: JobRun, ended: Settled): Recorded {
+		const own = { id: run.id, args: run.args, state: this.stateOf(run.id) };
+		if (ended.kind === "done") {
+			const { version, fingerprint } = ended.by;
+			return { outcome: { ...own, kind: "done", result: ended.result }, version, fingerprint };
+		}
+		return { outcome: { ...own, ...ended }, version: run.version, fingerprint: run.fingerprint };
 	}
 
 	/** `run` needs a live attempt (to be invoked or finished): now, or once one attaches. */
@@ -786,7 +811,7 @@ export class JobRecords {
 			return;
 		}
 		if (phase.kind === "finishing") {
-			job.finish(run, phase.outcome);
+			job.finish(run, phase.recorded);
 			return;
 		}
 		if (run.invoked) return;
@@ -826,7 +851,7 @@ export class JobRecords {
 				this.#replaceEntry(run);
 				return;
 			case "outcome":
-				run.phase = { kind: "finishing", outcome: change.outcome };
+				run.phase = { kind: "finishing", recorded: change.recorded };
 				this.#replaceEntry(run);
 				return;
 			case "block":
@@ -939,7 +964,7 @@ function recordFields(change: Exclude<RecordChange, { kind: "delete" | "drop" }>
 		case "update":
 			return change.fields;
 		case "outcome":
-			return { phase: { kind: "finishing", outcome: change.outcome } };
+			return { phase: { kind: "finishing", recorded: change.recorded } };
 		case "block":
 			return { phase: blocked(change.run.phase, change.reason) };
 		case "unblock":
@@ -956,9 +981,9 @@ function blocked(phase: RunPhase, reason: BlockedReason): Extract<RunPhase, { ki
 		case "pending":
 		case "running":
 		case "stopped":
-			return { kind: "blocked", reason, outcome: undefined, atLoad: false };
+			return { kind: "blocked", reason, recorded: undefined, atLoad: false };
 		case "finishing":
-			return { kind: "blocked", reason, outcome: phase.outcome, atLoad: false };
+			return { kind: "blocked", reason, recorded: phase.recorded, atLoad: false };
 		case "blocked":
 			return { ...phase, reason };
 	}

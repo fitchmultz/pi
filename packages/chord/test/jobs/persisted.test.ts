@@ -14,7 +14,7 @@ import { ChordError } from "../../src/data/index.ts";
 import { MAX_PENDING_OPS } from "../../src/delta/pending.ts";
 import { defineState } from "../../src/documents/index.ts";
 import { RETENTION_MS, Residency } from "../../src/documents/residency.ts";
-import { createHost, defineFacet, type HostError, type StoreSelf } from "../../src/host/index.ts";
+import { createHost, defineFacet, type HostError, type StoreSelf, untilAborted } from "../../src/host/index.ts";
 import { ChordObject } from "../../src/host/object.ts";
 import {
 	defineJob,
@@ -57,6 +57,23 @@ const ImportV2 = defineJob("notes.import", { ...importOptions(), version: 2 });
 
 /** `Import` at its version with another result schema (`num` for `int`): another fingerprint. */
 const ImportReshaped = defineJob("notes.import", { ...importOptions(), result: obj({ count: num() }) });
+
+/** Version 1's mappings to version 2: its args get a path suffix, its result counts 100 more. */
+const fromVersion1 = {
+	args: (old: ImportArgs) => ({ path: `${old.path}/v1` }),
+	result: (old: ImportResult) => ({ count: old.count + 100 }),
+};
+
+/** `Import` at the next version, mapping version 1's runs forwards. */
+const ImportAdapted = defineJob("notes.import", { ...importOptions(), version: 2, accepts: { 1: fromVersion1 } });
+
+/** `ImportAdapted` with another result schema (`num` for `int`): version 2 under another fingerprint. */
+const ImportAdaptedReshaped = defineJob("notes.import", {
+	...importOptions(),
+	version: 2,
+	result: obj({ count: num() }),
+	accepts: { 1: fromVersion1 },
+});
 
 const Abandoned = defineJob("notes.abandoned", {
 	version: 1,
@@ -188,6 +205,39 @@ async function record(store: ChordStore, id: string): Promise<Record<string, unk
 		context,
 	);
 	return row === undefined ? undefined : (JSON.parse(row.content) as Record<string, unknown>);
+}
+
+/**
+ * A run of version 1 that a reload stopped and resumed on `ImportAdapted`'s code, which returned `{ count: 7 }`; its
+ * `finish` failed once, so its record is left `finishing` with that result. `tried` has what the failed `finish` got;
+ * `succeed()` lets this host's later finishes succeed.
+ */
+async function resumedOnVersion2(open: () => Promise<ChordStore>) {
+	let resumed = false;
+	let failing = true;
+	const tried: ImportOutcome[] = [];
+	const jobs = await opened(
+		await open(),
+		async (_args, ctx) => {
+			if (resumed) return { count: 7 };
+			await untilAborted(ctx);
+			return { count: 0 };
+		},
+		(outcome) => {
+			if (!failing) return;
+			tried.push(outcome);
+			throw new Error("finish failed");
+		},
+	);
+	const run = await jobs.imports.start({ path: "a" }, context);
+	await delivered();
+	resumed = true;
+	await jobs.reload(ImportAdapted);
+	await vi.waitFor(async () => expect(await record(jobs.store, run.id)).toMatchObject({ finishFailures: 1 }));
+	const succeed = () => {
+		failing = false;
+	};
+	return { jobs, id: run.id, tried, succeed };
 }
 
 describe("records", () => {
@@ -1238,5 +1288,88 @@ describe("versions resolved by a reload (slice 7b §8)", () => {
 		ref.release();
 		await host.close(context);
 		await store.close(context);
+	});
+
+	it("a result newer code returned keeps its version in the record: finish gets it as returned, after a reopen too", async () => {
+		const open = await storeFile();
+		const resumed = await resumedOnVersion2(open);
+		const { id } = resumed;
+		// Version 2's code reran it with its args mapped; its own result is not mapped again.
+		const finished = { id, args: { path: "a/v1" }, state: { done: 0 }, kind: "done", result: { count: 7 } };
+		expect(resumed.tried).toEqual([finished]);
+		expect(await record(resumed.jobs.store, id)).toMatchObject({
+			version: 1,
+			args: { path: "a" },
+			phase: "finishing",
+			outcome: { kind: "done", result: { count: 7 }, version: 2, fingerprint: ImportAdapted.fingerprint },
+		});
+		await resumed.jobs.close();
+		// The next host blocks it at its load (a run of version 1) until a reload takes it: then it only finishes.
+		const jobs = await opened(await open(), async () => ({ count: 0 }), undefined, ImportAdapted);
+		const outcome = jobs.imports.outcome(id, context);
+		await jobs.reload(ImportAdapted);
+		await outcome;
+		expect(jobs.finished).toEqual([finished]);
+		expect(await record(jobs.store, id)).toBeUndefined();
+		await jobs.close();
+	});
+
+	it("code older than a recorded result blocks its run (a rollback), at a reload and at its load; its version finishes it", async () => {
+		const open = await storeFile();
+		const resumed = await resumedOnVersion2(open);
+		const { id } = resumed;
+		const blocked = [{ id, version: 1, phase: "blocked", reason: "version" }];
+		resumed.succeed();
+		await resumed.jobs.reload(Import);
+		await vi.waitFor(() => expect(resumed.jobs.imports.running.value).toEqual(blocked));
+		expect(resumed.jobs.finished).toEqual([]);
+		await resumed.jobs.crash();
+		// The next host on version 1's code: blocked at its load, its record kept as stored.
+		const jobs = await opened(await open(), async () => ({ count: 0 }));
+		expect(jobs.imports.running.value).toEqual(blocked);
+		expect(await record(jobs.store, id)).toMatchObject({ phase: "blocked", outcome: { version: 2 } });
+		const outcome = jobs.imports.outcome(id, context);
+		await jobs.reload(ImportAdapted);
+		await outcome;
+		expect(jobs.finished).toEqual([
+			{ id, args: { path: "a/v1" }, state: { done: 0 }, kind: "done", result: { count: 7 } },
+		]);
+		await jobs.close();
+	});
+
+	it("a recorded result of its version under another fingerprint stays blocked after a reload", async () => {
+		const open = await storeFile();
+		const resumed = await resumedOnVersion2(open);
+		await resumed.jobs.crash();
+		// The reload's code takes runs of version 1, not a result of its version stored under another schema.
+		const jobs = await opened(await open(), async () => ({ count: 0 }), undefined, ImportAdaptedReshaped);
+		await jobs.reload(ImportAdaptedReshaped);
+		await sleepMs(50);
+		expect(jobs.imports.running.value).toEqual([{ id: resumed.id, version: 1, phase: "blocked", reason: "version" }]);
+		expect(jobs.finished).toEqual([]);
+		await jobs.close();
+	});
+
+	it("a result of the run's own version is stored as before and mapped forwards once by newer code", async () => {
+		const open = await storeFile();
+		let failing = true;
+		const jobs = await opened(
+			await open(),
+			async () => ({ count: 1 }),
+			() => {
+				if (failing) throw new Error("finish failed");
+			},
+		);
+		const run = await jobs.imports.start({ path: "a" }, context);
+		await vi.waitFor(async () => expect(await record(jobs.store, run.id)).toMatchObject({ finishFailures: 1 }));
+		expect(await record(jobs.store, run.id)).toMatchObject({ outcome: { kind: "done", result: { count: 1 } } });
+		expect(await record(jobs.store, run.id)).not.toHaveProperty("outcome.version");
+		failing = false;
+		await jobs.reload(ImportAdapted);
+		await run.outcome(context);
+		expect(jobs.finished).toEqual([
+			{ id: run.id, args: { path: "a/v1" }, state: { done: 0 }, kind: "done", result: { count: 101 } },
+		]);
+		await jobs.close();
 	});
 });

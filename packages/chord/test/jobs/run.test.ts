@@ -18,7 +18,8 @@ describe("a run", () => {
 			phase: "running",
 		});
 		const outcome = { id: "r1", args: run.args, state: undefined, kind: "done", result: 1 } as const;
-		run.phase = { kind: "finishing", outcome };
+		const recorded = { outcome, version: 2, fingerprint: "f2" };
+		run.phase = { kind: "finishing", recorded };
 		const other = new JobRun("r2", 1, "f1", undefined, { a: 1 }, { kind: "running" });
 		expect(other.entryFor(undefined, { a: 1 })).toEqual({
 			id: "r2",
@@ -26,14 +27,14 @@ describe("a run", () => {
 			args: { a: 1 },
 			phase: "running",
 		});
-		run.phase = { kind: "blocked", reason: "finish_failed", outcome, atLoad: false };
+		run.phase = { kind: "blocked", reason: "finish_failed", recorded, atLoad: false };
 		expect(run.entryFor({ output: "x" }, run.args)).toEqual({
 			id: "r1",
 			version: 2,
 			phase: "blocked",
 			reason: "finish_failed",
 		});
-		run.phase = { kind: "blocked", reason: "version", outcome: undefined, atLoad: true };
+		run.phase = { kind: "blocked", reason: "version", recorded: undefined, atLoad: true };
 		expect(run.entryFor(undefined, run.args)).toMatchObject({ phase: "blocked", reason: "version" });
 		// A persisted run waiting for its reservation, or stopped, runs (again): `running`.
 		run.phase = { kind: "pending" };

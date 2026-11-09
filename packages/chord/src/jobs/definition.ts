@@ -44,6 +44,9 @@ export type JobAccepts<A extends Schema = Schema, R extends Schema = Schema> = {
 	readonly [version: number]: { readonly args: (old: never) => Static<A>; readonly result: (old: never) => Static<R> };
 };
 
+/** A job version as runs and their records name it: its number and its fingerprint (a `JobDefinition` is one). */
+export type JobVersion = { readonly version: number; readonly fingerprint: string };
+
 /** The value of a job's state document: the definition's document, `undefined` without one. */
 type StateOf<D> = D extends StateDefinition<infer T, false, boolean> ? T : undefined;
 

@@ -49,7 +49,8 @@ export class PersistedRuns {
 			return () => this.#stored.set(id, { id: created.id, revision: 1, version, deltasSinceBase: 0 });
 		}
 		writes.push(changeDocument(stored.id, stored.revision, { kind: "base", version, fingerprint, value }, text));
-		return () => this.#stored.set(id, { ...stored, revision: stored.revision + 1 });
+		// A base at the current record version: a record loaded at an older one is stored at this one from now on.
+		return () => this.#stored.set(id, { id: stored.id, revision: stored.revision + 1, version, deltasSinceBase: 0 });
 	}
 
 	/**

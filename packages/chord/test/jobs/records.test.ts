@@ -1,16 +1,25 @@
 // Tests of a job's records on its object (slice 6a §1.2, §15 rule 5): runs across attempts, cut off by an attempt's
 // seal, finished on the next live attempt, and the keep-alive of runs waiting for one.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type Context, BACKGROUND_CONTEXT as context } from "../../src/context/index.ts";
 import { arr, int, local, method, obj, str, unknown } from "../../src/contracts/index.ts";
 import { defineState, type SingletonHandle } from "../../src/documents/index.ts";
 import { createHost, defineFacet, untilAborted } from "../../src/host/index.ts";
 import { ChordObject } from "../../src/host/object.ts";
-import { defineJob, type JobHandle, type Outcome, type RunningEntry } from "../../src/jobs/index.ts";
+import { defineJob, type JobHandle, type Outcome, type Run, type RunningEntry } from "../../src/jobs/index.ts";
 import { constant } from "../../src/state/index.ts";
 import type { StagedWrite } from "../../src/store/step.ts";
-import { delivered, flushed, instancesOf, memoryStore, rejection, restartable, storeRestartable } from "../support.ts";
+import {
+	delivered,
+	flushed,
+	holdNextCommit,
+	instancesOf,
+	memoryStore,
+	rejection,
+	restartable,
+	storeRestartable,
+} from "../support.ts";
 
 const objects = instancesOf(ChordObject, "attempt");
 
@@ -441,6 +450,77 @@ describe("a reservation released during a restart (final review)", () => {
 		// V1's handler got V1's args.
 		expect(seen).toEqual([1]);
 		store.commit = commit;
+		await host.close(context);
+		await store.close(context);
+	});
+});
+
+describe("a start committing after its attempt's seal (in memory)", () => {
+	it("runs on the next attempt's newer code: its finish gets the result as that code returned it", async () => {
+		const Owner = local("app.late-owner", { version: 1, params: {}, members: {} });
+		const Saved = defineState("app.late-saved", {
+			schema: obj({ n: int() }),
+			version: 1,
+			initial: () => ({ n: 0 }),
+			persist: true,
+			checkpointWhen: () => false,
+		});
+		const V1 = defineJob("app.late", { version: 1, args: obj({ n: int() }), result: int() });
+		const V2 = defineJob("app.late", {
+			version: 2,
+			args: obj({ label: str() }),
+			result: str(),
+			accepts: {
+				1: {
+					args: (old: { n: number }) => ({ label: `mapped ${old.n}` }),
+					result: (old: number) => `v1 result ${old}`,
+				},
+			},
+		});
+		const store = await memoryStore();
+		const host = createHost({ store, onError: () => {} });
+		let start: (() => Promise<Run<unknown>>) | undefined;
+		const v1 = defineFacet((h) =>
+			h.serve(Owner, (_, self) => {
+				const saved = self.state(Saved);
+				const job = self.job(V1, { run: async ({ n }) => n });
+				// A start written with a persisted document: its commit goes through the store.
+				start = () =>
+					self.tx(async (tx) => {
+						(await tx.draft(saved)).n++;
+						return tx.start(job, { n: 1 });
+					}, context);
+				return {};
+			}),
+		);
+		await host.load([{ name: "@app/late", facet: v1 }], context);
+		const owner = await host.get(Owner, {}, context);
+		const finished: unknown[] = [];
+		const v2 = defineFacet((h) =>
+			h.serve(Owner, (_, self) => {
+				self.state(Saved);
+				self.job(V2, {
+					run: async ({ label }) => `${label} by v2`,
+					finish: (outcome) => void finished.push(outcome),
+				});
+				return {};
+			}),
+		);
+		// The start's commit step waits in the store while the reload seals its attempt: the reference shows `loading`
+		// once it is sealed, until the next attempt goes live after that commit.
+		const held = holdNextCommit(store);
+		const starting = start!();
+		await held.entered;
+		const reloading = host.reload([{ name: "@app/late", facet: v2 }], context);
+		await vi.waitFor(() => expect(owner.state.value.kind).toBe("loading"));
+		held.release();
+		await reloading;
+		const run = await starting;
+		await run.outcome(context);
+		expect(finished).toEqual([
+			{ id: run.id, args: { label: "mapped 1" }, state: undefined, kind: "done", result: "mapped 1 by v2" },
+		]);
+		owner.release();
 		await host.close(context);
 		await store.close(context);
 	});
