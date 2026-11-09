@@ -119,6 +119,9 @@ function hasQuotedMathSyntax(text: string): boolean {
 	if (text.startsWith("(") || text.startsWith("{")) return false;
 	const quote = findClosingDelimiter(text, '"', 0);
 	const beforeQuote = quote < 0 ? text : text.slice(0, quote);
+	if (findClosingDelimiter(beforeQuote, "_{", 0) >= 0 || findClosingDelimiter(beforeQuote, "^{", 0) >= 0) {
+		return true;
+	}
 	const prime = /\w+'/.exec(beforeQuote);
 	if (prime && prime.index + prime[0].length - 1 === findClosingDelimiter(beforeQuote, "'", 0)) {
 		const tail = beforeQuote.slice(prime.index + prime[0].length);
