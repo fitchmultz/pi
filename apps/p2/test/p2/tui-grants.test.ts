@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { createServer } from "node:http";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@p2/app/v1";
-import { WebSocketServer } from "ws";
 import { VirtualTerminal } from "../../../../packages/tui/test/virtual-terminal.ts";
 import { Sessions } from "../../plugins/sessions/contract.ts";
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
@@ -12,7 +9,7 @@ import { Grants, type LauncherAction, PrivilegedKeys, parseTarget } from "../../
 import { TERMINAL_RESET, TerminalModes } from "../../src/hosts/tui-modes.ts";
 import { TERMINAL_COLOR_QUERY } from "../../src/hosts/tui-terminal-colors.ts";
 import { TrustedUi, visibleText } from "../../src/hosts/tui-trusted-ui.ts";
-import { holdIn, poll, startFixture } from "./helpers.ts";
+import { holdIn, poll, startFixture, tuiBundleServer } from "./helpers.ts";
 
 const supported = Number(process.versions.node.split(".")[0]) >= 26;
 const CTRL_X = "\x18";
@@ -130,33 +127,12 @@ const FAKE_WORKER = `const seen=[];export default ({send,onMessage})=>onMessage(
 	if(d==='x')process.exit(3);
 });`;
 
-async function fakeServer(t: { after(fn: () => unknown): void }, source: () => string) {
-	const server = createServer((request, response) => {
-		const version = createHash("sha256").update(source()).digest("hex");
-		response.setHeader("Content-Type", request.url === "/__p2_tui" ? "application/json" : "text/javascript");
-		response.end(
-			request.url === "/__p2_tui" ? JSON.stringify({ version, bundle: `/__p2_tui/${version}.mjs` }) : source(),
-		);
-	});
-	const sockets = new WebSocketServer({ server });
-	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-	const address = server.address();
-	assert(address && typeof address === "object");
-	t.after(async () => {
-		for (const socket of sockets.clients) socket.terminate();
-		await new Promise<void>((resolve) => sockets.close(() => resolve()));
-		server.closeAllConnections();
-		await new Promise<void>((resolve) => server.close(() => resolve()));
-	});
-	return new URL(`http://127.0.0.1:${address.port}`);
-}
-
 test(
 	"isolation: C actions need local confirmation, K actions fire only on their key, worker IO is suspended",
 	{ skip: !supported, timeout: 30000 },
 	async (t) => {
 		let source = FAKE_WORKER;
-		const url = await fakeServer(t, () => source);
+		const url = await tuiBundleServer(t, () => source);
 		const terminal = new VirtualTerminal(80, 24);
 		const writes: string[] = [];
 		const write = terminal.write.bind(terminal);

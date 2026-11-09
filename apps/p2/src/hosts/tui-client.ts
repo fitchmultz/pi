@@ -98,9 +98,13 @@ export async function startTuiClient(options: {
 	let retry: NodeJS.Timeout | undefined;
 	let polling: NodeJS.Timeout | undefined;
 	let loading: Promise<void> | undefined;
+	/** A reload was asked for (`/reload`), maybe while a version check ran: that load swaps even an unchanged version. */
+	let forced = false;
 	let started = false;
 	/** The real terminal is lent to a local program (editor, suspend): worker IO is suspended. */
 	let paused = false;
+	/** That program's run, settled once it gives the terminal back; close waits for it. */
+	let lent: Promise<unknown> | undefined;
 	let releaseTerminal: <T>(run: () => Promise<T>) => Promise<T> = (run) => run();
 	let pending: Uint8Array[] = [];
 	let pendingBytes = 0;
@@ -367,8 +371,14 @@ export async function startTuiClient(options: {
 		});
 		socket = current;
 	};
+	/** The terminal's size as workers get it: at start, at activation and on every resize. */
+	const terminalSize = () => ({
+		columns: Math.min(500, Math.max(10, options.terminal.columns)),
+		rows: Math.min(200, Math.max(5, options.terminal.rows)),
+	});
 	const load = (force: boolean): Promise<void> => {
 		if (closed) return Promise.resolve();
+		forced ||= force;
 		if (loading) return loading;
 		loading = (async () => {
 			const request = (path: string) => transport.request(path, { signal: AbortSignal.timeout(10_000) });
@@ -383,15 +393,18 @@ export async function startTuiClient(options: {
 				manifest.bundle !== `/__p2_tui/${manifest.version}.mjs`
 			)
 				throw new Error("Invalid TUI bundle manifest");
-			if (manifest.version === version && !force) return;
+			if (manifest.version === version && !forced) return;
 			const source = await readBounded(await request(manifest.bundle), MAX_TUI_BUNDLE);
 			if (createHash("sha256").update(source).digest("hex") !== manifest.version)
 				throw new Error("TUI bundle version hash mismatch");
+			// Closed while downloading: no worker starts.
+			if (closed) return;
+			/** Why the new worker failed before its swap; after `ready` only `onFailure` tells. */
+			let failure: string | undefined;
 			let candidate!: TuiSandbox;
 			candidate = new TuiSandbox(source, {
 				input: {
-					columns: Math.min(500, Math.max(10, options.terminal.columns)),
-					rows: Math.min(200, Math.max(5, options.terminal.rows)),
+					...terminalSize(),
 					// The launcher's fixed origin, shown in the header (never credentials).
 					origin: options.url.origin,
 					// The visitor's mouse policy decides whether pi-tui captures the mouse (wheel, app-owned selection).
@@ -400,6 +413,7 @@ export async function startTuiClient(options: {
 				},
 				onFailure: (message) => {
 					if (sandbox === candidate) fail(message);
+					else failure = message;
 				},
 				onMessage: (message) => {
 					if (closed || sandbox !== candidate || !message || typeof message !== "object" || !("kind" in message))
@@ -443,6 +457,8 @@ export async function startTuiClient(options: {
 				if (closed) return;
 				const previous = sandbox;
 				const state = await previous?.request({ kind: "snapshot" });
+				// It failed while the active worker answered: it is not adopted, and the active worker stays (as before `ready`).
+				if (failure !== undefined) throw new Error(failure);
 				if (state !== undefined && Buffer.byteLength(JSON.stringify(state)) > 1024 * 1024)
 					throw new Error("TUI reload state exceeds 1 MiB");
 				clearTimeout(retry);
@@ -451,19 +467,23 @@ export async function startTuiClient(options: {
 				connected = false;
 				pending = [];
 				pendingBytes = 0;
-				// Swap: nothing granted to the old worker survives, and its terminal modes are undone first.
+				// Swap: nothing granted to the old worker survives, and its terminal modes are undone first. A terminal lent
+				// to a local program is left to it: `releaseTerminal` undid them, and restores the new worker's on return.
 				if (previous) {
 					grants.cancelWorker(previous);
 					ui.cancel();
-					options.terminal.write(modes.cleanup());
+					const undo = modes.cleanup();
+					if (!paused) options.terminal.write(undo);
 				}
 				suspendPrivileged = false;
 				sandbox = candidate;
 				version = manifest.version;
-				// Data only, before activation: the worker never reads local files or the environment.
+				// Data only, before activation: the worker never reads local files or the environment. Its size is the
+				// terminal's now: resizes while it started went to the active worker.
 				postCapabilities(candidate);
 				if (preferences) candidate.post({ kind: "preferences", preferences });
 				if (colorsKnown) candidate.post({ kind: "terminalColors", terminal: probe.state });
+				candidate.post({ kind: "resize", ...terminalSize() });
 				candidate.post({ kind: "activate", state });
 				connect();
 				await previous?.terminate();
@@ -473,6 +493,7 @@ export async function startTuiClient(options: {
 			}
 		})().finally(() => {
 			loading = undefined;
+			forced = false;
 		});
 		return loading;
 	};
@@ -486,22 +507,25 @@ export async function startTuiClient(options: {
 			ui.cancel();
 			grants.cancelAll();
 			await Promise.all([sandbox?.terminate(), preparing?.terminate()]);
+			// A local program has the terminal (editor, suspend): the writes below, and what the caller prints next
+			// (failures, access ended), wait until it gives the terminal back.
+			await lent;
 			if (started) probe.stop();
 			if (titled) options.terminal.setTitle?.("");
 			if (progressing) options.terminal.setProgress?.(false);
 			options.terminal.setProgramStatus?.({ state: "clear" });
-			// Exit and crash alike: undo every mode the worker enabled, then the fixed reset (section 3.6).
-			options.terminal.write(modes.cleanup());
-			options.terminal.stop();
+			// Exit and crash alike: undo every mode the worker enabled, then the fixed reset (section 3.6). Not after a lend
+			// that outlived the client: lending already undid the modes and stopped the terminal, and nothing restarted it.
+			// Forgotten either way, so a launcher notice that closes afterwards (a failed edit) restores none of them.
+			const undo = modes.cleanup();
+			if (!paused) {
+				options.terminal.write(undo);
+				options.terminal.stop();
+			}
 		})();
 		return closing;
 	};
-	const postResize = (): void =>
-		sandbox?.post({
-			kind: "resize",
-			columns: Math.min(500, Math.max(10, options.terminal.columns)),
-			rows: Math.min(200, Math.max(5, options.terminal.rows)),
-		});
+	const postResize = (): void => sandbox?.post({ kind: "resize", ...terminalSize() });
 	const onInput = (data: string): void => {
 		if (probe.consume(data) || paused) return;
 		// Launcher-drawn UI consumes everything; nothing reaches the worker meanwhile.
@@ -531,14 +555,18 @@ export async function startTuiClient(options: {
 	/**
 	 * Hands the real terminal to a local program (external editor, job control): worker IO is suspended, the worker's
 	 * modes are undone (without forgetting them) and the terminal stopped; afterwards everything is restored and the
-	 * worker redraws (section 3.2 `externalEditor`, `suspend`).
+	 * worker redraws (section 3.2 `externalEditor`, `suspend`). A close meanwhile waits for the program and restores
+	 * nothing.
 	 */
 	releaseTerminal = async <T>(run: () => Promise<T>): Promise<T> => {
 		paused = true;
 		options.terminal.write(modes.suspendSequence());
 		options.terminal.stop();
 		try {
-			return await run();
+			const running = run();
+			// Its failure is its caller's to report; close only waits for it.
+			lent = running.catch(() => {});
+			return await running;
 		} finally {
 			if (!closed) {
 				options.terminal.start(onInput, onResize);
