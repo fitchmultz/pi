@@ -261,6 +261,42 @@ describe("read tool streaming", () => {
 		);
 	});
 
+	it("survives cancellation during local file setup and permits a later read", () => {
+		const path = join(tempDir, "cancelled.txt");
+		writeFileSync(path, "one\ntwo");
+		const sourceResolverUrl = pathToFileURL(resolve(__dirname, "../src/experimental/source-resolver.ts")).href;
+		const readToolUrl = pathToFileURL(resolve(__dirname, "../src/core/tools/read.ts")).href;
+		const script = `
+			import assert from "node:assert/strict";
+			import { open } from "node:fs/promises";
+			import { createReadToolDefinition } from ${JSON.stringify(readToolUrl)};
+			const path = ${JSON.stringify(path)};
+			const handle = await open(path, "r");
+			const prototype = Object.getPrototypeOf(handle);
+			const stat = prototype.stat;
+			await handle.close();
+			const controller = new AbortController();
+			// Cancel after real metadata I/O, before the read tool can construct its native stream.
+			prototype.stat = async function (...args) {
+				const stats = await stat.apply(this, args);
+				controller.abort();
+				return stats;
+			};
+			const tool = createReadToolDefinition(process.cwd());
+			await assert.rejects(tool.execute("cancel", { path }, controller.signal), /Operation aborted/);
+			prototype.stat = stat;
+			const result = await tool.execute("after", { path });
+			assert.equal(result.content[0].text, "one\\ntwo");
+			process.stdout.write("cancelled and subsequent read succeeded");
+		`;
+		const output = execFileSync(
+			process.execPath,
+			["--import", sourceResolverUrl, "--input-type=module", "--eval", script],
+			{ encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+		);
+		expect(output).toBe("cancelled and subsequent read succeeded");
+	});
+
 	it("stops consuming the stream when aborted", async () => {
 		const controller = new AbortController();
 		let chunksRead = 0;

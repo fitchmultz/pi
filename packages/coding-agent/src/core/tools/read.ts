@@ -81,6 +81,7 @@ async function* readLocalFileChunks(path: string, { signal }: { signal?: AbortSi
 	const handle = await fsOpen(path, "r");
 	try {
 		const stats = await handle.stat();
+		signal?.throwIfAborted();
 		const end = stats.isFile() && stats.size > 0 ? stats.size - 1 : undefined;
 		yield* handle.createReadStream({ end, signal, autoClose: false });
 	} finally {
