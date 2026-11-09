@@ -127,20 +127,10 @@ function hasQuotedMathSyntax(text: string): boolean {
 		}
 	}
 	if (!/\\[A-Za-z]+/.test(beforeQuote)) return false;
-	let groups = 0;
+	if (findClosingDelimiter(beforeQuote, "{", 0) >= 0) return true;
 	let quotes = 0;
-	for (let index = 0; index < text.length; index++) {
-		const character = text[index];
-		if (character === "\\") {
-			index++;
-		} else if (character === "{") {
-			groups++;
-		} else if (character === "}") {
-			groups--;
-		} else if (character === '"') {
-			if (groups > 0) return true;
-			quotes++;
-		}
+	for (let index = quote; index >= 0; index = findClosingDelimiter(text, '"', index + 1)) {
+		quotes++;
 	}
 	return quotes % 2 === 0;
 }
