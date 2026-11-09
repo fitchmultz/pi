@@ -115,6 +115,20 @@ function looksLikePendingDollarMath(source: string): boolean {
 	return /\\[A-Za-z]+|[_^=+*/<>()[\]|±≤≥≠≈∈→⇒∞∫∑√-]/.test(source);
 }
 
+function hasQuotedMathSyntax(text: string): boolean {
+	if (text.startsWith("(") || text.startsWith("{")) return false;
+	const quote = findClosingDelimiter(text, '"', 0);
+	const beforeQuote = quote < 0 ? text : text.slice(0, quote);
+	const primes = /\w+('+)/.exec(beforeQuote);
+	if (primes && primes.index + primes[0].length - primes[1].length === findClosingDelimiter(text, "'", 0)) {
+		const tail = text.slice(primes.index + primes[0].length);
+		if (/^[(_^]/.test(tail) || (primes[1].length > 1 && (!tail || looksLikePendingDollarMath(tail)))) {
+			return true;
+		}
+	}
+	return /\\[A-Za-z]+/.test(beforeQuote);
+}
+
 const SHELL_EXPANSION_START_REGEX = /^[A-Za-z_({0-9@*#?$!-]/;
 const SHELL_PARAMETER_BEFORE_QUOTE_REGEX = /^[0-9@*#?$!-]["']$/;
 
@@ -293,13 +307,16 @@ function scanQuotedShellWord(
 						ownership === "shell-word" &&
 						(format.type !== "latex" ||
 							!SHELL_EXPANSION_START_REGEX.test(format.text) ||
-							!/["']/.test(format.text))
+							!/["']/.test(format.text) ||
+							hasQuotedMathSyntax(format.text))
 					) {
 						index++;
 						break;
 					}
 					// A cross-word math token can contain shell quotes; an unmatched single quote can still be a prime.
-					if (format.type === "latex" && format.text.endsWith("'")) primeMathStart ??= index + 1;
+					if (format.type === "latex" && findClosingDelimiter(format.text, "'", 0) >= 0) {
+						primeMathStart ??= index + 1;
+					}
 				}
 			}
 			continue;
