@@ -81,6 +81,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 
 | Reason retained | Owner | Primary tests |
 | --- | --- | --- |
+| A local read cancelled during file setup must leave Pi running instead of emitting an unhandled native stream `AbortError` | `core/tools/read.ts` | `read-streaming.test.ts` |
 | Render requests cannot outlive their callbacks across stop/start; stopping drops the owed frame and starting requests a new one. A main-screen stop moves the cursor below the frame, so the first frame after a restart redraws the screen instead of diffing against it | `packages/tui/src/{tui,tui-main-screen}.ts` | `packages/tui/test/tui-render.test.ts` |
 | A fullscreen scrollbar thumb drag keeps every button and motion event until its release, including over an overlay opened during the drag, such as transcript search. Upstream lets the overlay take the release, so the drag stays active and pointer motion without a pressed button keeps scrolling the transcript | `packages/tui/src/tui-alt-screen.ts` | `packages/tui/test/tui-alt-screen.test.ts` |
 | MCP initialization rejects a connection closed while its final notification is sent; closed stays final and close listeners run once | `packages/mcp/src/client.ts` | `packages/mcp/test/client.test.ts` |
