@@ -203,8 +203,24 @@ function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 			index++;
 		}
 	}
-	const raw = source.slice(0, index);
-	return hasExpansion && !raw.includes("\n") ? { type: "text", raw, text: raw } : undefined;
+	if (!hasExpansion) {
+		return undefined;
+	}
+	// Keep native math's consumed span too, so preserving a shell word does not re-parse its tail.
+	let rawEnd = index;
+	for (let dollar = 1; dollar >= 0 && dollar < index; dollar = findClosingDelimiter(source, "$", dollar + 1)) {
+		const candidate = dollar === 1 ? math : tokenizeInlineLatex(source.slice(dollar));
+		if (!candidate) {
+			continue;
+		}
+		rawEnd = Math.max(rawEnd, dollar + candidate.raw.length);
+		if (candidate.pending) {
+			break;
+		}
+		dollar += candidate.raw.length - 1;
+	}
+	const raw = source.slice(0, rawEnd);
+	return { type: "text", raw, text: raw };
 }
 
 function tokenizeInlineLatex(source: string): LatexToken | undefined {

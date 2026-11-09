@@ -1009,6 +1009,9 @@ A=
 				'echo "$(dirname "$HOME/bin")" "$PATH"',
 				'echo "$(echo "$?")" "$PATH"',
 				'echo "$(echo $HOME)" "$PATH"',
+				'echo "$(echo $HOME)" */*.txt',
+				'echo "$(echo $HOME)" `cmd`',
+				`echo "\${A/"$B"/$C}" */*.txt`,
 				'echo "$a"$b"$c"',
 				'echo "$pre"$mid"$suf"',
 				'"$(find . -name "*.ts" -o -name "*.js")"',
@@ -1033,6 +1036,9 @@ A=
 			const sources = [
 				'"$PREFIX/bin/node" "$HOME/.local/bin/pi" --model local-glm/glm-5.3-flash --thinking high',
 				'echo "$$" "$HOME"',
+				'echo "$(echo $HOME)" */*.txt',
+				'echo "$(echo $HOME)" `cmd`',
+				`echo "\${A/"$B"/$C}" */*.txt`,
 			];
 			for (const source of sources) {
 				const markdown = new Markdown("", 0, 0, defaultMarkdownTheme);
