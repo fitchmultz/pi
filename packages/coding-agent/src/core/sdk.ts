@@ -400,13 +400,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (saved && thinkingLevel !== saved.thinkingLevel)
 		throw new Error("Saved thinking level is unsupported by the current model");
 	const scopedModels = saved
-		? saved.scopedModels.map((scope) => {
+		? saved.scopedModels.flatMap((scope) => {
 				const model = modelRuntime.getModel(scope.provider, scope.id);
-				if (!model)
-					throw new Error(
-						`Saved scoped model ${scope.provider}/${scope.id} is not registered (${explainUnavailable(scope.provider, scope.id)})`,
-					);
-				return { model, thinkingLevel: scope.thinkingLevel };
+				return model ? [{ model, thinkingLevel: scope.thinkingLevel }] : [];
 			})
 		: options.scopedModels;
 
