@@ -84,6 +84,12 @@ The timeout and exit-code assertions are unchanged. Production shell helpers are
   and browser-bundling smoke passed. The p2 lint and type check also passed.
 - Focused package tests passed: 92 AI tests, 113 coding-agent tests, 200 editor tests,
   159 codemode sandbox tests, and 167 Durable storage and harness tests.
+- After the prepared-request and retry fixes, the affected AI tests passed all 61 cases,
+  coding-agent passed 131, and p2 passed 13. Root and p2 checks and normal commit hooks passed.
+  The regressions failed before their fixes.
+- A real p2 worker, file credentials, and the native Anthropic SDK sent a five-minute request
+  to a loopback HTTP server. The retained timing matched the wire request, without retaining
+  prepared credentials or resolving the stored replay options.
 - Real macOS Chrome: all 12 Chord page and stylesheet tests passed, including reloads,
   failed and slow stylesheet loads, reconnection, theme changes, and click tracing.
 - The first p2 diagnostic run passed 89 tests, failed three gesture and haptic assertions,
@@ -94,7 +100,7 @@ The timeout and exit-code assertions are unchanged. Production shell helpers are
   secret handling, and sheet parity. One bundle-reload test timed out in that run;
   it passed alone on both the candidate and untouched upstream. Three remote-environment
   cases retained their native skips.
-- Linux Node 26.13.0 and real Chromium: 113 p2 tests passed, with two remote-sandbox
+- Linux Node 26.13.0 and real Chromium: 113 p2 tests passed, with two Gondolin sandbox
   skips and no failures. This includes native terminal reconnects, server-start cleanup,
   TUI worker replacement, owner and foreign-request authentication, Discord's faux-provider
   flow, cache warming, activity panels, and mobile interactions.
@@ -107,10 +113,18 @@ The timeout and exit-code assertions are unchanged. Production shell helpers are
   source changes. The initial sweep exited with status 1, not a full-suite pass.
 
 Hosted GitHub Actions initially rejected dispatches because workflows on the fork were paused,
-despite the repository's enabled setting. The owner re-enabled them. Hosted build, package,
-standalone CLI, public-consumer, and MCP checks passed on the diagnostic head. The Mac job
-passed 105 of 106 tests; the remaining shell-timeout failure is under investigation.
-This is not a complete hosted CI pass.
+despite the repository's enabled setting. The owner re-enabled them.
+[CI run 42669038391](https://github.com/fitchmultz/pi/actions/runs/42669038391)
+passed all six jobs on source commit `69db50cef133131dfc327737ecb47915ff4f8614`.
+This includes the build, package suites, standalone CLI, public consumers, and MCP conformance.
+The Mac job passed all 106 restart, background-command, cancellation, and timeout tests,
+plus all four workspace-build and release-liveness tests.
+[Nix run 42669038283](https://github.com/fitchmultz/pi/actions/runs/42669038283)
+passed builds for Linux x64, Linux arm64, and macOS arm64.
+
+Independent Cursor and Pi Durable source reviews found no actionable findings after the fixes.
+The automated Pi Durable check on that source commit ended incomplete without posting findings.
+The completed independent Pi Durable review does not claim an automated check pass.
 
 ## UI evidence
 
