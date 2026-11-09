@@ -7,6 +7,7 @@ import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
+import { Lexer } from "marked";
 import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
 import { SELECTION_METADATA } from "../src/selection-markers.ts";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
@@ -873,6 +874,9 @@ describe("Markdown component", () => {
 				['"$HOME"$x^2$', '"$HOME"x²'],
 				['"$HOME"$x^2$!', '"$HOME"x²!'],
 				['x"$PREFIX"$x^2$', 'x"$PREFIX"x²'],
+				['"$ZZ" "$HOME"$x^2$', '"$ZZ" "$HOME"x²'],
+				['echo "$HOME" "$PREFIX"$x^2$', 'echo "$HOME" "$PREFIX"x²'],
+				['cmd "$VAR1" "$VAR2"$x^2$!', 'cmd "$VAR1" "$VAR2"x²!'],
 				['Output from "$a"$*"b" "$DIR" "$DIR/*" has \\(x^2\\).', 'Output from "$a"$*"b" "$DIR" "$DIR/*" has x².'],
 				['Output from "$a"$*"b" "$DIR" "$DIR/*" has **bold**.', 'Output from "$a"$*"b" "$DIR" "$DIR/*" has bold.'],
 				['The response was "$x^2$!"', 'The response was "x²!"'],
@@ -1100,6 +1104,32 @@ A=
 						.join("");
 					assert.strictEqual(text.replace(/\s/g, ""), source.replace(/\s/g, ""));
 				}
+			}
+		});
+
+		it("does not re-lex the remaining paragraph for each quoted shell word", (t) => {
+			const inlineTokens = Lexer.prototype.inlineTokens;
+			let lexedCharacters = 0;
+			t.mock.method(
+				Lexer.prototype,
+				"inlineTokens",
+				function (this: Lexer, source: string, tokens: Parameters<typeof inlineTokens>[1]) {
+					lexedCharacters += source.length;
+					return inlineTokens.call(this, source, tokens);
+				},
+			);
+			for (const [word, expectedMath] of [
+				['"$(echo `echo $HOME`)"', "x²"],
+				["'$@'$*'$#'", "\\(x^2\\)"],
+			]) {
+				const source = `${Array(40).fill(word).join(" ")} has \\(x^2\\).`;
+				lexedCharacters = 0;
+				const output = new Markdown(source, 0, 0, defaultMarkdownTheme)
+					.render(4000)
+					.map((line) => stripAnsi(line).trimEnd());
+				assert.deepStrictEqual(output, [`${Array(40).fill(word).join(" ")} has ${expectedMath}.`]);
+				// One native analysis, one actual run, and native emphasis children fit within three input lengths.
+				assert.ok(lexedCharacters <= source.length * 3, `${lexedCharacters} characters lexed for ${source.length}`);
 			}
 		});
 

@@ -117,61 +117,129 @@ function looksLikePendingDollarMath(source: string): boolean {
 
 const SHELL_EXPANSION_START_REGEX = /^[A-Za-z_({0-9@*#?$!-]/;
 
-interface NativeMathSpans {
+interface QuotedShellSpans {
 	sourceLength: number;
-	spans: { start: number; end: number; type: Token["type"] }[];
+	spans: { start: number; end: number }[];
 	next: number;
 }
 
-const nativeMathSpans = new WeakMap<Token[], NativeMathSpans>();
-const ignoredShellClosers = new WeakMap<Token[], number>();
+const quotedShellSpans = new WeakMap<Token[], QuotedShellSpans>();
 
 function tokenizeQuotedShellWord(this: TokenizerThis, source: string, tokens: Token[]): Tokens.Text | undefined {
-	const quote = source[0];
-	if ((quote !== '"' && quote !== "'") || source[1] !== "$") {
+	if ((source[0] !== '"' && source[0] !== "'") || source[1] !== "$") {
 		return undefined;
 	}
-	// A rejected candidate's closing quote must not become another shell-word opener.
-	if (ignoredShellClosers.get(tokens) === source.length) {
-		ignoredShellClosers.delete(tokens);
+	let cached = quotedShellSpans.get(tokens);
+	if (!cached) {
+		cached = { sourceLength: source.length, spans: findQuotedShellSpans(source, this), next: 0 };
+		quotedShellSpans.set(tokens, cached);
+	}
+	const offset = cached.sourceLength - source.length;
+	while (cached.spans[cached.next]?.end <= offset) {
+		cached.next++;
+	}
+	const span = cached.spans[cached.next];
+	if (span?.start !== offset) {
 		return undefined;
 	}
-	const math = tokenizeInlineLatex(source.slice(1));
-	const quotedPid = source.startsWith(`${quote}$$${quote}`);
-	const nestedExpansion = source[2] === "(" || source[2] === "{";
-	if (math?.pending || (!math && !quotedPid && !nestedExpansion)) {
-		if (!math) {
-			const closingQuote = findClosingDelimiter(source, quote, 2);
-			if (closingQuote >= 0) {
-				ignoredShellClosers.set(tokens, source.length - closingQuote);
+	const raw = source.slice(0, span.end - offset);
+	return { type: "text", raw, text: raw };
+}
+
+function findQuotedShellSpans(source: string, context: TokenizerThis): QuotedShellSpans["spans"] {
+	const lexer = new shellMathParser.Lexer(shellMathParser.defaults);
+	lexer.tokens.links = context.lexer.tokens.links;
+	lexer.state = { ...context.lexer.state };
+	const native = [];
+	let offset = 0;
+	for (const token of lexer.inlineTokens(source)) {
+		const end = offset + token.raw.length;
+		native.push({ start: offset, end, token });
+		offset = end;
+	}
+	const spans: QuotedShellSpans["spans"] = [];
+	const candidates = /["']\$/g;
+	let nativeIndex = 0;
+	for (let match = candidates.exec(source); match; match = candidates.exec(source)) {
+		const start = match.index;
+		while (native[nativeIndex]?.end <= start) {
+			nativeIndex++;
+		}
+		const parent = native[nativeIndex];
+		const previous = spans[spans.length - 1];
+		// An untouched native token owns its contents. A preserved opener exposes later words in that token.
+		if (
+			parent &&
+			parent.start < start &&
+			parent.token.type !== "text" &&
+			(!previous || previous.end <= parent.start)
+		) {
+			candidates.lastIndex = parent.end;
+			continue;
+		}
+		const wordSource = source.slice(start);
+		const quote = wordSource[0];
+		const math = tokenizeInlineLatex(wordSource.slice(1));
+		const quotedPid = wordSource.startsWith(`${quote}$$${quote}`);
+		const nestedExpansion = wordSource[2] === "(" || wordSource[2] === "{";
+		let dollarIndex = nativeIndex;
+		while (native[dollarIndex]?.end <= start + 1) {
+			dollarIndex++;
+		}
+		const dollar = native[dollarIndex]?.token;
+		if ((math?.pending && dollar?.type === "latex" && dollar.pending) || (!math && !quotedPid && !nestedExpansion)) {
+			const closingQuote = findClosingDelimiter(wordSource, quote, 2);
+			if (closingQuote >= 0) candidates.lastIndex = start + closingQuote + 1;
+			continue;
+		}
+		if (math && !quotedPid && !math.pending) {
+			const mathEnd = math.raw.length + 1;
+			const closingQuote = findClosingDelimiter(wordSource, quote, mathEnd);
+			let quotes = 0;
+			for (
+				let index = findClosingDelimiter(math.text, quote, 0);
+				index >= 0;
+				index = findClosingDelimiter(math.text, quote, index + 1)
+			) {
+				quotes++;
+			}
+			const endsAtQuotedWord = math.text.endsWith(quote) && quotes % 2 === 0;
+			if (
+				closingQuote >= 0 &&
+				!endsAtQuotedWord &&
+				!(
+					(nestedExpansion || math.text.endsWith(quote)) &&
+					SHELL_EXPANSION_START_REGEX.test(wordSource.slice(mathEnd))
+				) &&
+				((quotes > 0 && !SHELL_EXPANSION_START_REGEX.test(wordSource.slice(mathEnd))) ||
+					math.raw.startsWith("$$") ||
+					/^\p{P}*$/u.test(wordSource.slice(mathEnd, closingQuote)))
+			) {
+				candidates.lastIndex = start + closingQuote + 1;
+				continue;
 			}
 		}
-		return undefined;
-	}
-	if (math && !quotedPid) {
-		const mathEnd = math.raw.length + 1;
-		const closingQuote = findClosingDelimiter(source, quote, mathEnd);
-		let quotes = 0;
-		for (
-			let index = findClosingDelimiter(math.text, quote, 0);
-			index >= 0;
-			index = findClosingDelimiter(math.text, quote, index + 1)
-		) {
-			quotes++;
+		const word = scanQuotedShellWord(wordSource);
+		if (!word) continue;
+		// An unmatched single quote can be a math prime, not an unfinished shell word.
+		if (math && quote === "'" && word.quote && math.text.endsWith("'") && !/^[0-9@*#?$!-]'$/.test(math.text))
+			continue;
+		const wordEnd = start + word.end;
+		let end = wordEnd;
+		for (let index = nativeIndex; native[index]?.start < wordEnd; index++) {
+			const span = native[index];
+			if (span.start >= start && span.token.type === "latex") end = Math.max(end, span.end);
 		}
-		const endsAtQuotedWord = math.text.endsWith(quote) && quotes % 2 === 0;
-		if (
-			closingQuote >= 0 &&
-			!endsAtQuotedWord &&
-			!((nestedExpansion || math.text.endsWith(quote)) && SHELL_EXPANSION_START_REGEX.test(source.slice(mathEnd))) &&
-			((quotes > 0 && !SHELL_EXPANSION_START_REGEX.test(source.slice(mathEnd))) ||
-				math.raw.startsWith("$$") ||
-				/^\p{P}*$/u.test(source.slice(mathEnd, closingQuote)))
-		) {
-			return undefined;
-		}
+		if (previous && previous.end >= start) previous.end = Math.max(previous.end, end);
+		else spans.push({ start, end });
+		// Visit actual word boundaries even when a native math token reaches into the following word.
+		candidates.lastIndex = wordEnd;
 	}
+	return spans;
+}
 
+function scanQuotedShellWord(source: string): { end: number; quote: string | undefined } | undefined {
+	const quote = source[0];
 	let activeQuote: string | undefined = quote;
 	const expansions: { closing: ")" | "}"; quote: string | undefined }[] = [];
 	let hasExpansion = false;
@@ -179,12 +247,8 @@ function tokenizeQuotedShellWord(this: TokenizerThis, source: string, tokens: To
 	for (; index < source.length; index++) {
 		const character = source[index];
 		const next = source[index + 1];
-		if (!activeQuote && expansions.length === 0 && /\s/.test(character)) {
-			break;
-		}
-		if (character === "\n") {
-			return undefined;
-		}
+		if (!activeQuote && expansions.length === 0 && /\s/.test(character)) break;
+		if (character === "\n") return undefined;
 		if (character === "\\" && activeQuote !== "'") {
 			index++;
 			continue;
@@ -209,16 +273,10 @@ function tokenizeQuotedShellWord(this: TokenizerThis, source: string, tokens: To
 				continue;
 			}
 		}
-		if (character !== "$") {
-			continue;
-		}
+		if (character !== "$") continue;
 		if (expansions.length === 0 && activeQuote === quote) {
-			if (next === undefined) {
-				continue;
-			}
-			if (!SHELL_EXPANSION_START_REGEX.test(next)) {
-				return undefined;
-			}
+			if (next === undefined) continue;
+			if (!SHELL_EXPANSION_START_REGEX.test(next)) return undefined;
 			hasExpansion = true;
 			if (next === "$") {
 				index++;
@@ -231,52 +289,7 @@ function tokenizeQuotedShellWord(this: TokenizerThis, source: string, tokens: To
 			index++;
 		}
 	}
-	if (!hasExpansion) {
-		return undefined;
-	}
-	// An unmatched single quote can be a math prime, not an unfinished shell word.
-	if (math && quote === "'" && activeQuote && math.text.endsWith("'") && !/^[0-9@*#?$!-]'$/.test(math.text)) {
-		return undefined;
-	}
-	const raw = source.slice(0, preservedShellWordEnd(source, index, this, tokens));
-	return { type: "text", raw, text: raw };
-}
-
-function preservedShellWordEnd(source: string, wordEnd: number, context: TokenizerThis, tokens: Token[]): number {
-	let native = nativeMathSpans.get(tokens);
-	if (!native) {
-		const lexer = new shellMathParser.Lexer(shellMathParser.defaults);
-		lexer.tokens.links = context.lexer.tokens.links;
-		lexer.state = { ...context.lexer.state };
-		const spans: NativeMathSpans["spans"] = [];
-		let offset = 0;
-		for (const token of lexer.inlineTokens(source)) {
-			const end = offset + token.raw.length;
-			spans.push({ start: offset, end, type: token.type });
-			offset = end;
-		}
-		native = { sourceLength: source.length, spans, next: 0 };
-		nativeMathSpans.set(tokens, native);
-	}
-	const offset = native.sourceLength - source.length;
-	let rawEnd = wordEnd;
-	// Marked passes one token array for each inline run; subsequent sources are suffixes of that run.
-	while (true) {
-		const span = native.spans[native.next];
-		if (!span || span.start >= offset + wordEnd) {
-			break;
-		}
-		native.next++;
-		if (span.start >= offset) {
-			if (span.type === "latex") {
-				rawEnd = Math.max(rawEnd, span.end - offset);
-			} else if (span.type !== "text") {
-				// Preserving Markdown syntax changes how later words are tokenized.
-				nativeMathSpans.delete(tokens);
-			}
-		}
-	}
-	return rawEnd;
+	return hasExpansion ? { end: index, quote: activeQuote } : undefined;
 }
 
 function tokenizeInlineLatex(source: string): LatexToken | undefined {
