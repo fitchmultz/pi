@@ -319,7 +319,7 @@ function scanQuotedShellWord(
 				if (format) {
 					const continuationStart = index + format.raw.length - 1;
 					const continuation =
-						ownership === "shell-word" && format.type === "latex" && format.raw.endsWith('"$')
+						ownership === "shell-word" && format.type === "latex" && /["']\$$/.test(format.raw)
 							? scanQuotedShellWord(
 									source.slice(continuationStart),
 									sourceOffset + continuationStart,
