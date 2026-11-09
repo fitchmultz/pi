@@ -73,7 +73,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 	}
 	if (
 		normalized.api !== "anthropic-messages" ||
-		normalized.id !== "claude-opus-5-5" ||
+		(normalized.id !== "claude-opus-5-5" && normalized.id !== "claude-fable-5-2") ||
 		normalized.baseUrl !== CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL
 	) {
 		return normalized;
@@ -83,6 +83,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 		supportsMidConvoToolChanges: true,
 		supportsMidConvoEffort: true,
 		forceAdaptiveThinking: true,
+		...(normalized.id === "claude-fable-5-2" ? { supportsTemperature: false } : {}),
 		...normalized.compat,
 	};
 	return {

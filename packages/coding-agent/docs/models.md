@@ -139,7 +139,7 @@ Choose the conservative end of any published range. A model without a lifetime f
 
 For Anthropic Messages, `compat.supportsLongCacheRetention: false` makes a requested `long` retention use five-minute cache markers, so warming uses `promptCache.short`. Omitted or `true` long-retention support keeps native one-hour markers and uses `promptCache.long`.
 
-Canonical Cloudflare AI Gateway Opus 5.5 defaults to five-minute `short` and one-hour `long` lifetimes when its catalog omits `promptCache`. Explicit empty or partial catalog metadata is preserved: an omitted tier remains unknown and is not warmed. Catalog entries with a non-canonical `baseUrl` do not receive these defaults.
+Canonical Cloudflare AI Gateway Opus 5.5 and Fable 5.2 default to five-minute `short` and one-hour `long` lifetimes when the catalog omits `promptCache`. Explicit empty or partial catalog metadata is preserved: an omitted tier remains unknown and is not warmed. Catalog entries with a non-canonical `baseUrl` do not receive these defaults.
 
 A provider-level `baseUrl` override in `models.json` or an extension is applied after catalog normalization and retains the model's metadata, including these lifetimes. To replace the lifetimes, redefine the model under `models` with its complete metadata, including `input`, `reasoning`, `thinkingLevelMap`, `cost`, limits and `compat`; `promptCache: {}` leaves both tiers unknown and disables warming for that model. An empty `promptCache` in `modelOverrides` does not remove inherited tiers.
 
