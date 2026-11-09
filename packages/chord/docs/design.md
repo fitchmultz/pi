@@ -1637,14 +1637,18 @@ host.serve(ChatStore, ({ conversation }, self) => {          // local: no princi
   refused at declaration, as documents). A reload restarts the job's object: a running in-memory run ends `aborted
   { reload }` at the old attempt's seal (a persisted one is stopped and resumed per `resume`, R3); `finish` runs on the
   new code with the outcome's args and result mapped forwards (once per run, never per publication); a run not invoked
-  yet runs on the new code with its args mapped, and its state document migrates through its own `migrate`. Without an adapter, for a run of a newer version than the code (a rollback), or for a job the new
+  yet runs on the new code with its args mapped, and its state document migrates through its own `migrate`. A result
+  keeps the version and fingerprint of the code that returned it (a persisted run's record stores them with the result
+  when they are not the run's own): `finish` gets it mapped forwards from that version, as returned when the current
+  code returned it, while the args map from the run's own version. Without an adapter, for a run or a recorded result
+  of a newer version than the code (a rollback) or of the code's version with another fingerprint, or for a job the new
   code no longer declares, the run is `blocked { version }` (kept, not invoked) until a reload brings matching code;
   blocked runs (`finish_failed` ones too) are retried on every reload of their object's plugin; a persisted run of
-  another version or fingerprint stays blocked with its record as stored until the reload that brings its version
-  resumes it. A native restart aborts running in-memory runs (`aborted { reason: "reload" }`) and `finish` runs on the
-  new code; persisted runs are stopped and resumed per their `resume` (6b R3, owner, 2026-10-29). A `finish` in flight
-  across a reload completes on the code it started with; the next one runs on the new code. A version change aborts
-  nothing and discards nothing.
+  another version or fingerprint (its own or its recorded result's) stays blocked with its record as stored until the
+  reload that brings its version resumes it. A native restart aborts running in-memory runs
+  (`aborted { reason: "reload" }`) and `finish` runs on the new code; persisted runs are stopped and resumed per their
+  `resume` (6b R3, owner, 2026-10-29). A `finish` in flight across a reload completes on the code it started with; the
+  next one runs on the new code. A version change aborts nothing and discards nothing.
 - **Persistence (slice 6):** `persist: { resume: "rerun" | "abandon" }` keeps the run record and its state document
   in the owner's store (owner: a `local` object with empty params, P3). How a run resumes after a crash is required, no
   default: rerun (the current

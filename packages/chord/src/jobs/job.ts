@@ -16,7 +16,7 @@ import { capped, chordSpans, ended, OpenSpan, parentOf, spanFailed, untraced } f
 import type { Watchable } from "../watch.ts";
 import type { JobDefinition, Outcome } from "./definition.ts";
 import type { JobRecords, Settled } from "./records.ts";
-import type { AnyOutcome, Invocation, JobRun, Run } from "./run.ts";
+import type { AnyOutcome, Invocation, JobRun, Recorded, Run } from "./run.ts";
 import type { RunningEntry } from "./running.ts";
 
 /** A job's handle, `self.job(Job, { run, finish? })`; `A`, `R` and `S` are its args, result and state. */
@@ -305,7 +305,8 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 		})();
 		running
 			.then(
-				(result) => this.#settled(run, invocation, ctx, { kind: "done", result }),
+				// The result is of this attempt's version, whatever the run's: `finish` maps it from there.
+				(result) => this.#settled(run, invocation, ctx, { kind: "done", result, by: this.#definition }),
 				(error: unknown) => this.#settled(run, invocation, ctx, this.#failed(run, invocation, error)),
 			)
 			.finally(() => invocation.ended())
@@ -331,12 +332,12 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 	}
 
 	/**
-	 * Runs the finish of `run` with its recorded `outcome`: `finish` with the cleanup in one transaction under the
+	 * Runs the finish of `run` with its `recorded` outcome: `finish` with the cleanup in one transaction under the
 	 * attempt's token, retried with backoff after a throw (reported), blocked after five in a row. The attempt's seal
 	 * stops it without a report or a count; the next live attempt finishes the run.
 	 */
-	finish(run: JobRun, outcome: AnyOutcome): void {
-		const work = this.#finish(run, outcome);
+	finish(run: JobRun, recorded: Recorded): void {
+		const work = this.#finish(run, recorded);
 		this.#owner.admit(work);
 	}
 
@@ -364,7 +365,7 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 	 * `run`'s finish phase in its span: each failed try a `chord.retry` event with its backoff; ends `ok`, `error`
 	 * (blocked) or `aborted` (the attempt's seal).
 	 */
-	async #finish(run: JobRun, recorded: AnyOutcome): Promise<void> {
+	async #finish(run: JobRun, recorded: Recorded): Promise<void> {
 		const span = this.#phaseSpan(run, "finish");
 		const { context } = this.#owner;
 		let outcome: "ok" | "error" | "aborted" = "error";
@@ -377,10 +378,13 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 		}
 	}
 
-	/** The tries of finishing `run` with `outcome` under `context`, retried with backoff; how the phase ended. */
+	/**
+	 * The tries of finishing `run` with its `recorded` outcome under `context`, retried with backoff; how the phase
+	 * ended. Its waiters get the outcome as recorded, `finish` as the current code takes it.
+	 */
 	async #finishTries(
 		run: JobRun,
-		outcome: AnyOutcome,
+		recorded: Recorded,
 		span: OpenSpan<"chord.job"> | undefined,
 		context: Context,
 	): Promise<"ok" | "error" | "aborted"> {
@@ -394,8 +398,8 @@ export class Job implements JobHandle<JsonValue, unknown, JsonValue | undefined>
 						async (tx) => {
 							const staging = this.#records.staging(tx);
 							staging.finishing = run;
-							await this.#implementation.finish?.(this.#records.outcomeOf(run, outcome, context), tx);
-							this.#records.change(tx, { kind: "delete", run, outcome });
+							await this.#implementation.finish?.(this.#records.outcomeOf(run, recorded, context), tx);
+							this.#records.change(tx, { kind: "delete", run, outcome: recorded.outcome });
 						},
 						token,
 						context,

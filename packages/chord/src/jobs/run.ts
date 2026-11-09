@@ -1,13 +1,13 @@
 // One run of a job (§15, slice 6b §4.1): its record (id, version, key, args, its phase with what that holds: the
-// recorded outcome, a blocked run's reason; restarts, finish failures, abort mark), its current invocation (the fence
-// of its seal token, its abort signal, the end an abort joins: one per invocation, as a persisted run is invoked again
-// after a seal, R3), its `running` entry and the `Run` handle its callers wait on.
+// recorded outcome and its result's version, a blocked run's reason; restarts, finish failures, abort mark), its
+// current invocation (the fence of its seal token, its abort signal, the end an abort joins: one per invocation, as a
+// persisted run is invoked again after a seal, R3), its `running` entry and the `Run` handle its callers wait on.
 
 import type { Context } from "../context/index.ts";
 import type { ChordError } from "../data/index.ts";
 import { SealToken } from "../documents/internal.ts";
 import type { JsonValue } from "../json.ts";
-import type { Outcome } from "./definition.ts";
+import type { JobVersion, Outcome } from "./definition.ts";
 
 /** A started run as its caller holds it: its id and a wait for its outcome. */
 export interface Run<O> {
@@ -25,27 +25,34 @@ export interface Run<O> {
 export type AnyOutcome = Outcome<JsonValue, unknown, JsonValue | undefined>;
 
 /**
+ * A run's outcome as its record keeps it, with the job version of its result: the version whose `run` returned it (the
+ * run's own, or a newer one that invoked the run after a reload, slice 7b §8); a failure has no result and is of the
+ * run's own version. `finish` gets the args mapped forwards from the run's version, the result from this one.
+ */
+export type Recorded = JobVersion & { readonly outcome: AnyOutcome };
+
+/**
  * Where a run's record stands, with what each phase holds. A persisted run is `pending` from its start's commit until
  * its reservation commit (`running`, then its `run` starts), `stopped` once a clean stop cut it off; an in-memory run
  * is `running` from its start's commit. `finishing` once its outcome is recorded: the outcome is kept, so `finish` is
  * retried without running `run` again. `blocked` after five failed finishes or for another version, with its reason
- * and its outcome if one was recorded; `atLoad` marks a persisted run blocked for its version at its load, whose state
- * document was not decoded (read once a reload's code takes it).
+ * and its outcome if one was recorded; `atLoad` marks a persisted run blocked for its version (or its result's) at its
+ * load, whose state document was not decoded (read once a reload's code takes it).
  */
 export type RunPhase =
 	| { readonly kind: "pending" | "running" | "stopped" }
-	| { readonly kind: "finishing"; readonly outcome: AnyOutcome }
+	| { readonly kind: "finishing"; readonly recorded: Recorded }
 	| {
 			readonly kind: "blocked";
 			readonly reason: BlockedReason;
-			readonly outcome: AnyOutcome | undefined;
+			readonly recorded: Recorded | undefined;
 			readonly atLoad: boolean;
 	  };
 
 /**
- * Why a run is blocked: its `finish` failed five times in a row, or its version is not the code's (stored by another
- * job version or fingerprint, of a newer version or an older one without an adapter, or of a job the code no longer
- * declares, slice 7b §8).
+ * Why a run is blocked: its `finish` failed five times in a row, or its version or its result's is not the code's
+ * (stored by another job version or fingerprint, of a newer version or an older one without an adapter, or of a job
+ * the code no longer declares, slice 7b §8).
  */
 export type BlockedReason = "finish_failed" | "version";
 

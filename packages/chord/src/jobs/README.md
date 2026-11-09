@@ -113,10 +113,12 @@ host.serve(ChatStore, (_, self) => {
   under its entry, delivered as one frame per batch).
 
 Persisted jobs (slice 6b): `persist: { resume: "rerun" | "abandon" }` in a `local` type with empty params. Each
-unsettled run's record (`stored.ts`) is a document in `chord.jobs`, its state one in `chord.job-states`
+unsettled run's record (`stored.ts`; a result names the job version and fingerprint that returned it when they are not
+the run's own) is a document in `chord.jobs`, its state one in `chord.job-states`
 (`persisted.ts`, `run-states.ts`); a run is reserved (`running`) before `run`, counted after a crash (five in a row end it
 `restart_limit`), written back `stopped` by the close writer after the drain, resumed on the next live attempt (per
 `resume`); the records load once per object, again only after a load failed, a record of another version or fingerprint
-blocked before its state is decoded; `abort(id, ctx)` is stored and joins the current invocation;
+(its run's or its result's) blocked before its state is decoded; `abort(id, ctx)` is stored and joins the current
+invocation;
 `ctx.state.change(fn, ctx, { persistence: { kind: "deferred" } })` holds a change (its ops folded in a `PendingOps`) until
 the next immediate one, the outcome, the close writer or its deadline (one timer per object).

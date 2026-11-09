@@ -251,12 +251,15 @@ jobs sharing a state definition never meet. The record:
 { version, fingerprint, args, key?, trace?,
   phase: "pending" | "running" | "stopped" | "finishing" | "blocked",
   restarts, finishFailures, abort?: true, blocked?: "finish_failed" | "version",
-  outcome?: { kind: "done", result } | { kind: "failed", error: StoredJobError } }
+  outcome?: { kind: "done", result, version?, fingerprint? } | { kind: "failed", error: StoredJobError } }
 // StoredJobError: { kind: "threw", error: WireError } | { kind: "aborted", reason } | { kind: "restart_limit", restarts }
 ```
 
 Errors are stored in the wire error format (a `PluginError`'s code, message and details survive); a stored outcome is
-rebuilt as the in-memory one.
+rebuilt as the in-memory one. A result returned by the code of another job version than the run's own (the run invoked
+on newer code after a reload, slice 7b §8) stores that version and its fingerprint; a result without them is of the
+run's own version. The record documents are record version 2 (`chord.job-run.2`). A version 1 record still loads; its
+results read as the run's own version's, also one that newer code returned: nothing stored tells it apart.
 
 ### 4.2 Transitions
 
@@ -270,7 +273,7 @@ rebuilt as the in-memory one.
 | `finish` fails | record `finishFailures + 1`; at 5 `blocked: "finish_failed"` | retried after the backoff, a blocked run on reload |
 | `finish` succeeds | record deleted, state retired (Q9), with what `finish` wrote | the run settles |
 | clean stop (host close, a native restart, R3's seal) | the stopped runs written `stopped`, held state flushed, by the close writer | |
-| activation (records loaded once per object; each live attempt resumes what waits) | each `running` record: `restarts + 1` (or, at 5, `failed { restart_limit }` and `finishing`, `job_interrupted` reported); `stopped` and `pending`: back to `pending` | maps, keys, active count, `running` rebuilt before anything runs; `rerun` invokes, `abandon` records `failed { aborted, restart }`; an abort-marked run finishes `aborted` without `run`; `finishing` resumes `finish`; `blocked` stays; a record of another job version, or of the same version with another fingerprint, is `blocked: "version"` |
+| activation (records loaded once per object; each live attempt resumes what waits) | each `running` record: `restarts + 1` (or, at 5, `failed { restart_limit }` and `finishing`, `job_interrupted` reported); `stopped` and `pending`: back to `pending` | maps, keys, active count, `running` rebuilt before anything runs; `rerun` invokes, `abandon` records `failed { aborted, restart }`; an abort-marked run finishes `aborted` without `run`; `finishing` resumes `finish`; `blocked` stays; a record of another job version, or of the same version with another fingerprint (its run's or its result's), is `blocked: "version"` |
 
 - **A retry after a seal (R3):** the runs the seal stopped are resumed by the next live attempt only once their old
   invocation settled (bounded by `closeTimeout`, as the drain; an invocation outliving it is fenced, its run resumes
