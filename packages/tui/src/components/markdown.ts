@@ -137,7 +137,8 @@ function hasQuotedMathSyntax(text: string): boolean {
 			groups++;
 		} else if (character === "}") {
 			groups--;
-		} else if (character === '"' && groups === 0) {
+		} else if (character === '"') {
+			if (groups > 0) return true;
 			quotes++;
 		}
 	}

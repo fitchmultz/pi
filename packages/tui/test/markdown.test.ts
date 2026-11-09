@@ -900,6 +900,7 @@ describe("Markdown component", () => {
 				['"$A""$B"$f\'\'(x)$y', '"$A""$B"f\'\'(x)y'],
 				[String.raw`"$A""$B"$x^2+\text{"yes"}$`, '"$A""$B"x²+"yes"'],
 				[String.raw`"$A""$B"$a = \text{6"}$`, '"$A""$B"a = 6"'],
+				[String.raw`"$A""$B"$x = \text{6"} + y"$`, '"$A""$B"x = 6" + y"'],
 				[String.raw`"$A""$B"$x+\text{6"}$`, '"$A""$B"x+6"'],
 				[String.raw`"$a"$*"b"$a = \text{6"}$`, '"$a"$*"b"a = 6"'],
 				[String.raw`"$(echo "$N")"$a = \text{6"}$`, '"$(echo "$N")"a = 6"'],
