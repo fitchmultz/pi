@@ -2,11 +2,12 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`085c84e98e7f4c950f2be606466fff4f75d8fe7c` (2026-11-07), following official v1.5.0.
+`bd0d815c3197e75323f6db60ee3ad1f73d5280d7` (2026-11-09), following official v1.5.0.
 It is upstream plus the features
 below. Everything else follows upstream behavior and APIs.
 
-The [2026-11-07 integration record](docs/upstream-sync-2026-11-07.md) documents the current baseline,
+The [2026-11-09 integration record](docs/upstream-sync-2026-11-09.md) documents the current baseline,
+conflict decisions and verification. The [2026-11-07 integration record](docs/upstream-sync-2026-11-07.md) documents the previous baseline,
 conflict decisions and verification. The [2026-11-05 integration record](docs/upstream-sync-2026-11-05.md) documents the previous baseline,
 conflict decisions and verification. The [2026-11-04 integration record](docs/upstream-sync-2026-11-04.md)
 records the previous integration. The [v1.5.0 integration record](docs/upstream-sync-1.5.0.md) records the preceding release integration. The
@@ -99,10 +100,10 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Voice startup belongs to one run. Stopped starts release late microphone and wake-lock results, create no further resources, and cannot fail a newer run. Current permission errors remain visible | `apps/p2/plugins/voice/engine.ts` | `apps/p2/test/p2/voice-ui.test.ts` |
 | A p2 message shows once when its conversation opens again after its send's answer was lost, and a message whose call has not gone out, such as one whose upload keeps failing, stays shown as newer entries arrive. The page-lifetime outbox keeps each message's delivery (untried, tried, accepted) and where its first call went out. Upstream keeps that start in the chat view and takes it before the uploads, so a reopened view shows the outbox's copy beside the transcript's entry for up to ten seconds, and a newer entry hides a message the server never got | `apps/p2/plugins/chat/{outbox.ts,web.tsx}` | `apps/p2/test/p2/{outbox,ui-outbox}.test.ts` |
 | A Radius v4 WebSocket channel opened while the brain's socket to Radius is congested must start paused once its loopback socket opens. `ws` ignores `pause()` while connecting, so upstream reads the service's output into the congested socket's buffer without bound | `apps/p2/plugins/radius/brain.ts` | `apps/p2/test/p2/radius.test.ts` |
-| Closing the plugin watcher is final: a build whose discovery finishes after `close()` must not watch linked plugin directories, whose persistent watches keep the process alive. Upstream's later `#closed` stops late base records and rename renewal, but its `#watchDirs` still checks only `#reported`: keep its one `#closed` and guard `#watchDirs` with it | `packages/chord/src/node/plugins/watcher.ts` | `packages/chord/test/node/plugins/watcher.test.ts` |
+| Closing the plugin watcher is final: a build whose discovery finishes after `close()` must not watch linked plugin directories, whose persistent watches keep the process alive. Keep upstream's one `#closed` and check it before opening tree or individual-directory watches | `packages/chord/src/node/plugins/watcher.ts` | `packages/chord/test/node/plugins/watcher.test.ts` |
 | Legacy published Kimi Coding catalogs must not break offline builds or revert the native OpenAI protocol on fetched/cached overlays; preserve effort/tool constraints and K3 cache-write pricing | `packages/ai/src/api/kimi.ts`, `packages/ai/catalog/{families/kimi,providers/kimi-coding,providers/moonshotai}.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts` |
 | Git footers must catch branch changes missed while native watchers and polling baselines start, and must not publish a branch query that a cwd change superseded | `core/footer-data-provider.ts` | `footer-data-provider.test.ts` |
-| Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates | `core/{cache-warmer,model-runtime,sdk}.ts`, `modes/interactive/interactive-mode.ts` | `cache-warmer.test.ts` |
+| Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates. Shared policy lives in pi-ai; coding-agent retains prepared-request timing and its cycle ownership | `packages/ai/src/cache-warming.ts`, `core/{cache-warmer,model-runtime,sdk}.ts` | `cache-warmer.test.ts`, `apps/p2/test/p2/cache-warming.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
 | Oversized public Durable input/write admissions must not fail the Session; host commits can opt into assembled-batch checks including document revisions. Queued input entry-size refusal settles only that input and preserves answers, tool work and valid siblings. SQLite checks exact rows with confirmed rollback, not an aggregate queue cap; post-effect compactions and real commit failures keep their fatal-storage semantics. Upstream's group commit fails the Session on any refused batch, so the check runs before a commit joins the writer's group, once every admitted write is published; the Session's storage cache and gated storage forward it | `packages/durable/src/{storage/sqlite/storage,session/session,session/cached-storage,session/keys,session/transaction,harness/harness,harness/inbox,harness/submissions,harness/compaction}.ts` | `packages/durable/test-workers/{input-admission,commit-admission,storage}.test.ts`, `packages/durable/test/harness-storage-failure.test.ts` |
 | Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
@@ -231,7 +232,9 @@ re-claimed stored record IDs on every update, so the fork keeps that filter. The
 The fork also keeps its own delivery tooling: `scripts/install-fork.mjs`, the isolated `./test.sh`,
 fork policy text in `AGENTS.md`/`CONTRIBUTING.md`, a macOS CI job for restart,
 `background_command`, bash abort and bash timeout, and no upstream publishing, binary (including Android APK) or
-issue-analysis workflows. Upstream's `scripts/preview-packages.mjs` is kept but unused;
+issue-analysis workflows. macOS browser-test launchers use Chrome's mock keychain, not the user's
+keychain. Chord's browser harness starts with an explicit light color scheme; theme tests can override it.
+Upstream's `scripts/preview-packages.mjs` is kept but unused;
 the preview script's tests still run. Nix builds
 retain upstream's derivation and locks with the batched install-phase packing above; automatic
 catalog-pin commits and stable-branch promotion are upstream-only. The

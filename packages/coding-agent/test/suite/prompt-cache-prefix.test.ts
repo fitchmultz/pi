@@ -5,6 +5,7 @@ import {
 	type CacheRetention,
 	fauxAssistantMessage,
 	fauxToolCall,
+	getPromptCacheTtlMs,
 	hasApi,
 	InMemoryModelsStore,
 	type Model,
@@ -19,7 +20,6 @@ import { Container } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { expect, it, type MockInstance, vi } from "vitest";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
-import { getPromptCacheTtlMs } from "../../src/core/cache-warmer.ts";
 import { ModelRuntime } from "../../src/core/model-runtime.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
