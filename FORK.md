@@ -60,6 +60,7 @@ the fork's nonblocking quit behavior rather than upstream's unconditional wait f
 an ordinary quit can leave an interrupted tool call without its final result.
 
 These fixes remain until upstream supplies equivalent behavior, not merely closes a report.
+Native working-session restoration omits removed models from the saved cycling list while retaining the selected model, remaining order and thinking levels. A missing selected model still fails (`core/sdk.ts`, `test/suite/working-session-models.test.ts`).
 Private output-file creation (`wx` / `0o600`) now follows upstream `utils/output-files.ts` (adopted in the v1.1.0 sync); the fork keeps `private-spill.test.ts` as a regression guard.
 Malformed Env frames now follow upstream's guarded decoder; the fork keeps `packages/env/test/connection.test.ts` as a subprocess regression guard. The SSH login-shell fixture now follows upstream's sh/Bash/zsh startup coverage.
 Literal and modified `+` key bindings now use upstream's modifier parser; the fork's regression cases remain.
