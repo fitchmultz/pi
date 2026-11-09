@@ -1,6 +1,14 @@
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
-import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens, type TokensList } from "marked";
+import {
+	Marked,
+	type Token,
+	Tokenizer,
+	type TokenizerExtension,
+	type TokenizerThis,
+	type Tokens,
+	type TokensList,
+} from "marked";
 import markedCjkFriendly from "marked-cjk-friendly";
 import { renderLatex } from "../latex.ts";
 import { SELECTION_METADATA, SELECTION_SOURCE_END } from "../selection-markers.ts";
@@ -109,7 +117,15 @@ function looksLikePendingDollarMath(source: string): boolean {
 
 const SHELL_EXPANSION_START_REGEX = /^[A-Za-z_({0-9@*#?$!-]/;
 
-function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
+interface NativeMathSpans {
+	sourceLength: number;
+	spans: { start: number; end: number }[];
+	next: number;
+}
+
+const nativeMathSpans = new WeakMap<Token[], NativeMathSpans>();
+
+function tokenizeQuotedShellWord(this: TokenizerThis, source: string, tokens: Token[]): Tokens.Text | undefined {
 	const quote = source[0];
 	if ((quote !== '"' && quote !== "'") || source[1] !== "$") {
 		return undefined;
@@ -206,20 +222,46 @@ function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 	if (!hasExpansion) {
 		return undefined;
 	}
-	// Keep native math's consumed span too, without probing dollars owned by codespans or links.
-	let rawEnd = index;
-	let offset = 0;
-	for (const token of shellMathParser.Lexer.lexInline(source, shellMathParser.defaults)) {
-		if (offset >= index) {
+	// An unmatched single quote can be a math prime, not an unfinished shell word.
+	if (math && quote === "'" && activeQuote && math.text.endsWith("'") && !/^[0-9@*#?$!-]'$/.test(math.text)) {
+		return undefined;
+	}
+	const raw = source.slice(0, preservedShellWordEnd(source, index, this, tokens));
+	return { type: "text", raw, text: raw };
+}
+
+function preservedShellWordEnd(source: string, wordEnd: number, context: TokenizerThis, tokens: Token[]): number {
+	let native = nativeMathSpans.get(tokens);
+	if (!native) {
+		const lexer = new shellMathParser.Lexer(shellMathParser.defaults);
+		lexer.tokens.links = context.lexer.tokens.links;
+		lexer.state = { ...context.lexer.state };
+		const spans: NativeMathSpans["spans"] = [];
+		let offset = 0;
+		for (const token of lexer.inlineTokens(source)) {
+			const end = offset + token.raw.length;
+			if (token.type === "latex") {
+				spans.push({ start: offset, end });
+			}
+			offset = end;
+		}
+		native = { sourceLength: source.length, spans, next: 0 };
+		nativeMathSpans.set(tokens, native);
+	}
+	const offset = native.sourceLength - source.length;
+	let rawEnd = wordEnd;
+	// Marked passes one token array for each inline run; subsequent sources are suffixes of that run.
+	while (true) {
+		const span = native.spans[native.next];
+		if (!span || span.start >= offset + wordEnd) {
 			break;
 		}
-		offset += token.raw.length;
-		if (token.type === "latex") {
-			rawEnd = Math.max(rawEnd, offset);
+		native.next++;
+		if (span.start >= offset) {
+			rawEnd = Math.max(rawEnd, span.end - offset);
 		}
 	}
-	const raw = source.slice(0, rawEnd);
-	return { type: "text", raw, text: raw };
+	return rawEnd;
 }
 
 function tokenizeInlineLatex(source: string): LatexToken | undefined {

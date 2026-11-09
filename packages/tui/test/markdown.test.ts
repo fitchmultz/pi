@@ -868,6 +868,8 @@ describe("Markdown component", () => {
 				["The derivative is '$f'(x) = x^2$'.", "The derivative is 'f'(x) = x²'."],
 				["The derivative is '$f'(x) = x^2$.'", "The derivative is 'f'(x) = x².'"],
 				["The derivative is '$f'(x) = x^2$!'", "The derivative is 'f'(x) = x²!'"],
+				["The derivative is '$f'$!' and $y^2$", "The derivative is 'f'!' and y²"],
+				["'$f'$?' and **bold**", "'f'?' and bold"],
 				['The response was "$x^2$!"', 'The response was "x²!"'],
 				['The response was "$x$?"', 'The response was "x?"'],
 				['Output from "$(echo `echo $HOME`)" has \\(x^2\\).', 'Output from "$(echo `echo $HOME`)" has x².'],
@@ -887,6 +889,29 @@ describe("Markdown component", () => {
 					.render(160)
 					.map((line) => stripAnsi(line).trimEnd());
 				assert.deepStrictEqual(lines, [expected], source);
+			}
+		});
+
+		it("keeps document reference links from suppressing formatting after shell words", () => {
+			const commands = [
+				['"$(echo [label $HOME][ref])"', "[ref]: x"],
+				['"$(echo [label $HOME][])"', "[label $HOME]: x"],
+				['"$(echo [label $HOME])"', "[label $HOME]: x"],
+			];
+			const tails = [
+				[String.raw`has \(x^2\).`, "has x²."],
+				["is **bold**.", "is bold."],
+			];
+			for (const [command, definition] of commands) {
+				for (const [tail, expectedTail] of tails) {
+					const source = `Output from ${command} ${tail}\n\n${definition}`;
+					const output = new Markdown(source, 0, 0, defaultMarkdownTheme)
+						.render(160)
+						.map((line) => stripAnsi(line).trimEnd())
+						.join("\n")
+						.trimEnd();
+					assert.strictEqual(output, `Output from ${command} ${expectedTail}`, source);
+				}
 			}
 		});
 
