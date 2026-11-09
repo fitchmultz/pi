@@ -870,6 +870,10 @@ describe("Markdown component", () => {
 				['The response was "$x^2$!"', 'The response was "x²!"'],
 				['The response was "$x$?"', 'The response was "x?"'],
 				[
+					String.raw`The derivative is '$f'(x)=\frac{x^2}{2}$ for $x>0$'.`,
+					"The derivative is 'f'(x) = x²/2 for x > 0'.",
+				],
+				[
 					String.raw`The expression "$x^2 + \text{"yes"}$" is supported.`,
 					'The expression "x² + "yes"" is supported.',
 				],
@@ -995,6 +999,8 @@ A=
 				'printf "%s\\n" "$HOME" "$PATH" "$SHELL"',
 				'echo "$?" "$$"',
 				'echo "$$" "$$"',
+				'echo "$$" "$HOME"',
+				'echo "$$" "$?"',
 				'printf "%s\\n" "$@" "$#"',
 				'echo "$!" "$-" "$*"',
 				`echo "\${PATH/"$HOME"/$PWD}"`,
@@ -1018,22 +1024,27 @@ A=
 		});
 
 		it("preserves quoted shell expansions while streaming and wrapping", () => {
-			const source = '"$PREFIX/bin/node" "$HOME/.local/bin/pi" --model local-glm/glm-5.3-flash --thinking high';
-			const markdown = new Markdown("", 0, 0, defaultMarkdownTheme);
-			for (let end = 1; end <= source.length; end++) {
-				const prefix = source.slice(0, end);
-				markdown.setText(prefix);
-				assert.deepStrictEqual(
-					markdown.render(160).map((line) => stripAnsi(line).trimEnd()),
-					[prefix.trimEnd()],
-				);
-			}
-			for (const width of [20, 40, 80]) {
-				const text = markdown
-					.render(width)
-					.map((line) => stripAnsi(line).trimEnd())
-					.join("");
-				assert.strictEqual(text.replace(/\s/g, ""), source.replace(/\s/g, ""));
+			const sources = [
+				'"$PREFIX/bin/node" "$HOME/.local/bin/pi" --model local-glm/glm-5.3-flash --thinking high',
+				'echo "$$" "$HOME"',
+			];
+			for (const source of sources) {
+				const markdown = new Markdown("", 0, 0, defaultMarkdownTheme);
+				for (let end = 1; end <= source.length; end++) {
+					const prefix = source.slice(0, end);
+					markdown.setText(prefix);
+					assert.deepStrictEqual(
+						markdown.render(160).map((line) => stripAnsi(line).trimEnd()),
+						[prefix.trimEnd()],
+					);
+				}
+				for (const width of [20, 40, 80]) {
+					const text = markdown
+						.render(width)
+						.map((line) => stripAnsi(line).trimEnd())
+						.join("");
+					assert.strictEqual(text.replace(/\s/g, ""), source.replace(/\s/g, ""));
+				}
 			}
 		});
 

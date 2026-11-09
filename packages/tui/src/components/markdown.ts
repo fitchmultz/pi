@@ -113,19 +113,29 @@ function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 		return undefined;
 	}
 	const math = tokenizeInlineLatex(source.slice(1));
-	if (!math || math.pending) {
+	const quotedPid = source.startsWith(`${quote}$$${quote}`);
+	if (math?.pending || (!math && !quotedPid)) {
 		return undefined;
 	}
-	const mathEnd = math.raw.length + 1;
-	const closingQuote = findClosingDelimiter(source, quote, mathEnd);
-	const endsAtQuotedWord = math.text.endsWith(quote) && /\s/.test(math.text[math.text.length - 2] ?? "");
-	if (
-		closingQuote >= 0 &&
-		/^\p{P}*$/u.test(source.slice(mathEnd, closingQuote)) &&
-		!endsAtQuotedWord &&
-		!source.startsWith(`${quote}$$${quote}`)
-	) {
-		return undefined;
+	if (math && !quotedPid) {
+		const mathEnd = math.raw.length + 1;
+		const closingQuote = findClosingDelimiter(source, quote, mathEnd);
+		let quotes = 0;
+		for (
+			let index = findClosingDelimiter(math.text, quote, 0);
+			index >= 0;
+			index = findClosingDelimiter(math.text, quote, index + 1)
+		) {
+			quotes++;
+		}
+		const endsAtQuotedWord = math.text.endsWith(quote) && quotes % 2 === 0;
+		if (
+			closingQuote >= 0 &&
+			!endsAtQuotedWord &&
+			(quotes > 0 || math.raw.startsWith("$$") || /^\p{P}*$/u.test(source.slice(mathEnd, closingQuote)))
+		) {
+			return undefined;
+		}
 	}
 
 	let activeQuote: string | undefined = quote;
