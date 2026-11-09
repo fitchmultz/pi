@@ -7,6 +7,7 @@ import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
+import { Lexer } from "marked";
 import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
 import { SELECTION_METADATA } from "../src/selection-markers.ts";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
@@ -859,6 +860,115 @@ describe("Markdown component", () => {
 			assert.deepStrictEqual(lines, ["A map ℂ³ → ℂ³, xy, x-y, -x, 1/2, →, and s → ∞."]);
 		});
 
+		it("keeps math inside quotes and immediately before identifiers", () => {
+			const cases = [
+				[
+					String.raw`"$x/y$" and "$$x^2$$", $x/y$z, $a:b$c, $\text{"yes"}$bar, $\frac{a}{b}$x.`,
+					'"x/y" and "x²", x/yz, a:bc, "yes"bar, a/bx.',
+				],
+				["The derivative is '$f'(x) = x^2$'.", "The derivative is 'f'(x) = x²'."],
+				["The derivative is '$f'(x) = x^2$.'", "The derivative is 'f'(x) = x².'"],
+				["The derivative is '$f'(x) = x^2$!'", "The derivative is 'f'(x) = x²!'"],
+				["The derivative is '$f'$!' and $y^2$", "The derivative is 'f'!' and y²"],
+				["'$f'$?' and **bold**", "'f'?' and bold"],
+				["The derivative is $f'$; '$HOME'$x^2$", "The derivative is f'; '$HOME'x²"],
+				["Math $f''$; '$HOME'$x^2$!", "Math f''; '$HOME'x²!"],
+				["Math $f'$!; '$HOME'$x^2$", "Math f'!; '$HOME'x²"],
+				["Math $f'$!; '$HOME/bin/$USER'$x^2$", "Math f'!; '$HOME/bin/$USER'x²"],
+				["Math $f'$x; '$HOME'$x^2$", "Math f'x; '$HOME'x²"],
+				["echo $A x'$B'$f'$x", "echo A x'B'f'x"],
+				['"$HOME"$f\'$x', '"$HOME"f\'x'],
+				["'$HOME'$f'$x", "'$HOME'f'x"],
+				['"$HOME"$x^2$', '"$HOME"x²'],
+				['"$HOME"$x^2$!', '"$HOME"x²!'],
+				['x"$PREFIX"$x^2$', 'x"$PREFIX"x²'],
+				['"$ZZ" "$HOME"$x^2$', '"$ZZ" "$HOME"x²'],
+				['echo "$HOME" "$PREFIX"$x^2$', 'echo "$HOME" "$PREFIX"x²'],
+				['cmd "$VAR1" "$VAR2"$x^2$!', 'cmd "$VAR1" "$VAR2"x²!'],
+				["' $A' '$B'$x^2$", "' A' 'B'x²"],
+				['echo $A "$B"$x^2$', 'echo A "B"x²'],
+				['"$A""$B"$x^2$', '"$A""$B"x²'],
+				['"$A""$B"$x^2$!', '"$A""$B"x²!'],
+				['"$A""$B"$f\'(x)$', '"$A""$B"f\'(x)'],
+				['"$A""$B"$f\'\'(x)$', '"$A""$B"f\'\'(x)'],
+				['"$A""$B"$x\'_i$', '"$A""$B"x\'ᵢ'],
+				['"$a"$*"b"$f\'(x)$', '"$a"$*"b"f\'(x)'],
+				['"$(dirname "$X")"$f\'(x)$', '"$(dirname "$X")"f\'(x)'],
+				['echo "$A""$B"$f\'(x)$ and $y^2$', 'echo "$A""$B"f\'(x) and y²'],
+				['"$A""$B"$f\'(x)$ and **bold**', '"$A""$B"f\'(x) and bold'],
+				['"$A""$B"$f\'(x)$y', '"$A""$B"f\'(x)y'],
+				['"$A""$B"$f\'\'(x)$y', '"$A""$B"f\'\'(x)y'],
+				[String.raw`"$A""$B"$x^2+\text{"yes"}$`, '"$A""$B"x²+"yes"'],
+				[String.raw`"$A""$B"$a = \text{6"}$`, '"$A""$B"a = 6"'],
+				[String.raw`"$A""$B"$x = \text{6"} + y"$`, '"$A""$B"x = 6" + y"'],
+				[String.raw`"$A""$B"$r = \frac{1}{2}"$`, '"$A""$B"r = 1/2"'],
+				[String.raw`"$A""$B"$x_{i} = \alpha"$`, '"$A""$B"xᵢ = α"'],
+				[String.raw`"$A""$B"$x^{2} = \alpha"$`, '"$A""$B"x² = α"'],
+				[String.raw`"$A""$B"$x_{i} = \alpha"$ and $z^2$`, '"$A""$B"xᵢ = α" and z²'],
+				[String.raw`"$A""$B"$x+\text{6"}$`, '"$A""$B"x+6"'],
+				[String.raw`"$a"$*"b"$a = \text{6"}$`, '"$a"$*"b"a = 6"'],
+				[String.raw`"$(echo "$N")"$a = \text{6"}$`, '"$(echo "$N")"a = 6"'],
+				[String.raw`"$A""$B"$a = \text{6"}$ and $y^2$`, '"$A""$B"a = 6" and y²'],
+				['"$A""$B"$g(x)+f\'(x)+g\'$', '"$A""$B"g(x)+f\'(x)+g\''],
+				['"$A""$B"$g(x)+f\'+g\'$', '"$A""$B"g(x)+f\'+g\''],
+				['"$(echo "$N")"$g(x)+f\'+g\'$', '"$(echo "$N")"g(x)+f\'+g\''],
+				['"$A""$B"$a\' + b\'$', '"$A""$B"a\' + b\''],
+				['"$A""$B"$f\', g\'$', '"$A""$B"f\', g\''],
+				['"$A""$B"$u\'v\'$', '"$A""$B"u\'v\''],
+				['"$a"$*"b"$a\' + b\'$', '"$a"$*"b"a\' + b\''],
+				['"$(echo "$N")"$a\' + b\'$', '"$(echo "$N")"a\' + b\''],
+				['"$A""$B"$a\' + b\'$ and $y^2$', '"$A""$B"a\' + b\' and y²'],
+				['"$A""$B"$a\' + b\'$ and **bold**', '"$A""$B"a\' + b\' and bold'],
+				['"$(echo "$NESTED")"$x^2$', '"$(echo "$NESTED")"x²'],
+				['"$A""$B"**bold**', '"$A""$B"bold'],
+				['"$a"$*"b"**bold**', '"$a"$*"b"bold'],
+				['Output from "$a"$*"b" "$DIR" "$DIR/*" has \\(x^2\\).', 'Output from "$a"$*"b" "$DIR" "$DIR/*" has x².'],
+				['Output from "$a"$*"b" "$DIR" "$DIR/*" has **bold**.', 'Output from "$a"$*"b" "$DIR" "$DIR/*" has bold.'],
+				['The response was "$x^2$!"', 'The response was "x²!"'],
+				['The response was "$x$?"', 'The response was "x?"'],
+				['Output from "$(echo `echo $HOME`)" has \\(x^2\\).', 'Output from "$(echo `echo $HOME`)" has x².'],
+				['Output from "$(echo `echo $HOME`)" is **bold**.', 'Output from "$(echo `echo $HOME`)" is bold.'],
+				['Output from "$(echo [label $HOME](x))" has \\(x^2\\).', 'Output from "$(echo [label $HOME](x))" has x².'],
+				[
+					String.raw`The derivative is '$f'(x)=\frac{x^2}{2}$ for $x>0$'.`,
+					"The derivative is 'f'(x) = x²/2 for x > 0'.",
+				],
+				[
+					String.raw`The expression "$x^2 + \text{"yes"}$" is supported.`,
+					'The expression "x² + "yes"" is supported.',
+				],
+			];
+			for (const [source, expected] of cases) {
+				const lines = new Markdown(source, 0, 0, defaultMarkdownTheme)
+					.render(160)
+					.map((line) => stripAnsi(line).trimEnd());
+				assert.deepStrictEqual(lines, [expected], source);
+			}
+		});
+
+		it("keeps document reference links from suppressing formatting after shell words", () => {
+			const commands = [
+				['"$(echo [label $HOME][ref])"', "[ref]: x"],
+				['"$(echo [label $HOME][])"', "[label $HOME]: x"],
+				['"$(echo [label $HOME])"', "[label $HOME]: x"],
+			];
+			const tails = [
+				[String.raw`has \(x^2\).`, "has x²."],
+				["is **bold**.", "is bold."],
+			];
+			for (const [command, definition] of commands) {
+				for (const [tail, expectedTail] of tails) {
+					const source = `Output from ${command} ${tail}\n\n${definition}`;
+					const output = new Markdown(source, 0, 0, defaultMarkdownTheme)
+						.render(160)
+						.map((line) => stripAnsi(line).trimEnd())
+						.join("\n")
+						.trimEnd();
+					assert.strictEqual(output, `Output from ${command} ${expectedTail}`, source);
+				}
+			}
+		});
+
 		it("renders display dollar delimiters without Markdown escape corruption", () => {
 			const markdown = new Markdown(
 				String.raw`Before
@@ -958,11 +1068,135 @@ A=
 
 			assert.deepStrictEqual(lines, ["Costs $5 and $10 or $8k–$12k; use $x$, $HOME, and $" + "{PATH}."]);
 
-			const shellVariables = "Paths: $HOME/$USER and $XDG_CONFIG_HOME/$APP_CONFIG";
-			const shellLines = new Markdown(shellVariables, 0, 0, defaultMarkdownTheme)
-				.render(80)
-				.map((line) => stripAnsi(line).trimEnd());
-			assert.deepStrictEqual(shellLines, [shellVariables]);
+			const shellSources = [
+				"Paths: $HOME/$USER and $XDG_CONFIG_HOME/$APP_CONFIG",
+				'"$PREFIX/bin/node" "$HOME/.local/bin/pi" --model local-glm/glm-5.3-flash --thinking high',
+				'export PATH="$HOME/.local/bin:$PATH"',
+				'echo "$HOME/bin/$USER"',
+				'echo "$HOME" "$USER"',
+				`echo "\${HOME}/bin:\${PATH}"`,
+				'echo "$HOME" and "$PATH"',
+				'echo "$HOME" && echo "$PWD"',
+				'echo "$(pwd)" "$(whoami)"',
+				'echo "$prefix/bin/node" "$home/.local/bin/pi"',
+				'printf "%s\\n" "$HOME" "$PATH" "$SHELL"',
+				'echo "$?" "$$"',
+				'echo "$$" "$$"',
+				'echo "$$" "$HOME"',
+				'echo "$$" "$?"',
+				'printf "%s\\n" "$@" "$#"',
+				'echo "$!" "$-" "$*"',
+				`echo "\${PATH/"$HOME"/$PWD}"`,
+				`echo "$(printf '%s\\n' "$HOME")" "$PATH"`,
+				'echo "$(echo "$HOME")" "$PATH"',
+				'echo "$(dirname "$HOME/bin")" "$PATH"',
+				'echo "$(echo "$?")" "$PATH"',
+				'echo "$(echo $HOME)" "$PATH"',
+				'echo "$(echo $HOME)" */*.txt',
+				'echo "$(echo $HOME)" `cmd`',
+				`echo "\${A/"$B"/$C}" */*.txt`,
+				'echo "$a"$b"$c"',
+				'echo "$DIR" "$a"$b"$c"',
+				String.raw`echo "$DIR" "$a"$b\alpha"$c"`,
+				String.raw`echo "$A""$B"$b{x,y}\alpha"$c"`,
+				String.raw`echo "$DIR" "$a"$b{x,y}\text"$c"`,
+				String.raw`echo "$A""$B"$b_{x,y}\alpha"$c"`,
+				'echo "$A""$B"$b_{1..3}"$c"',
+				String.raw`echo "$A""$B"$b^{x,y}\alpha"$c"`,
+				"echo '$A''$B'$b_{1..3}'$c'",
+				"echo '$DIR' '$a'$b_{1..3}'$c'",
+				"echo '$(echo '$N')'$b_{1..3}'$c'",
+				'echo "$A" "$B"$*"C" "$D"',
+				`echo "$DIR" "$a"\${b}"$c"`,
+				'echo "$DIR" "$a"$(echo b)"$c"',
+				"echo '$DIR' '$a'$b'$c'",
+				"echo '$A' '$B'$*'C' '$D'",
+				'echo "$DIR" "$a"$b" "$c',
+				`echo "$DIR" "$a"\${b}" "$c`,
+				'echo "$pre"$mid"$suf"',
+				'echo "$a"$@"$b"',
+				'echo "$a"$*"$b"',
+				'echo "$a"$#"$b"',
+				'echo "$a"$!"$b"',
+				'echo "$a"$-"$b"',
+				'echo "$a"$?"$b"',
+				"echo '$@'$*'$#'",
+				'"$(find . -name "*.ts" -o -name "*.js")"',
+				'echo "$(basename "`pwd`")"',
+				'echo "$(echo "**bold**")"',
+				'echo "$(echo "[x](y)")"',
+				'echo "$HOME"/\\$USER',
+				'echo "$HOME"/\\*',
+				'find "$HOME" -name "*.ts" -o -name "*.js"',
+				'case "$X" in *linux*) echo linux ;; esac',
+				'ls "$HOME" */*.txt',
+			];
+			for (const shellSource of shellSources) {
+				const shellLines = new Markdown(shellSource, 0, 0, defaultMarkdownTheme)
+					.render(160)
+					.map((line) => stripAnsi(line).trimEnd());
+				assert.deepStrictEqual(shellLines, [shellSource], shellSource);
+			}
+		});
+
+		it("preserves quoted shell expansions while streaming and wrapping", () => {
+			const sources = [
+				'"$PREFIX/bin/node" "$HOME/.local/bin/pi" --model local-glm/glm-5.3-flash --thinking high',
+				'echo "$$" "$HOME"',
+				'echo "$a"$@"$b"',
+				'echo "$DIR" "$a"$b"$c"',
+				String.raw`echo "$DIR" "$a"$b\alpha"$c"`,
+				String.raw`echo "$A""$B"$b{x,y}\alpha"$c"`,
+				'echo "$A" "$B"$*"C" "$D"',
+				"echo '$@'$*'$#'",
+				'echo "$(echo $HOME)" */*.txt',
+				'echo "$(echo $HOME)" `cmd`',
+				`echo "\${A/"$B"/$C}" */*.txt`,
+			];
+			for (const source of sources) {
+				const markdown = new Markdown("", 0, 0, defaultMarkdownTheme);
+				for (let end = 1; end <= source.length; end++) {
+					const prefix = source.slice(0, end);
+					markdown.setText(prefix);
+					assert.deepStrictEqual(
+						markdown.render(160).map((line) => stripAnsi(line).trimEnd()),
+						[prefix.trimEnd()],
+					);
+				}
+				for (const width of [20, 40, 80]) {
+					const text = markdown
+						.render(width)
+						.map((line) => stripAnsi(line).trimEnd())
+						.join("");
+					assert.strictEqual(text.replace(/\s/g, ""), source.replace(/\s/g, ""));
+				}
+			}
+		});
+
+		it("does not re-lex the remaining paragraph for each quoted shell word", (t) => {
+			const inlineTokens = Lexer.prototype.inlineTokens;
+			let lexedCharacters = 0;
+			t.mock.method(
+				Lexer.prototype,
+				"inlineTokens",
+				function (this: Lexer, source: string, tokens: Parameters<typeof inlineTokens>[1]) {
+					lexedCharacters += source.length;
+					return inlineTokens.call(this, source, tokens);
+				},
+			);
+			for (const [word, expectedMath] of [
+				['"$(echo `echo $HOME`)"', "x²"],
+				["'$@'$*'$#'", "\\(x^2\\)"],
+			]) {
+				const source = `${Array(40).fill(word).join(" ")} has \\(x^2\\).`;
+				lexedCharacters = 0;
+				const output = new Markdown(source, 0, 0, defaultMarkdownTheme)
+					.render(4000)
+					.map((line) => stripAnsi(line).trimEnd());
+				assert.deepStrictEqual(output, [`${Array(40).fill(word).join(" ")} has ${expectedMath}.`]);
+				// One native analysis, one actual run, and native emphasis children fit within three input lengths.
+				assert.ok(lexedCharacters <= source.length * 3, `${lexedCharacters} characters lexed for ${source.length}`);
+			}
 		});
 
 		it("preserves unsupported and incomplete LaTeX exactly", () => {

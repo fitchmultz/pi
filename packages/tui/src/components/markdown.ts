@@ -1,6 +1,14 @@
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
-import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens, type TokensList } from "marked";
+import {
+	Marked,
+	type Token,
+	Tokenizer,
+	type TokenizerExtension,
+	type TokenizerThis,
+	type Tokens,
+	type TokensList,
+} from "marked";
 import markedCjkFriendly from "marked-cjk-friendly";
 import { renderLatex } from "../latex.ts";
 import { SELECTION_METADATA, SELECTION_SOURCE_END } from "../selection-markers.ts";
@@ -107,6 +115,275 @@ function looksLikePendingDollarMath(source: string): boolean {
 	return /\\[A-Za-z]+|[_^=+*/<>()[\]|±≤≥≠≈∈→⇒∞∫∑√-]/.test(source);
 }
 
+function hasQuotedMathSyntax(text: string): boolean {
+	if (text.startsWith("(") || text.startsWith("{")) return false;
+	const quote = findClosingDelimiter(text, '"', 0);
+	const beforeQuote = quote < 0 ? text : text.slice(0, quote);
+	if (findClosingDelimiter(beforeQuote, "_{", 0) >= 0 || findClosingDelimiter(beforeQuote, "^{", 0) >= 0) {
+		return true;
+	}
+	const prime = /\w+'/.exec(beforeQuote);
+	if (prime && prime.index + prime[0].length - 1 === findClosingDelimiter(beforeQuote, "'", 0)) {
+		const tail = beforeQuote.slice(prime.index + prime[0].length);
+		if (/^[(_^]/.test(tail) || findClosingDelimiter(tail, "'", 0) >= 0) {
+			return true;
+		}
+	}
+	const command = /\\[A-Za-z]+/.exec(beforeQuote);
+	if (!command) return false;
+	if (findClosingDelimiter(beforeQuote, "{", command.index + command[0].length) >= 0) return true;
+	let quotes = 0;
+	for (let index = quote; index >= 0; index = findClosingDelimiter(text, '"', index + 1)) {
+		quotes++;
+	}
+	return quotes % 2 === 0;
+}
+
+const SHELL_EXPANSION_START_REGEX = /^[A-Za-z_({0-9@*#?$!-]/;
+const SHELL_PARAMETER_BEFORE_QUOTE_REGEX = /^[0-9@*#?$!-]["']$/;
+
+interface QuotedShellSpans {
+	sourceLength: number;
+	spans: { start: number; end: number }[];
+	next: number;
+}
+
+const quotedShellSpans = new WeakMap<Token[], QuotedShellSpans>();
+
+function tokenizeQuotedShellWord(this: TokenizerThis, source: string, tokens: Token[]): Tokens.Text | undefined {
+	if ((source[0] !== '"' && source[0] !== "'") || source[1] !== "$") {
+		return undefined;
+	}
+	let cached = quotedShellSpans.get(tokens);
+	if (!cached) {
+		cached = planQuotedShellSpans(source, tokens, this);
+		quotedShellSpans.set(tokens, cached);
+	}
+	const offset = cached.sourceLength - source.length;
+	while (cached.spans[cached.next]?.end <= offset) {
+		cached.next++;
+	}
+	const span = cached.spans[cached.next];
+	if (span?.start !== offset) {
+		return undefined;
+	}
+	const raw = source.slice(0, span.end - offset);
+	return { type: "text", raw, text: raw };
+}
+
+function planQuotedShellSpans(source: string, prefix: readonly Token[], context: TokenizerThis): QuotedShellSpans {
+	const lexer = new shellMathParser.Lexer(shellMathParser.defaults);
+	lexer.tokens.links = context.lexer.tokens.links;
+	lexer.state = { ...context.lexer.state };
+	// Native math may have consumed a word's opener before this extension's first callback.
+	const fullSource = prefix.map((token) => token.raw).join("") + source;
+	const native = [];
+	const formatStarts = new Map<number, Token>();
+	let offset = 0;
+	for (const token of [...prefix, ...lexer.inlineTokens(source)]) {
+		const end = offset + token.raw.length;
+		native.push({ start: offset, end, token });
+		if (
+			token.type !== "text" &&
+			token.type !== "escape" &&
+			!(token.type === "latex" && (token.pending || SHELL_PARAMETER_BEFORE_QUOTE_REGEX.test(token.text)))
+		) {
+			formatStarts.set(offset, token);
+		}
+		offset = end;
+	}
+	const spans: QuotedShellSpans["spans"] = [];
+	const candidates = /["']\$/g;
+	let nativeIndex = 0;
+	for (let match = candidates.exec(fullSource); match; match = candidates.exec(fullSource)) {
+		const start = match.index;
+		while (native[nativeIndex]?.end <= start) {
+			nativeIndex++;
+		}
+		const parent = native[nativeIndex];
+		const previous = spans[spans.length - 1];
+		// An untouched native token owns its contents. A preserved opener exposes later words in that token.
+		if (
+			parent &&
+			parent.start < start &&
+			parent.token.type !== "text" &&
+			(!previous || previous.end <= parent.start)
+		) {
+			candidates.lastIndex = parent.end;
+			if (parent.token.type === "latex" && parent.end === start + 2) {
+				// A native math prime does not own the next quoted word's opener.
+				const word = scanQuotedShellWord(fullSource.slice(start), start, formatStarts, "native-prefix");
+				if (word && !word.quote) {
+					const closingQuote = findClosingDelimiter(fullSource, fullSource[start], start + 2);
+					if (closingQuote >= 0) candidates.lastIndex = closingQuote + 1;
+				}
+			}
+			continue;
+		}
+		const wordSource = fullSource.slice(start);
+		const quote = wordSource[0];
+		const math = tokenizeInlineLatex(wordSource.slice(1));
+		const quotedPid = wordSource.startsWith(`${quote}$$${quote}`);
+		const nestedExpansion = wordSource[2] === "(" || wordSource[2] === "{";
+		let dollarIndex = nativeIndex;
+		while (native[dollarIndex]?.end <= start + 1) {
+			dollarIndex++;
+		}
+		const dollar = native[dollarIndex]?.token;
+		if ((math?.pending && dollar?.type === "latex" && dollar.pending) || (!math && !quotedPid && !nestedExpansion)) {
+			const closingQuote = findClosingDelimiter(wordSource, quote, 2);
+			if (closingQuote >= 0) candidates.lastIndex = start + closingQuote + 1;
+			continue;
+		}
+		if (math && !quotedPid && !math.pending) {
+			const mathEnd = math.raw.length + 1;
+			const closingQuote = findClosingDelimiter(wordSource, quote, mathEnd);
+			let quotes = 0;
+			for (
+				let index = findClosingDelimiter(math.text, quote, 0);
+				index >= 0;
+				index = findClosingDelimiter(math.text, quote, index + 1)
+			) {
+				quotes++;
+			}
+			const endsAtQuotedWord = math.text.endsWith(quote) && quotes % 2 === 0;
+			if (
+				closingQuote >= 0 &&
+				!endsAtQuotedWord &&
+				!(
+					(nestedExpansion || math.text.endsWith(quote)) &&
+					SHELL_EXPANSION_START_REGEX.test(wordSource.slice(mathEnd))
+				) &&
+				((quotes > 0 && !SHELL_EXPANSION_START_REGEX.test(wordSource.slice(mathEnd))) ||
+					math.raw.startsWith("$$") ||
+					/^\p{P}*$/u.test(wordSource.slice(mathEnd, closingQuote)))
+			) {
+				candidates.lastIndex = start + closingQuote + 1;
+				continue;
+			}
+		}
+		const word = scanQuotedShellWord(wordSource, start, formatStarts, "shell-word");
+		if (!word) continue;
+		// An unmatched single quote can be a math prime, not an unfinished shell word.
+		if (
+			math &&
+			quote === "'" &&
+			word.quote &&
+			math.text.endsWith("'") &&
+			!SHELL_PARAMETER_BEFORE_QUOTE_REGEX.test(math.text)
+		)
+			continue;
+		const wordEnd = start + word.end;
+		let end = wordEnd;
+		for (let index = nativeIndex; native[index]?.start < wordEnd; index++) {
+			const span = native[index];
+			if (span.start >= start && span.token.type === "latex") end = Math.max(end, span.end);
+		}
+		if (previous && previous.end >= start) previous.end = Math.max(previous.end, end);
+		else spans.push({ start, end });
+		// Visit actual word boundaries even when a native math token reaches into the following word.
+		candidates.lastIndex = wordEnd;
+	}
+	return { sourceLength: fullSource.length, spans, next: 0 };
+}
+
+function scanQuotedShellWord(
+	source: string,
+	sourceOffset: number,
+	formatStarts: ReadonlyMap<number, Token>,
+	ownership: "native-prefix" | "shell-word" | "quoted-expansion",
+): { end: number; quote: string | undefined } | undefined {
+	const quote = source[0];
+	let activeQuote: string | undefined = quote;
+	const expansions: { closing: ")" | "}"; quote: string | undefined }[] = [];
+	let hasExpansion = false;
+	let primeMathStart: number | undefined;
+	let index = 1;
+	for (; index < source.length; index++) {
+		const character = source[index];
+		const next = source[index + 1];
+		if (!activeQuote && expansions.length === 0 && /\s/.test(character)) break;
+		if (character === "\n") return undefined;
+		if (character === "\\" && activeQuote !== "'") {
+			index++;
+			continue;
+		}
+		if (character === activeQuote) {
+			activeQuote = undefined;
+			if (expansions.length === 0) {
+				if (ownership === "quoted-expansion") {
+					index++;
+					break;
+				}
+				const format = formatStarts.get(sourceOffset + index + 1);
+				if (format) {
+					const continuationStart = index + format.raw.length - 1;
+					const continuation =
+						ownership === "shell-word" && format.type === "latex" && /["']\$$/.test(format.raw)
+							? scanQuotedShellWord(
+									source.slice(continuationStart),
+									sourceOffset + continuationStart,
+									formatStarts,
+									"quoted-expansion",
+								)
+							: undefined;
+					if (
+						ownership === "shell-word" &&
+						!(continuation && !continuation.quote) &&
+						(format.type !== "latex" ||
+							!SHELL_EXPANSION_START_REGEX.test(format.text) ||
+							!/["']/.test(format.text) ||
+							hasQuotedMathSyntax(format.text))
+					) {
+						index++;
+						break;
+					}
+					// A cross-word math token can contain shell quotes; an unmatched single quote can still be a prime.
+					if (format.type === "latex" && findClosingDelimiter(format.text, "'", 0) >= 0) {
+						primeMathStart ??= index + 1;
+					}
+				}
+			}
+			continue;
+		}
+		if (!activeQuote) {
+			if (character === '"' || character === "'") {
+				activeQuote = character;
+				continue;
+			}
+			const expansion = expansions[expansions.length - 1];
+			if (expansion && character === expansion.closing) {
+				expansions.pop();
+				activeQuote = expansion.quote;
+				continue;
+			}
+			if (character === "(" && expansion?.closing === ")") {
+				expansions.push({ closing: ")", quote: undefined });
+				continue;
+			}
+		}
+		if (character !== "$") continue;
+		if (expansions.length === 0 && activeQuote === quote) {
+			if (next === undefined) continue;
+			if (!SHELL_EXPANSION_START_REGEX.test(next)) return undefined;
+			hasExpansion = true;
+			if (next === "$") {
+				index++;
+				continue;
+			}
+		}
+		if (activeQuote !== "'" && (next === "(" || next === "{")) {
+			expansions.push({ closing: next === "(" ? ")" : "}", quote: activeQuote });
+			activeQuote = undefined;
+			index++;
+		}
+	}
+	if (activeQuote === "'" && primeMathStart !== undefined) {
+		return { end: primeMathStart, quote: undefined };
+	}
+	return hasExpansion ? { end: index, quote: activeQuote } : undefined;
+}
+
 function tokenizeInlineLatex(source: string): LatexToken | undefined {
 	let opening = "";
 	let closing = "";
@@ -198,6 +475,15 @@ function tokenizeBlockLatex(source: string): LatexToken | undefined {
 
 const LATEX_MARKDOWN_EXTENSIONS: readonly TokenizerExtension[] = [
 	{
+		name: "quotedShellWord",
+		level: "inline",
+		start(source) {
+			const match = /["']\$/.exec(source);
+			return match?.index;
+		},
+		tokenizer: tokenizeQuotedShellWord,
+	},
+	{
 		name: "latexBlock",
 		level: "block",
 		start(source) {
@@ -274,14 +560,22 @@ function removeHtmlCommentBlocks(tokens: Token[]): void {
 	}
 }
 
-const markdownParser = new Marked();
-markdownParser.setOptions({
-	tokenizer: new MarkdownTokenizer(),
-});
-markdownParser.use({
-	tokenizer: { emStrong: markedCjkFriendly().tokenizer?.emStrong },
-	extensions: [...LATEX_MARKDOWN_EXTENSIONS],
-});
+function createMarkdownParser(extensions: readonly TokenizerExtension[]): Marked {
+	const parser = new Marked();
+	parser.setOptions({
+		tokenizer: new MarkdownTokenizer(),
+	});
+	parser.use({
+		tokenizer: { emStrong: markedCjkFriendly().tokenizer?.emStrong },
+		extensions: [...extensions],
+	});
+	return parser;
+}
+
+const shellMathParser = createMarkdownParser(
+	LATEX_MARKDOWN_EXTENSIONS.filter((extension) => extension.name !== "quotedShellWord"),
+);
+const markdownParser = createMarkdownParser(LATEX_MARKDOWN_EXTENSIONS);
 
 /**
  * Default text styling for markdown content.
