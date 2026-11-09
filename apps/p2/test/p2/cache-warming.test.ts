@@ -229,6 +229,16 @@ test("does not assume asking for long retention upgrades an existing five-minute
 	assert.equal(state.recorded, 2);
 });
 
+test("stops after a failed refresh when the next retry would miss expiry", async (t) => {
+	const { state, start, advance } = setup(t);
+	state.failed = true;
+	start(600_000);
+	await advance(270_000);
+	assert.equal(state.sent.length, 1);
+	assert.equal(state.recorded, 0);
+	assert.equal(state.alive, 0);
+});
+
 test("keeps retrying a failed refresh while the original entry is still valid", async (t) => {
 	const { state, start, advance } = setup(t, "idle", { ...MODEL, promptCache: { short: 11 } });
 	state.failed = true;

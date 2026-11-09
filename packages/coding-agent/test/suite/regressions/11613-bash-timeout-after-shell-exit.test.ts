@@ -23,10 +23,9 @@ describe.skipIf(process.platform === "win32")("issue #11613 bash timeout after t
 	}
 
 	it("reports the shell's exit code when background processes kept writing until the timeout", async () => {
-		const message = await runExpectingTimeout(
-			"(while true; do echo tick; sleep 0.02; done) & sleep 0.2; echo boom >&2; exit 3",
-			1,
-		);
+		// One steady writer avoids shell-loop gaps triggering idle-pipe completion before the deadline.
+		const writer = `${JSON.stringify(process.execPath)} -e 'setInterval(() => process.stdout.write("tick\\n"), 20)'`;
+		const message = await runExpectingTimeout(`${writer} & sleep 0.2; echo boom >&2; exit 3`, 1);
 		expect(message).toContain("boom");
 		expect(message).toMatch(
 			/Command timed out after 1 seconds\. The shell exited with code 3 after 0\.\d seconds, but background processes it started kept writing output until the timeout\.$/,

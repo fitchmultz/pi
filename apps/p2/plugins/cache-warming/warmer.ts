@@ -105,6 +105,10 @@ export class ConversationWarmers {
 	}
 
 	#arm(conversationId: ConversationId, run: Run, dueAt: number): void {
+		if (dueAt >= run.timing.dispatchedAt + run.timing.ttlMs) {
+			this.stop(conversationId);
+			return;
+		}
 		run.timer = setTimeout(() => void this.#refresh(conversationId, run), Math.max(0, dueAt - Date.now()));
 	}
 

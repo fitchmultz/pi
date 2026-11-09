@@ -23,10 +23,12 @@ import type { CacheWarmingMode } from "./settings-manager.ts";
 
 export type { CacheWarmingAction, CacheWarmingDecision };
 
-function getCacheWarmingTiming(model: Model<Api>, options: SimpleStreamOptions | undefined) {
-	const ttlMs = getPromptCacheTtlMs(model, options);
-	const delayMs = ttlMs === undefined ? undefined : getCacheWarmingDelayMs(ttlMs);
-	if (ttlMs === undefined || delayMs === undefined) return undefined;
+function getCacheWarmingTiming(model: Model<Api>, options: SimpleStreamOptions | undefined, previousTtlMs?: number) {
+	const requestedTtlMs = getPromptCacheTtlMs(model, options);
+	if (requestedTtlMs === undefined) return undefined;
+	const ttlMs = Math.min(requestedTtlMs, previousTtlMs ?? requestedTtlMs);
+	const delayMs = getCacheWarmingDelayMs(ttlMs);
+	if (delayMs === undefined) return undefined;
 	return { ttlMs, delayMs, retention: getEffectiveCacheRetention(model, options) };
 }
 
@@ -294,7 +296,7 @@ export class CacheWarmer {
 					getCacheWarmingRequestOptions(run.options, run.controller.signal),
 					(model, options) => {
 						if (!this.validateRun(run) || this.refreshDeadlineMissed(run)) return;
-						const timing = getCacheWarmingTiming(model, options);
+						const timing = getCacheWarmingTiming(model, options, run.ttlMs);
 						if (!timing) this.stop("cache lifetime unavailable");
 						else Object.assign(run, timing);
 					},

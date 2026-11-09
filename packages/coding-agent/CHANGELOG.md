@@ -118,6 +118,7 @@
 - Fixed cancellation during post-run recovery or pre-settlement being reported as a finished run; `agent_settled.aborted` now remains `true` ([#10607](https://github.com/earendil-works/pi/issues/10607)).
 - Fixed cache overlap estimates crossing abandoned branches or presenting unknown read prices and expiry as measured facts. Recorded usage and cost totals remain complete.
 - Fixed cache warming using ambient rather than resolved credential retention and omitting one-hour writes and prompt-length pricing tiers. Native preparation drives scheduling; refreshes resolve current auth and headers and recheck context and dispatch deadlines.
+- Fixed cache warming treating a request for longer retention as an upgrade of an existing shorter-lived cache entry. Refreshes keep the shorter lifetime while using current retention for price estimates.
 - Fixed queued managed restarts to wait until admitted native work, including extension commands and handlers, completes.
 - Fixed custom extension UI leaking components that finish during factory initialization and losing editor text typed while an asynchronous factory is pending.
 - Fixed model-catalog compatibility checks crashing on npm 12's keyed `npm pack --json` metadata; release checks and workspace packing share the existing validation.

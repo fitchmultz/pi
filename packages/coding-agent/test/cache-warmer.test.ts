@@ -595,7 +595,9 @@ describe("cache warming", () => {
 			expect(session.messages).toEqual(history);
 			if (fixture.refreshRetention) {
 				expect.soft(session.cacheWarmingStatus?.state).toBe("scheduled");
-				expect.soft(session.cacheWarmingStatus?.nextWarmAt).toBe(Date.now() + refreshed.delayMs);
+				expect
+					.soft(session.cacheWarmingStatus?.nextWarmAt)
+					.toBe(Date.now() + Math.min(expected.delayMs, refreshed.delayMs));
 				expect.soft(session.cacheWarmingStatus?.decision?.missCost).toBeCloseTo(refreshed.missCost, 10);
 				expect(session.cacheWarmingStatus?.decision?.expectedSavings).toBeCloseTo(refreshed.expectedSavings);
 			} else {

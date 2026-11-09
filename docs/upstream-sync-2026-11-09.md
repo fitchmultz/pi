@@ -43,10 +43,11 @@ being scheduled as a one-hour request when stored credential environment values 
 the process environment.
 
 Each p2 refresh rechecks entry expiry after the host's phase decision and after auth preparation.
-Timers run from dispatch, not response completion. A successful refresh uses the shorter of
-the old and newly requested lifetimes. Anthropic documents that reading a five-minute entry
+Timers run from dispatch, not response completion. Both coding-agent and p2 keep the shorter of
+the old and newly requested lifetimes across refreshes. Anthropic documents that reading a five-minute entry
 [restarts its five-minute lifetime even when the new request asks for one hour](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#mixing-different-ttls).
-Failed refreshes retain best-effort retries while the current entry is still valid.
+A failed p2 refresh reuses its retry delay only when the retry can start before expiry.
+Otherwise it stops and releases the worker's keep-alive.
 
 The default is upstream's `idle`: warming may continue after the run settles, within the
 existing 30-minute idle window and savings threshold. An explicit `off` or `streaming`
@@ -68,6 +69,13 @@ Chord's browser also starts with an emulated light color scheme. Its stylesheet 
 black unstyled text; inheriting the host's dark theme made three assertions fail with white
 text. Theme tests still explicitly switch between dark and light. All nine stylesheet tests
 and all three page tests pass with these isolated settings in real Chrome on macOS.
+
+## Shell timeout fixture
+
+The Mac CI shell-timeout fixture returned the shell's exit code 3 after 0.4 seconds,
+before its one-second deadline. The case requires continuous background output.
+It now uses one Node interval writer instead of spawning a sleep process for each tick.
+The timeout and exit-code assertions are unchanged. Production shell helpers are unchanged.
 
 ## Verification
 
