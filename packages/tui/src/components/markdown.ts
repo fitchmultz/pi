@@ -107,6 +107,8 @@ function looksLikePendingDollarMath(source: string): boolean {
 	return /\\[A-Za-z]+|[_^=+*/<>()[\]|±≤≥≠≈∈→⇒∞∫∑√-]/.test(source);
 }
 
+const SHELL_EXPANSION_START_REGEX = /^[A-Za-z_({0-9@*#?$!-]/;
+
 function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 	const quote = source[0];
 	if ((quote !== '"' && quote !== "'") || source[1] !== "$") {
@@ -114,7 +116,8 @@ function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 	}
 	const math = tokenizeInlineLatex(source.slice(1));
 	const quotedPid = source.startsWith(`${quote}$$${quote}`);
-	if (math?.pending || (!math && !quotedPid)) {
+	const nestedExpansion = source[2] === "(" || source[2] === "{";
+	if (math?.pending || (!math && !quotedPid && !nestedExpansion)) {
 		return undefined;
 	}
 	if (math && !quotedPid) {
@@ -132,7 +135,10 @@ function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 		if (
 			closingQuote >= 0 &&
 			!endsAtQuotedWord &&
-			(quotes > 0 || math.raw.startsWith("$$") || /^\p{P}*$/u.test(source.slice(mathEnd, closingQuote)))
+			!(nestedExpansion && SHELL_EXPANSION_START_REGEX.test(source.slice(mathEnd))) &&
+			((quotes > 0 && !SHELL_EXPANSION_START_REGEX.test(source.slice(mathEnd))) ||
+				math.raw.startsWith("$$") ||
+				/^\p{P}*$/u.test(source.slice(mathEnd, closingQuote)))
 		) {
 			return undefined;
 		}
@@ -182,7 +188,7 @@ function tokenizeQuotedShellWord(source: string): Tokens.Text | undefined {
 			if (next === undefined) {
 				continue;
 			}
-			if (!/[A-Za-z_({0-9@*#?$!-]/.test(next)) {
+			if (!SHELL_EXPANSION_START_REGEX.test(next)) {
 				return undefined;
 			}
 			hasExpansion = true;
