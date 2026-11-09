@@ -291,7 +291,7 @@ function scanQuotedShellWord(
 	source: string,
 	sourceOffset: number,
 	formatStarts: ReadonlyMap<number, Token>,
-	ownership: "native-prefix" | "shell-word",
+	ownership: "native-prefix" | "shell-word" | "quoted-expansion",
 ): { end: number; quote: string | undefined } | undefined {
 	const quote = source[0];
 	let activeQuote: string | undefined = quote;
@@ -311,10 +311,25 @@ function scanQuotedShellWord(
 		if (character === activeQuote) {
 			activeQuote = undefined;
 			if (expansions.length === 0) {
+				if (ownership === "quoted-expansion") {
+					index++;
+					break;
+				}
 				const format = formatStarts.get(sourceOffset + index + 1);
 				if (format) {
+					const continuationStart = index + format.raw.length - 1;
+					const continuation =
+						ownership === "shell-word" && format.type === "latex" && format.raw.endsWith('"$')
+							? scanQuotedShellWord(
+									source.slice(continuationStart),
+									sourceOffset + continuationStart,
+									formatStarts,
+									"quoted-expansion",
+								)
+							: undefined;
 					if (
 						ownership === "shell-word" &&
+						!(continuation && !continuation.quote) &&
 						(format.type !== "latex" ||
 							!SHELL_EXPANSION_START_REGEX.test(format.text) ||
 							!/["']/.test(format.text) ||
