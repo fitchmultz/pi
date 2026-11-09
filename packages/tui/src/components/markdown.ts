@@ -119,21 +119,33 @@ const SHELL_EXPANSION_START_REGEX = /^[A-Za-z_({0-9@*#?$!-]/;
 
 interface NativeMathSpans {
 	sourceLength: number;
-	spans: { start: number; end: number }[];
+	spans: { start: number; end: number; type: Token["type"] }[];
 	next: number;
 }
 
 const nativeMathSpans = new WeakMap<Token[], NativeMathSpans>();
+const ignoredShellClosers = new WeakMap<Token[], number>();
 
 function tokenizeQuotedShellWord(this: TokenizerThis, source: string, tokens: Token[]): Tokens.Text | undefined {
 	const quote = source[0];
 	if ((quote !== '"' && quote !== "'") || source[1] !== "$") {
 		return undefined;
 	}
+	// A rejected candidate's closing quote must not become another shell-word opener.
+	if (ignoredShellClosers.get(tokens) === source.length) {
+		ignoredShellClosers.delete(tokens);
+		return undefined;
+	}
 	const math = tokenizeInlineLatex(source.slice(1));
 	const quotedPid = source.startsWith(`${quote}$$${quote}`);
 	const nestedExpansion = source[2] === "(" || source[2] === "{";
 	if (math?.pending || (!math && !quotedPid && !nestedExpansion)) {
+		if (!math) {
+			const closingQuote = findClosingDelimiter(source, quote, 2);
+			if (closingQuote >= 0) {
+				ignoredShellClosers.set(tokens, source.length - closingQuote);
+			}
+		}
 		return undefined;
 	}
 	if (math && !quotedPid) {
@@ -240,9 +252,7 @@ function preservedShellWordEnd(source: string, wordEnd: number, context: Tokeniz
 		let offset = 0;
 		for (const token of lexer.inlineTokens(source)) {
 			const end = offset + token.raw.length;
-			if (token.type === "latex") {
-				spans.push({ start: offset, end });
-			}
+			spans.push({ start: offset, end, type: token.type });
 			offset = end;
 		}
 		native = { sourceLength: source.length, spans, next: 0 };
@@ -258,7 +268,12 @@ function preservedShellWordEnd(source: string, wordEnd: number, context: Tokeniz
 		}
 		native.next++;
 		if (span.start >= offset) {
-			rawEnd = Math.max(rawEnd, span.end - offset);
+			if (span.type === "latex") {
+				rawEnd = Math.max(rawEnd, span.end - offset);
+			} else if (span.type !== "text") {
+				// Preserving Markdown syntax changes how later words are tokenized.
+				nativeMathSpans.delete(tokens);
+			}
 		}
 	}
 	return rawEnd;
