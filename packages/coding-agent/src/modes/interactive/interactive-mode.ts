@@ -4549,25 +4549,26 @@ export class InteractiveMode {
 		);
 	}
 
-	private static countDroppedThinkingBlocks(message: AssistantMessage): number {
-		let count = 0;
+	/** List the reason Anthropic reported for each thinking block it dropped from the request of `message`. */
+	private static droppedThinkingBlockReasons(message: AssistantMessage): unknown[] {
+		const reasons: unknown[] = [];
 		for (const diagnostic of message.diagnostics ?? []) {
 			if (diagnostic.type !== "anthropic_input_transformations") continue;
 			const transformations = diagnostic.details?.transformations;
 			if (!Array.isArray(transformations)) continue;
-			count += transformations.filter(
-				(transformation) =>
-					typeof transformation === "object" &&
-					transformation !== null &&
-					(transformation as Record<string, unknown>).type === "thinking_dropped",
-			).length;
+			for (const transformation of transformations as unknown[]) {
+				if (typeof transformation !== "object" || transformation === null) continue;
+				const { type, reason } = transformation as Record<string, unknown>;
+				if (type === "thinking_dropped") reasons.push(reason);
+			}
 		}
-		return count;
+		return reasons;
 	}
 
 	/**
 	 * Count the dropped thinking blocks that a response in the current context window need not
-	 * announce. The window starts at the branch's latest compaction.
+	 * announce. The window starts at the branch's latest compaction. A block counts whatever reason
+	 * its report gives: Anthropic drops a block once and reports one reason for it.
 	 *
 	 * - Reported: the highest count of an earlier response in the window. The last response is not
 	 *   enough: a report lists every block dropped from its request, and with message threads only
@@ -4581,7 +4582,7 @@ export class InteractiveMode {
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
 			if (entry.type === "message" && entry.message.role === "assistant") {
-				reported = Math.max(reported, InteractiveMode.countDroppedThinkingBlocks(entry.message));
+				reported = Math.max(reported, InteractiveMode.droppedThinkingBlockReasons(entry.message).length);
 			}
 			if (entry.type !== "compaction") continue;
 			if (reported > 0) return reported;
@@ -4602,23 +4603,27 @@ export class InteractiveMode {
 	private maybeShowThinkingDropNotice(message: AssistantMessage): void {
 		if (!this.settingsManager.getShowCacheMissNotices()) return;
 
-		const droppedCount = InteractiveMode.countDroppedThinkingBlocks(message);
+		const reasons = InteractiveMode.droppedThinkingBlockReasons(message);
+		const droppedCount = reasons.length;
 		if (droppedCount === 0) return;
 
 		// message_end reaches the UI before the current message is persisted,
 		// so the branch holds only the responses before it.
 		if (droppedCount <= InteractiveMode.countKnownThinkingDrops(this.sessionManager.getBranch())) return;
 
+		// Name a cause only when every dropped block reports it. Anthropic's other reasons (another
+		// organization or end user) and mixed or missing reasons get no cause.
+		const cause = reasons.every((reason) => reason === "prefix_binding_mismatch")
+			? " after the earlier prompt changed"
+			: reasons.every((reason) => reason === "model_binding_mismatch")
+				? " written by another model"
+				: "";
 		const noun = droppedCount === 1 ? "thinking block" : "thinking blocks";
 		this.chatContainer.addChild(new Spacer(1));
 		addChatActivity(
 			this.chatContainer,
 			new ThemedText(
-				() =>
-					theme.fg(
-						"warning",
-						`Anthropic dropped ${droppedCount} ${noun} after the earlier prompt changed (details in session)`,
-					),
+				() => theme.fg("warning", `Anthropic dropped ${droppedCount} ${noun}${cause} (details in session)`),
 				1,
 				0,
 			),

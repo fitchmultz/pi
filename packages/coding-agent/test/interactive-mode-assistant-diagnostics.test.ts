@@ -61,8 +61,12 @@ const maybeShowThinkingDropNotice = Reflect.get(InteractiveMode.prototype, "mayb
 	message: AssistantMessage,
 ) => void;
 
-/** An assistant message with `thinking` thinking blocks whose request had `drops` thinking blocks dropped. */
-function reply(drops: number, thinking = 0): AssistantMessage {
+/**
+ * An assistant message with `thinking` thinking blocks whose request had thinking blocks dropped:
+ * `drops` of them because the earlier prompt changed, or one for each listed reason.
+ */
+function reply(drops: number | Array<string | undefined>, thinking = 0): AssistantMessage {
+	const reasons = typeof drops === "number" ? Array.from({ length: drops }, () => "prefix_binding_mismatch") : drops;
 	return {
 		...message,
 		content: [
@@ -70,17 +74,17 @@ function reply(drops: number, thinking = 0): AssistantMessage {
 			{ type: "text", text: "reply" },
 		],
 		diagnostics:
-			drops === 0
+			reasons.length === 0
 				? undefined
 				: [
 						{
 							type: "anthropic_input_transformations",
 							timestamp: 1,
 							details: {
-								transformations: Array.from({ length: drops }, (_, index) => ({
+								transformations: reasons.map((reason, index) => ({
 									type: "thinking_dropped",
 									path: `messages.${index}.content.0`,
-									reason: "prefix_binding_mismatch",
+									...(reason === undefined ? {} : { reason }),
 								})),
 							},
 						},
@@ -128,6 +132,34 @@ describe("InteractiveMode assistant diagnostics", () => {
 		manager.appendMessage(message);
 
 		expect(thinkingDropNotice(manager, { ...message, timestamp: 2 })).toBe("");
+	});
+
+	test.each([
+		[
+			"names the earlier prompt when every dropped block reports a prefix mismatch",
+			["prefix_binding_mismatch", "prefix_binding_mismatch"],
+			" after the earlier prompt changed",
+		],
+		[
+			"names another model when every dropped block reports a model mismatch",
+			["model_binding_mismatch", "model_binding_mismatch"],
+			" written by another model",
+		],
+		["names no cause for another reason", ["organization_binding_mismatch", "organization_binding_mismatch"], ""],
+		["names no cause for mixed reasons", ["prefix_binding_mismatch", "model_binding_mismatch"], ""],
+		["names no cause when a reason is missing", ["prefix_binding_mismatch", undefined], ""],
+	])("%s", (_name, reasons, cause) => {
+		expect(thinkingDropNotice(SessionManager.inMemory(), reply(reasons))).toBe(
+			`Anthropic dropped 2 thinking blocks${cause} (details in session)`,
+		);
+	});
+
+	test("does not repeat a drop count whatever reason the reports give", () => {
+		const manager = SessionManager.inMemory();
+		manager.appendMessage(reply(["model_binding_mismatch", "prefix_binding_mismatch"]));
+		manager.appendMessage(reply(0, 1));
+
+		expect(thinkingDropNotice(manager, reply(["model_binding_mismatch", "prefix_binding_mismatch"]))).toBe("");
 	});
 
 	test("does not repeat a drop count reported before responses without a report", () => {
