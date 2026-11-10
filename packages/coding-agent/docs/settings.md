@@ -138,6 +138,13 @@ Without an argument, either command cycles **off → on → hybrid → off** fro
 
 User and assistant text stay visible. Tools, shell commands, custom messages/entries, and routine notices form **Activity** groups with live call/update counts and running/failure status. Fullscreen clicks open groups and individual cards; inner controls keep their behavior. Ctrl+O (`app.tools.expand`) expands or collapses all groups and details in either terminal mode. Expanded cards retain full output, nested codemode calls, and supported images.
 
+In an open group, a card that is not expanded takes at most two rows. Pi cuts the card itself, so tools and extensions need no compact-view code:
+
+- A tool card shows the first row of the call and the first row of the result.
+- A custom message or custom entry from an extension shows the first two rows of its normal rendering.
+
+Pi skips blank rows, shortens each row to the terminal width, and shows `[image]` in place of an inline image. A shell command card shows the command and its status with the last output line.
+
 Enabling on collapses existing groups and cards; enabling hybrid opens groups but keeps cards compact. Disabling it restores normal presentation without expanding everything. Visible thinking separates groups; hidden thinking does not. Input dialogs, the working indicator, warnings, and errors stay outside groups. Presentation changes do not alter model context or saved results; `/compact` remains the context-compaction command.
 
 ## Network and retries
