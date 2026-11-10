@@ -509,11 +509,13 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 
 	const transformedMessages = transformMessages(conversation, model, normalizeToolCallId);
 
-	// Only routes proven by real calls send the skip value: provider `google`, except Gemini before 3 and Deep Research.
+	// Only the Gemini API gets the skip value (provider `google` or its host), not Gemini before 3 or Deep Research.
+	// Real calls proved this through a gateway route of `google`; no call went to the host itself.
 	const geminiMajorVersion = getGeminiMajorVersion(model.id);
 	const sendsSkipValue =
 		model.api === "google-generative-ai" &&
-		model.provider === "google" &&
+		(model.provider === "google" ||
+			(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com")) &&
 		(geminiMajorVersion === undefined || geminiMajorVersion >= 3) &&
 		!model.id.startsWith("deep-research-");
 

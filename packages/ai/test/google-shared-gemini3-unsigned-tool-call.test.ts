@@ -6,18 +6,22 @@ import { normalizeContext } from "../src/utils/transcript.ts";
 const SKIP_VALUE = "skip_thought_signature_validator";
 /** The model a session used before it switched to Gemini; its tool calls carry no Google signature. */
 const OTHER_MODEL = { api: "openai-codex-responses", provider: "openai-codex", id: "gpt-6.1-sol" };
+const GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta";
+/** A gateway route to the Gemini API, the shape of the base URL the real calls used. */
+const GATEWAY_URL = "https://gateway.ai.cloudflare.com/v1/account/gateway/google-ai-studio/v1beta";
 
 function makeGemini3Model<TApi extends "google-generative-ai" | "google-vertex">(
 	api: TApi,
 	provider: Model<TApi>["provider"],
 	id = "gemini-3-pro-preview",
+	baseUrl = "https://example.com",
 ): Model<TApi> {
 	return {
 		id,
 		name: "Gemini 3 Pro Preview",
 		api,
 		provider,
-		baseUrl: "https://example.com",
+		baseUrl,
 		reasoning: true,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -109,16 +113,19 @@ describe("google-shared convertMessages — Gemini 3 unsigned tool calls", () =>
 	});
 
 	// The Gemini API rejects the request (400) when the first call of a step in the current turn has
-	// no signature. Real calls on provider `google` show which models need or accept the value.
-	it.each(["gemini-3-flash-preview", "gemini-4-carbon", "gemini-pro-latest", "gemma-4-31b-it"])(
-		"puts the skip value on the first call of another model's message for google/%s",
-		(id) => {
-			const model = makeGemini3Model("google-generative-ai", "google", id);
-			const contents = convertMessages(model, normalizeContext(makeContext(OTHER_MODEL)));
+	// no signature. Real calls on provider `google`, through a gateway route to that API, show which
+	// models need or accept the value. A provider under another ID reaches the same API by its host.
+	it.each([
+		makeGemini3Model("google-generative-ai", "google", "gemini-3-flash-preview", GEMINI_API_URL),
+		makeGemini3Model("google-generative-ai", "google", "gemini-4-carbon", GATEWAY_URL),
+		makeGemini3Model("google-generative-ai", "google", "gemini-pro-latest", GATEWAY_URL),
+		makeGemini3Model("google-generative-ai", "google", "gemma-4-31b-it", GATEWAY_URL),
+		makeGemini3Model("google-generative-ai", "my-gemini", "gemini-4-carbon", GEMINI_API_URL),
+	])("puts the skip value on the first call of another model's message for $provider/$id at $baseUrl", (model) => {
+		const contents = convertMessages(model, normalizeContext(makeContext(OTHER_MODEL)));
 
-			expect(functionCallSignatures(contents)).toEqual([SKIP_VALUE, undefined]);
-		},
-	);
+		expect(functionCallSignatures(contents)).toEqual([SKIP_VALUE, undefined]);
+	});
 
 	// The value stays on the message after its turn ends, so the request prefix does not change.
 	it("keeps the skip value on another model's message in a previous turn", () => {
@@ -136,13 +143,31 @@ describe("google-shared convertMessages — Gemini 3 unsigned tool calls", () =>
 	});
 
 	// No real call proved the value on these routes, so they send what upstream sends: no value.
+	// A base URL that only names the Gemini API host in its path, or that is no URL, is another route.
 	it.each([
 		makeGemini3Model("google-vertex", "google-vertex"),
-		makeGemini3Model("google-generative-ai", "opencode", "gemini-4-carbon"),
-		makeGemini3Model("google-generative-ai", "opencode-go", "gemini-4-argon"),
-		makeGemini3Model("google-generative-ai", "google", "gemini-2.5-flash"),
-		makeGemini3Model("google-generative-ai", "google", "deep-research-preview-04-2026"),
-	])("does not add the skip value for $provider/$id", (model) => {
+		makeGemini3Model(
+			"google-generative-ai",
+			"opencode",
+			"gemini-4-carbon",
+			"https://opencode.ai/inference/google/v1beta",
+		),
+		makeGemini3Model(
+			"google-generative-ai",
+			"opencode-go",
+			"gemini-4-argon",
+			"https://opencode.ai/inference/go/google/v1beta",
+		),
+		makeGemini3Model(
+			"google-generative-ai",
+			"my-proxy",
+			"gemini-4-carbon",
+			"https://proxy.example.com/generativelanguage.googleapis.com/v1beta",
+		),
+		makeGemini3Model("google-generative-ai", "my-gemini", "gemini-4-carbon", ""),
+		makeGemini3Model("google-generative-ai", "google", "gemini-2.5-flash", GEMINI_API_URL),
+		makeGemini3Model("google-generative-ai", "google", "deep-research-preview-04-2026", GEMINI_API_URL),
+	])("does not add the skip value for $provider/$id at $baseUrl", (model) => {
 		const contents = convertMessages(model, normalizeContext(makeContext(OTHER_MODEL)));
 
 		expect(functionCallSignatures(contents)).toEqual([undefined, undefined]);
