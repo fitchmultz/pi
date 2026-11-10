@@ -126,6 +126,7 @@ import type { ModelRuntime } from "./model-runtime.ts";
 import { type NestedCallSummary, NestedToolCallRunner } from "./nested-tool-calls.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
+import { describeRuntime, RUNTIME_RECORD_ENTRY, type RuntimeRecordData } from "./runtime-record.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
 import {
 	type BranchSummaryEntry,
@@ -467,6 +468,8 @@ export class AgentSession {
 	private _workingSessionMode?: WorkingSession["mode"];
 	workingSessionLaunch?: WorkingSessionLaunch;
 	private _restoredWorkingSession = false;
+	/** Startup record of a restored working session, kept off the journal until its first agent run. */
+	private _heldRuntimeRecord?: RuntimeRecordData;
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
@@ -1733,6 +1736,7 @@ export class AgentSession {
 
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "agent_start") this._journalHeldRuntimeRecord();
 		// An abort requested while the run was starting, e.g. during before_agent_start, stops it
 		// here. agent_start is awaited before the first request.
 		if (event.type === "agent_start" && this._agentRunAbortRequested) this.agent.abort();
@@ -4109,9 +4113,46 @@ export class AgentSession {
 		}
 
 		this._applyExtensionBindings(this._extensionRunner);
+		await this._recordRuntime(this._sessionStartEvent.reason);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		this._extensionRunner.reportUnhandledMcpServers();
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
+	}
+
+	/**
+	 * Journal what this session start runs with, ahead of the entries its `session_start` handlers append.
+	 * A session without a journal gets no record. A new session's record waits in memory with its other
+	 * setup entries until the first message creates the file, and a restored working session's until its
+	 * first agent run.
+	 */
+	private async _recordRuntime(trigger: SessionStartEvent["reason"]): Promise<void> {
+		if (!this.sessionManager.isPersisted()) return;
+		const launcherPid = this._managedHost?.owner.pid;
+		const data = await describeRuntime(
+			{
+				trigger,
+				process: {
+					pid: process.pid,
+					mode: this._extensionMode,
+					...(launcherPid === undefined ? {} : { launcherPid }),
+				},
+			},
+			this._resourceLoader,
+		);
+		// A restored working session's journal must still equal its saved state if this start is rolled
+		// back or tried again: a newer journal is refused. So its startup record waits for the first run.
+		if (this._restoredWorkingSession && trigger !== "reload") {
+			this._heldRuntimeRecord = data;
+			return;
+		}
+		this._journalHeldRuntimeRecord();
+		this.sessionManager.appendCustomEntry(RUNTIME_RECORD_ENTRY, data);
+	}
+
+	private _journalHeldRuntimeRecord(): void {
+		if (!this._heldRuntimeRecord) return;
+		this.sessionManager.appendCustomEntry(RUNTIME_RECORD_ENTRY, this._heldRuntimeRecord);
+		this._heldRuntimeRecord = undefined;
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -4545,6 +4586,7 @@ export class AgentSession {
 			this._extensionErrorListener;
 		if (hasBindings) {
 			await options?.beforeSessionStart?.();
+			await this._recordRuntime("reload");
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
 			this._extensionRunner.reportUnhandledMcpServers();
 			await this.extendResourcesFromExtensions("reload");

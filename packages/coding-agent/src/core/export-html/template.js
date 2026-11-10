@@ -465,8 +465,8 @@
           const label = flatNode.node.label;
           const isCurrentLeaf = entry.id === currentLeafId;
 
-          // Always show current leaf
-          if (isCurrentLeaf) return true;
+          // Always show current leaf, unless it is a custom entry: those have nothing to show in the transcript.
+          if (isCurrentLeaf && entry.type !== 'custom') return true;
 
           // Hide assistant messages with only tool calls (no text) unless error/aborted
           if (entry.type === 'message' && entry.message.role === 'assistant') {
