@@ -751,6 +751,17 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getLastChangelogForkCommit(): string | undefined {
+		return this.settings.lastChangelogForkCommit;
+	}
+
+	setLastChangelogForkCommit(commit: string): void {
+		this.beforeMutation?.();
+		this.globalSettings.lastChangelogForkCommit = commit;
+		this.markModified("lastChangelogForkCommit");
+		this.save();
+	}
+
 	getExtensionChangelogVersion(key: string): string | undefined {
 		return this.settings.extensionChangelogVersions?.[key];
 	}
