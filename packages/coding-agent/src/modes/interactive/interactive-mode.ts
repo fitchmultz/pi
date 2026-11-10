@@ -3433,63 +3433,67 @@ export class InteractiveMode {
 	}
 
 	private async handleRightClickPaste(): Promise<void> {
-		return this.session.workingSessionGate.run(async () => {
-			const target = this.renderer.getFocusedComponent();
-			const handleInput = target?.handleInput;
-			if (!target || !handleInput) return;
-			try {
-				const text = await readClipboardText();
-				if (!text || this.renderer.getFocusedComponent() !== target) return;
-				handleInput.call(target, `\x1b[200~${text}\x1b[201~`);
-				this.ui.requestRender();
-			} catch {
-				// Silently ignore clipboard errors (may not have permission, etc.)
-			}
-		});
+		return this.session.workingSessionGate.run(() => this._handleRightClickPaste());
+	}
+
+	private async _handleRightClickPaste(): Promise<void> {
+		const target = this.renderer.getFocusedComponent();
+		const handleInput = target?.handleInput;
+		if (!target || !handleInput) return;
+		try {
+			const text = await readClipboardText();
+			if (!text || this.renderer.getFocusedComponent() !== target) return;
+			handleInput.call(target, `\x1b[200~${text}\x1b[201~`);
+			this.ui.requestRender();
+		} catch {
+			// Silently ignore clipboard errors (may not have permission, etc.)
+		}
 	}
 
 	private async handleClipboardPaste(): Promise<void> {
-		return this.session.workingSessionGate.run(async () => {
-			try {
-				const filePaths = await readClipboardFilePaths();
-				if (filePaths) {
-					if (filePaths.some((filePath) => /\p{Cc}/u.test(filePath))) {
-						throw new Error("Clipboard file path contains control characters");
-					}
-					const paths = this.isBashMode ? filePaths.map(quoteIfNeeded).join(" ") : filePaths.join("\n");
-					const cursor = this.editor.getCursor?.();
-					const currentLine = cursor ? (this.editor.getText().split("\n")[cursor.line] ?? "") : "";
-					const characterBeforeCursor = cursor && cursor.col > 0 ? currentLine[cursor.col - 1] : "";
-					const characterAfterCursor = cursor ? currentLine[cursor.col] : "";
-					const leadingSpace = characterBeforeCursor && !/\s/.test(characterBeforeCursor) ? " " : "";
-					const trailingSpace = characterAfterCursor && !/\s/.test(characterAfterCursor) ? " " : "";
-					this.editor.insertTextAtCursor?.(`${leadingSpace}${paths}${trailingSpace}`);
-					this.ui.requestRender();
-					return;
-				}
+		return this.session.workingSessionGate.run(() => this._handleClipboardPaste());
+	}
 
-				const image = await readClipboardImage();
-				if (image) {
-					const tmpDir = os.tmpdir();
-					const ext = extensionForImageMimeType(image.mimeType) ?? "png";
-					const fileName = `pi-clipboard-${crypto.randomUUID()}.${ext}`;
-					const filePath = path.join(tmpDir, fileName);
-					fs.writeFileSync(filePath, Buffer.from(image.bytes));
-
-					this.editor.insertTextAtCursor?.(filePath);
-					this.ui.requestRender();
-					return;
+	private async _handleClipboardPaste(): Promise<void> {
+		try {
+			const filePaths = await readClipboardFilePaths();
+			if (filePaths) {
+				if (filePaths.some((filePath) => /\p{Cc}/u.test(filePath))) {
+					throw new Error("Clipboard file path contains control characters");
 				}
-
-				const text = await readClipboardText();
-				if (text) {
-					this.editor.insertTextAtCursor?.(text);
-					this.ui.requestRender();
-				}
-			} catch (error) {
-				this.showError(`Failed to paste from clipboard: ${error instanceof Error ? error.message : String(error)}`);
+				const paths = this.isBashMode ? filePaths.map(quoteIfNeeded).join(" ") : filePaths.join("\n");
+				const cursor = this.editor.getCursor?.();
+				const currentLine = cursor ? (this.editor.getText().split("\n")[cursor.line] ?? "") : "";
+				const characterBeforeCursor = cursor && cursor.col > 0 ? currentLine[cursor.col - 1] : "";
+				const characterAfterCursor = cursor ? currentLine[cursor.col] : "";
+				const leadingSpace = characterBeforeCursor && !/\s/.test(characterBeforeCursor) ? " " : "";
+				const trailingSpace = characterAfterCursor && !/\s/.test(characterAfterCursor) ? " " : "";
+				this.editor.insertTextAtCursor?.(`${leadingSpace}${paths}${trailingSpace}`);
+				this.ui.requestRender();
+				return;
 			}
-		});
+
+			const image = await readClipboardImage();
+			if (image) {
+				const tmpDir = os.tmpdir();
+				const ext = extensionForImageMimeType(image.mimeType) ?? "png";
+				const fileName = `pi-clipboard-${crypto.randomUUID()}.${ext}`;
+				const filePath = path.join(tmpDir, fileName);
+				fs.writeFileSync(filePath, Buffer.from(image.bytes));
+
+				this.editor.insertTextAtCursor?.(filePath);
+				this.ui.requestRender();
+				return;
+			}
+
+			const text = await readClipboardText();
+			if (text) {
+				this.editor.insertTextAtCursor?.(text);
+				this.ui.requestRender();
+			}
+		} catch (error) {
+			this.showError(`Failed to paste from clipboard: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	private handleStartupSubmit(text: string): void {
@@ -3497,226 +3501,232 @@ export class InteractiveMode {
 		this.showStatus("Startup is still in progress");
 	}
 
+	/**
+	 * Makes an inline UI callback run as working-session activity. The gate is read on each call,
+	 * because replacing the session replaces the gate.
+	 */
+	private asWorkingSessionActivity<Args extends unknown[], Result>(
+		callback: (...args: Args) => Promise<Result>,
+	): (...args: Args) => Promise<Result> {
+		return (...args) => this.session.workingSessionGate.run(() => callback(...args));
+	}
+
 	private setupEditorSubmitHandler(): void {
-		this.defaultEditor.onSubmit = (text: string) =>
-			this.session.workingSessionGate
-				.run(async () => {
-					text = text.trim();
-					if (!text) return;
+		const submit = this.asWorkingSessionActivity(async (text: string) => {
+			text = text.trim();
+			if (!text) return;
 
-					// Handle commands
-					const compactViewCommand = text.match(/^\/(?:compact-view|cv)(?=\s|$)/);
-					if (compactViewCommand) {
-						const action = text.slice(compactViewCommand[0].length).trim();
-						this.editor.setText("");
-						if (!action) {
-							this.setCompactView(
-								this.compactView === false ? true : this.compactView === true ? "hybrid" : false,
-							);
-							return;
-						}
-						if (action !== "on" && action !== "off" && action !== "hybrid" && action !== "toggle") {
-							this.showWarning("Usage: /compact-view [on|off|hybrid|toggle]");
-							return;
-						}
-						this.setCompactView(
-							action === "hybrid" ? "hybrid" : action === "toggle" ? !this.compactView : action === "on",
-						);
-						return;
-					}
-					if (text === "/settings") {
-						this.showSettingsSelector();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/scoped-models") {
-						this.editor.setText("");
-						await this.showModelsSelector();
-						return;
-					}
-					if (text === "/model" || text.startsWith("/model ")) {
-						const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
-						this.editor.setText("");
-						await this.handleModelCommand(searchTerm);
-						return;
-					}
-					if (text === "/thinking" || text.startsWith("/thinking ")) {
-						const searchTerm = text.startsWith("/thinking ") ? text.slice(10).trim() : undefined;
-						this.editor.setText("");
-						this.handleThinkingCommand(searchTerm);
-						return;
-					}
-					if (text === "/export" || text.startsWith("/export ")) {
-						await this.handleExportCommand(text);
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/import" || text.startsWith("/import ")) {
-						await this.handleImportCommand(text);
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/share") {
-						await this.handleShareCommand();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/bug" || text.startsWith("/bug ")) {
-						const hint = text.slice("/bug".length).trim();
-						this.editor.setText("");
-						await this.handleBugCommand(hint ? hint : undefined);
-						return;
-					}
-					if (text === "/copy") {
-						await this.handleCopyCommand();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/name" || text.startsWith("/name ")) {
-						this.handleNameCommand(text);
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/session") {
-						this.handleSessionCommand();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/changelog") {
-						this.handleChangelogCommand();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/hotkeys") {
-						this.handleHotkeysCommand();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/fork") {
-						this.showUserMessageSelector();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/clone") {
-						this.editor.setText("");
-						await this.handleCloneCommand();
-						return;
-					}
-					if (text === "/tree") {
-						this.showTreeSelector();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/trust") {
-						this.showTrustSelector();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/login" || text.startsWith("/login ")) {
-						const providerRef = text.startsWith("/login ") ? text.slice(7).trim() : undefined;
-						this.editor.setText("");
-						await this.handleLoginCommand(providerRef);
-						return;
-					}
-					if (text === "/logout") {
-						this.showOAuthSelector("logout");
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/new") {
-						this.editor.setText("");
-						await this.handleClearCommand();
-						return;
-					}
-					if (text === "/compact" || text.startsWith("/compact ")) {
-						const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
-						this.editor.setText("");
-						await this.handleCompactCommand(customInstructions);
-						return;
-					}
-					if (text === "/reload") {
-						this.editor.setText("");
-						await this.handleReloadCommand();
-						return;
-					}
-					if (text === "/debug") {
-						this.handleDebugCommand();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/arminsayshi") {
-						this.handleArminSaysHi();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/dementedelves") {
-						this.handleDementedDelves();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/resume") {
-						this.showSessionSelector();
-						this.editor.setText("");
-						return;
-					}
-					if (text === "/quit") {
-						this.editor.setText("");
-						await this.shutdown();
-						return;
-					}
+			// Handle commands
+			const compactViewCommand = text.match(/^\/(?:compact-view|cv)(?=\s|$)/);
+			if (compactViewCommand) {
+				const action = text.slice(compactViewCommand[0].length).trim();
+				this.editor.setText("");
+				if (!action) {
+					this.setCompactView(this.compactView === false ? true : this.compactView === true ? "hybrid" : false);
+					return;
+				}
+				if (action !== "on" && action !== "off" && action !== "hybrid" && action !== "toggle") {
+					this.showWarning("Usage: /compact-view [on|off|hybrid|toggle]");
+					return;
+				}
+				this.setCompactView(
+					action === "hybrid" ? "hybrid" : action === "toggle" ? !this.compactView : action === "on",
+				);
+				return;
+			}
+			if (text === "/settings") {
+				this.showSettingsSelector();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/scoped-models") {
+				this.editor.setText("");
+				await this.showModelsSelector();
+				return;
+			}
+			if (text === "/model" || text.startsWith("/model ")) {
+				const searchTerm = text.startsWith("/model ") ? text.slice(7).trim() : undefined;
+				this.editor.setText("");
+				await this.handleModelCommand(searchTerm);
+				return;
+			}
+			if (text === "/thinking" || text.startsWith("/thinking ")) {
+				const searchTerm = text.startsWith("/thinking ") ? text.slice(10).trim() : undefined;
+				this.editor.setText("");
+				this.handleThinkingCommand(searchTerm);
+				return;
+			}
+			if (text === "/export" || text.startsWith("/export ")) {
+				await this.handleExportCommand(text);
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/import" || text.startsWith("/import ")) {
+				await this.handleImportCommand(text);
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/share") {
+				await this.handleShareCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/bug" || text.startsWith("/bug ")) {
+				const hint = text.slice("/bug".length).trim();
+				this.editor.setText("");
+				await this.handleBugCommand(hint ? hint : undefined);
+				return;
+			}
+			if (text === "/copy") {
+				await this.handleCopyCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/name" || text.startsWith("/name ")) {
+				this.handleNameCommand(text);
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/session") {
+				this.handleSessionCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/changelog") {
+				this.handleChangelogCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/hotkeys") {
+				this.handleHotkeysCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/fork") {
+				this.showUserMessageSelector();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/clone") {
+				this.editor.setText("");
+				await this.handleCloneCommand();
+				return;
+			}
+			if (text === "/tree") {
+				this.showTreeSelector();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/trust") {
+				this.showTrustSelector();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/login" || text.startsWith("/login ")) {
+				const providerRef = text.startsWith("/login ") ? text.slice(7).trim() : undefined;
+				this.editor.setText("");
+				await this.handleLoginCommand(providerRef);
+				return;
+			}
+			if (text === "/logout") {
+				this.showOAuthSelector("logout");
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/new") {
+				this.editor.setText("");
+				await this.handleClearCommand();
+				return;
+			}
+			if (text === "/compact" || text.startsWith("/compact ")) {
+				const customInstructions = text.startsWith("/compact ") ? text.slice(9).trim() : undefined;
+				this.editor.setText("");
+				await this.handleCompactCommand(customInstructions);
+				return;
+			}
+			if (text === "/reload") {
+				this.editor.setText("");
+				await this.handleReloadCommand();
+				return;
+			}
+			if (text === "/debug") {
+				this.handleDebugCommand();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/arminsayshi") {
+				this.handleArminSaysHi();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/dementedelves") {
+				this.handleDementedDelves();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/resume") {
+				this.showSessionSelector();
+				this.editor.setText("");
+				return;
+			}
+			if (text === "/quit") {
+				this.editor.setText("");
+				await this.shutdown();
+				return;
+			}
 
-					// Handle bash command (! for normal, !! for excluded from context)
-					if (text.startsWith("!")) {
-						const isExcluded = text.startsWith("!!");
-						const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
-						if (command) {
-							if (this.session.isBashRunning) {
-								this.showWarning("A bash command is already running. Press Esc to cancel it first.");
-								this.editor.setText(text);
-								return;
-							}
-							this.editor.addToHistory?.(text);
-							await this.handleBashCommand(command, isExcluded);
-							this.isBashMode = false;
-							this.updateEditorBorderColor();
-							return;
-						}
-					}
-
-					// Queue input during compaction (extension commands execute immediately)
-					if (this.session.isCompacting) {
-						if (this.isExtensionCommand(text)) {
-							this.editor.addToHistory?.(text);
-							this.editor.setText("");
-							await this.session.prompt(text);
-						} else {
-							this.queueCompactionMessage(text, "steer");
-						}
+			// Handle bash command (! for normal, !! for excluded from context)
+			if (text.startsWith("!")) {
+				const isExcluded = text.startsWith("!!");
+				const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
+				if (command) {
+					if (this.session.isBashRunning) {
+						this.showWarning("A bash command is already running. Press Esc to cancel it first.");
+						this.editor.setText(text);
 						return;
 					}
-
-					// If streaming, use prompt() with steer behavior
-					// This handles extension commands (execute immediately), prompt template expansion, and queueing
-					if (this.session.isStreaming) {
-						this.editor.addToHistory?.(text);
-						this.editor.setText("");
-						await this.session.prompt(text, { streamingBehavior: "steer" });
-						this.updatePendingMessagesDisplay();
-						this.ui.requestRender();
-						return;
-					}
-
-					// Normal message submission
-					// First, move any pending bash components to chat
-					this.flushPendingBashComponents();
-
-					if (this.restoredInputPaused && this.compactionQueuedMessages.length) await this.flushCompactionQueue();
-					this.restoredInputPaused = false;
-					this.pendingUserInputs.push(text);
-					if (this.onInputCallback) this.onInputCallback(this.pendingUserInputs.shift()!);
 					this.editor.addToHistory?.(text);
-				})
-				.catch((error: unknown) => this.showError(String(error)));
+					await this.handleBashCommand(command, isExcluded);
+					this.isBashMode = false;
+					this.updateEditorBorderColor();
+					return;
+				}
+			}
+
+			// Queue input during compaction (extension commands execute immediately)
+			if (this.session.isCompacting) {
+				if (this.isExtensionCommand(text)) {
+					this.editor.addToHistory?.(text);
+					this.editor.setText("");
+					await this.session.prompt(text);
+				} else {
+					this.queueCompactionMessage(text, "steer");
+				}
+				return;
+			}
+
+			// If streaming, use prompt() with steer behavior
+			// This handles extension commands (execute immediately), prompt template expansion, and queueing
+			if (this.session.isStreaming) {
+				this.editor.addToHistory?.(text);
+				this.editor.setText("");
+				await this.session.prompt(text, { streamingBehavior: "steer" });
+				this.updatePendingMessagesDisplay();
+				this.ui.requestRender();
+				return;
+			}
+
+			// Normal message submission
+			// First, move any pending bash components to chat
+			this.flushPendingBashComponents();
+
+			if (this.restoredInputPaused && this.compactionQueuedMessages.length) await this.flushCompactionQueue();
+			this.restoredInputPaused = false;
+			this.pendingUserInputs.push(text);
+			if (this.onInputCallback) this.onInputCallback(this.pendingUserInputs.shift()!);
+			this.editor.addToHistory?.(text);
+		});
+		this.defaultEditor.onSubmit = (text) => submit(text).catch((error: unknown) => this.showError(String(error)));
 	}
 
 	private subscribeToAgent(): void {
@@ -5063,25 +5073,27 @@ export class InteractiveMode {
 	}
 
 	private async handleOpenExternalEditor(): Promise<void> {
-		return this.session.workingSessionGate.run(async () => {
-			const editorCmd = this.settingsManager.getExternalEditorCommand();
-			const content = this.editor.getExpandedText?.() ?? this.editor.getText();
-			this.ui.stop();
-			try {
-				const result = await editInExternalEditor({
-					command: editorCmd,
-					content,
-				});
-				if (result.status === "complete") {
-					this.editor.setText(result.content);
-				} else {
-					this.showStatus(result.message);
-				}
-			} finally {
-				this.ui.start();
-				this.ui.requestRender(true);
+		return this.session.workingSessionGate.run(() => this._handleOpenExternalEditor());
+	}
+
+	private async _handleOpenExternalEditor(): Promise<void> {
+		const editorCmd = this.settingsManager.getExternalEditorCommand();
+		const content = this.editor.getExpandedText?.() ?? this.editor.getText();
+		this.ui.stop();
+		try {
+			const result = await editInExternalEditor({
+				command: editorCmd,
+				content,
+			});
+			if (result.status === "complete") {
+				this.editor.setText(result.content);
+			} else {
+				this.showStatus(result.message);
 			}
-		});
+		} finally {
+			this.ui.start();
+			this.ui.requestRender(true);
+		}
 	}
 
 	// =========================================================================
@@ -5252,70 +5264,33 @@ export class InteractiveMode {
 	}
 
 	private async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		return this.session.workingSessionGate.run(async () => {
-			if (this.compactionQueuedMessages.length === 0) {
-				return;
-			}
+		return this.session.workingSessionGate.run(() => this._flushCompactionQueue(options));
+	}
 
-			const queuedMessages = [...this.compactionQueuedMessages];
-			this.compactionQueuedMessages = [];
+	private async _flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
+		if (this.compactionQueuedMessages.length === 0) {
+			return;
+		}
+
+		const queuedMessages = [...this.compactionQueuedMessages];
+		this.compactionQueuedMessages = [];
+		this.updatePendingMessagesDisplay();
+
+		const restoreQueue = (error: unknown) => {
+			this.session.clearQueue();
+			this.compactionQueuedMessages = queuedMessages;
 			this.updatePendingMessagesDisplay();
+			this.showError(
+				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+			);
+		};
 
-			const restoreQueue = (error: unknown) => {
-				this.session.clearQueue();
-				this.compactionQueuedMessages = queuedMessages;
-				this.updatePendingMessagesDisplay();
-				this.showError(
-					`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
-						error instanceof Error ? error.message : String(error)
-					}`,
-				);
-			};
-
-			try {
-				if (options?.willRetry) {
-					// When retry is pending, queue messages for the retry turn
-					for (const message of queuedMessages) {
-						if (this.isExtensionCommand(message.text)) {
-							await this.session.prompt(message.text);
-						} else if (message.mode === "followUp") {
-							await this.session.followUp(message.text);
-						} else {
-							await this.session.steer(message.text);
-						}
-					}
-					this.updatePendingMessagesDisplay();
-					return;
-				}
-
-				// Find first non-extension-command message to use as prompt
-				const firstPromptIndex = queuedMessages.findIndex((message) => !this.isExtensionCommand(message.text));
-				if (firstPromptIndex === -1) {
-					// All extension commands - execute them all
-					for (const message of queuedMessages) {
-						await this.session.prompt(message.text);
-					}
-					return;
-				}
-
-				// Execute any extension commands before the first prompt
-				const preCommands = queuedMessages.slice(0, firstPromptIndex);
-				const firstPrompt = queuedMessages[firstPromptIndex];
-				const rest = queuedMessages.slice(firstPromptIndex + 1);
-
-				for (const message of preCommands) {
-					await this.session.prompt(message.text);
-				}
-
-				// Start a prompt when idle, or queue it into a run still finishing compaction.
-				const promptPromise = this.session
-					.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode })
-					.catch((error) => {
-						restoreQueue(error);
-					});
-
-				// Queue remaining messages
-				for (const message of rest) {
+		try {
+			if (options?.willRetry) {
+				// When retry is pending, queue messages for the retry turn
+				for (const message of queuedMessages) {
 					if (this.isExtensionCommand(message.text)) {
 						await this.session.prompt(message.text);
 					} else if (message.mode === "followUp") {
@@ -5325,11 +5300,50 @@ export class InteractiveMode {
 					}
 				}
 				this.updatePendingMessagesDisplay();
-				void promptPromise;
-			} catch (error) {
-				restoreQueue(error);
+				return;
 			}
-		});
+
+			// Find first non-extension-command message to use as prompt
+			const firstPromptIndex = queuedMessages.findIndex((message) => !this.isExtensionCommand(message.text));
+			if (firstPromptIndex === -1) {
+				// All extension commands - execute them all
+				for (const message of queuedMessages) {
+					await this.session.prompt(message.text);
+				}
+				return;
+			}
+
+			// Execute any extension commands before the first prompt
+			const preCommands = queuedMessages.slice(0, firstPromptIndex);
+			const firstPrompt = queuedMessages[firstPromptIndex];
+			const rest = queuedMessages.slice(firstPromptIndex + 1);
+
+			for (const message of preCommands) {
+				await this.session.prompt(message.text);
+			}
+
+			// Start a prompt when idle, or queue it into a run still finishing compaction.
+			const promptPromise = this.session
+				.prompt(firstPrompt.text, { streamingBehavior: firstPrompt.mode })
+				.catch((error) => {
+					restoreQueue(error);
+				});
+
+			// Queue remaining messages
+			for (const message of rest) {
+				if (this.isExtensionCommand(message.text)) {
+					await this.session.prompt(message.text);
+				} else if (message.mode === "followUp") {
+					await this.session.followUp(message.text);
+				} else {
+					await this.session.steer(message.text);
+				}
+			}
+			this.updatePendingMessagesDisplay();
+			void promptPromise;
+		} catch (error) {
+			restoreQueue(error);
+		}
 	}
 
 	/** Move pending bash components from pending area to chat */
@@ -6365,15 +6379,17 @@ export class InteractiveMode {
 
 	/** `onBack` reopens the selector the login was started from when the user cancels it. */
 	private async startProviderLogin(providerOption: AuthSelectorProvider, onBack?: () => void): Promise<void> {
-		return this.session.workingSessionGate.run(async () => {
-			if (providerOption.authType === "oauth") {
-				await this.showLoginDialog(providerOption.id, providerOption.name, onBack);
-			} else if (providerOption.method?.login) {
-				await this.showApiKeyLoginDialog(providerOption.id, providerOption.name, onBack);
-			} else {
-				this.showAmbientAuthDialog(providerOption, onBack);
-			}
-		});
+		return this.session.workingSessionGate.run(() => this._startProviderLogin(providerOption, onBack));
+	}
+
+	private async _startProviderLogin(providerOption: AuthSelectorProvider, onBack?: () => void): Promise<void> {
+		if (providerOption.authType === "oauth") {
+			await this.showLoginDialog(providerOption.id, providerOption.name, onBack);
+		} else if (providerOption.method?.login) {
+			await this.showApiKeyLoginDialog(providerOption.id, providerOption.name, onBack);
+		} else {
+			this.showAmbientAuthDialog(providerOption, onBack);
+		}
 	}
 
 	private showLoginAuthTypeSelector(providerOptions?: AuthSelectorProvider[]): void {
@@ -6499,69 +6515,68 @@ export class InteractiveMode {
 	}
 
 	private async showOAuthSelector(mode: "login" | "logout"): Promise<void> {
-		return this.session.workingSessionGate.run(async () => {
-			if (mode === "login") {
-				this.showLoginAuthTypeSelector();
-				return;
-			}
+		return this.session.workingSessionGate.run(() => this._showOAuthSelector(mode));
+	}
 
-			let providerOptions: AuthSelectorProvider[];
-			try {
-				providerOptions = await this.getLogoutProviderOptions();
-			} catch (error) {
-				this.showError(
-					`Could not read stored credentials: ${error instanceof Error ? error.message : String(error)}`,
-				);
-				return;
-			}
-			if (providerOptions.length === 0) {
-				this.showStatus(
-					"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
-				);
-				return;
-			}
+	private async _showOAuthSelector(mode: "login" | "logout"): Promise<void> {
+		if (mode === "login") {
+			this.showLoginAuthTypeSelector();
+			return;
+		}
 
-			this.showSelector((done) => {
-				const selector = new OAuthSelectorComponent(
-					mode,
-					providerOptions,
-					(providerId: string) =>
-						this.session.workingSessionGate.run(async () => {
-							done();
+		let providerOptions: AuthSelectorProvider[];
+		try {
+			providerOptions = await this.getLogoutProviderOptions();
+		} catch (error) {
+			this.showError(`Could not read stored credentials: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		if (providerOptions.length === 0) {
+			this.showStatus(
+				"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
+			);
+			return;
+		}
 
-							const providerOption = providerOptions.find((provider) => provider.id === providerId);
-							if (!providerOption) {
-								return;
-							}
+		this.showSelector((done) => {
+			const selector = new OAuthSelectorComponent(
+				mode,
+				providerOptions,
+				this.asWorkingSessionActivity(async (providerId: string) => {
+					done();
 
-							try {
-								await this.session.modelRuntime.logout(providerOption.id, {
-									signal: AbortSignal.timeout(15_000),
-								});
-								await this.updateAvailableProviderCount();
-								const message =
-									providerOption.authType === "oauth"
-										? `Logged out of ${providerOption.name}`
-										: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
-								this.showStatus(message);
-							} catch (error: unknown) {
-								const message = error instanceof Error ? error.message : String(error);
-								this.showError(
-									error instanceof CredentialSynchronizationError
-										? `Credentials removed for ${providerOption.name}, but local model state could not be synchronized: ${message}`
-										: `Logout failed: ${message}`,
-								);
-							}
-						}),
-					() => {
-						done();
-						this.ui.requestRender();
-					},
-					undefined,
-					this.ui,
-				);
-				return { component: selector, focus: selector, dispose: () => selector.dispose() };
-			});
+					const providerOption = providerOptions.find((provider) => provider.id === providerId);
+					if (!providerOption) {
+						return;
+					}
+
+					try {
+						await this.session.modelRuntime.logout(providerOption.id, {
+							signal: AbortSignal.timeout(15_000),
+						});
+						await this.updateAvailableProviderCount();
+						const message =
+							providerOption.authType === "oauth"
+								? `Logged out of ${providerOption.name}`
+								: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
+						this.showStatus(message);
+					} catch (error: unknown) {
+						const message = error instanceof Error ? error.message : String(error);
+						this.showError(
+							error instanceof CredentialSynchronizationError
+								? `Credentials removed for ${providerOption.name}, but local model state could not be synchronized: ${message}`
+								: `Logout failed: ${message}`,
+						);
+					}
+				}),
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				undefined,
+				this.ui,
+			);
+			return { component: selector, focus: selector, dispose: () => selector.dispose() };
 		});
 	}
 

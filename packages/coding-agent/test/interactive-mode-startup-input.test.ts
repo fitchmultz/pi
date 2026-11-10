@@ -18,6 +18,7 @@ type SubmitContext = {
 	flushPendingBashComponents: () => void;
 	onInputCallback?: (text: string) => void;
 	pendingUserInputs: string[];
+	asWorkingSessionActivity: unknown;
 };
 
 type InputContext = {
@@ -55,6 +56,7 @@ function createSubmitContext(): SubmitContext {
 		},
 		flushPendingBashComponents: vi.fn(),
 		pendingUserInputs: [],
+		asWorkingSessionActivity: Reflect.get(InteractiveMode.prototype, "asWorkingSessionActivity"),
 	};
 }
 

@@ -24,6 +24,7 @@ test("native image errors abort paste without reading text or changing the edito
 	vi.stubEnv("TERMUX_VERSION", "");
 	const context = {
 		session: { workingSessionGate: new WorkingSessionGate() },
+		_handleClipboardPaste: Reflect.get(InteractiveMode.prototype, "_handleClipboardPaste"),
 		editor: { insertTextAtCursor: vi.fn() },
 		showError: vi.fn(),
 		ui: { requestRender: vi.fn() },

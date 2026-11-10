@@ -32,6 +32,7 @@ test("Finder file paths take precedence over their icon image", async () => {
 	const insertTextAtCursor = vi.fn<(text: string) => void>();
 	const context = {
 		session: { workingSessionGate: new WorkingSessionGate() },
+		_handleClipboardPaste: Reflect.get(InteractiveMode.prototype, "_handleClipboardPaste"),
 		editor: { insertTextAtCursor },
 		showError: vi.fn(),
 		ui: { requestRender: vi.fn() },
@@ -51,6 +52,7 @@ test("clipboard file paths containing terminal control characters are rejected",
 	mocks.readClipboardFilePaths.mockResolvedValue(["/tmp/photo\x1b]0;unsafe\x07.png"]);
 	const context = {
 		session: { workingSessionGate: new WorkingSessionGate() },
+		_handleClipboardPaste: Reflect.get(InteractiveMode.prototype, "_handleClipboardPaste"),
 		editor: { insertTextAtCursor },
 		showError,
 		ui: { requestRender: vi.fn() },
@@ -73,6 +75,7 @@ test("native file-path errors are shown without falling through to the icon imag
 	mocks.readClipboardFilePaths.mockRejectedValue(new Error("Native clipboard file read failed"));
 	const context = {
 		session: { workingSessionGate: new WorkingSessionGate() },
+		_handleClipboardPaste: Reflect.get(InteractiveMode.prototype, "_handleClipboardPaste"),
 		editor: { insertTextAtCursor: vi.fn() },
 		showError,
 		ui: { requestRender: vi.fn() },
@@ -98,6 +101,7 @@ test.each([
 	mocks.readClipboardFilePaths.mockResolvedValue(["/tmp/photo.png"]);
 	const context = {
 		session: { workingSessionGate: new WorkingSessionGate() },
+		_handleClipboardPaste: Reflect.get(InteractiveMode.prototype, "_handleClipboardPaste"),
 		editor: {
 			getCursor: () => ({ line: 0, col: cursorCol }),
 			getText: () => editorText,
@@ -125,6 +129,7 @@ test("bash mode shell-quotes file paths and inserts them as arguments", async ()
 	]);
 	const context = {
 		session: { workingSessionGate: new WorkingSessionGate() },
+		_handleClipboardPaste: Reflect.get(InteractiveMode.prototype, "_handleClipboardPaste"),
 		editor: {
 			getCursor: () => ({ line: 0, col: 3 }),
 			getText: () => "catDEST",
