@@ -807,7 +807,7 @@ describe("RPC shutdown triggers", () => {
 		}
 	});
 
-	// #11599: a second ctx.shutdown() during cleanup is ignored.
+	// A second ctx.shutdown() during cleanup is ignored: a repeated request cannot restart cleanup.
 	it("lets a shutdown started by an extension request finish when the extension requests it again", async () => {
 		let requestShutdown: (() => void) | undefined;
 		const { runtimeHost, exitSpy, finishDispose, cleanup } = await startWithSlowDispose(
