@@ -621,6 +621,9 @@ describe("compact Activity and messages", () => {
 			},
 			undefined,
 			0,
+			[],
+			undefined,
+			undefined,
 			true,
 		);
 		expect(component.render(12)).toHaveLength(2);
@@ -634,6 +637,9 @@ describe("compact Activity and messages", () => {
 			() => new Text("Needs attention\nquestion\nchoices", 0, 0),
 			undefined,
 			0,
+			[],
+			undefined,
+			undefined,
 			true,
 		);
 		expect(important.render(40)).toHaveLength(4);
