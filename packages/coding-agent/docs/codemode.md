@@ -123,7 +123,7 @@ What `tools.read()` resolves to:
 | A `json` selection | The formatted selection, by the same rules: all of it up to 1 MiB without `limit`. |
 | An image | An image block `{ type: "image", data, mimeType, note }` that `image()` shows. `data` is the base64 image the model would see and `note` the text that goes with it, such as resize hints. |
 
-Where a script prints the whole text of a longer file unchanged, with `text()`, `show()`, `return`, or inside JSON, the model sees the text of a direct `read` instead: the first 2000 lines or 50KB and the notice with the offsets to continue from. Text the script selects or changes is printed as it is.
+Where a script prints the whole text of a longer file unchanged, with `text()`, `show()`, `return`, or inside JSON, the model sees the text of a direct `read` instead, when that is shorter: the first 2000 lines or 50KB and the notice with the offsets to continue from. Text the script selects or changes is printed as it is.
 
 Reuse instructions and reference documents whose full text remains in context. After a change or compaction, read the missing material again. Full output remains available for inspection; these practices do not change tool limits or hide errors.
 

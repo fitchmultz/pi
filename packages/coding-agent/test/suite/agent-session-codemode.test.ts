@@ -779,6 +779,40 @@ describe("codemode options and store", () => {
 		);
 	});
 
+	it("prints a script's output unchanged when a call's string value is empty or shorter than its text", async () => {
+		const search = (name: string, structuredContent: string): AgentTool => ({
+			name,
+			label: name,
+			description: `${name} tool`,
+			parameters: Type.Object({}),
+			outputSchema: Type.String(),
+			execute: async () => ({
+				content: [{ type: "text", text: "No matches found." }],
+				details: {},
+				structuredContent,
+			}),
+		});
+		const harness = await createHarness({
+			initialActiveToolNames: ["codemode", "search", "grade"],
+			extensionFactories: [
+				createCodemodeExtension(),
+				(pi: ExtensionAPI) => {
+					pi.registerTool(createToolDefinitionFromAgentTool(search("search", "")));
+					pi.registerTool(createToolDefinitionFromAgentTool(search("grade", "No")));
+				},
+			],
+		});
+		harnesses.push(harness);
+		expect(
+			resultText(
+				await run(
+					harness,
+					'text("Notes: No header"); const found = await tools.search({}); const grade = await tools.grade({}); text("first result"); return [found, grade];',
+				),
+			),
+		).toBe('==> text 1/3 <==\nNotes: No header\n==> text 2/3 <==\nfirst result\n==> text 3/3 <==\n["","No"]');
+	});
+
 	it("persists store() writes as custom entries for later calls", async () => {
 		const harness = await setup();
 		expect(resultText(await run(harness, increment))).toBe("1");

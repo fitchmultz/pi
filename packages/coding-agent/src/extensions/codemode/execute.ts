@@ -484,7 +484,7 @@ async function truncateOutput(
  * The value a script receives for a nested call: a tool that declares
  * `outputSchema` resolves to its `structuredContent`, also for error results that carry one (such
  * as MCP results with `isError`); any other tool resolves to its text content. Other failures
- * reject with the tool's error text. A string `structuredContent` other than the text content is
+ * reject with the tool's error text. A string `structuredContent` longer than the text content is
  * an {@link UncutValue}.
  */
 function toScriptValue(tool: AgentTool<any>, outcome: AgentToolCallOutcome): unknown {
@@ -495,7 +495,7 @@ function toScriptValue(tool: AgentTool<any>, outcome: AgentToolCallOutcome): unk
 	return text;
 }
 
-/** A nested call's string value that is not the text of its result: a cut `read` resolves to all of its text. */
+/** A nested call's string value that holds more than the text of its result: a cut `read` resolves to all of its text. */
 interface UncutValue {
 	value: string;
 	/** The text a direct call shows the model: the page and its notice. */
@@ -657,7 +657,8 @@ function startScript(
 			const value = toScriptValue(tool, outcome);
 			if (typeof value === "string") {
 				const shown = textOf(outcome.result);
-				if (shown !== value) uncutValues.push({ value, shown });
+				// Only a longer value: its text then never lengthens the output, and no empty value is searched for.
+				if (value.length > shown.length) uncutValues.push({ value, shown });
 			}
 			return value;
 		},
