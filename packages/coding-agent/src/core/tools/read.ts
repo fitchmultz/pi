@@ -81,6 +81,7 @@ async function* readLocalFileChunks(path: string, { signal }: { signal?: AbortSi
 	const handle = await fsOpen(path, "r");
 	try {
 		const stats = await handle.stat();
+		// A stream created with an already-aborted signal emits its AbortError as an unhandled "error" event.
 		signal?.throwIfAborted();
 		const end = stats.isFile() && stats.size > 0 ? stats.size - 1 : undefined;
 		yield* handle.createReadStream({ end, signal, autoClose: false });
