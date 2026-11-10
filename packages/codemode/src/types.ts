@@ -115,7 +115,7 @@ export interface CodemodeSandboxBaseOptions {
 	 * Functions exposed as top-level identifiers instead of on `tools`, for host helpers such as
 	 * attaching an image to the result. They behave like tools (JSON round trip, promise result)
 	 * but are not recorded in `result.calls`. Names must be identifiers and may not shadow the
-	 * built-in globals (`tools`, `ALL_TOOLS`, `console`, `text`, `image`, `exit`, `store`, `load`).
+	 * built-in globals (`tools`, `ALL_TOOLS`, `console`, `text`, `image`, `exit`, `show`, `store`, `load`).
 	 */
 	globals?: CodemodeTool[];
 	/**

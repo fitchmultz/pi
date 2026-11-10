@@ -11,7 +11,14 @@ import { resolveReadPathAsync } from "./path-utils.ts";
 import { extractReadJson, type ReadJsonOptions, readJsonSchema } from "./read-json.ts";
 import { readRenderers } from "./renderers/read.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.ts";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
+import {
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_LINES,
+	formatSize,
+	STRUCTURED_MAX_BYTES,
+	type TruncationResult,
+	truncateHead,
+} from "./truncate.ts";
 
 const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
@@ -35,6 +42,13 @@ export type ReadToolInput = Static<typeof readSchema>;
  * block for images that codemode's `image()` accepts. `note` is the text that goes with the image,
  * such as resize hints. Property descriptions are left out so the type stays on one line in tool
  * descriptions.
+ *
+ * The text is the model-facing text, with one exception: a read without `limit` whose page was cut
+ * resolves to all the text from `offset` to the end of the file, when that is at most
+ * STRUCTURED_MAX_BYTES. A script that parses or searches a file needs all of it, and the cut text
+ * ends in a notice: `JSON.parse(await tools.read({ path }))` failed at the notice in 132 scripts of
+ * 30 days of session journals. A longer file, and a read with `limit`, resolve to the page and its
+ * notice, which name the offsets to continue with.
  */
 const readOutputSchema = Type.Union([
 	Type.String(),
@@ -136,6 +150,16 @@ interface SelectedLines {
 	firstLineBytes: number;
 	/** UTF-8 size of a 0-indexed line from the first selected line on, or undefined when it was not measured. */
 	lineBytes: (line: number) => number | undefined;
+	/**
+	 * All selected text, when the selection has no limit, its page was cut and it is at most
+	 * STRUCTURED_MAX_BYTES: what programmatic callers get in place of the page.
+	 */
+	uncutText: string | undefined;
+}
+
+/** Whether the shown page leaves out selected text. */
+function isCut(truncation: TruncationResult): boolean {
+	return truncation.truncated || truncation.firstLineExceedsLimit;
 }
 
 /**
@@ -221,13 +245,18 @@ function selectLinesFromBuffer(
 	const text = buffer.toString("utf-8");
 	const allLines = (json === undefined ? text : extractReadJson(text, json)).split("\n");
 	const endLine = limit === undefined ? undefined : Math.min(startLine + limit, allLines.length);
-	const truncation = truncateHead(allLines.slice(startLine, endLine).join("\n"));
+	const selected = allLines.slice(startLine, endLine).join("\n");
+	const truncation = truncateHead(selected);
 	const firstLineBytes = truncation.firstLineExceedsLimit ? Buffer.byteLength(allLines[startLine], "utf-8") : 0;
 	return {
 		totalFileLines: allLines.length,
 		truncation,
 		firstLineBytes,
 		lineBytes: (line) => Buffer.byteLength(allLines[line], "utf-8"),
+		uncutText:
+			limit === undefined && isCut(truncation) && truncation.totalBytes <= STRUCTURED_MAX_BYTES
+				? selected
+				: undefined,
 	};
 }
 
@@ -260,6 +289,8 @@ async function selectLinesFromStream(
 	// Sizes of the lines from startLine on, until MEASURED_LINES lines or MEASURED_BYTES bytes are measured.
 	const lineSizes: number[] = [];
 	let measuredBytes = 0;
+	// The pieces of a selection without limit, until it exceeds what programmatic callers get.
+	let uncutPieces: string[] | undefined = limit === undefined ? [] : undefined;
 	// The selected line being read: its text, while it is stored, and its size.
 	let pieces: string[] | undefined = [];
 	let lineBytes = 0;
@@ -319,7 +350,12 @@ async function selectLinesFromStream(
 			line++;
 			position = newline + 1;
 		}
-		if (selectionStart !== -1) selectedBytes += Buffer.byteLength(text.slice(selectionStart), "utf-8");
+		if (selectionStart !== -1) {
+			const piece = text.slice(selectionStart);
+			selectedBytes += Buffer.byteLength(piece, "utf-8");
+			if (selectedBytes > STRUCTURED_MAX_BYTES) uncutPieces = undefined;
+			else uncutPieces?.push(piece);
+		}
 	};
 
 	for await (const chunk of chunks) {
@@ -335,7 +371,14 @@ async function selectLinesFromStream(
 		totalLines: selectedBytes === 0 ? 0 : selectedLines - (lastLineEmpty ? 1 : 0),
 		totalBytes: selectedBytes,
 	};
-	return { totalFileLines: line + 1, truncation, firstLineBytes, lineBytes: (index) => lineSizes[index - startLine] };
+	return {
+		totalFileLines: line + 1,
+		truncation,
+		firstLineBytes,
+		lineBytes: (index) => lineSizes[index - startLine],
+		// Joined only for a cut page: an uncut page already is the whole selection.
+		uncutText: isCut(truncation) ? uncutPieces?.join("") : undefined,
+	};
 }
 
 export function createReadToolDefinition(
@@ -361,6 +404,8 @@ export function createReadToolDefinition(
 			_onUpdate?,
 			ctx?: ExtensionContext,
 		) {
+			// Set for a read whose programmatic result is more than its page: see readOutputSchema.
+			let uncutText: string | undefined;
 			return new Promise<{ content: (TextContent | ImageContent)[]; details: ReadToolDetails | undefined }>(
 				(resolve, reject) => {
 					if (signal?.aborted) {
@@ -451,6 +496,8 @@ export function createReadToolDefinition(
 									if (aborted) return;
 								}
 								const { totalFileLines, truncation, firstLineBytes, lineBytes } = selection;
+								// A read answered with the end of the file keeps its note, so it resolves to the page.
+								if (pastEndNote === "") uncutText = selection.uncutText;
 								const startLineDisplay = startLine + 1;
 								// A user-specified limit is honored before truncation.
 								const userLimitedLines =
@@ -521,7 +568,7 @@ export function createReadToolDefinition(
 						}
 					})();
 				},
-			).then((result) => ({ ...result, structuredContent: toReadOutput(result.content) }));
+			).then((result) => ({ ...result, structuredContent: uncutText ?? toReadOutput(result.content) }));
 		},
 		...readRenderers,
 	};
