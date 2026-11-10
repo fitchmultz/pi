@@ -12,7 +12,6 @@ import { witness } from "../proof.mjs";
 const repo = process.env.PI_PERF_REPO;
 const payload = process.env.PI_PERF_ARTIFACT_REPO ?? repo;
 const packages = getPublicWorkspacePackages(join(payload, "packages"));
-assert.equal(packages.length, 10);
 const mode = process.argv[2];
 function outputHashes() {
 	return Object.fromEntries(

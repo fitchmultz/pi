@@ -29,37 +29,41 @@ export class CustomMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private _expanded = false;
 	private outputPad: number;
+	private markdownTransformers: readonly MarkdownTransformer[];
+	private messageId?: string;
+	private timestamp?: string;
 	private compactView: boolean;
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private imageChildren: Component[] = [];
-	private markdownTransformers: readonly MarkdownTransformer[];
-	private messageId?: string;
-	private timestamp?: string;
 
+	/**
+	 * The first seven arguments are upstream's, in upstream's positions, so an extension written for upstream
+	 * constructs the same component here. The fork's display options follow them.
+	 */
 	constructor(
 		message: CustomMessage<unknown>,
 		customRenderer?: MessageRenderer,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		outputPad = 1,
-		compactView = false,
-		showImages = true,
-		imageWidthCells = 60,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
 		messageId?: string,
 		timestamp?: string,
+		compactView = false,
+		showImages = true,
+		imageWidthCells = 60,
 	) {
 		super();
 		this.message = message;
 		this.customRenderer = customRenderer;
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
-		this.compactView = compactView;
-		this.showImages = showImages;
-		this.imageWidthCells = imageWidthCells;
 		this.markdownTransformers = markdownTransformers;
 		this.messageId = messageId;
 		this.timestamp = timestamp;
+		this.compactView = compactView;
+		this.showImages = showImages;
+		this.imageWidthCells = imageWidthCells;
 
 		this.addChild(new Spacer(1));
 

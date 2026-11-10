@@ -22,6 +22,7 @@
 - Fixed `start()` after `stop()` drawing nothing, and ignoring later `requestRender()` calls until a forced render, when a render was pending at `stop()` or requested while stopped, for example by the key handler that stopped the TUI.
 - Fixed `TuiMainScreen` drawing changed lines at the wrong rows and leaving stale lines when restarted with `stop()` and `start()` without a forced render. The first frame after the restart now clears and redraws the screen, as `requestRender(true)` does.
 - Fixed a fullscreen scrollbar drag staying active when it was released over an overlay opened during the drag, such as transcript search. Pointer motion without a pressed button kept scrolling the transcript. The drag now keeps every button and motion event until its release.
+- Fixed a fullscreen text-selection drag staying active when a component handled its release, such as an overlay opened during the drag. Its auto-scroll kept scrolling the transcript with no button held. The primary button's release now ends the drag whichever component handles it.
 
 ## [1.5.1] - 2026-11-09
 

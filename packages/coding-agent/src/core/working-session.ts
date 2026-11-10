@@ -4,6 +4,7 @@ import { isAbsolute } from "node:path";
 import { isDeepStrictEqual, types } from "node:util";
 import { copyJson, isJsonValue } from "@earendil-works/chord/json";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { Message } from "@earendil-works/pi-ai";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { jsonChunks, readFileChunksSync, readJsonFileSync } from "../utils/streaming-file.ts";
@@ -105,7 +106,11 @@ export interface WorkingSessionHold {
 	release(): Promise<void>;
 }
 
-function record(value: unknown): value is Record<string, unknown> {
+type Json = Record<string, unknown>;
+type Check = (value: Json, path: string) => void;
+type FieldType = "string" | "number" | "boolean";
+
+function record(value: unknown): value is Json {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -113,290 +118,264 @@ function strings(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((item: unknown) => typeof item === "string");
 }
 
-function content(value: unknown): boolean {
-	return (
-		typeof value === "string" ||
-		(Array.isArray(value) &&
-			value.every((part: unknown) => {
-				if (!record(part)) return false;
-				switch (part.type) {
-					case "text":
-						return typeof part.text === "string";
-					case "image":
-						return typeof part.data === "string" && typeof part.mimeType === "string";
-					case "thinking":
-						return typeof part.thinking === "string";
-					case "toolCall":
-						return typeof part.id === "string" && typeof part.name === "string" && record(part.arguments);
-					default:
-						return false;
-				}
-			}))
-	);
+/** Every rejection names the field that failed, such as `entries[12].message.content[0].type`. */
+function fail(path: string): never {
+	throw new Error(`Invalid native working session at ${path}`);
 }
 
-function message(value: unknown): boolean {
-	if (!record(value) || typeof value.role !== "string" || !value.role) return false;
-	if (
-		[
-			"user",
-			"system",
-			"assistant",
-			"toolResult",
-			"custom",
-			"bashExecution",
-			"branchSummary",
-			"compactionSummary",
-		].includes(value.role) &&
-		typeof value.timestamp !== "number"
-	)
-		return false;
-	switch (value.role) {
-		case "user":
-		case "system":
-			return content(value.content);
-		case "assistant":
-			return (
-				Array.isArray(value.content) &&
-				content(value.content) &&
-				typeof value.api === "string" &&
-				typeof value.provider === "string" &&
-				typeof value.model === "string" &&
-				record(value.usage) &&
-				typeof value.stopReason === "string"
-			);
-		case "toolResult":
-			return (
-				Array.isArray(value.content) &&
-				content(value.content) &&
-				typeof value.toolCallId === "string" &&
-				typeof value.toolName === "string" &&
-				typeof value.isError === "boolean"
-			);
-		case "custom":
-			return typeof value.customType === "string" && typeof value.display === "boolean" && content(value.content);
-		case "bashExecution":
-			return (
-				typeof value.command === "string" &&
-				typeof value.output === "string" &&
-				typeof value.cancelled === "boolean" &&
-				typeof value.truncated === "boolean" &&
-				(value.exitCode === undefined || typeof value.exitCode === "number")
-			);
-		case "branchSummary":
-			return typeof value.summary === "string" && (value.fromId === null || typeof value.fromId === "string");
-		case "compactionSummary":
-			return typeof value.summary === "string" && typeof value.tokensBefore === "number";
-		default:
-			// AgentMessage is declaration-merged; extension roles own their JSON payload schema.
-			return true;
-	}
+/** Fail at the first of `keys` whose value is not of `type`. */
+function fields(value: Json, path: string, type: FieldType, ...keys: string[]): void {
+	for (const key of keys) if (typeof value[key] !== type) fail(`${path}.${key}`);
 }
 
-function prompt(value: unknown): boolean {
-	return (
-		record(value) &&
-		typeof value.cwd === "string" &&
-		isAbsolute(value.cwd) &&
-		(value.customPrompt === undefined || typeof value.customPrompt === "string") &&
-		(value.forceSystemPrompt === undefined || typeof value.forceSystemPrompt === "string") &&
-		typeof value.appendSystemPrompt === "string" &&
-		strings(value.selectedTools) &&
-		(value.hiddenTools === undefined || strings(value.hiddenTools)) &&
-		strings(value.promptGuidelines) &&
-		record(value.toolSnippets) &&
-		Object.values(value.toolSnippets).every((item) => item === undefined || typeof item === "string") &&
-		record(value.sections) &&
-		Object.values(value.sections).every((item) => item === undefined || typeof item === "string") &&
-		record(value.toolGuidelines) &&
-		Object.values(value.toolGuidelines).every((item) => item === undefined || strings(item)) &&
-		Array.isArray(value.contextFiles) &&
-		value.contextFiles.every(
-			(file: unknown) => record(file) && typeof file.path === "string" && typeof file.content === "string",
-		) &&
-		Array.isArray(value.skills) &&
-		value.skills.every(
-			(skill: unknown) =>
-				record(skill) &&
-				["name", "description", "filePath", "baseDir"].every((key) => typeof skill[key] === "string") &&
-				record(skill.sourceInfo) &&
-				typeof skill.disableModelInvocation === "boolean",
-		)
-	);
+/** As `fields`, for keys that may be absent. */
+function optionalFields(value: Json, path: string, type: FieldType, ...keys: string[]): void {
+	for (const key of keys) if (value[key] !== undefined && typeof value[key] !== type) fail(`${path}.${key}`);
+}
+
+/** Fail unless `value` is an array whose items all pass `item`. */
+function list(value: unknown, path: string, item: (value: unknown, path: string) => void): void {
+	if (!Array.isArray(value)) fail(path);
+	for (let index = 0; index < value.length; index++) item(value[index], `${path}[${index}]`);
+}
+
+/** The check a table holds for a tag read from JSON; inherited keys such as "constructor" are not tags. */
+function lookup<Tag extends string>(table: Record<Tag, Check>, tag: unknown): Check | undefined {
+	return typeof tag === "string" && Object.hasOwn(table, tag) ? table[tag as Tag] : undefined;
+}
+
+// Keyed by pi-ai's content block types: a block type added there fails the build until it has a check here.
+const contentBlocks: Record<Exclude<Message["content"], string>[number]["type"], Check> = {
+	text: (part, path) => fields(part, path, "string", "text"),
+	image: (part, path) => fields(part, path, "string", "data", "mimeType"),
+	thinking: (part, path) => fields(part, path, "string", "thinking"),
+	toolCall: (part, path) => {
+		fields(part, path, "string", "id", "name");
+		if (!record(part.arguments)) fail(`${path}.arguments`);
+	},
+};
+
+function block(value: unknown, path: string): void {
+	if (!record(value)) fail(path);
+	const check = lookup(contentBlocks, value.type);
+	if (!check) fail(`${path}.type`);
+	check(value, path);
+}
+
+function content(value: unknown, path: string): void {
+	if (typeof value !== "string") list(value, path, block);
+}
+
+// Keyed by every role this build declares, pi-ai's and Pi's own: a role added to either fails the build until it
+// has a check here.
+const messageRoles: Record<AgentMessage["role"], Check> = {
+	user: (value, path) => content(value.content, `${path}.content`),
+	system: (value, path) => content(value.content, `${path}.content`),
+	assistant: (value, path) => {
+		list(value.content, `${path}.content`, block);
+		fields(value, path, "string", "api", "provider", "model", "stopReason");
+		if (!record(value.usage)) fail(`${path}.usage`);
+	},
+	toolResult: (value, path) => {
+		list(value.content, `${path}.content`, block);
+		fields(value, path, "string", "toolCallId", "toolName");
+		fields(value, path, "boolean", "isError");
+	},
+	custom: (value, path) => {
+		fields(value, path, "string", "customType");
+		fields(value, path, "boolean", "display");
+		content(value.content, `${path}.content`);
+	},
+	bashExecution: (value, path) => {
+		fields(value, path, "string", "command", "output");
+		fields(value, path, "boolean", "cancelled", "truncated");
+		optionalFields(value, path, "number", "exitCode");
+	},
+	branchSummary: (value, path) => {
+		fields(value, path, "string", "summary");
+		if (value.fromId !== null && typeof value.fromId !== "string") fail(`${path}.fromId`);
+	},
+	compactionSummary: (value, path) => {
+		fields(value, path, "string", "summary");
+		fields(value, path, "number", "tokensBefore");
+	},
+};
+
+/** A message; `role`, when given, is the only role admitted. */
+function message(value: unknown, path: string, role?: AgentMessage["role"]): void {
+	if (!record(value)) fail(path);
+	if (typeof value.role !== "string" || !value.role || (role && value.role !== role)) fail(`${path}.role`);
+	// AgentMessage is declaration-merged; extension roles own their JSON payload schema.
+	const check = lookup(messageRoles, value.role);
+	if (!check) return;
+	fields(value, path, "number", "timestamp");
+	check(value, path);
+}
+
+function prompt(value: unknown, path: string): void {
+	if (!record(value)) fail(path);
+	if (typeof value.cwd !== "string" || !isAbsolute(value.cwd)) fail(`${path}.cwd`);
+	optionalFields(value, path, "string", "customPrompt", "forceSystemPrompt");
+	fields(value, path, "string", "appendSystemPrompt");
+	for (const key of ["selectedTools", "promptGuidelines"]) if (!strings(value[key])) fail(`${path}.${key}`);
+	if (value.hiddenTools !== undefined && !strings(value.hiddenTools)) fail(`${path}.hiddenTools`);
+	const dictionary = (key: string, item: (value: unknown) => boolean) => {
+		const entries = value[key];
+		if (!record(entries)) fail(`${path}.${key}`);
+		for (const [name, entry] of Object.entries(entries))
+			if (entry !== undefined && !item(entry)) fail(`${path}.${key}.${name}`);
+	};
+	dictionary("toolSnippets", (item) => typeof item === "string");
+	dictionary("sections", (item) => typeof item === "string");
+	dictionary("toolGuidelines", strings);
+	list(value.contextFiles, `${path}.contextFiles`, (file, at) => {
+		if (!record(file)) fail(at);
+		fields(file, at, "string", "path", "content");
+	});
+	list(value.skills, `${path}.skills`, (skill, at) => {
+		if (!record(skill)) fail(at);
+		fields(skill, at, "string", "name", "description", "filePath", "baseDir");
+		if (!record(skill.sourceInfo)) fail(`${at}.sourceInfo`);
+		fields(skill, at, "boolean", "disableModelInvocation");
+	});
 }
 
 function validateWorkingSession(value: unknown): WorkingSession {
-	const fail: () => never = () => {
-		throw new Error("Invalid native working session");
-	};
-	if (!record(value)) fail();
-	if (value.version !== 1 || !["turn", "settled"].includes(String(value.boundary))) fail();
-	for (const name of ["cwd", "sessionDir", "createdAt"]) if (typeof value[name] !== "string") fail();
-	if (
-		!isAbsolute(String(value.cwd)) ||
-		(value.sessionDir !== "" && !isAbsolute(String(value.sessionDir))) ||
-		(value.sessionFile !== undefined && (typeof value.sessionFile !== "string" || !isAbsolute(value.sessionFile)))
-	)
-		fail();
-	if (
-		!record(value.header) ||
-		value.header.type !== "session" ||
-		value.header.version !== 3 ||
-		typeof value.header.id !== "string" ||
-		typeof value.header.cwd !== "string" ||
-		typeof value.header.timestamp !== "string"
-	)
-		fail();
+	if (!record(value)) fail("(root)");
+	if (value.version !== 1) fail("version");
+	if (!["turn", "settled"].includes(String(value.boundary))) fail("boundary");
+	if (typeof value.cwd !== "string" || !isAbsolute(value.cwd)) fail("cwd");
+	if (typeof value.sessionDir !== "string" || (value.sessionDir !== "" && !isAbsolute(value.sessionDir)))
+		fail("sessionDir");
+	if (typeof value.createdAt !== "string") fail("createdAt");
+	if (value.sessionFile !== undefined && (typeof value.sessionFile !== "string" || !isAbsolute(value.sessionFile)))
+		fail("sessionFile");
+	if (!record(value.header)) fail("header");
+	if (value.header.type !== "session") fail("header.type");
+	if (value.header.version !== 3) fail("header.version");
+	if (typeof value.header.id !== "string") fail("header.id");
+	fields(value.header, "header", "string", "cwd", "timestamp");
 	assertValidSessionId(value.header.id);
-	if (!Array.isArray(value.entries)) fail();
 	const ids = new Set<string>();
-	for (const entry of value.entries as unknown[]) {
-		if (
-			!record(entry) ||
-			typeof entry.id !== "string" ||
-			!entry.id ||
-			ids.has(entry.id) ||
-			typeof entry.timestamp !== "string" ||
-			typeof entry.type !== "string"
-		)
-			fail();
-		if (entry.parentId !== null && (typeof entry.parentId !== "string" || !ids.has(entry.parentId))) fail();
+	list(value.entries, "entries", (entry, at) => {
+		if (!record(entry)) fail(at);
+		if (typeof entry.id !== "string" || !entry.id || ids.has(entry.id)) fail(`${at}.id`);
+		fields(entry, at, "string", "timestamp", "type");
+		if (entry.parentId !== null && (typeof entry.parentId !== "string" || !ids.has(entry.parentId)))
+			fail(`${at}.parentId`);
 		// Other types, such as pre-1.0 fork `context_window` boundaries, round-trip as opaque journal records
 		// because the session loader keeps them; the restored journal must still match the file byte for byte.
 		switch (entry.type) {
 			case "message":
-				if (!message(entry.message)) fail();
+				message(entry.message, `${at}.message`);
 				break;
 			case "thinking_level_change":
-				if (typeof entry.thinkingLevel !== "string") fail();
+				fields(entry, at, "string", "thinkingLevel");
 				break;
 			case "model_change":
-				if (typeof entry.provider !== "string" || typeof entry.modelId !== "string") fail();
+				fields(entry, at, "string", "provider", "modelId");
 				break;
 			case "usage":
-				if (!["kind", "provider", "model"].every((key) => typeof entry[key] === "string") || !record(entry.usage))
-					fail();
+				fields(entry, at, "string", "kind", "provider", "model");
+				if (!record(entry.usage)) fail(`${at}.usage`);
 				break;
 			case "compaction":
+				fields(entry, at, "string", "summary");
 				if (
-					typeof entry.summary !== "string" ||
 					typeof entry.firstKeptEntryId !== "string" ||
-					(entry.firstKeptEntryId !== entry.id && !ids.has(entry.firstKeptEntryId)) ||
-					typeof entry.tokensBefore !== "number" ||
-					(entry.systemMessage !== undefined &&
-						(!record(entry.systemMessage) ||
-							entry.systemMessage.role !== "system" ||
-							!message(entry.systemMessage)))
+					(entry.firstKeptEntryId !== entry.id && !ids.has(entry.firstKeptEntryId))
 				)
-					fail();
+					fail(`${at}.firstKeptEntryId`);
+				fields(entry, at, "number", "tokensBefore");
+				if (entry.systemMessage !== undefined) message(entry.systemMessage, `${at}.systemMessage`, "system");
 				break;
 			case "branch_summary":
 				// Provenance may name "root" or an abandoned path omitted by createBranchedSession().
-				if (typeof entry.summary !== "string" || typeof entry.fromId !== "string") fail();
+				fields(entry, at, "string", "summary", "fromId");
 				break;
 			case "custom":
-				if (typeof entry.customType !== "string") fail();
+				fields(entry, at, "string", "customType");
 				break;
 			case "label":
-				if (
-					typeof entry.targetId !== "string" ||
-					!ids.has(entry.targetId) ||
-					(entry.label !== undefined && typeof entry.label !== "string")
-				)
-					fail();
+				if (typeof entry.targetId !== "string" || !ids.has(entry.targetId)) fail(`${at}.targetId`);
+				optionalFields(entry, at, "string", "label");
 				break;
 			case "session_info":
-				if (entry.name !== undefined && typeof entry.name !== "string") fail();
+				optionalFields(entry, at, "string", "name");
 				break;
 			case "custom_message":
-				if (typeof entry.customType !== "string" || typeof entry.display !== "boolean" || !content(entry.content))
-					fail();
+				fields(entry, at, "string", "customType");
+				fields(entry, at, "boolean", "display");
+				content(entry.content, `${at}.content`);
 				break;
 			case "context_edit":
-				if (
-					typeof entry.targetId !== "string" ||
-					!ids.has(entry.targetId) ||
-					(entry.replacement !== null && (!record(entry.replacement) || !content(entry.replacement.content)))
-				)
-					fail();
+				if (typeof entry.targetId !== "string" || !ids.has(entry.targetId)) fail(`${at}.targetId`);
+				if (entry.replacement !== null) {
+					if (!record(entry.replacement)) fail(`${at}.replacement`);
+					content(entry.replacement.content, `${at}.replacement.content`);
+				}
 				break;
 		}
 		ids.add(entry.id);
-	}
-	if (value.leafId !== null && (typeof value.leafId !== "string" || !ids.has(value.leafId))) fail();
-	for (const name of [
-		"activeTools",
-		"pendingTools",
-		"steeringText",
-		"followUpText",
-		"allowedTools",
-		"excludedTools",
-	]) {
-		const list = value[name];
-		if (list === undefined && (name === "allowedTools" || name === "excludedTools")) continue;
-		if (!Array.isArray(list) || !list.every((item) => typeof item === "string")) fail();
-	}
-	for (const name of ["steering", "followUp", "nextTurn", "pendingCustom", "pendingBash"]) {
-		const list = value[name];
-		if (!Array.isArray(list) || !list.every(message)) fail();
-		const role =
-			name === "pendingBash"
-				? "bashExecution"
-				: name === "nextTurn" || name === "pendingCustom"
-					? "custom"
-					: undefined;
-		if (role && !list.every((item: unknown) => record(item) && item.role === role)) fail();
-	}
+	});
+	if (value.leafId !== null && (typeof value.leafId !== "string" || !ids.has(value.leafId))) fail("leafId");
+	for (const name of ["activeTools", "pendingTools", "steeringText", "followUpText"])
+		if (!strings(value[name])) fail(name);
+	for (const name of ["allowedTools", "excludedTools"])
+		if (value[name] !== undefined && !strings(value[name])) fail(name);
+	const queues = {
+		steering: undefined,
+		followUp: undefined,
+		nextTurn: "custom",
+		pendingCustom: "custom",
+		pendingBash: "bashExecution",
+	} as const;
+	for (const [name, role] of Object.entries(queues)) list(value[name], name, (item, at) => message(item, at, role));
 	if (
 		value.defaultToolModifiers !== undefined &&
 		(!strings(value.defaultToolModifiers) ||
 			!value.defaultToolModifiers.every(isToolModifier) ||
 			getToolListError(value.defaultToolModifiers))
 	)
-		fail();
+		fail("defaultToolModifiers");
 	for (const name of ["steeringMode", "followUpMode"])
-		if (!["all", "one-at-a-time"].includes(String(value[name]))) fail();
+		if (!["all", "one-at-a-time"].includes(String(value[name]))) fail(name);
 	const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-	if (!levels.includes(String(value.thinkingLevel)) || typeof value.usesDefaultTools !== "boolean") fail();
-	const model = (item: unknown): boolean =>
-		record(item) &&
-		typeof item.provider === "string" &&
-		typeof item.id === "string" &&
-		(item.thinkingLevel === undefined || levels.includes(String(item.thinkingLevel)));
-	if (
-		(value.model !== undefined && !model(value.model)) ||
-		!Array.isArray(value.scopedModels) ||
-		!value.scopedModels.every(model)
-	)
-		fail();
-	if (!record(value.settings) || !prompt(value.prompt) || (value.runPrompt !== undefined && !prompt(value.runPrompt)))
-		fail();
-	if (!record(value.settingsLayers) || !record(value.settingsLayers.global) || !record(value.settingsLayers.project))
-		fail();
-	if (
-		!Array.isArray(value.flags) ||
-		!value.flags.every(
-			(item) =>
-				Array.isArray(item) &&
-				item.length === 2 &&
-				typeof item[0] === "string" &&
-				["boolean", "string"].includes(typeof item[1]),
-		)
-	)
-		fail();
-	if (
-		value.mode !== undefined &&
-		(!record(value.mode) || typeof value.mode.kind !== "string" || value.mode.data === undefined)
-	)
-		fail();
-	if (value.launch !== undefined) {
-		if (!record(value.launch) || typeof value.launch.agentDir !== "string" || !isAbsolute(value.launch.agentDir))
-			fail();
-		for (const name of ["extensions", "skills", "prompts", "themes"]) {
-			const list = value.launch[name];
-			if (!Array.isArray(list) || !list.every((item) => typeof item === "string")) fail();
-		}
-		for (const name of [
+	if (!levels.includes(String(value.thinkingLevel))) fail("thinkingLevel");
+	if (typeof value.usesDefaultTools !== "boolean") fail("usesDefaultTools");
+	const model = (item: unknown, path: string): void => {
+		if (!record(item)) fail(path);
+		fields(item, path, "string", "provider", "id");
+		if (item.thinkingLevel !== undefined && !levels.includes(String(item.thinkingLevel)))
+			fail(`${path}.thinkingLevel`);
+	};
+	if (value.model !== undefined) model(value.model, "model");
+	list(value.scopedModels, "scopedModels", model);
+	if (!record(value.settings)) fail("settings");
+	prompt(value.prompt, "prompt");
+	if (value.runPrompt !== undefined) prompt(value.runPrompt, "runPrompt");
+	if (!record(value.settingsLayers)) fail("settingsLayers");
+	for (const name of ["global", "project"]) if (!record(value.settingsLayers[name])) fail(`settingsLayers.${name}`);
+	list(value.flags, "flags", (item, at) => {
+		if (!Array.isArray(item) || item.length !== 2) fail(at);
+		if (typeof item[0] !== "string") fail(`${at}[0]`);
+		if (!["boolean", "string"].includes(typeof item[1])) fail(`${at}[1]`);
+	});
+	if (value.mode !== undefined) {
+		if (!record(value.mode)) fail("mode");
+		fields(value.mode, "mode", "string", "kind");
+		if (value.mode.data === undefined) fail("mode.data");
+	}
+	const launch = value.launch;
+	if (launch !== undefined) {
+		if (!record(launch)) fail("launch");
+		if (typeof launch.agentDir !== "string" || !isAbsolute(launch.agentDir)) fail("launch.agentDir");
+		for (const name of ["extensions", "skills", "prompts", "themes"])
+			if (!strings(launch[name])) fail(`launch.${name}`);
+		optionalFields(
+			launch,
+			"launch",
+			"boolean",
 			"noExtensions",
 			"noSkills",
 			"noPromptTemplates",
@@ -404,17 +383,10 @@ function validateWorkingSession(value: unknown): WorkingSession {
 			"noContextFiles",
 			"trustProject",
 			"offline",
-		])
-			if (value.launch[name] !== undefined && typeof value.launch[name] !== "boolean") fail();
-		if (value.launch.systemPrompt !== undefined && typeof value.launch.systemPrompt !== "string") fail();
-		if (value.launch.disabledBuiltinExtensions !== undefined && !strings(value.launch.disabledBuiltinExtensions))
-			fail();
-		if (
-			value.launch.appendSystemPrompt !== undefined &&
-			(!Array.isArray(value.launch.appendSystemPrompt) ||
-				!value.launch.appendSystemPrompt.every((item) => typeof item === "string"))
-		)
-			fail();
+		);
+		optionalFields(launch, "launch", "string", "systemPrompt");
+		for (const name of ["disabledBuiltinExtensions", "appendSystemPrompt"])
+			if (launch[name] !== undefined && !strings(launch[name])) fail(`launch.${name}`);
 	}
 	return value as unknown as WorkingSession;
 }
