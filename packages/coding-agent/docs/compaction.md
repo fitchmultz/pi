@@ -153,6 +153,7 @@ interface CompactionEntry<T = unknown> {
   usage?: Usage;       // LLM usage that generated the summary
   fromHook?: boolean;  // true if provided by extension (legacy field name)
   details?: T;         // implementation-specific data
+  providerSummary?: CompactionProviderSummary; // see "Provider summary block"
 }
 
 // Default compaction uses this for details (from compaction.ts):
@@ -326,10 +327,87 @@ pi.on("session_before_compact", async (event, ctx) => {
       tokensBefore: preparation.tokensBefore,
       // usage: summaryResponse.usage, // Optional; included in session totals
       details: { /* custom data */ },
+      // providerSummary: { instructions: "..." }, // Optional; see "Provider summary block"
     }
   };
 });
 ```
+
+#### Provider summary block
+
+Claude models with preserved thinking accept a reasoning block only while everything before it is unchanged. A compaction replaces the older messages, so the model drops the reasoning in the kept messages as well. The Anthropic API can write a signed summary block that stands in place of the older messages and keeps that reasoning valid. An extension asks Pi for such a block by adding `providerSummary` to the compaction it returns:
+
+```typescript
+return {
+  compaction: {
+    summary: "Your summary...",
+    firstKeptEntryId: preparation.firstKeptEntryId,
+    tokensBefore: preparation.tokensBefore,
+    providerSummary: {
+      // Optional. Replaces the API's own summarization prompt.
+      instructions: "State the task in one sentence. Do not name a next step.",
+    },
+  },
+};
+```
+
+Without `providerSummary`, nothing changes. With it, Pi does this before it stores the compaction entry:
+
+1. Pi sends one request to the session's current model, with the session's credentials and route. The request holds exactly the messages before `firstKeptEntryId`, built the way Pi built the request that the first kept message answered, plus `instructions`. The model answers with the block instead of a reply.
+2. Pi stores the entry. `summary`, `firstKeptEntryId`, `tokensBefore` and `details` are stored as returned. `providerSummary` on the entry holds the block and the record of the request. The request's usage is added to the entry's `usage`, so session totals include it.
+3. From then on, a request to that same provider, API and model starts with the block. The kept entries follow unchanged, including system messages among them. `summary` follows the kept entries. Entries after the compaction follow `summary`.
+
+```
+Entry with a block, request to the model that made it:
+
+  ┌────────┬───────┬─────┬──────┬─────┬──────┬─────────┬──────────────┐
+  │ system │ block │ ass │ tool │ ass │ tool │ summary │ new messages │
+  └────────┴───────┴─────┴──────┴─────┴──────┴─────────┴──────────────┘
+       ↑               └─────────┬────────┘
+   unchanged          entries from firstKeptEntryId
+```
+
+The leading system message is the one that led the context before the compaction. Pi does not fold later prompt and tool changes into it for such an entry, because a changed prompt or tool list also invalidates the kept reasoning. Changes from the summarized part are declared again in a system message after the kept entries.
+
+A request to any other model does not get the block. It gets the same messages without it: the leading system message, the kept entries, `summary`, then the new messages.
+
+Where the kept entries can start:
+
+| First kept message | Result |
+|---|---|
+| An assistant message | Supported. The request is the one that this message answered. |
+| A user or custom message that directly follows an assistant message | Supported. |
+| A user or custom message that follows a tool result or another user message | No block (`reason: "cut"`). The API merges the two messages. |
+| A tool result | No block (`reason: "cut"`). A tool call and its result must stay together. |
+| None (`firstKeptEntryId` is the compaction's own ID or an entry without a message, or `null` in a `turn_end` draft) | No block (`reason: "cut"`). No kept reasoning needs one. |
+
+Pi never cancels the compaction and never runs its own summarizer because of `providerSummary`. In each of these cases it stores the entry without a block, and the compaction behaves as without the opt-in:
+
+| `providerSummary.reason` on the entry | Cause |
+|---|---|
+| `overflow` | The compaction's `reason` is `"overflow"`. The context does not fit the model, so the request would fail too. No request is sent. |
+| `model` | No implementation for the session's model. No request is sent. Implemented for `anthropic-messages` models with managed effort. |
+| `cut` | The kept entries start where a block cannot keep their reasoning valid (see the table above), or no message is kept, or no message precedes the kept entries. No request is sent. |
+| `aborted` | The user cancelled (Esc) while the request ran. |
+| `timeout` | The request took longer than 30 seconds. |
+| `error: <message>` | The request failed, for example `prompt is too long` when the messages do not fit the model. |
+| `stop: <stop reason>` | The API answered without a block, for example `stop: refusal` when it rejects the `instructions`, or `stop: max_tokens`. |
+
+```typescript
+interface CompactionProviderSummary {
+  provider: string;    // provider, API and model of the request
+  api: string;
+  model: string;
+  block?: JsonObject;  // the signed block as returned; absent when none was made
+  reason?: string;     // why there is no block; absent when block is present
+  seconds: number;     // duration of the request; 0 when none was sent
+  usage?: Usage;       // usage of the request; also included in the entry's usage
+}
+```
+
+A compaction entry in a `turn_end` result accepts the same `providerSummary` field (see [turn_end](extensions.md#turn_start--turn_end)).
+
+Do not put a message between the block and the kept entries in a `context` or `context_with_system` handler, and do not change, remove or reorder the kept messages. Either one makes the model drop the kept reasoning again. Text for the model belongs after the kept entries.
 
 #### Converting Messages to Text
 

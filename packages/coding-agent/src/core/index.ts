@@ -61,6 +61,7 @@ export {
 	type Extension,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
+	type ExtensionCompactionResult,
 	type ExtensionContext,
 	type ExtensionError,
 	type ExtensionEvent,

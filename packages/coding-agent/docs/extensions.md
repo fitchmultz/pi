@@ -555,12 +555,14 @@ pi.on("session_before_compact", async (event, ctx) => {
       firstKeptEntryId: preparation.firstKeptEntryId,
       tokensBefore: preparation.tokensBefore,
       // usage: summaryResponse.usage, // Optional; included in session totals
+      // providerSummary: { instructions: "..." }, // Optional; see compaction.md#provider-summary-block
     }
   };
 });
 
 pi.on("session_compact", async (event, ctx) => {
   // event.compactionEntry - the saved compaction
+  // event.compactionEntry.providerSummary - block or reason, seconds and usage, when the compaction asked for a block
   // event.fromExtension - whether extension provided it
   // event.reason - "manual" (/compact), "threshold", or "overflow"
   // event.willRetry - whether the aborted turn is retried after compaction (overflow recovery)
@@ -773,6 +775,8 @@ pi.on("turn_end", async (event, ctx) => {
 ```
 
 `turn_end` runs after the assistant and tool-result messages have been persisted and before the low-level `turn_end` event. Retry backoff and final-attempt recovery still happen after `agent_end`, preserving their existing lifecycle and queue ordering; `agent_before_settle` sees the repaired projection after that work completes. Boundary handlers run in extension load and registration order. Each handler sees prior proposals in `event.entries` and sees `event.context` rebuilt from them. Returning `entries` or `continue` replaces only that field; omitted fields preserve the current proposal. Allowed draft entry types are `custom`, `custom_message`, `context_edit`, and `compaction`. The complete proposal is validated before it is appended in list order after all handlers finish; a handler error is reported and later handlers still run. Validation prevents partially applied semantic errors, but persistence is not transactional.
+
+A `compaction` draft accepts `providerSummary: { instructions?: string }`, with the meaning and the fallbacks described in [Provider summary block](compaction.md#provider-summary-block). Pi sends the request after all handlers finished, when it appends the draft, so `event.context` previews show the compaction without a block.
 
 `continue: true` ensures one next provider request for that boundary invocation. If tool results, steering, or a follow-up already cause that request, they satisfy the decision and no additional request is made; otherwise Pi makes one context-only request. Error and aborted responses remain hard exits. `continue: false` never suppresses natural work. Guard continuation conditions: an unconditional `continue: true` is evaluated again after the next response and can create an endless loop. A `custom_message` draft contributes a user-role model message but is extension-authored: it does not run human input hooks, slash commands, skills, or prompt templates.
 
