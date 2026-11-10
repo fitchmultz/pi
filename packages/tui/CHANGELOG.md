@@ -24,6 +24,7 @@
 - Fixed `TuiMainScreen` drawing changed lines at the wrong rows and leaving stale lines when restarted with `stop()` and `start()` without a forced render. The first frame after the restart now clears and redraws the screen, as `requestRender(true)` does.
 - Fixed a fullscreen scrollbar drag staying active when it was released over an overlay opened during the drag, such as transcript search. Pointer motion without a pressed button kept scrolling the transcript. The drag now keeps every button and motion event until its release.
 - Fixed a fullscreen text-selection drag staying active when a component handled its release, such as an overlay opened during the drag. Its auto-scroll kept scrolling the transcript with no button held. The primary button's release now ends the drag whichever component handles it.
+- Fixed `wrapTextWithAnsi()` adding a blank row after a line that fills the width when a space follows it and then a word longer than the width, or nothing else on that line. This affected text with an active style or hyperlink and, in a fullscreen frame, all `Text` and `Markdown` text.
 
 ## [1.5.2] - 2026-11-10
 
