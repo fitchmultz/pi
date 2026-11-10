@@ -7,10 +7,9 @@
  */
 
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { keyHint } from "../../../modes/interactive/components/keybinding-hints.ts";
 import { VisualLinePreview } from "../../../modes/interactive/components/visual-truncate.ts";
 import { theme } from "../../../modes/interactive/theme/theme.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
+import type { KeybindingHints, ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
 import type { BashToolDetails } from "../bash.ts";
 import { getTextOutput, invalidArgText, startToolTimer, str, toolTimerText } from "../render-utils.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "../truncate.ts";
@@ -33,6 +32,7 @@ function rebuildBashResultRenderComponent(
 	options: ToolRenderResultOptions,
 	showImages: boolean,
 	timerText: string | undefined,
+	keyHint: KeybindingHints["keyHint"],
 ): void {
 	component.clear();
 
@@ -101,7 +101,14 @@ export function createShellRenderers(prompt: string): Pick<ToolDefinition<any, a
 		renderResult(result, options, _theme, context) {
 			const timerText = toolTimerText(context, options.isPartial);
 			const component = (context.lastComponent as Container | undefined) ?? new Container();
-			rebuildBashResultRenderComponent(component, result as any, options, context.showImages, timerText);
+			rebuildBashResultRenderComponent(
+				component,
+				result as any,
+				options,
+				context.showImages,
+				timerText,
+				context.keyHint,
+			);
 			component.invalidate();
 			return component;
 		},

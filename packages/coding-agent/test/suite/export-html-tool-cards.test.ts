@@ -6,7 +6,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Message } from "@earendil-works/pi-ai";
+import type { JsonValue, Message } from "@earendil-works/pi-ai";
 import { setKeybindings, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { beforeAll, describe, expect, onTestFinished, test } from "vitest";
@@ -15,6 +15,7 @@ import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import backgroundCommand from "../../src/extensions/background-command/index.ts";
 import { createCodemodeExtension } from "../../src/extensions/codemode/index.ts";
+import { createMcpExtension } from "../../src/extensions/mcp/index.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
 import { createHarness, type HarnessOptions } from "./harness.ts";
 
@@ -164,25 +165,60 @@ describe("tool cards in an HTML export", () => {
 	});
 
 	test("a result's expand hint names the click that expands it on the page", async () => {
-		const details = { jobs: [], total: 0, nextOffset: null };
+		const lines = (count: number) => Array.from({ length: count }, (_, index) => `row ${index + 1}`).join("\n");
+		const result = (toolCallId: string, toolName: string, text: string, details?: JsonValue): Message => ({
+			role: "toolResult",
+			toolCallId,
+			toolName,
+			content: [{ type: "text", text }],
+			details,
+			isError: false,
+			timestamp: 3,
+		});
+		const noJobs = { jobs: [], total: 0, nextOffset: null };
+		const nestedCalls = Array.from({ length: 10 }, (_, index) => ({
+			id: `call/${index}`,
+			name: "read",
+			args: "{}",
+			status: "ok",
+		}));
+
+		// Every built-in renderer that shortens a result, each with more output than its collapsed form shows.
 		const cards = await exportCards(
-			[backgroundCommand],
 			[
-				call("call-1", "background_command", { action: "status" }),
-				{
-					role: "toolResult",
-					toolCallId: "call-1",
-					toolName: "background_command",
-					content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
-					details,
-					isError: false,
-					timestamp: 3,
-				},
+				backgroundCommand,
+				createCodemodeExtension(),
+				createMcpExtension({ loadConfig: () => ({ servers: [], errors: [] }) }),
+			],
+			[
+				call("jobs", "background_command", { action: "status" }),
+				result("jobs", "background_command", JSON.stringify(noJobs, null, 2), noJobs),
+				call("grep", "grep", { pattern: "row" }),
+				result("grep", "grep", lines(20)),
+				call("find", "find", { pattern: "*.md" }),
+				result("find", "find", lines(25)),
+				call("shell", "powershell", { command: "Get-ChildItem" }),
+				result("shell", "powershell", lines(8)),
+				call("script", "codemode", { code: 'text("rows")' }),
+				result("script", "codemode", lines(8), { calls: nestedCalls }),
+				// A call to an MCP tool whose server is not connected, drawn by the MCP renderers.
+				call("mcp", "mcp__my_docs__search", { query: "pi" }),
+				result("mcp", "mcp__my_docs__search", lines(8)),
 			],
 		);
 
-		// The terminal's card reads "No background jobs (ctrl+o to expand)"; a browser has no such key.
-		expect(cards["call-1"]?.collapsed).toEqual(["No background jobs (click to expand)"]);
+		// The terminal's cards name its expand key here, "ctrl+o"; a browser has no such key.
+		const hints = Object.fromEntries(
+			Object.entries(cards).map(([id, card]) => [id, card.collapsed?.filter((row) => row.includes("to expand"))]),
+		);
+		expect(hints).toEqual({
+			jobs: ["No background jobs (click to expand)"],
+			grep: ["... (5 more lines, click to expand)"],
+			find: ["... (5 more lines, click to expand)"],
+			shell: ["... (3 earlier lines, click to expand)"],
+			script: ["... (2 earlier calls, click to expand)", "... (3 more lines, click to expand)"],
+			mcp: ["... (3 more lines, click to expand)"],
+		});
 	});
 
 	test("a tool with a result renderer and no call renderer keeps its arguments", async () => {
