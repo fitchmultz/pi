@@ -209,7 +209,7 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Retained work reduction | Owner | Primary tests |
 | --- | --- | --- |
 | Scan each decoded journal chunk once and join complete lines only at record boundaries when opening sessions | `packages/coding-agent/src/core/session-manager.ts` | `packages/coding-agent/test/session-manager/file-operations.test.ts`; [synthetic opening measurements](docs/performance/session-open-2026-10-24.md) |
-| Resolve `--session` and `--fork` ID prefixes, cross-project IDs and misses without parsing non-matching journals past their headers; matching sessions are still read in full because activity time orders ambiguous matches. Full `list()`/`listAll()` listings are unchanged and uncached. Upstream still builds complete metadata for every saved session | `core/session-manager.ts` (`listProjectSessions`, `listAllSessions`), `main.ts` | `session-arg-resolution.test.ts` |
+| Resolve `--session` and `--fork` ID prefixes, cross-project IDs and misses without parsing non-matching journals past their headers; matching sessions are still read in full because activity time orders ambiguous matches. Full `list()`/`listAll()` listings read journal lines directly and split them on `\n` exactly as opening a session does: a record containing a stray carriage return counts, and carriage returns alone do not separate records. Listings stay uncached and re-read every journal. Upstream reads listings through `readline` and still builds complete metadata for every saved session | `core/session-manager.ts` (`readSessionLines`, `listProjectSessions`, `listAllSessions`), `main.ts` | `session-arg-resolution.test.ts`, `session-manager/file-operations.test.ts` |
 | Lossless upload compression on qualified Anthropic Messages and public OpenAI Responses endpoints; existing Codex zstd stays canonical-endpoint-only. See [support boundaries and measurement](docs/compression.md) | `packages/ai/src/utils/request-compression.ts`, `packages/ai/src/api/{anthropic-messages,openai-responses,openai-codex-responses}.ts` | `packages/ai/test/{anthropic-request-compression,openai-request-compression,openai-codex-stream}.test.ts` |
 | Normalize tool declarations once per comparison, index model overlays per read, repair JSON by spans, and drain Codex events without repeated array shifts | `packages/agent/src/agent-loop.ts`, `packages/ai/src/{utils/transcript,utils/json-parse,models,api/openai-codex-responses}.ts` | `packages/agent/test/agent.test.ts`, `packages/ai/test/{system-message-replay,json-parse,model-types,openai-codex-websocket-queue}.test.ts` |
 | Stream long-token wrapping, use native grapheme endpoints, reuse only the current editor layout after comparing text, width and paste membership, and reuse unchanged same-index rows in unstyled Boxes after child changes | `packages/tui/src/{utils,components/editor,components/input,components/box}.ts` | `packages/tui/test/{wrap-ansi,editor,input,layout,mouse-components}.test.ts` |
@@ -267,9 +267,8 @@ The generated schemas are under `packages/coding-agent/schemas/` and use upstrea
 
 Package production uses the maintained `scripts/package-artifacts.mjs` and local consumer helpers,
 including npm 12's expected-package-keyed pack metadata. Selected workspaces pack in one npm process;
-Nix retains its ten raw named archives. Upstream's derivation has no source override for pi-schema,
-which its install lock lists without an integrity hash, so its Nix build fails to evaluate; the fork
-packs pi-schema and overrides it. Pinned fleet automation has migrated to the artifact API,
+Nix retains its ten raw named archives: the eight that upstream's derivation packs, plus chord and
+durable, which the fork's coding-agent depends on. Each has a source override. Pinned fleet automation has migrated to the artifact API,
 and the obsolete `scripts/coding-agent-consumer.mjs` shim has been removed.
 Retained offline comparison fixtures are documented in [Performance reproduction](docs/performance.md).
 
