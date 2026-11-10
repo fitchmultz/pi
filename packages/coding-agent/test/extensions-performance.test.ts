@@ -125,11 +125,14 @@ describe("non-fatal extension performance warnings", () => {
 		vi.spyOn(performance, "now").mockImplementation(() => now);
 		const component = {
 			value: "footer",
+			capturesViewportInput: true,
 			render() {
 				now += 17;
 				return [this.value];
 			},
-			invalidate: vi.fn(),
+			invalidate: vi.fn(function (this: { value: string }) {
+				this.value = "invalidated";
+			}),
 			dispose: vi.fn(),
 		};
 		const runner = await createRunner((pi) => {
@@ -153,9 +156,13 @@ describe("non-fatal extension performance warnings", () => {
 		expect(warnings).toEqual([]);
 		await Promise.resolve();
 		expect(warnings.map((warning) => warning.event)).toEqual(["footer"]);
+		// A member the wrapper does not know by name still reaches the host.
+		expect(footer?.capturesViewportInput).toBe(true);
 		footer?.invalidate();
 		footer?.dispose?.();
 		expect(component.invalidate).toHaveBeenCalledOnce();
 		expect(component.dispose).toHaveBeenCalledOnce();
+		// Methods run on the extension's component, so the state they change is the state it renders.
+		expect(footer?.render(80)).toEqual(["invalidated"]);
 	});
 });

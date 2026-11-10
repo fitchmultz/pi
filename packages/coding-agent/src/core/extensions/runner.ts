@@ -11,7 +11,7 @@ import {
 	type Provider,
 	type ProviderHeaders,
 } from "@earendil-works/pi-ai";
-import type { KeyId } from "@earendil-works/pi-tui";
+import type { Component, KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
 import type { CacheWarmingAction } from "../cache-warmer.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -266,6 +266,28 @@ function invokeHandler(
 	} finally {
 		warnSlowCall(extension, event.type, performance.now() - started, 100, report);
 	}
+}
+
+/**
+ * Reports a footer render that blocks the event loop. Only `render` is replaced: every other member
+ * is the component's own, and its methods still run on the component.
+ */
+function timeFooterRender<T extends Component>(component: T, extension: Extension, report: ExtensionErrorListener): T {
+	const render = (width: number): string[] => {
+		const started = performance.now();
+		try {
+			return component.render(width);
+		} finally {
+			warnSlowCall(extension, "footer", performance.now() - started, 16, report);
+		}
+	};
+	return new Proxy(component, {
+		get(target, key) {
+			if (key === "render") return render;
+			const member: unknown = Reflect.get(target, key);
+			return typeof member === "function" ? member.bind(target) : member;
+		},
+	});
 }
 
 type BoundaryBaseEvent =
@@ -970,55 +992,34 @@ export class ExtensionRunner {
 		const extension = this.extensions.find((entry) => entry.path === extensionPath);
 		if (!extension) return ctx;
 		return new Proxy(ctx, {
-			get: (target, key, receiver) => {
-				if (key !== "ui") return Reflect.get(target, key, receiver);
-				const base = ctx.ui;
-				let wrappers = this.extensionUIContexts.get(base);
-				if (!wrappers) {
-					wrappers = new Map();
-					this.extensionUIContexts.set(base, wrappers);
-				}
-				let ui = wrappers.get(extension);
-				if (!ui) {
-					ui = Object.create(base) as ExtensionUIContext;
-					ui.setFooter = (factory) =>
-						base.setFooter(
-							factory
-								? (...args) => {
-										const component = factory(...args);
-										return {
-											render: (width) => {
-												const started = performance.now();
-												try {
-													return component.render(width);
-												} finally {
-													warnSlowCall(extension, "footer", performance.now() - started, 16, (error) =>
-														queueMicrotask(() => {
-															try {
-																this.emitError(error);
-															} catch {
-																// Rendering diagnostics remain non-fatal.
-															}
-														}),
-													);
-												}
-											},
-											invalidate: () => component.invalidate(),
-											dispose: () => component.dispose?.(),
-											handleInput: component.handleInput?.bind(component),
-											handleMouse: component.handleMouse?.bind(component),
-											get wantsKeyRelease() {
-												return component.wantsKeyRelease;
-											},
-										};
-									}
-								: undefined,
-						);
-					wrappers.set(extension, ui);
-				}
-				return ui;
-			},
+			get: (target, key, receiver) =>
+				key === "ui" ? this.footerTimingUI(ctx.ui, extension) : Reflect.get(target, key, receiver),
 		});
+	}
+
+	/** The UI context one extension sees while diagnostics are on: its footers report their slow renders. */
+	private footerTimingUI(base: ExtensionUIContext, extension: Extension): ExtensionUIContext {
+		let wrappers = this.extensionUIContexts.get(base);
+		if (!wrappers) {
+			wrappers = new Map();
+			this.extensionUIContexts.set(base, wrappers);
+		}
+		let ui = wrappers.get(extension);
+		if (!ui) {
+			const report: ExtensionErrorListener = (error) =>
+				queueMicrotask(() => {
+					try {
+						this.emitError(error);
+					} catch {
+						// Rendering diagnostics remain non-fatal.
+					}
+				});
+			ui = Object.create(base) as ExtensionUIContext;
+			ui.setFooter = (factory) =>
+				base.setFooter(factory ? (...args) => timeFooterRender(factory(...args), extension, report) : undefined);
+			wrappers.set(extension, ui);
+		}
+		return ui;
 	}
 
 	private callHandler(

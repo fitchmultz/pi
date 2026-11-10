@@ -126,6 +126,7 @@
 - Fixed the retained performance fixtures, which imported deleted files and called changed APIs, so the smoke command in the [performance record](../../docs/performance.md) stopped at its eleventh case. That command runs to the end again and a script test now runs it; cases whose measured code is deleted were removed. The record and its results file list only measurements for code the fork still carries, with the recorded numbers unchanged.
 - Fixed quitting while a tool runs dropping that tool's result from the saved session, which then showed `No result provided` for the call on resume. Quit now aborts the turn and waits up to 500 ms for it to settle while the shutdown handlers run. A tool that ignores cancellation still cannot hold up the handlers or the exit, and certified working-session exits still wait without a limit.
 - Fixed collapsed tool-output and bash previews returning private selection annotations from `render()` to callers outside a fullscreen frame after that frame had rendered them.
+- Fixed `PI_EXTENSION_PERFORMANCE=1` changing how an extension footer behaves: the timing wrapper forwarded only a fixed list of members, so the host could not see `capturesViewportInput` or any other member. Only `render` is wrapped now.
 
 ### Removed
 
