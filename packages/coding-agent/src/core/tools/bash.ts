@@ -23,6 +23,13 @@ const MAX_TIMEOUT_MS = 2_147_483_647;
 /** Output limit of `structuredContent.output`, which programmatic callers such as codemode scripts receive. */
 const STRUCTURED_OUTPUT_MAX_BYTES = 1024 * 1024;
 const MAX_TIMEOUT_SECONDS = MAX_TIMEOUT_MS / 1000;
+/**
+ * How far the local shell reads ahead of a consumer that writes output to a file: while the promises
+ * `onData` returned for this many bytes are pending, the shell does not read from the command.
+ * Durable's shell spill buffers the same amount (`SPILL_HIGH_WATER_MARK`); docs/performance.md records
+ * the measurement.
+ */
+const MAX_PENDING_OUTPUT_BYTES = 1024 * 1024;
 
 function resolveTimeoutMs(timeout: number | undefined): number | undefined {
 	if (timeout === undefined) return undefined;
@@ -85,7 +92,13 @@ export interface BashOperations {
 		command: string,
 		cwd: string,
 		options: {
-			onData: (data: Buffer) => void;
+			/**
+			 * Receives each output chunk in order. A consumer that stores a chunk asynchronously returns
+			 * a promise that settles once the chunk is stored and rejects if storing fails; pi returns one
+			 * for each chunk it writes to a full-output file. An implementation may ignore it; one that
+			 * can pause its source can use it to limit the output waiting to be stored.
+			 */
+			onData: (data: Buffer) => void | Promise<void>;
 			signal?: AbortSignal;
 			timeout?: number;
 			env?: NodeJS.ProcessEnv;
@@ -147,7 +160,10 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 			let exitedBeforeDeadlineAfterMs: number | undefined;
 			let timeoutHandle: NodeJS.Timeout | undefined;
 			let outputError: Error | undefined;
-			let pendingOutput: Promise<void> | undefined;
+			// Bytes handed to onData whose returned promise has not settled.
+			let pendingOutputBytes = 0;
+			// Settles once every promise onData returned has settled.
+			let outputSettled = Promise.resolve();
 			const onAbort = () => {
 				killed = true;
 				if (child.pid) killProcessTree(child.pid);
@@ -156,20 +172,31 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				outputError = error instanceof Error ? error : new Error(String(error));
 				onAbort();
 			};
+			// Not after a failure: the pipes must flow for the killed command's exit to be seen.
+			const outputIsBackedUp = () => !outputError && pendingOutputBytes >= MAX_PENDING_OUTPUT_BYTES;
 			const handleData = (data: Buffer) => {
 				if (outputError) return;
 				try {
-					// The void callback contract still accepts synchronous consumers. Our spill
-					// consumers return a drain promise, which only this native producer awaits.
-					const pending: unknown = onData(data);
-					if (pending instanceof Promise) {
+					const written = onData(data);
+					// Extensions are loaded without type checking, so their callback may return any value.
+					if (!(written instanceof Promise)) return;
+					// Captured so that the callback below does not keep `data` alive until the write completes.
+					const bytes = data.length;
+					pendingOutputBytes += bytes;
+					// Checked on every chunk: Node resumes both pipes itself when the shell exits.
+					if (outputIsBackedUp()) {
 						child.stdout?.pause();
 						child.stderr?.pause();
-						pendingOutput = pending.catch(failOutput).then(() => {
+					}
+					const settled = written.catch(failOutput).then(() => {
+						pendingOutputBytes -= bytes;
+						if (!outputIsBackedUp()) {
 							child.stdout?.resume();
 							child.stderr?.resume();
-						});
-					}
+						}
+					});
+					const earlier = outputSettled;
+					outputSettled = settled.then(() => earlier);
 				} catch (error) {
 					failOutput(error);
 				}
@@ -196,8 +223,8 @@ export function createLocalShellOperations(shellName: string, resolveShellConfig
 				}
 				// Handle shell spawn errors and wait for the process to terminate without hanging
 				// on inherited stdio handles held by detached descendants.
-				const exitCode = await waitForChildProcess(child);
-				await pendingOutput;
+				const exitCode = await waitForChildProcess(child, outputIsBackedUp);
+				await outputSettled;
 				if (outputError) throw outputError;
 				if (signal?.aborted) {
 					throw new Error("aborted");
@@ -382,9 +409,9 @@ export function createShellToolDefinition(
 
 			const handleData = (data: Buffer) => {
 				if (!acceptingOutput) return;
-				const drained = output.append(data);
+				const written = output.append(data);
 				scheduleOutputUpdate();
-				return drained;
+				return written;
 			};
 
 			const finishOutput = async () => {
