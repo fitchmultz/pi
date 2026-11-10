@@ -241,8 +241,7 @@ export class ModelRuntime implements Models {
 		this.modelCredentials = {
 			read: (id, options) => {
 				options?.signal?.throwIfAborted();
-				return this.extensionProviders.get(id)?.ignoreStoredCredentials === true &&
-					!credentials.hasRuntimeApiKey(id)
+				return this.ignoresStoredCredentials(id) && !credentials.hasRuntimeApiKey(id)
 					? Promise.resolve(undefined)
 					: credentials.read(id, options);
 			},
@@ -800,16 +799,18 @@ export class ModelRuntime implements Models {
 		return this.credentials.settled();
 	}
 
+	/** An extension can register a provider that must not authenticate with its saved credential. */
+	private ignoresStoredCredentials(providerId: string): boolean {
+		return this.extensionProviders.get(providerId)?.ignoreStoredCredentials === true;
+	}
+
 	listCredentials(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
 		return this.credentials.list(options);
 	}
 
 	getProviderAuthStatus(providerId: string): AuthStatus {
 		if (this.credentials.hasRuntimeApiKey(providerId)) return { configured: true, source: "runtime" };
-		if (
-			this.snapshot.storedProviders.has(providerId) &&
-			this.extensionProviders.get(providerId)?.ignoreStoredCredentials !== true
-		) {
+		if (this.snapshot.storedProviders.has(providerId) && !this.ignoresStoredCredentials(providerId)) {
 			return { configured: true, source: "stored" };
 		}
 		const configured = configuredRequestAuthStatus(
@@ -1253,9 +1254,7 @@ export class ModelRuntime implements Models {
 		configuredStatus: AuthStatus | undefined,
 		type: AuthType,
 	): void {
-		const hasStored =
-			this.snapshot.storedProviders.has(providerId) &&
-			this.extensionProviders.get(providerId)?.ignoreStoredCredentials !== true;
+		const hasStored = this.snapshot.storedProviders.has(providerId) && !this.ignoresStoredCredentials(providerId);
 		if (!hasStored && !this.credentials.hasRuntimeApiKey(providerId) && !configuredStatus?.configured) return;
 		const configuredProviders = new Set(this.snapshot.configuredProviders).add(providerId);
 		const auth = new Map(this.snapshot.auth);
@@ -1278,7 +1277,7 @@ export class ModelRuntime implements Models {
 			if (value !== undefined) (effective as Record<string, unknown>)[key] = value;
 		}
 		this.extensionProviders.set(providerId, effective);
-		if (effective.ignoreStoredCredentials === true) {
+		if (this.ignoresStoredCredentials(providerId)) {
 			// A saved credential's old check must not survive isolation or an in-flight refresh.
 			this.providerAvailabilitySeq.set(providerId, (this.providerAvailabilitySeq.get(providerId) ?? 0) + 1);
 			const configuredProviders = new Set(this.snapshot.configuredProviders);

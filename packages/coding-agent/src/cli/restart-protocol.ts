@@ -57,23 +57,29 @@ export type RestartWorkerMessage =
 /** Sent only by a launcher that advertised {@link MANAGED_PROTOCOL_ENV}: readiness was accepted and rollback retired. */
 export type RestartLauncherMessage = { type: "pi:accepted" };
 
+/** Wire check shared by the worker's restart message and the launcher's handoff: both must name complete native state. */
+export function isRestartSession(value: unknown): value is RestartSession {
+	return (
+		!!value &&
+		typeof value === "object" &&
+		"sessionFile" in value &&
+		typeof value.sessionFile === "string" &&
+		"sessionId" in value &&
+		typeof value.sessionId === "string" &&
+		value.sessionId !== "" &&
+		"workingSession" in value &&
+		typeof value.workingSession === "string" &&
+		isAbsolute(value.workingSession)
+	);
+}
+
 export function parseRestartHandoff(encoded: string): RestartHandoff {
 	const value: unknown = JSON.parse(encoded);
-	if (
-		!value ||
-		typeof value !== "object" ||
-		!("sessionFile" in value) ||
-		typeof value.sessionFile !== "string" ||
-		!("sessionId" in value) ||
-		typeof value.sessionId !== "string" ||
-		!value.sessionId ||
-		!("workingSession" in value) ||
-		typeof value.workingSession !== "string" ||
-		!isAbsolute(value.workingSession)
-	) {
+	if (!isRestartSession(value)) {
 		throw new Error("Invalid restart handoff: complete native working-session state is required");
 	}
-	const fields = value as Record<string, unknown>;
+	// The optional fields are still unchecked wire input.
+	const fields: Partial<Record<keyof RestartHandoff, unknown>> = value;
 	for (const key of ["message", "failure"] as const) {
 		if (fields[key] !== undefined && typeof fields[key] !== "string")
 			throw new Error(`Invalid restart handoff ${key}`);

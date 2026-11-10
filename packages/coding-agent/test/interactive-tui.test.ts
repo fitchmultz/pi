@@ -190,6 +190,7 @@ describe("InteractiveMode right-click paste", () => {
 		const requestRender = vi.fn();
 		const context = {
 			session: { workingSessionGate: new WorkingSessionGate() },
+			_handleRightClickPaste: Reflect.get(InteractiveMode.prototype, "_handleRightClickPaste"),
 			renderer: { getFocusedComponent: () => target },
 			ui: { requestRender },
 		};

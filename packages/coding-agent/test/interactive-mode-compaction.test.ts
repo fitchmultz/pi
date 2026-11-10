@@ -271,6 +271,7 @@ describe("InteractiveMode compaction events", () => {
 			isExtensionCommand: vi.fn().mockReturnValue(false),
 			updatePendingMessagesDisplay: vi.fn(),
 			showError: vi.fn(),
+			_flushCompactionQueue: Reflect.get(InteractiveMode.prototype, "_flushCompactionQueue"),
 		};
 
 		const flushCompactionQueue = Reflect.get(InteractiveMode.prototype, "flushCompactionQueue") as (

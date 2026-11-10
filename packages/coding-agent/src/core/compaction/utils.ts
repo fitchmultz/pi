@@ -188,7 +188,29 @@ export interface CheckpointPromptSections {
 export function formatCheckpointPrompt(sections: CheckpointPromptSections): string {
 	const criticalContext =
 		sections.criticalContext === undefined ? "" : `\n\n## Critical Context\n${sections.criticalContext}`;
-	return `## Goal\n${sections.goal}\n\n## Constraints & Preferences\n${sections.constraints}\n\n## Progress\n### Done\n${sections.done}\n\n### In Progress\n${sections.inProgress}\n\n### Blocked\n${sections.blocked}\n\n## Key Decisions\n${sections.keyDecisions}\n\n## Next Steps\n${sections.nextSteps}${criticalContext}\n\nKeep each section concise. Preserve exact file paths, function names, and error messages.`;
+	return `## Goal
+${sections.goal}
+
+## Constraints & Preferences
+${sections.constraints}
+
+## Progress
+### Done
+${sections.done}
+
+### In Progress
+${sections.inProgress}
+
+### Blocked
+${sections.blocked}
+
+## Key Decisions
+${sections.keyDecisions}
+
+## Next Steps
+${sections.nextSteps}${criticalContext}
+
+Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 }
 
 // ============================================================================
