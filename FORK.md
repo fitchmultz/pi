@@ -384,7 +384,8 @@ models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
 Restart guidance is a recorded `restart` prompt section, set in `before_agent_start`, so a copy of
 the session that runs without managed control keeps the leading system message and records the
-section's removal. A `context_with_system` handler adds the guidance only to windows recorded
+section's removal. Models without mid-conversation system messages still get the removal folded
+into the leading message. A `context_with_system` handler adds the guidance only to windows recorded
 before the section was saved. Forced text stays run-scoped and unpersisted. Child
 finalization recovery remains a conditional source risk: managed saved-session attempts create
 new contracts, and no reachable unchanged-contract reset was reproduced. Do not restore an old

@@ -411,6 +411,17 @@ describe("actual managed restart guidance", () => {
 			null,
 		]);
 		expect(getCurrentSystemPrompt(childRequest)).not.toContain("<restart>");
+		// What the provider gets: an API that takes later system messages keeps the parent's start.
+		for (const api of ["openai-responses", "openai-codex-responses"] as const) {
+			const [parent, forked] = await payloads([f.requests[0], child.requests[0]], api);
+			expect(forked.instructions).toEqual(parent.instructions);
+			expect(forked.input?.slice(0, parent.input?.length)).toEqual(parent.input);
+			expect(forked.tools).toEqual(parent.tools);
+		}
+		// An API without them gets every later system message folded into the leading one.
+		const [parent, forked] = await payloads([f.requests[0], child.requests[0]], "openai-completions");
+		expect(JSON.stringify(parent.messages?.[0])).toContain("<restart>");
+		expect(JSON.stringify(forked.messages?.[0])).not.toContain("<restart>");
 	});
 
 	it("adds the guidance to a leading system message that was recorded without it", async () => {
