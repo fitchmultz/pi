@@ -3,6 +3,7 @@ import type {
 	Tool as OpenAITool,
 	ResponseConfigurationUpdateItemParam,
 	ResponseCreateParamsStreaming,
+	ResponseFailedEvent,
 	ResponseInput,
 	ResponseInputContent,
 	ResponseInputImage,
@@ -121,6 +122,8 @@ export interface OpenAIResponsesStreamOptions {
 		usage: Usage,
 		serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	) => void;
+	/** Builds the error thrown for a `response.failed` event, after its usage is recorded. Default: a plain `Error`. */
+	failedResponseError?: (event: ResponseFailedEvent) => Error;
 }
 
 export interface ConvertResponsesMessagesOptions {
@@ -804,6 +807,7 @@ export async function processResponsesStream<TApi extends Api>(
 			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
 		} else if (event.type === "response.failed") {
 			finalizeResponse(event.response);
+			if (options?.failedResponseError) throw options.failedResponseError(event);
 			const error = event.response?.error;
 			const details = event.response?.incomplete_details;
 			const msg = error

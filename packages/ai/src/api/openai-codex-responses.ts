@@ -2,6 +2,7 @@ import type * as NodeZlib from "node:zlib";
 import type {
 	Tool as OpenAITool,
 	ResponseCreateParamsStreaming,
+	ResponseFailedEvent,
 	ResponseInput,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
@@ -689,15 +690,16 @@ async function processStream(
 			grammarToolInputProperties,
 			resolveServiceTier: resolveCodexServiceTier,
 			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+			failedResponseError: codexFailedResponseError,
 		},
 	);
 }
 
 class CodexApiError extends Error {
 	readonly code?: string;
-	readonly payload?: Record<string, unknown>;
+	readonly payload?: unknown;
 
-	constructor(message: string, options?: { code?: string; payload?: Record<string, unknown>; cause?: unknown }) {
+	constructor(message: string, options?: { code?: string; payload?: unknown; cause?: unknown }) {
 		super(options?.code ? `${options.code}: ${message}` : message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
@@ -741,6 +743,12 @@ function isPreviousResponseNotFoundError(error: unknown): boolean {
 	return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
 }
 
+/** The typed error for a failed response; transport recovery reads its code. */
+function codexFailedResponseError(event: ResponseFailedEvent): CodexApiError {
+	const error = event.response.error;
+	return new CodexApiError(error?.message || "Codex response failed", { code: error?.code, payload: event });
+}
+
 function extractCodexEventError(event: Record<string, unknown>): { code?: string; message?: string } {
 	const nested = event.error && typeof event.error === "object" ? (event.error as Record<string, unknown>) : undefined;
 	return {
@@ -776,15 +784,6 @@ async function* mapCodexEvents(
 				code,
 				payload: event,
 			});
-		}
-
-		if (type === "response.failed") {
-			// Preserve terminal usage before the typed error used by transport recovery.
-			yield { ...event, type: "response.completed" } as unknown as ResponseStreamEvent;
-			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
-			const code = response?.error?.code;
-			const message = response?.error?.message;
-			throw new CodexApiError(message || "Codex response failed", { code, payload: event });
 		}
 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {
@@ -1577,6 +1576,7 @@ async function processWebSocketStream(
 				grammarToolInputProperties,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				failedResponseError: codexFailedResponseError,
 			},
 		);
 		if (options?.signal?.aborted) {
