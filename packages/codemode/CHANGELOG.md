@@ -5,6 +5,11 @@
 ### Added
 
 - Added a `background` source option and an optional `CodemodeSourceCapabilities` argument to `parseCodemodeSource()`. A caller that can report a result after the tool call returns passes `{ background: true }`; every other caller keeps rejecting the field with the existing error text.
+
+## [1.5.1] - 2026-11-09
+
+### Added
+
 - Added `resolveSchemaRef(ref, root)`, which returns the subschema a local `$ref` (`#`, `#/$defs/Item`) names in a schema, with URI-decoded and JSON Pointer unescaped segments ([#11803](https://github.com/earendil-works/pi/issues/11803))
 
 ### Fixed

@@ -19,12 +19,19 @@
 - Fixed inline math stripping dollar signs, braces and shell operators from quoted shell arguments.
 - Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
 - Fixed a rejected `getSuggestions()` call stopping all later autocomplete requests and escaping as an unhandled rejection, which ends Node processes by default. `Editor` now handles a failed lookup like one with no suggestions, including a rejection with the abort reason after a newer request supersedes it.
-
-- Fixed Markdown rendering HTML comments (`<!-- ... -->`) as visible text ([#11710](https://github.com/earendil-works/pi/issues/11710))
-- Fixed fullscreen Kitty images in Orca showing only their first row. Orca's xterm.js image addon stores images in the cells they cover. `TuiAltScreen` now draws Kitty images after clearing and writing the rows they cover on every terminal, not only WezTerm ([#11835](https://github.com/earendil-works/pi/issues/11835))
 - Fixed `start()` after `stop()` drawing nothing, and ignoring later `requestRender()` calls until a forced render, when a render was pending at `stop()` or requested while stopped, for example by the key handler that stopped the TUI.
 - Fixed `TuiMainScreen` drawing changed lines at the wrong rows and leaving stale lines when restarted with `stop()` and `start()` without a forced render. The first frame after the restart now clears and redraws the screen, as `requestRender(true)` does.
 - Fixed a fullscreen scrollbar drag staying active when it was released over an overlay opened during the drag, such as transcript search. Pointer motion without a pressed button kept scrolling the transcript. The drag now keeps every button and motion event until its release.
+
+## [1.5.1] - 2026-11-09
+
+### Fixed
+
+- Fixed Markdown rendering HTML comments (`<!-- ... -->`) as visible text ([#11710](https://github.com/earendil-works/pi/issues/11710))
+- Fixed fullscreen Kitty images in Orca showing only their first row. Orca's xterm.js image addon stores images in the cells they cover. `TuiAltScreen` now draws Kitty images after clearing and writing the rows they cover on every terminal, not only WezTerm ([#11835](https://github.com/earendil-works/pi/issues/11835))
+- Fixed deleting a paste marker with Backspace corrupting later short markers such as `[paste #2]`, causing the marker text to be submitted instead of its pasted content ([#11923](https://github.com/earendil-works/pi/issues/11923))
+- Fixed internal cursor markers leaking into terminal output, including with multiple markers or horizontally clipped content ([#9441](https://github.com/earendil-works/pi/pull/9441) by [@muyiyr](https://github.com/muyiyr))
+- Fixed Alacritty hyperlinks not being enabled when `TERM_PROGRAM` is unset; detection now also uses `TERM` and `ALACRITTY_WINDOW_ID` ([#11767](https://github.com/earendil-works/pi/issues/11767))
 
 ## [1.5.0] - 2026-11-02
 

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `coerce` and `parse` converting an optional `null` inside an `anyOf`/`oneOf` branch into a value (`"null"` for a string) instead of dropping it. A union that accepts the value as it is keeps its nulls.
+
+## [1.5.1] - 2026-11-09
+
 ### Added
 
 - `unsafe<T>(schema)` types a schema as accepting `T` without checking it, as TypeBox's `Type.Unsafe` does.
@@ -16,8 +22,6 @@
 - Faster checks, still without eval: object and array loops run `const`, small `enum`s, type lists, number bounds, string lengths and patterns inline instead of calling a closure; a closed object looks up keys in declared order first; `anyOf` branches that are bare types (as `nullable` builds) run as one type test. Checks take about 16% less time across the benchmark's speed cases, up to 30% less for tagged unions and 45% less for nullable properties.
 
 ### Fixed
-
-- Fixed `coerce` and `parse` converting an optional `null` inside an `anyOf`/`oneOf` branch into a value (`"null"` for a string) instead of dropping it. A union that accepts the value as it is keeps its nulls.
 
 - A `number` or `integer` no longer accepts `NaN`, `Infinity` or `-Infinity`, as in TypeBox; before, an unbounded `num()` accepted them. JSON has neither, so only values built in code are affected. Errors name the value (`expected number, got NaN`).
 - The third-party licenses are in `THIRD_PARTY_NOTICES/`, renamed from `LICENSES/`, which Vite's license notices read as the package's license file, failing browser builds that bundle the package.

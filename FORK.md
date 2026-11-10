@@ -2,23 +2,23 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`bd0d815c3197e75323f6db60ee3ad1f73d5280d7` (2026-11-09), following official v1.5.0.
-It is upstream plus the features
-below. Everything else follows upstream behavior and APIs.
+`4ea8837927564c592b1d184c956ab7d28c88119b` (2026-11-10), two commits after official v1.5.1.
+It is upstream plus the features below. Everything else follows upstream behavior and APIs.
 
-The [2026-11-09 integration record](docs/upstream-sync-2026-11-09.md) documents the current baseline,
-conflict decisions and verification. The [2026-11-07 integration record](docs/upstream-sync-2026-11-07.md) documents the previous baseline,
-conflict decisions and verification. The [2026-11-05 integration record](docs/upstream-sync-2026-11-05.md) documents the previous baseline,
-conflict decisions and verification. The [2026-11-04 integration record](docs/upstream-sync-2026-11-04.md)
-records the previous integration. The [v1.5.0 integration record](docs/upstream-sync-1.5.0.md) records the preceding release integration. The
-[2026-10-29 integration record](docs/upstream-sync-2026-10-29.md) records the previous
-integration. The [v1.4.0 integration record](docs/upstream-sync-1.4.0.md)
-records the previous release integration. The
-[2026-10-21 consolidation record](docs/upstream-consolidation-2026-10-21.md)
-records the previous native replacements, retained differences and consumer inspection. The [v1.3.0 integration record](docs/upstream-sync-1.3.0.md)
-records the previous integration's callers, regressions and commands. The
-[earlier 2026-10-15 integration record](docs/upstream-sync-2026-10-15.md) documents the
-measured divergence, preserved callers, new regressions and verification commands.
+Each integration record documents its baseline, conflict decisions and verification, newest first:
+
+- [2026-11-10](docs/upstream-sync-2026-11-10.md), the current baseline, including official v1.5.1
+- [2026-11-09](docs/upstream-sync-2026-11-09.md)
+- [2026-11-07](docs/upstream-sync-2026-11-07.md)
+- [2026-11-05](docs/upstream-sync-2026-11-05.md)
+- [2026-11-04](docs/upstream-sync-2026-11-04.md)
+- [v1.5.0](docs/upstream-sync-1.5.0.md)
+- [2026-10-29](docs/upstream-sync-2026-10-29.md)
+- [v1.4.0](docs/upstream-sync-1.4.0.md)
+- [2026-10-21 consolidation](docs/upstream-consolidation-2026-10-21.md): native replacements, retained
+  differences and consumer inspection
+- [v1.3.0](docs/upstream-sync-1.3.0.md)
+- [2026-10-15](docs/upstream-sync-2026-10-15.md): measured divergence and preserved callers
 
 ## Fork features
 
@@ -88,7 +88,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | A pending tools refresh must not overwrite a disconnected MCP server's error output | `extensions/mcp/runtime.ts` | `mcp-extension.test.ts` |
 | Session shutdown waits for MCP transports already closing after reconnect or sign-in changes, so quitting does not leave old stdio servers running. Calls on clients detached after session expiry remain independent | `extensions/mcp/runtime.ts` | `mcp-extension.test.ts` |
 | Command output must drain after process exit without counting link backpressure as silence | `packages/env/daemon/src/{exec,output,process,pty}.rs` | `packages/env/test/{process,terminal,conformance,remote}.test.ts` |
-| WebSocket errors close their Chord link or HTTP scope while `ws` completes its close handshake, delivering code 1009 for oversized frames | `packages/chord/src/node/http/upgrades.ts`, `apps/p2/src/hosts/socket-limits.ts` | `packages/chord/test/node/http/upgrades.test.ts`, `apps/p2/test/p2/socket-limits.test.ts` |
+| A protocol error on a p2 client socket, such as an oversized frame, closes its Chord link while `ws` completes the close handshake, so the client receives code 1009. Upstream's p2 still terminates the socket on the error, which can discard the close frame and report 1006. Chord's HTTP component follows upstream's fix | `apps/p2/src/hosts/socket-limits.ts` | `apps/p2/test/p2/socket-limits.test.ts` |
 | A terminal viewer's frames from before its socket binds (an outdated host's notice) end with their host connection. Upstream keeps them on the view across connections, so a host restarted before the socket binds still shows it a stale Restart prompt, which would end the new host's terminals | `apps/p2/plugins/terminals/service.ts` | `apps/p2/test/p2/terminal-service.test.ts` |
 | A p2 start whose plugins fail to load must exit with its error even while a launcher's `/health` poll or a page's `/chord` reconnect waits. Upstream leaves the requests and upgrades captured during the load waiting, so the failed start keeps its port and process lock until each client gives up; a captured upgrade keeps them even after its client resets | `apps/p2/src/hosts/server.ts` | `apps/p2/test/p2/server-start.test.ts` |
 | A signal while the p2 server entry starts must close the server once started, so its exit hooks run. Upstream handles signals only after the start: Ctrl+C or a supervisor's SIGTERM during the start kills it without them, and on macOS the next start then refuses the data directory over the lock socket file left behind | `apps/p2/src/hosts/server.ts` | `apps/p2/test/p2/server-start.test.ts` |
@@ -123,6 +123,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Mistral's header deadline must stop after headers with or without a caller signal; caller cancellation must still stop SSE and held-open HTTP-error bodies ([#10609](https://github.com/earendil-works/pi/issues/10609)) | `packages/ai/src/api/mistral-conversations.ts` | `packages/ai/test/mistral-http-transport.test.ts` |
 | Failed terminal responses must preserve consumed numeric usage and error details | `packages/ai/src/api/{openai-responses-shared,openai-codex-responses}.ts` | `packages/ai/test/{openai-responses-terminal-event,openai-codex-stream}.test.ts` |
 | Low-level `agentLoop()` and `agentLoopContinue()` streams must end when their run throws, for example from `prepareRequest`: an error assistant message (`aborted` after cancellation), `turn_end`, then `agent_end` carrying the messages accepted before the failure and that message. Upstream's adapters settle only a successful run, so iteration and `result()` stay pending and the rejection is unhandled | `packages/agent/src/agent-loop.ts` | `packages/agent/test/agent-loop.test.ts` |
+| Claude Fable 5.2 and Mythos 5.2 requests omit `temperature`, which Anthropic's [migration guide](https://platform.claude.com/docs/en/models/fable-5-2/migration-guide) says to omit. Upstream's catalog entry still sends a caller's temperature | `packages/ai/catalog/families/anthropic.ts`, `packages/ai/src/api/cloudflare.ts` | `packages/ai/test/anthropic-mid-conversation-effort.test.ts` |
 | Astra Ultrafast and legacy Codex Fast estimates need correct tier/confirmation rules | `packages/ai/src/api/{openai-responses,openai-codex-responses}.ts` | `packages/ai/test/openai-ultrafast-pricing.test.ts` |
 | Anthropic strict limits apply across initial and inline definitions, including required schemas. Upstream's one-time fallback after a rejected request stays for limits a count cannot predict, such as compiled grammar size; alone it would spend a rejected request on every over-limit turn and drop strict mode for all preferred tools | `packages/ai/src/api/anthropic-messages.ts` | `packages/ai/test/anthropic-strict-tool-{schema,fallback}.test.ts` |
 | Optional nulls inside schema unions must not be coerced into fabricated values. Upstream's pi-schema drops optional nulls only through properties and items; inside an `anyOf`/`oneOf` branch its conversion pass turns them into values (`"null"` for a string) | `packages/schema/src/coerce.ts` (pass 1) | `packages/ai/test/validation.test.ts`, `packages/schema/test/coerce.test.ts` |
@@ -511,8 +512,11 @@ only complete current native state, with no journal-only or pre-v1 handoff fallb
 - `npm run check` after code changes.
 - `./test.sh` (also the default `npm test`) runs all non-e2e tests offline in an isolated home; `./test.sh -- <command>` runs a
   focused command the same way. Node and npm resolve before HOME isolation so version-manager
-  shims keep working. The isolated root follows the caller's `TMPDIR`; Chord's upstream lock
-  fallback handles Unix socket paths that exceed the native limit.
+  shims keep working. The isolated root follows the caller's `TMPDIR`, except that macOS's per-user
+  default becomes `/tmp`: under the default, Chord's socket-file fixtures exceed the 104-byte Unix
+  socket path limit. A `TMPDIR` the caller chose is kept.
+- Env's daemon tests need the debug daemon: `npm run build:daemon --workspace packages/env`
+  (Rust toolchain).
 - `./test.sh` keeps the caller's `PATH`. If GNU coreutils' `gnubin` comes before `/bin`, Env's
   foreground-job test sees `gsleep` instead of `sleep`. Remove `gnubin` from `PATH` and unset
   `BASH_ENV` when it re-adds it, for example `env -u BASH_ENV PATH=<PATH without gnubin> ./test.sh`.
