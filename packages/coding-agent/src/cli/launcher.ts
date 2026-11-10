@@ -53,9 +53,9 @@ function isLauncherRestartArtifact(path: string): boolean {
 	return basename(path) === "working-session.json" && basename(dirname(path)).startsWith("pi-restart-state-");
 }
 
+/** Takes only paths that passed {@link isLauncherRestartArtifact}: the launcher tracks no others. */
 function removeRestartArtifact(path: string): void {
 	rmSync(path, { force: true });
-	if (basename(path) !== "working-session.json" || !basename(dirname(path)).startsWith("pi-restart-state-")) return;
 	// Only remove the empty native artifact directory, never recursively delete an IPC path.
 	try {
 		rmdirSync(dirname(path));
