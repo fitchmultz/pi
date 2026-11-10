@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs, {
 	appendFileSync,
 	mkdirSync,
@@ -41,12 +42,9 @@ import {
 } from "./harness.ts";
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
+/** Polls until `condition` holds. Only the test's timeout limits the wait, so a slow machine cannot fail it early. */
 async function until(condition: () => boolean) {
-	for (let i = 0; i < 240; i++) {
-		if (condition()) return;
-		await delay(25);
-	}
-	throw new Error("Timed out waiting for background completion");
+	while (!condition()) await delay(25);
 }
 const notices = (h: Harness) =>
 	h.sessionManager
@@ -55,7 +53,10 @@ const notices = (h: Harness) =>
 const jobFrom = (h: Harness) =>
 	JSON.parse(getMessageText(getToolResult(h, "background_command"))) as BackgroundCommandJob;
 
-describe("background command extension delivery", () => {
+// Most tests here start one or two detached worker processes from TypeScript source. A start takes
+// 0.2 s on an idle machine and about 9 s on one starved enough to reproduce the CI timeouts, where the
+// slowest test took 60 s. The limit is three times that, rounded up to a minute.
+describe("background command extension delivery", { timeout: 180_000 }, () => {
 	const harnesses: Harness[] = [];
 	const roots: string[] = [];
 	async function harness(owner?: SessionManager, extensions: NonNullable<HarnessOptions["extensionFactories"]> = []) {
@@ -83,7 +84,33 @@ describe("background command extension delivery", () => {
 			command: `while [ ! -f ${quote(release)} ]; do sleep 0.02; done; printf 'background result\\n'; exit 7`,
 		};
 	};
+	/**
+	 * Writes the record of a running job as the detached worker leaves it on disk; `finish` writes
+	 * the worker's final state. For tests about the session's side of delivery, which do not need a
+	 * worker process to start.
+	 */
+	function seedRunningJob(h: Harness) {
+		const id = randomUUID();
+		const directory = join(backgroundCommandDirectory(h.sessionManager), id);
+		const logFile = join(directory, "output.log");
+		const job: BackgroundCommandJob = {
+			id,
+			command: "seeded job",
+			cwd: h.tempDir,
+			createdAt: new Date().toISOString(),
+			logFile,
+			status: "running",
+			pid: process.pid,
+		};
+		mkdirSync(directory, { recursive: true });
+		writeFileSync(logFile, "background result\n");
+		writeFileSync(join(directory, "job.json"), JSON.stringify({ job }));
+		return {
+			finish: () => writeFileSync(join(directory, "state.json"), JSON.stringify({ status: "failed", exitCode: 7 })),
+		};
+	}
 	afterEach(async () => {
+		vi.useRealTimers();
 		const failures = harnesses.flatMap((h) =>
 			h.session.messages.filter((message) => message.role === "assistant" && message.stopReason === "error"),
 		);
@@ -127,7 +154,7 @@ describe("background command extension delivery", () => {
 		expect(notices(h)).toHaveLength(1);
 		expect(h.faux.state.callCount).toBe(4);
 		expect(errors).toEqual([]);
-	}, 30_000);
+	});
 	it("delivers after the whole foreground batch, once across reload", async () => {
 		const h = await harness();
 		const { command, release } = held(h);
@@ -249,27 +276,26 @@ describe("background command extension delivery", () => {
 		expect(notices(other)).toHaveLength(2);
 	});
 	it("stops delivery without crashing when another process takes over its lease, then resumes", async () => {
+		// The monitor polls every second, and the lease owner looks at its lock only when it refreshes
+		// it: every 5 seconds, half of proper-lockfile's default 10-second stale threshold. A fake clock
+		// runs both timers at once.
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
 		const h = await harness();
 		const root = backgroundCommandDirectory(h.sessionManager);
-		const { command, release } = held(h);
-		const job = await startBackgroundCommand(root, command, { command, cwd: h.tempDir, env: getShellEnv() });
-		await until(() => lockfile.checkSync(root, { realpath: false }));
+		const job = seedRunningJob(h);
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(lockfile.checkSync(root, { realpath: false })).toBe(true);
 		// Another process sharing the session replaces the lease, as when this owner stalls past the
-		// stale threshold; the owner notices at its next lock refresh, 5 seconds after acquiring it.
+		// stale threshold: the lock then carries a modification time this owner did not write.
 		const lock = `${root}.lock`;
-		const keepFresh = () => utimesSync(lock, new Date(), new Date());
-		keepFresh();
-		const takeover = setInterval(keepFresh, 500);
-		try {
-			await delay(6500);
-			writeFileSync(release, "go");
-			await until(() => backgroundCommandFinished(readBackgroundCommand(root, job.id)));
-			h.setResponses([fauxAssistantMessage("Continued")]);
-			await h.session.prompt("Continue while the other process owns delivery");
-			expect(notices(h)).toHaveLength(0);
-		} finally {
-			clearInterval(takeover);
-		}
+		const replaced = new Date(statSync(lock).mtime.getTime() + 1);
+		utimesSync(lock, replaced, replaced);
+		await vi.advanceTimersByTimeAsync(5000);
+		vi.useRealTimers();
+		job.finish();
+		h.setResponses([fauxAssistantMessage("Continued")]);
+		await h.session.prompt("Continue while the other process owns delivery");
+		expect(notices(h)).toHaveLength(0);
 		h.setResponses([fauxAssistantMessage("Completion consumed")]);
 		rmdirSync(lock);
 		await until(() => notices(h).length === 1 && h.session.isIdle);
@@ -335,22 +361,30 @@ describe("background command extension delivery", () => {
 			expect(ctx.signal).toBeUndefined();
 			h.setResponses([fauxAssistantMessage("Ready")]);
 			await h.session.prompt("Initialize the saved journal");
-			const padding = Buffer.alloc(1024 * 1024, " ");
-			padding[padding.length - 1] = 10;
-			for (let i = 0; i < 128; i++) appendFileSync(h.sessionManager.getSessionFile()!, padding);
-			const { command, release } = held(h);
 			const root = backgroundCommandDirectory(h.sessionManager);
-			const starting = startBackgroundCommand(root, command, { command, cwd: h.tempDir, env: getShellEnv() });
+			const job = seedRunningJob(h);
 			let releaseLease: (() => void) | undefined = lockfile.lockSync(root, { realpath: false });
+			// The monitor publishes its status once it has read the journal and listed the job records.
+			let passes = 0;
+			h.session.extensionRunner.setUIContext(
+				createTestUiContext({
+					setStatus(key) {
+						if (key === "background-command") passes++;
+					},
+				}),
+				"rpc",
+			);
 			let aborted: Promise<void> | undefined;
 			let signalAtAbort: AbortSignal | undefined;
 			let lowLevelSignalAtAbort: AbortSignal | undefined;
 			let boundaryAtAbort: unknown;
 			const cancelDuringRecovery = () => {
 				setImmediate(() => {
-					// The acquired lease and unfinished native boundary prove receipt recovery is in flight.
+					// The boundary holds the lease and has not finished its pass: it is reading the journal. That
+					// read needs file I/O, which cannot complete before this callback at any journal size.
 					boundaryAtAbort = {
 						leaseHeld: lockfile.checkSync(root, { realpath: false }),
+						passes,
 						active: h.session.isStreaming,
 						lowLevelActive: h.session.agent.signal !== undefined,
 						agentEnds: h.eventsOfType("agent_end").length,
@@ -383,9 +417,7 @@ describe("background command extension delivery", () => {
 				},
 				fauxAssistantMessage("Unexpected wake"),
 			]);
-			let job: BackgroundCommandJob;
 			try {
-				job = await starting;
 				await h.session.prompt("Finish foreground work");
 			} finally {
 				releaseLease?.();
@@ -395,6 +427,7 @@ describe("background command extension delivery", () => {
 			await aborted;
 			expect(boundaryAtAbort).toEqual({
 				leaseHeld: true,
+				passes: 0,
 				active: true,
 				lowLevelActive: boundary === "turn_end",
 				agentEnds: initialAgentEnds + (boundary === "agent_before_settle" ? 1 : 0),
@@ -416,14 +449,14 @@ describe("background command extension delivery", () => {
 			);
 			expect(signalAtAbort?.aborted).toBe(true);
 			if (boundary === "turn_end") expect(signalAtAbort).toBe(lowLevelSignalAtAbort);
+			expect(passes).toBe(1);
 			expect(ctx.signal).toBeUndefined();
 			expect(
 				SessionManager.open(h.sessionManager.getSessionFile()!)
 					.getEntries()
 					.filter((entry) => entry.type === "custom" && entry.customType === "background-command-run-state"),
 			).toContainEqual(expect.objectContaining({ data: true }));
-			writeFileSync(release, "go");
-			await until(() => backgroundCommandFinished(readBackgroundCommand(root, job.id)));
+			job.finish();
 			await until(() => notices(h).length === 1 && h.session.isIdle);
 			expect(h.faux.state.callCount).toBe(2);
 			h.setResponses([fauxAssistantMessage("Continued")]);
@@ -431,20 +464,12 @@ describe("background command extension delivery", () => {
 			expect(h.sessionManager.getEntries()).toContainEqual(
 				expect.objectContaining({ type: "custom", customType: "background-command-run-state", data: false }),
 			);
-			const next = held(h, "next");
-			const nextJob = await startBackgroundCommand(root, next.command, {
-				command: next.command,
-				cwd: h.tempDir,
-				env: getShellEnv(),
-			});
 			h.setResponses([fauxAssistantMessage("Normal completion wake")]);
-			writeFileSync(next.release, "go");
-			await until(() => backgroundCommandFinished(readBackgroundCommand(root, nextJob.id)));
+			seedRunningJob(h).finish();
 			await until(() => notices(h).length === 2 && h.session.isIdle);
 			expect(h.faux.state.callCount).toBe(4);
 			expect(ctx.signal).toBeUndefined();
 		},
-		15_000,
 	);
 	it.skipIf(process.platform === "win32")(
 		"uses effective shell settings, relative cwd, and session metadata",
