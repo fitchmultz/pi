@@ -7,6 +7,7 @@
 - The undocumented `ExtensionRunner.emitBoundary()` preview-builder callback must return synchronously; boundary events still expose a synchronous `context` preview.
 - Boundary `event.context` is now readonly. Empty-proposal previews are computed from the live session on first read; read them during the handler rather than retaining an unread event.
 - Complete native working-session capture and restore require a persistence-capable `ResourceLoader`; `getWorkingSessionResources()` is optional for ordinary SDK sessions. Directly constructed sessions must supply an explicit launch owner. Snapshot values must be plain finite JSON; lossy values are rejected.
+- `BashOperations.exec` now types `onData` as `(data: Buffer) => void | Promise<void>`. When pi writes the chunk to its spill file, the promise settles with that write, and the local shell uses it to limit unwritten output. Custom operations may ignore it. A typed caller that passes its own `onData` returning another value, such as `(data) => chunks.push(data)`, needs a block body.
 
 ### Added
 
@@ -33,7 +34,7 @@
 - Consolidated duplicated compaction, resource-ignore and sleep helpers: re-exported `calculateContextTokens` and `ContextUsageEstimate` from `@earendil-works/pi-ai`, derived compaction and branch-summary token defaults from `SETTINGS_DEFAULTS`, composed checkpoint summary prompts from a shared builder, extracted `.gitignore`/`.ignore`/`.fdignore` rule loading into `core/resource-ignore.ts`, and replaced the duplicate `utils/sleep.ts` wrapper with `timers/promises`.
 - Published settings, models, keybindings, and theme schemas using upstream's shared runtime definitions; the fork settings schema retains boolean and `"hybrid"` compact activity preferences.
 - Reduced repeated session-history work, assistant/tree rendering and native read, grep, edit and image processing.
-- Bound native Bash spill queues and wait for complete private spill files before returning. This bounded-memory path is slower on the recorded 64 MiB workload.
+- Native Bash commands are no longer read while 1 MiB of their output waits to be written to the spill file, and the spill file is complete before the command returns. See [the measurement](../../docs/performance.md#bash-output-spill-2026-11-10).
 - Skip disk reads for acknowledged terminal background jobs during monitoring; explicit status tools still read fresh state.
 - Batch workspace builds and npm/Nix packing, and retain PID-unique CPU profiles from every launcher and worker.
 - Skip unnecessary full archived-history indexing for recent context-usage estimates, preserving context-edit and compaction invalidation.
