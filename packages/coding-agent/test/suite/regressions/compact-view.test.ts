@@ -421,7 +421,13 @@ describe("compact view settings and native event lifecycle", () => {
 		expect(text()).not.toContain('"commandPreview"');
 		await submit("/cv off");
 		expect(text()).not.toContain("Activity");
+		// Normal view: the summary row with a preview until expanded, then Pi's card with the whole notice.
+		expect(text()).toContain(row);
+		expect(text()).not.toContain(`[${BACKGROUND_COMMAND_NOTICE}]`);
+		view.setToolsExpanded(true);
+		expect(text()).toContain(`[${BACKGROUND_COMMAND_NOTICE}]`);
 		expect(text()).toContain('"commandPreview"');
+		view.setToolsExpanded(false);
 		await submit("/cv hybrid");
 		expect(text()).toContain(row);
 		expect(text()).not.toContain('"commandPreview"');
