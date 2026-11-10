@@ -23,7 +23,6 @@
 - Fixed Kimi K3.1 Pro and K3.1 Pro Highspeed cache writes costing $0 on Moonshot, Moonshot China and Kimi Coding, in generated data, Kimi Coding implied estimates, offline hydration and pi.dev catalog overlays. They now cost the published five-minute rate, which equals the input rate ($2 and $4 per million tokens).
 - Fixed Radius gateway catalogs accepting incomplete pricing that produces `NaN` cost estimates ([#10507](https://github.com/earendil-works/pi/issues/10507)).
 - Fixed the abort-test helper returning before checking the aborted result and follow-up; added an offline regression ([#10508](https://github.com/earendil-works/pi/issues/10508)).
-- Fixed Cloudflare AI Gateway Claude models failing with a 404 by using dashed model IDs during generation, provider construction, and remote-catalog loading.
 - Fixed exact `gpt-6-astra` Ultrafast estimates in OpenAI and Codex Responses: terminal-confirmed `ultrafast` costs 6x every standard or long-context component; request-only Ultrafast does not imply delivery.
 - Fixed legacy Codex Responses `fast` pricing to match `priority`, including its existing requested-tier fallback.
 - Fixed a provider's auth-check failure hiding healthy providers; global availability now exposes provider-local diagnostics.
@@ -46,6 +45,7 @@
 - Retired the fork's unreleased Anthropic stall timing hooks and lifecycle/Undici observation helper.
 - Removed the fork's temporary passive cache tracing: the `cacheTraceContext` request option and `CacheTraceContext` type, the `@earendil-works/pi-ai/utils/cache-trace` module, and the recorder hooks in the Anthropic, OpenAI Completions, OpenAI Responses and Codex adapters. `PI_CACHE_TRACE_DIR` and `PI_CACHE_TRACE_SESSION_ID` are no longer read. Requests, cache warming, usage accounting and prompt-cache options are unchanged.
 - Retired the fork's unreleased migration of legacy Kimi Coding Anthropic catalog entries during hydration and overlay merges; pi.dev serves those entries only to pi older than 1.2.1. `@earendil-works/pi-ai/api/kimi` now exports only `restoreKimiK3CacheWriteCost`.
+- Retired the fork's unreleased rewrite of dotted Cloudflare AI Gateway Claude IDs at provider construction, pinned catalog hydration and pi.dev overlay merges. The catalog generator writes Anthropic's dashed IDs, and every catalog pi.dev publishes has them. `@earendil-works/pi-ai/api/cloudflare` no longer exports `normalizeCloudflareModelId`.
 
 ## [1.5.2] - 2026-11-10
 

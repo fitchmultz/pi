@@ -2,7 +2,6 @@ import OpenAI from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
 import type {
-	Api,
 	AssistantMessage,
 	CacheRetention,
 	Model,
@@ -13,12 +12,12 @@ import type {
 	StreamFunction,
 	StreamOptions,
 	TranscriptContext,
-	Usage,
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
+import { createPendingAssistantMessage } from "../utils/pending-assistant.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { createRequestCompressionFetch } from "../utils/request-compression.ts";
@@ -27,6 +26,7 @@ import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
+	applyServiceTierPricing,
 	convertResponsesMessages,
 	convertResponsesTools,
 	getResponsesToolSupport,
@@ -166,22 +166,8 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 		const compat = getCompat(model);
 		const configurationUpdateEffort = getConfigurationUpdateEffort(model, options, compat);
 		const output: AssistantMessage = {
-			role: "assistant",
-			content: [],
-			api: model.api as Api,
-			provider: model.provider,
-			model: model.id,
+			...createPendingAssistantMessage(model.api, model),
 			...(configurationUpdateEffort === undefined ? {} : { providerThinkingLevel: configurationUpdateEffort }),
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "pending",
-			timestamp: Date.now(),
 		};
 
 		try {
@@ -426,36 +412,4 @@ function buildParams(
 	}
 
 	return params;
-}
-
-function getServiceTierCostMultiplier(
-	model: Pick<Model<"openai-responses">, "id">,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-): number {
-	switch (serviceTier) {
-		case "ultrafast":
-			return model.id === "gpt-6-astra" ? 6 : 1;
-		case "flex":
-			return 0.5;
-		case "priority":
-		case "fast":
-			return model.id === "gpt-5.5" ? 2.5 : 2;
-		default:
-			return 1;
-	}
-}
-
-function applyServiceTierPricing(
-	usage: Usage,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	model: Pick<Model<"openai-responses">, "id">,
-) {
-	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
-	if (multiplier === 1) return;
-
-	usage.cost.input *= multiplier;
-	usage.cost.output *= multiplier;
-	usage.cost.cacheRead *= multiplier;
-	usage.cost.cacheWrite *= multiplier;
-	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }
