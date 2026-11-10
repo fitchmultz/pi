@@ -11,6 +11,8 @@
 
 - Fixed `McpClient.connect()` reporting success after the connection closed during initialization. It now rejects with `McpConnectionClosedError`, keeps the client closed, and notifies close listeners only once.
 
+## [1.5.2] - 2026-11-10
+
 ## [1.5.1] - 2026-11-09
 
 ### Added

@@ -10,6 +10,8 @@
 - Chord v2's persisted jobs no longer drop a blocked run from their count twice: a run blocked at its load (another job version) whose activation then failed (a native's open throwing, say) was blocked again by a reload that dropped its job, so `host.activity.jobs` fell below zero and, once a reload declared the job again, its `concurrency` limit let one run too many start. Such a run now stays blocked as it was.
 - Chord v2's jobs map a run's result from the version of the code that returned it. A run that newer code ran after a reload (a persisted run resumed with `rerun`, or a start that committed after its attempt's seal) had its result mapped through `accepts` as if the run's own version had returned it: `finish` got it mapped a second time, and older code after a rollback finished the run with a result it could not read. The recorded outcome now keeps the version and fingerprint of the code that returned the result, and a persisted run's record stores them with the result when they are not the run's own. `finish` maps the result from that version; code older than it, or at that version with another fingerprint, blocks the run (`blocked { version }`) until a reload brings code that takes it. Persisted run records are now record version 2 (`chord.job-run.2`). Version 1 records still load, and their results read as the run's own version's, including a result that newer code returned before this fix: nothing stored tells it apart. Earlier Chord builds read version 2 records as version 1 ones: they ignore a result's version and drop it when they write the record again.
 
+## [1.5.2] - 2026-11-10
+
 ## [1.5.1] - 2026-11-09
 
 ### Breaking Changes

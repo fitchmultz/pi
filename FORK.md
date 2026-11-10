@@ -2,12 +2,13 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`4ea8837927564c592b1d184c956ab7d28c88119b` (2026-11-10), two commits after official v1.5.1.
+`6273031b012ab3c017cdbf593a62b7e6792186a8` (2026-11-10), four commits after official v1.5.2.
 It is upstream plus the features below. Everything else follows upstream behavior and APIs.
 
 Each integration record documents its baseline, conflict decisions and verification, newest first:
 
-- [2026-11-10](docs/upstream-sync-2026-11-10.md), the current baseline, including official v1.5.1
+- [v1.5.2](docs/upstream-sync-1.5.2.md), the current baseline, including official v1.5.2
+- [2026-11-10](docs/upstream-sync-2026-11-10.md), including official v1.5.1
 - [2026-11-09](docs/upstream-sync-2026-11-09.md)
 - [2026-11-07](docs/upstream-sync-2026-11-07.md)
 - [2026-11-05](docs/upstream-sync-2026-11-05.md)
