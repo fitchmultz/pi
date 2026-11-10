@@ -299,6 +299,61 @@ describe("toolExposure setting", () => {
 			expect(notifications).toEqual([]);
 		});
 
+		/** Starts a session and returns its extension API, to register tools after `session_start`. */
+		async function startThenRegister(options: Parameters<typeof createHarness>[0], notifications: string[]) {
+			const apis: ExtensionAPI[] = [];
+			await setup(
+				{ ...options, extensionFactories: [(pi) => void apis.push(pi), ...(options?.extensionFactories ?? [])] },
+				notifications,
+			);
+			return apis[0];
+		}
+
+		// Tools register after `session_start` when their extension must connect first, as MCP tools do.
+		it("warns once when tools the setting defers register after session_start", async () => {
+			const notifications: string[] = [];
+			const pi = await startThenRegister(
+				{ settings: { toolExposure: { "lookup_*": "deferred" } }, extensionFactories: discovery },
+				notifications,
+			);
+			expect(notifications).toEqual([]);
+
+			pi.registerTool(weatherTool());
+			expect(notifications).toEqual([UNREACHABLE_WARNING]);
+			pi.registerTool(weatherTool({ name: "lookup_tides" }));
+			expect(notifications).toEqual([UNREACHABLE_WARNING]);
+		});
+
+		it("does not warn again for a late tool after the warning at session_start", async () => {
+			const notifications: string[] = [];
+			const pi = await startThenRegister(
+				{ settings: { toolExposure: { "lookup_*": "deferred" } }, extensionFactories: [weatherExtension] },
+				notifications,
+			);
+			pi.registerTool(weatherTool({ name: "lookup_tides" }));
+			expect(notifications).toEqual([UNREACHABLE_WARNING]);
+		});
+
+		it("does not warn for a late tool that tool_search reaches or the setting does not change", async () => {
+			const notifications: string[] = [];
+			const reached = await startThenRegister(
+				{ settings, initialActiveToolNames: ["tool_search"], extensionFactories: discovery },
+				notifications,
+			);
+			reached.registerTool(weatherTool());
+
+			const unchanged = await startThenRegister(
+				{ settings: { toolExposure: { other_tool: "deferred" } }, extensionFactories: discovery },
+				notifications,
+			);
+			unchanged.registerTool(weatherTool());
+			unchanged.registerTool(weatherTool({ name: "searched", exposure: "deferred" }));
+
+			const unset = await startThenRegister({ extensionFactories: discovery }, notifications);
+			unset.registerTool(weatherTool({ exposure: "deferred" }));
+			expect(notifications).toEqual([]);
+		});
+
 		it("does not warn for a declared tool or for tools the setting does not change", async () => {
 			const notifications: string[] = [];
 			await setup(

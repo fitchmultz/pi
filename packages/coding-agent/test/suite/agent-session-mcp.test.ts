@@ -734,6 +734,24 @@ return { docs, sameForAliases: aliases.every((alias) => JSON.stringify(alias) ==
 		expect(codemode.harness.session.getActiveToolNames()).toEqual(["codemode", "mcp__docs__search"]);
 	});
 
+	it("warns once when the toolExposure setting defers a direct server's tools and nothing reaches them", async () => {
+		// The server entry is `direct`, so the MCP extension activates neither codemode nor tool_search.
+		// The tools register once the server is connected, after `session_start`.
+		const { harness, notifications } = await setup("direct", undefined, {
+			settings: { toolExposure: { "mcp__docs__*": "deferred" } },
+		});
+		expect(harness.session.getActiveToolNames()).toEqual([]);
+		expect(notifications).toEqual([
+			"Tools that the toolExposure setting makes codemode or deferred are only reachable from the codemode or tool_search tool, but neither is active; they cannot be called.",
+		]);
+
+		const reached = await setup("direct", undefined, {
+			builtInTools: ["tool_search"],
+			settings: { toolExposure: { "mcp__docs__*": "deferred" } },
+		});
+		expect(reached.notifications).toEqual([]);
+	});
+
 	it("tells scripts what directly exposed MCP tools resolve to", async () => {
 		const { harness } = await setup("direct");
 		harness.session.setActiveToolsByName([...harness.session.getActiveToolNames(), "codemode"]);

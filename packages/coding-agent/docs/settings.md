@@ -102,7 +102,7 @@ The tool then behaves like a tool that registered with that exposure:
 - An entry wins over the exposure an MCP server entry in `mcp.json` gives the tool.
 - A tool that its extension registered as `hidden` stays hidden.
 
-`codemode` and `deferred` tools need the `codemode` or `tool_search` tool to be active. Pi does not activate them for this setting. It warns at startup and after `/reload` when neither is active and the setting leaves a tool unreachable.
+`codemode` and `deferred` tools need the `codemode` or `tool_search` tool to be active. Pi does not activate them for this setting. When neither is active and the setting leaves a registered tool unreachable, Pi warns once per session start and once per `/reload`: after the extensions handled `session_start`, or when the first such tool registers later, as MCP tools do once their server connects. Pi does not warn when `codemode` or `tool_search` is turned off later in the session.
 
 `/reload` applies a changed setting to the running session. Tools that are declared stay declared, except tools set to `hidden`. A tool whose entry was removed or changed to `direct` or `model-only` is declared as in a new session.
 

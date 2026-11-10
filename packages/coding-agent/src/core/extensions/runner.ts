@@ -20,7 +20,7 @@ import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
 import type { SessionManager } from "../session-manager.ts";
-import { getToolExposureSetting } from "../settings-manager.ts";
+import { getToolExposureSetting, type Settings } from "../settings-manager.ts";
 import {
 	type BuildSystemPromptOptions,
 	buildSystemPrompt,
@@ -463,6 +463,11 @@ export class ExtensionRunner {
 	private getCallableToolsFn: () => readonly AgentTool[] = () => [];
 	/** Registered MCP servers already reported as unhandled. */
 	private readonly reportedMcpServers = new Set<string>();
+	/**
+	 * The `toolExposure` setting while registered tools are checked against it: from `session_start`
+	 * until the unreachable-tools warning was shown. Unset, registering a tool costs nothing more.
+	 */
+	private watchedToolExposure: Settings["toolExposure"];
 	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	private forkHandler: ForkHandler = async () => ({ cancelled: false });
 	private navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -512,7 +517,11 @@ export class ExtensionRunner {
 		this.runtime.getAllTools = actions.getAllTools;
 		this.runtime.getSettings = actions.getSettings;
 		this.runtime.setActiveTools = actions.setActiveTools;
-		this.runtime.refreshTools = actions.refreshTools;
+		this.runtime.refreshTools = () => {
+			actions.refreshTools();
+			// Tools can register after `session_start`, as MCP tools do once their server connects.
+			this.checkUnreachableTools();
+		};
 		this.runtime.getCommands = actions.getCommands;
 		this.runtime.setModel = actions.setModel;
 		this.runtime.getThinkingLevel = actions.getThinkingLevel;
@@ -883,10 +892,17 @@ export class ExtensionRunner {
 
 	/**
 	 * Warn when the `toolExposure` setting makes tools reachable only from the codemode or
-	 * tool_search tool and neither is active, as the MCP extension warns for its tools.
+	 * tool_search tool and neither is active, as the MCP extension warns for its tools. Call it
+	 * after `session_start`, whose handlers activate those tools. The warning is shown once per
+	 * call: now, or when the first such tool registers later.
 	 */
 	reportUnreachableTools(): void {
-		const { toolExposure } = this.runtime.getSettings();
+		this.watchedToolExposure = this.runtime.getSettings().toolExposure;
+		this.checkUnreachableTools();
+	}
+
+	private checkUnreachableTools(): void {
+		const toolExposure = this.watchedToolExposure;
 		if (toolExposure === undefined) return;
 		const tools = this.runtime.getAllTools();
 		const active = new Set(this.runtime.getActiveTools());
@@ -901,6 +917,7 @@ export class ExtensionRunner {
 				getToolExposureSetting(toolExposure, tool.name) === tool.exposure,
 		);
 		if (!unreachable) return;
+		this.watchedToolExposure = undefined;
 		this.uiContext.notify(
 			"Tools that the toolExposure setting makes codemode or deferred are only reachable from the codemode or tool_search tool, but neither is active; they cannot be called.",
 			"warning",
