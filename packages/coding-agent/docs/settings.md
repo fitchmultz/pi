@@ -142,9 +142,9 @@ In an open group, a tool card, custom message, custom entry, compaction summary 
 
 - A tool card shows the first row of the call and the first row of the result.
 - A custom message or custom entry from an extension shows the first two rows of its normal rendering.
-- A compaction or branch summary shows its label and its summary row, for example `[compaction]` and `Compacted from 184,320 tokens (ctrl+o to expand)`. The blank row above the card stays.
+- A compaction or branch summary shows its label and its summary row, for example `[compaction]` and `Compacted from 184,320 tokens (ctrl+o to expand)`.
 
-Pi skips blank rows, shortens each row to the terminal width, and shows `[image]` in place of an inline image. A shell command card shows the command and its status with the last output line.
+Pi skips blank rows, so a card that is not expanded has no blank row above it. Pi shortens each row to the terminal width and shows `[image]` in place of an inline image. A shell command card shows the command and its status with the last output line.
 
 Enabling on collapses existing groups and cards; enabling hybrid opens groups but keeps cards compact. Disabling it restores normal presentation without expanding everything. Visible thinking separates groups; thinking hidden by `hideThinkingBlock` takes no rows and does not. A thinking block collapsed with a click keeps its label, and a click on the label expands the block again. Input dialogs, the working indicator, warnings, and errors stay outside groups. Presentation changes do not alter model context or saved results; `/compact` remains the context-compaction command.
 

@@ -4271,7 +4271,6 @@ export class InteractiveMode {
 				break;
 			}
 			case "compactionSummary": {
-				this.chatContainer.addChild(new Spacer(1));
 				const component = new CompactionSummaryMessageComponent(
 					message,
 					this.getMarkdownThemeWithSettings(),
@@ -4286,7 +4285,6 @@ export class InteractiveMode {
 				break;
 			}
 			case "branchSummary": {
-				this.chatContainer.addChild(new Spacer(1));
 				const component = new BranchSummaryMessageComponent(
 					message,
 					this.getMarkdownThemeWithSettings(),

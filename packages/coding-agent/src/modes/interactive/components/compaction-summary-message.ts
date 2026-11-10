@@ -67,15 +67,19 @@ export class CompactionSummaryMessageComponent extends Box {
 		this.compactView = compactView;
 	}
 
-	/** Compact view shows an unexpanded summary as its two-row preview: the label and the summary row. */
+	/**
+	 * The card with its blank row above it. Compact view shows an unexpanded summary as its two-row preview:
+	 * the label and the summary row. The preview skips blank rows, so the row above the card goes too.
+	 */
 	override render(width: number): string[] {
-		const lines = super.render(width);
+		const lines = ["", ...super.render(width)];
 		return this.compactView && !this.expanded ? this.compactPreview.render(lines, width) : lines;
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Box["handleMouse"]> {
 		const native = this.compactView && !this.expanded ? this.compactPreview.toNative(event) : event;
-		return native && super.handleMouse(native);
+		// The box starts one row down, below the blank row.
+		return native && super.handleMouse({ ...native, y: native.y - 1, height: native.height - 1 });
 	}
 
 	private updateDisplay(): void {

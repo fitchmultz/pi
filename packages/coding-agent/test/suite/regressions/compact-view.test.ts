@@ -130,6 +130,30 @@ describe("compact view settings and native event lifecycle", () => {
 		const { view, submit, text, rebind } = await createView(harness);
 		await rebind();
 		expect(text()).toContain("full detail");
+		// The compaction summary is the first card of the transcript. Normal view: its blank row, then its card.
+		const top = (count: number) =>
+			text()
+				.split("\n")
+				.slice(0, count)
+				.map((row) => row.trim());
+		const heading = expect.stringContaining("▾ Activity");
+		const summaryRow = `Compacted from 5,000 tokens (${keyText("app.tools.expand")} to expand)`;
+		const expandedCard = [
+			"",
+			"",
+			"[compaction]",
+			"",
+			"Compacted from 5,000 tokens",
+			"",
+			"summary row 1",
+			"",
+			"summary row 2",
+			"",
+		];
+		expect(top(6)).toEqual(["", "", "[compaction]", "", summaryRow, ""]);
+		view.setToolsExpanded(true);
+		expect(top(10)).toEqual(expandedCard);
+		view.setToolsExpanded(false);
 		const children = [...view.chatContainer.children];
 		const saved = structuredClone(harness.session.messages);
 		for (const [command, enabled] of [
@@ -165,9 +189,11 @@ describe("compact view settings and native event lifecycle", () => {
 				expect(text().includes(`${card} row 1`)).toBe(enabled !== true);
 				expect(text().includes(`${card} row 3`)).toBe(enabled === false);
 			}
-			// The compaction summary too: hidden when on, its label and summary row when hybrid, its card when off.
-			expect(text().includes("[compaction]")).toBe(enabled !== true);
-			expect(/\[compaction\] *\n *Compacted from 5,000 tokens/.test(text())).toBe(enabled === "hybrid");
+			// The compaction summary too: hidden when on, two rows under the heading when hybrid, and when off
+			// its blank row and its card.
+			if (enabled === true) expect(text()).not.toContain("[compaction]");
+			else if (enabled) expect(top(3)).toEqual([heading, "[compaction]", summaryRow]);
+			else expect(top(6)).toEqual(["", "", "[compaction]", "", summaryRow, ""]);
 			expect(view.defaultEditor.getText()).toBe("");
 		}
 		expect(text().match(/Usage: \/compact-view \[on\|off\|hybrid\|toggle\]/g)).toHaveLength(2);
@@ -183,7 +209,11 @@ describe("compact view settings and native event lifecycle", () => {
 		expect(text()).toContain("▾ Activity");
 		// A rebuilt transcript, as after a compaction, makes new cards; they start in the two-row form.
 		await rebind();
-		expect(text()).toMatch(/\[compaction\] *\n *Compacted from 5,000 tokens/);
+		expect(top(3)).toEqual([heading, "[compaction]", summaryRow]);
+		// Ctrl+O shows the whole card, with its blank row above it.
+		view.setToolsExpanded(true);
+		expect(top(11)).toEqual([heading, ...expandedCard]);
+		view.setToolsExpanded(false);
 		await submit("/compact-view");
 		expect(harness.settingsManager.getCompactView()).toBe(false);
 		expect(text()).not.toContain("Activity");

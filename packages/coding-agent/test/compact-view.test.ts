@@ -777,28 +777,39 @@ describe("compact Activity and messages", () => {
 	] as const)("%s takes two rows until expanded and its normal card otherwise", (_name, create, label, what) => {
 		const text = (lines: string[]) => lines.map((line) => stripAnsi(line).trim());
 		const preview = [label, `${what} (${keyText("app.tools.expand")} to expand)`];
-		const card = ["", preview[0], "", preview[1], ""];
-		const normal = create(false);
-		expect(text(normal.render(60))).toEqual(card);
-		normal.setExpanded(true);
-		const full = normal.render(60);
-		expect(text(full)).toContain("detail 11");
-
 		const component = create(true);
 		const collapsed = () => text(compactRows(component, 60));
 		expect(collapsed()).toEqual(preview);
 		for (const width of [1, 12]) compactRows(component, width);
-		// A click on either row opens the card; a click on the open card closes it.
+
+		// Normal view: the blank row above the card, then the card.
+		const normal = create(false);
+		const card = ["", "", label, "", preview[1], ""];
+		expect(text(normal.render(60))).toEqual(card);
+		normal.setExpanded(true);
+		const full = normal.render(60);
+		expect(text(full).slice(0, 4)).toEqual(["", "", label, ""]);
+		expect(text(full)).toContain("detail 11");
+
+		// A click on either row opens the card; a click on the label of the open card closes it.
 		for (const row of [0, 1]) {
 			click(component, row, 60);
 			expect(component.render(60)).toEqual(full);
-			click(component, 1, 60);
+			click(component, 2, 60);
 			expect(collapsed()).toEqual(preview);
 		}
 		// Ctrl+O reaches the card through setExpanded.
 		component.setExpanded(true);
 		expect(component.render(60)).toEqual(full);
 		component.setExpanded(false);
+		// In an open group the two rows follow the heading directly, in "on" and in hybrid.
+		for (const mode of [true, "hybrid"] as const) {
+			const chat = new ChatContainer();
+			chat.setCompactView(mode);
+			chat.addChild(component);
+			if (mode === true) click(chat, 0, 60);
+			expect(text(chat.render(60))).toEqual(["▾ Activity · 1 update", ...preview]);
+		}
 		// `/compact-view` switches existing cards in place.
 		component.setCompactView(false);
 		expect(text(component.render(60))).toEqual(card);
