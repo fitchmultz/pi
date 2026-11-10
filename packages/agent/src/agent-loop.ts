@@ -306,8 +306,8 @@ async function runLoop(
 		const decision = await config.finishTurn?.(lastCompletedTurn, signal);
 		await emit({ type: "turn_end", message, toolResults });
 
-		// Natural work satisfies this turn's continuation; it never adds a later request.
 		if (decision?.action === "end") break;
+		// Natural work satisfies this turn's continuation; it never adds a later request.
 		pendingMessages = (await config.getSteeringMessages?.()) || [];
 		if (hasMoreToolCalls || pendingMessages.length > 0) continue;
 		// Agent would stop here. Check for follow-up messages.
