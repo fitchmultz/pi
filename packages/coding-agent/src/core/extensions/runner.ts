@@ -6,6 +6,7 @@ import { performance } from "node:perf_hooks";
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
 	getCurrentSystemMessage,
+	getProviderSummaryStandIn,
 	type ImageContent,
 	type Model,
 	type Provider,
@@ -367,7 +368,10 @@ function restoreSystemMessages(
 ): AgentMessage[] {
 	if (sameMessages(returned, visible)) return current;
 	const head = getCurrentSystemMessage(current);
-	return head ? [head, ...returned] : returned;
+	if (!head) return returned;
+	// The rebuilt head is not the one a summary block was written under: its text stands in.
+	const standIn = getProviderSummaryStandIn(current);
+	return standIn ? [head, standIn, ...returned] : [head, ...returned];
 }
 
 export async function emitProjectTrustEvent(

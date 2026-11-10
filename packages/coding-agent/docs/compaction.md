@@ -367,28 +367,34 @@ Entry with a block, request to the model that made it:
    unchanged          entries from firstKeptEntryId
 ```
 
-The leading system message is the one that led the context before the compaction. Pi does not fold later prompt and tool changes into it for such an entry, because a changed prompt or tool list also invalidates the kept reasoning. Changes from the summarized part are declared again in a system message after the kept entries.
+The leading system message is the one that led the context before the compaction. Pi does not fold later prompt and tool changes into it for such an entry, because a changed prompt or tool list also invalidates the kept reasoning. The summarized messages can have changed the tools and the prompt:
 
-A request to any other model does not get the block. It gets the same messages without it: the leading system message, the kept entries, `summary`, then the new messages.
+- **Tools.** The block restores the tools that the summarized messages added, for the model that made it. Pi stores the same changes on the entry (`providerSummary.toolsAdded`, `providerSummary.toolsRemoved`) and puts them in a system message directly after the leading one. That message tells Pi's own tool state and every other model which tools exist. It is not sent to the model that made the block, so no tool definition is sent twice.
+- **Prompt sections.** The block does not restore them. Pi states the changed sections again in a system message before the next model request, after the kept entries.
 
-Where the kept entries can start:
+In messages, the context of such an entry is:
 
-| First kept message | Result |
-|---|---|
-| An assistant message | Supported. The request is the one that this message answered. |
-| A user or custom message that directly follows an assistant message | Supported. |
-| A user or custom message that follows a tool result or another user message | No block (`reason: "cut"`). The API merges the two messages. |
-| A tool result | No block (`reason: "cut"`). A tool call and its result must stay together. |
-| None (`firstKeptEntryId` is the compaction's own ID or an entry without a message, or `null` in a `turn_end` draft) | No block (`reason: "cut"`). No kept reasoning needs one. |
+```
+[system message + providerSummary] [system message: summarized tool changes] [kept entries] [compactionSummary] [later entries]
+```
+
+Only the model that made a block can read it, and only below the leading system message it was made under. In these requests the block's summary text takes its place, as a user message before the first kept message (`Summary of the earlier conversation:` and the text), and the kept reasoning is not kept valid:
+
+- a request to another provider, API or model, for example after a model switch
+- a request whose conversation a `context` handler changed
+- a request with a system prompt that a `before_agent_start` handler replaced
+
+The first kept message must be an assistant message, and it must not have failed or been aborted. The block request is then the request that this message answered, sent again with `instructions`. With any other start Pi stores the compaction without a block (`reason: "cut"`): a user message, a custom message or a tool result as first kept message, no kept message at all (`firstKeptEntryId` is the compaction's own ID or an entry without a message, or `null` in a `turn_end` draft), or no leading system message.
 
 Pi never cancels the compaction and never runs its own summarizer because of `providerSummary`. In each of these cases it stores the entry without a block, and the compaction behaves as without the opt-in:
 
 | `providerSummary.reason` on the entry | Cause |
 |---|---|
 | `overflow` | The compaction's `reason` is `"overflow"`. The context does not fit the model, so the request would fail too. No request is sent. |
-| `model` | No implementation for the session's model. No request is sent. Implemented for `anthropic-messages` models with managed effort. |
-| `cut` | The kept entries start where a block cannot keep their reasoning valid (see the table above), or no message is kept, or no message precedes the kept entries. No request is sent. |
-| `aborted` | The user cancelled (Esc) while the request ran. |
+| `model` | No implementation for the session's model, or the session uses a virtual model. No request is sent. Implemented for `anthropic-messages` models with managed effort; `supportsProviderSummary(model)` from `@earendil-works/pi-ai` tells. |
+| `prompt` | A `before_agent_start` handler replaced the system prompt of this run. The block could not be sent later. No request is sent. |
+| `cut` | The kept entries do not start with a completed assistant message (see above). No request is sent. |
+| `aborted` | The user cancelled (Esc) while the request ran. Esc at that point stops only the request; the compaction is stored. |
 | `timeout` | The request took longer than 30 seconds. |
 | `error: <message>` | The request failed, for example `prompt is too long` when the messages do not fit the model. |
 | `stop: <stop reason>` | The API answered without a block, for example `stop: refusal` when it rejects the `instructions`, or `stop: max_tokens`. |
@@ -400,6 +406,8 @@ interface CompactionProviderSummary {
   model: string;
   block?: JsonObject;  // the signed block as returned; absent when none was made
   reason?: string;     // why there is no block; absent when block is present
+  toolsAdded?: Tool[];            // with a block: tools the summarized messages added
+  toolsRemoved?: ToolReference[]; // with a block: tools the summarized messages removed
   seconds: number;     // duration of the request; 0 when none was sent
   usage?: Usage;       // usage of the request; also included in the entry's usage
 }
@@ -407,7 +415,7 @@ interface CompactionProviderSummary {
 
 A compaction entry in a `turn_end` result accepts the same `providerSummary` field (see [turn_end](extensions.md#turn_start--turn_end)).
 
-Do not put a message between the block and the kept entries in a `context` or `context_with_system` handler, and do not change, remove or reorder the kept messages. Either one makes the model drop the kept reasoning again. Text for the model belongs after the kept entries.
+Do not put a message between the leading system message and the kept entries in a `context_with_system` handler, and do not change, remove or reorder the kept messages. Either one makes the model drop the kept reasoning again. Text for the model belongs after the kept entries.
 
 #### Converting Messages to Text
 

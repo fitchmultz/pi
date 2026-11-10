@@ -2,11 +2,16 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	getCurrentSystemMessage,
+	getCurrentTools,
+	getInitialSystemMessage,
+	getToolStateChanges,
 	type ImageContent,
 	type JsonObject,
 	type Message,
 	type SystemMessage,
 	type TextContent,
+	type Tool,
+	type ToolReference,
 	type ToolResultMessage,
 	type Usage,
 	type UserMessage,
@@ -105,6 +110,14 @@ export interface CompactionProviderSummary {
 	block?: JsonObject;
 	/** Why there is no block. Absent when `block` is present. */
 	reason?: string;
+	/**
+	 * Tools that the summarized conversation added, compared with the entry's `systemMessage`. The
+	 * block restores them for its model. Pi declares them in a system message directly after the
+	 * leading one, so that its own tool state and every other model know them.
+	 */
+	toolsAdded?: Tool[];
+	/** Tools that the summarized conversation removed, compared with the entry's `systemMessage`. */
+	toolsRemoved?: ToolReference[];
 	/** Seconds the request took. 0 when no request was sent. */
 	seconds: number;
 	/** Usage of the request. Also included in the entry's `usage`. Absent when no request was sent. */
@@ -507,7 +520,46 @@ export function buildContextEntries(
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
-	return buildContextEntriesFromPath(buildSessionPath(entries, leafId, byId));
+	return withoutSummaryPosition(buildContextEntriesFromPath(buildSessionPath(entries, leafId, byId)));
+}
+
+/** A compaction entry whose compacted context starts with a provider summary block. */
+type SummaryBlockEntry = CompactionEntry & {
+	systemMessage: SystemMessage;
+	providerSummary: CompactionProviderSummary & { block: JsonObject };
+};
+
+function hasSummaryBlock(entry: SessionEntry | undefined): entry is SummaryBlockEntry {
+	return (
+		entry?.type === "compaction" && entry.providerSummary?.block !== undefined && entry.systemMessage !== undefined
+	);
+}
+
+/**
+ * The messages that a provider summary block for a compaction at `firstKeptEntryId` stands for:
+ * every message before the first kept message that is not a system message. Undefined when the
+ * projection has no such kept message.
+ */
+export function getMessagesBeforeKept(
+	projection: SessionProjection,
+	firstKeptEntryId: string | null,
+): AgentMessage[] | undefined {
+	const firstKept = projection.entries.findLastIndex((entry) => entry.sourceEntry.id === firstKeptEntryId);
+	if (firstKept < 0) return undefined;
+	const offset = projection.entries.slice(0, firstKept).reduce((count, entry) => count + entry.messages.length, 0);
+	const index = projection.messages.findIndex((message, at) => at >= offset && message.role !== "system");
+	return index < 0 ? undefined : projection.messages.slice(0, index);
+}
+
+/**
+ * The internal entry list names a compaction with a summary block twice: first for the block, and
+ * again after the kept entries, where its summary stands. Callers get each entry once.
+ */
+function withoutSummaryPosition(contextEntries: SessionEntry[]): SessionEntry[] {
+	const [compaction] = contextEntries;
+	return hasSummaryBlock(compaction)
+		? contextEntries.filter((entry, index) => index === 0 || entry !== compaction)
+		: contextEntries;
 }
 
 function buildContextEntriesFromPath(path: SessionEntry[]): SessionEntry[] {
@@ -526,6 +578,20 @@ function buildContextEntriesFromPath(path: SessionEntry[]): SessionEntry[] {
 	const compactionIdx = path.findIndex((entry) => entry.id === compaction.id);
 	if (compactionIdx < 0) {
 		return path;
+	}
+
+	if (hasSummaryBlock(compaction)) {
+		// The provider reads the kept turns' reasoning only when they follow the block exactly as it
+		// saw them, so they are the context entries from before the compaction, system messages and
+		// earlier summaries included. The entry's own summary follows them.
+		const before = buildContextEntriesFromPath(path.slice(0, compactionIdx));
+		const firstKept = before.findLastIndex((entry) => entry.id === compaction.firstKeptEntryId);
+		return [
+			compaction,
+			...(firstKept < 0 ? [] : before.slice(firstKept)),
+			compaction,
+			...path.slice(compactionIdx + 1),
+		];
 	}
 
 	const contextEntries: SessionEntry[] = [compaction];
@@ -593,24 +659,72 @@ function projectContextEntries(
 	for (const entry of contextEntries) {
 		if (entry.type === "context_edit") edits.set(entry.targetId, entry);
 	}
-	const projectedEntries = contextEntries.map(
-		(sourceEntry, index): ProjectedSessionEntry => ({
-			sourceEntry,
-			// buildContextEntries() may retain an older compaction entry because its
-			// raw ID lies inside the newest retained range. Only the newest compaction
-			// at index zero contributes a checkpoint and summary.
-			messages:
-				sourceEntry.type === "compaction" && index > 0
-					? []
-					: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
-		}),
-	);
+	const [newest] = contextEntries;
+	const projectedEntries = hasSummaryBlock(newest)
+		? projectSummaryBlockEntries(newest, contextEntries, edits)
+		: contextEntries.map(
+				(sourceEntry, index): ProjectedSessionEntry => ({
+					sourceEntry,
+					// buildContextEntries() may retain an older compaction entry because its
+					// raw ID lies inside the newest retained range. Only the newest compaction
+					// at index zero contributes a checkpoint and summary.
+					messages:
+						sourceEntry.type === "compaction" && index > 0
+							? []
+							: projectContextEntry(sourceEntry, edits.get(sourceEntry.id)),
+				}),
+			);
 	return {
 		entries: projectedEntries,
 		messages: projectedEntries.flatMap((entry) => entry.messages),
 		thinkingLevel,
 		model: model && { ...model },
 	};
+}
+
+/**
+ * Project a context that starts with a provider summary block: the leading system message with the
+ * block, the tools the summarized conversation changed, the kept entries, the summary, then the
+ * entries after the compaction.
+ */
+function projectSummaryBlockEntries(
+	compaction: SummaryBlockEntry,
+	contextEntries: SessionEntry[],
+	edits: Map<string, ContextEditEntry>,
+): ProjectedSessionEntry[] {
+	const { systemMessage, providerSummary } = compaction;
+	const { provider, api, model, block, toolsAdded, toolsRemoved } = providerSummary;
+	const lead: AgentMessage[] = [{ ...systemMessage, providerSummary: { provider, api, model, block } }];
+	if (toolsAdded || toolsRemoved) {
+		lead.push({
+			role: "system",
+			content: "",
+			...(toolsAdded ? { toolsAdded } : {}),
+			...(toolsRemoved ? { toolsRemoved } : {}),
+			timestamp: new Date(compaction.timestamp).getTime(),
+		});
+	}
+	// System messages before the first kept message belong to the request the block summarizes.
+	let keptStarted = false;
+	return contextEntries.map((sourceEntry, index): ProjectedSessionEntry => {
+		if (index === 0) return { sourceEntry, messages: lead };
+		let messages: AgentMessage[];
+		if (sourceEntry.type !== "compaction") {
+			messages = projectContextEntry(sourceEntry, edits.get(sourceEntry.id));
+		} else if (sourceEntry.providerSummary?.block) {
+			// This entry's summary, or the summary of an earlier block that the kept turns followed.
+			messages = projectContextEntry(sourceEntry, edits.get(sourceEntry.id)).filter(
+				(message) => message.role !== "system",
+			);
+		} else {
+			messages = [];
+		}
+		if (!keptStarted) {
+			messages = messages.filter((message) => message.role !== "system");
+			keptStarted = messages.length > 0;
+		}
+		return { sourceEntry, messages };
+	});
 }
 
 /** Build the finalized model context from the canonical session projection. */
@@ -1514,10 +1628,29 @@ export class SessionManager {
 		details?: T,
 		fromHook?: boolean,
 		usage?: Usage,
+		providerSummary?: CompactionProviderSummary,
 	): string {
 		const timestamp = new Date().toISOString();
-		const systemMessage = getCurrentSystemMessage(this.buildSessionProjection().messages);
+		const projection = this.buildSessionProjection();
 		const id = generateId(this.byId);
+		let systemMessage = getCurrentSystemMessage(projection.messages);
+		if (systemMessage) systemMessage = { ...systemMessage, timestamp: new Date(timestamp).getTime() };
+		if (providerSummary?.block) {
+			// The provider reads the kept reasoning only below the prompt and tools it was written under,
+			// so the leading system message stays as it is instead of becoming the replayed state.
+			const lead = getInitialSystemMessage(projection.messages);
+			const summarized = getMessagesBeforeKept(projection, firstKeptEntryId);
+			if (!lead || !summarized)
+				throw new Error("A provider summary block needs a leading system message and a kept message");
+			systemMessage = { ...lead };
+			delete systemMessage.providerSummary;
+			const { toolsAdded, toolsRemoved } = getToolStateChanges(lead.toolsAdded ?? [], getCurrentTools(summarized));
+			providerSummary = {
+				...providerSummary,
+				...(toolsAdded.length > 0 ? { toolsAdded } : {}),
+				...(toolsRemoved.length > 0 ? { toolsRemoved } : {}),
+			};
+		}
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
 			id,
@@ -1529,7 +1662,8 @@ export class SessionManager {
 			details,
 			usage,
 			fromHook,
-			...(systemMessage ? { systemMessage: { ...systemMessage, timestamp: new Date(timestamp).getTime() } } : {}),
+			...(systemMessage ? { systemMessage } : {}),
+			...(providerSummary ? { providerSummary } : {}),
 		};
 		this._appendEntry(entry);
 		return entry.id;
@@ -1737,7 +1871,7 @@ export class SessionManager {
 	 * Uses tree traversal from current leaf.
 	 */
 	buildContextEntries(): SessionEntry[] {
-		return this._getActiveBranch().contextEntries.slice();
+		return withoutSummaryPosition(this._getActiveBranch().contextEntries.slice());
 	}
 
 	/**

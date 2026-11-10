@@ -19,6 +19,7 @@ import {
 	ANTHROPIC_WORKSPACE_ID_ENV,
 } from "../env-api-keys.ts";
 import { calculateCost } from "../models.ts";
+import { wroteProviderSummary } from "../provider-summary.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
@@ -1520,8 +1521,19 @@ function buildParams(
 		model.reasoning && options?.thinkingEnabled === false && model.thinkingLevelMap?.off !== null;
 	// Effort cannot change between messages while thinking is disabled, so "off" sends no effort markers.
 	const effortMessages = model.compat?.supportsMidConvoEffort === true && !thinkingDisabled;
+	// System messages before the first kept message restate the tools that the summarized
+	// conversation changed. The block restores those itself (`tool_changes`), and any message between
+	// the block and the first kept message makes Anthropic drop the kept thinking (both measured).
+	// So they are not sent; their definitions only take the strict shares they had when first sent.
+	const firstKept = flags.summaryBlock ? conversationMessages.findIndex((message) => message.role !== "system") : 0;
+	const keptMessages = firstKept < 0 ? [] : conversationMessages.slice(firstKept);
+	if (nativeToolChanges) {
+		for (const message of conversationMessages.slice(0, conversationMessages.length - keptMessages.length)) {
+			if (message.role === "system") convertToolDefinitions(message.toolsAdded ?? []);
+		}
+	}
 	const converted = convertMessages(
-		conversationMessages,
+		keptMessages,
 		isOAuthToken,
 		cacheControl,
 		compat.allowEmptySignature,
@@ -2008,9 +2020,7 @@ function getSummaryBlock(
 	messages: TranscriptContext["messages"],
 ): JsonObject | undefined {
 	const summary = getInitialSystemMessage(messages)?.providerSummary;
-	return summary?.provider === model.provider && summary.api === model.api && summary.model === model.id
-		? summary.block
-		: undefined;
+	return summary && wroteProviderSummary(model, summary) ? summary.block : undefined;
 }
 
 /**

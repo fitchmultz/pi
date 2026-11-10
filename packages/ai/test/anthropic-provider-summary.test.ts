@@ -297,4 +297,52 @@ describe("Anthropic provider summary block", () => {
 		expect(otherModel.body.messages).toEqual(withoutBlock.body.messages);
 		expect(otherModel.betas).not.toContain(COMPACTION_BETA);
 	});
+
+	it("does not send the tools the block restores, and sends later tool changes in place", async () => {
+		const h = harness([
+			sse([
+				messageStart(),
+				{ type: "content_block_start", index: 0, content_block: { type: "text", text: "ok" } },
+				{ type: "content_block_stop", index: 0 },
+				{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
+				{ type: "message_stop" },
+			]),
+		]);
+		const ring = { name: "ring", description: "Ring the bell", parameters: Type.Object({}) };
+		const chime = { name: "chime", description: "Play the chime", parameters: Type.Object({}) };
+		const base = normalizeContext({ systemPrompt: "You are a test assistant.", tools: [lookup], messages: [] });
+		const lead = base.messages[0] as SystemMessage;
+		const context = {
+			messages: [
+				{ ...lead, providerSummary: { provider: model.provider, api: model.api, model: model.id, block } },
+				// Added in the summarized conversation: the block's `tool_changes` restore it.
+				{ role: "system", content: "", toolsAdded: [ring], timestamp: 1 },
+				assistant("call_6", "sixth"),
+				toolResult("call_6"),
+				// Added in the kept conversation.
+				{ role: "system", content: "", toolsAdded: [chime], timestamp: 1 },
+				assistant("call_7", "seventh"),
+				toolResult("call_7"),
+			],
+		} as typeof base;
+
+		await stream(model, context, h.options).result();
+
+		const { body } = h.requests[0];
+		expect(body.messages[0]).toEqual({ role: "assistant", content: [block] });
+		// Anything between the block and the first kept message makes Anthropic drop the kept thinking.
+		expect(body.messages[1].role).toBe("assistant");
+		const added = body.messages.flatMap((message) =>
+			message.role === "system" && Array.isArray(message.content)
+				? message.content.flatMap((part: { type: string; tool?: { definition: { name: string } } }) =>
+						part.type === "tool_addition" && part.tool ? [part.tool.definition.name] : [],
+					)
+				: [],
+		);
+		expect(added).toEqual(["chime"]);
+		expect((body.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
+			"lookup",
+			"__pi_deferred_placeholder__",
+		]);
+	});
 });
