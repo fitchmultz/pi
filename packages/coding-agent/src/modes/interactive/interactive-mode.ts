@@ -4222,12 +4222,12 @@ export class InteractiveMode {
 						renderer,
 						this.getMarkdownThemeWithSettings(),
 						this.outputPad,
-						!!this.compactView,
-						this.settingsManager.getShowImages(),
-						this.settingsManager.getImageWidthCells(),
 						this.getMarkdownTransformers(),
 						options?.messageId,
 						options?.timestamp,
+						!!this.compactView,
+						this.settingsManager.getShowImages(),
+						this.settingsManager.getImageWidthCells(),
 					);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
