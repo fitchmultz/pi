@@ -71,6 +71,18 @@ The tutorial stopped after its step 8, waiting for the edited plugin's reload. T
 stall under the per-user directory is not established; the measurement is the evidence.
 Upstream's test files are unchanged.
 
+## Fixes found during review
+
+- **Radius status line.** Upstream's `radiusStatusText` printed `connected as brain Studio`, and
+  upstream's own test expects `connected as brain "Studio" (brain-1)`. The fork now prints the
+  quoted name with the server ID. The name is a label that two brains can share; the ID is not.
+- **Output-drain fixtures.** The daemon keeps reading after a shell exits until its descendants
+  are silent for 100 ms. Two fork tests wrote ten ticks with a `sleep 0.02` process per tick.
+  On the emulated Intel Mac job the gaps exceeded 100 ms, and the test failed twice with five
+  ticks. One Node process now writes the ticks 20 ms apart and signals the shell through a
+  pipe before it exits. The assertions are unchanged. With the daemon's re-arm removed, the
+  new fixture still fails, with four ticks.
+
 ## Verification
 
 All runs used macOS and Node 24.22.2 unless stated. Providers were offline or faux.
@@ -84,10 +96,8 @@ All runs used macOS and Node 24.22.2 unless stated. Providers were offline or fa
   tutorial timeout, and seven Env suites that needed the daemon build.
 - p2 on Node 26.13.0 with real Chrome: 66 of 67 tests passed across the Familiar, its drawer
   entry, conversations, Radius, session operations and start, socket limits, server start, the
-  drawer, and cache warming.
-- The one p2 failure is upstream's. `radiusStatusText` returns `connected as brain Studio`, and
-  upstream's test expects `connected as brain "Studio" (brain-1)`. Both files match upstream
-  main on those lines.
+  drawer, and cache warming. The one failure was upstream's status-line mismatch, fixed below;
+  the Radius file then passed all its tests.
 
 These checks do not qualify live Radius, Discord, remote sandboxes, Windows, or a physical
 Termux device.

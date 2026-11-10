@@ -146,6 +146,10 @@ afterEach(async () => {
 	for (const dir of tempDirs.splice(0)) await removeTempDir(dir);
 }, 15_000);
 
+// One process writes ten ticks 20 ms apart, for longer than the grace after exit, and tells the shell through the
+// `ready` pipe that it runs. A shell loop that starts a `sleep` per tick left gaps longer than the grace on slow runners.
+const TICK_WRITER = `${JSON.stringify(process.execPath)} -e 'require("fs").writeFileSync("ready","\\n");let i=0;const t=setInterval(()=>{process.stdout.write("tick"+ ++i+"\\n");if(i===10)clearInterval(t)},20)'`;
+
 describe("NodeExecutionEnv filesystem", () => {
 	it("reads, writes, lists, and removes files and directories", async () => {
 		const root = createTempDir();
@@ -775,7 +779,7 @@ describe("NodeExecutionEnv shell", () => {
 			try {
 				const collected = await collectShellOutput(
 					env,
-					"echo $$ > group.pid; sleep 3 & (for i in 1 2 3 4 5 6 7 8 9 10; do sleep 0.02; echo tick$i; done) & exit 3",
+					`echo $$ > group.pid; mkfifo ready; sleep 3 & ${TICK_WRITER} & read _ < ready; exit 3`,
 					undefined,
 					BACKGROUND_CONTEXT,
 				);

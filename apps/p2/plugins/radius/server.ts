@@ -11,7 +11,7 @@ export function radiusStatusText(status: RadiusStatus): string {
 	return status.status === "connected"
 		? status.name === undefined
 			? `connected as brain ${status.serverId}`
-			: `connected as brain ${status.name}`
+			: `connected as brain ${JSON.stringify(status.name)} (${status.serverId})`
 		: status.status === "retrying"
 			? `not connected (${status.error})`
 			: "";
