@@ -237,15 +237,15 @@ export class CacheWarmer {
 			this.stop(run.phase === "idle" ? "30-minute idle safety limit reached" : "one-hour safety limit reached");
 			return undefined;
 		}
-		// Replacing or stopping a run clears this timer, so it always fires for the current run.
 		const timer = setTimeout(
 			() => {
-				if (this.run) void this.refresh(this.run);
+				// The timer is armed for one run: the one that holds this cycle.
+				if (this.run?.cycle === cycle) void this.refresh(this.run);
 			},
 			Math.max(0, nextWarmAt - Date.now()),
 		);
 		timer.unref?.();
-		return {
+		const cycle: RefreshCycle = {
 			kind: "scheduled",
 			timer,
 			nextWarmAt,
@@ -254,6 +254,7 @@ export class CacheWarmer {
 			// late refresh is likely a full-price cache write, not a cache warm.
 			refreshDeadlineAt: nextWarmAt + Math.floor((run.ttlMs - run.delayMs) / 2),
 		};
+		return cycle;
 	}
 
 	private async refresh(run: ActiveRun): Promise<void> {
