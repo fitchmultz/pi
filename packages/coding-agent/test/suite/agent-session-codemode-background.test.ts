@@ -220,6 +220,10 @@ const completionText = (message: CustomMessage<unknown>): string => {
 /** Let the session run its pending microtasks and the work's promise chain. */
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+/** The session's background work without the cancel callbacks. */
+const listWork = async (harness: Harness) =>
+	(await harness.session.getBackgroundWork()).map(({ id, description }) => ({ id, description }));
+
 describe("codemode background runs", () => {
 	const harnesses: Harness[] = [];
 
@@ -755,6 +759,104 @@ describe("codemode background runs", () => {
 		expect(completions(harness)).toHaveLength(0);
 		expect(storeEntries(harness)).toHaveLength(0);
 		expect(usageEntries(harness)).toHaveLength(0);
+	});
+
+	it("lists a run as background work until the run its completion started has ended", async () => {
+		const run = createDeferredRunTool();
+		const harness = await setup([], [toolExtension(run.tool)]);
+		await promptTool(harness, "deferred_run");
+		await run.started;
+
+		expect(harness.session.isIdle).toBe(true);
+		expect(await listWork(harness)).toEqual([{ id: run.runId(), description: "test-background run is active" }]);
+
+		const woken = Promise.withResolvers<void>();
+		const answer = Promise.withResolvers<void>();
+		harness.setResponses([
+			async () => {
+				woken.resolve();
+				await answer.promise;
+				return fauxAssistantMessage("after completion");
+			},
+		]);
+		run.finish();
+		await woken.promise;
+		// The completion is in the transcript and its run is active; only the run's end clears the entry.
+		expect(completions(harness, "test-background")).toHaveLength(1);
+		expect(harness.session.isIdle).toBe(false);
+		expect(await listWork(harness)).toEqual([
+			{ id: run.runId(), description: "test-background run is awaiting delivery" },
+		]);
+
+		answer.resolve();
+		await harness.session.waitForIdle();
+		await flush();
+		expect(await listWork(harness)).toEqual([]);
+		expect(harness.session.getLastAssistantText()).toBe("after completion");
+	});
+
+	it("cancels one listed run without a completion and leaves the other running", async () => {
+		const gate = createGatedTool();
+		const run = createDeferredRunTool();
+		const harness = await setup([gate.tool], [toolExtension(run.tool)]);
+		await launch(harness, `${BACKGROUND}await tools.gated({});\nstore("step", 1);\nreturn "never";`, [
+			"foreground done",
+		]);
+		await gate.started;
+		const script = codemodeResult(harness).toolCallId;
+		await promptTool(harness, "deferred_run", ["second foreground done", "after completion"]);
+		await run.started;
+
+		const work = await harness.session.getBackgroundWork();
+		expect(work.map(({ id, description }) => ({ id, description }))).toEqual([
+			{ id: script, description: `${CODEMODE_BACKGROUND_COMPLETION_TYPE} run is active` },
+			{ id: run.runId(), description: "test-background run is active" },
+		]);
+		await work[0]!.cancel();
+
+		expect(gate.aborted()).toBe(true);
+		expect(await listWork(harness)).toEqual([{ id: run.runId(), description: "test-background run is active" }]);
+		run.finish();
+		const completion = await waitForCompletion(harness, "test-background");
+		expect(completionText(completion)).toBe("work output");
+		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("after completion"));
+		await harness.session.waitForIdle();
+		await flush();
+		expect(await listWork(harness)).toEqual([]);
+		expect(completions(harness)).toHaveLength(0);
+		expect(storeEntries(harness)).toHaveLength(0);
+	});
+
+	it("lists background work during a save hold without invalidating the save or writing", async () => {
+		const run = createDeferredRunTool();
+		const harness = await setup(
+			[],
+			[
+				toolExtension(run.tool),
+				(pi) => {
+					pi.on("background_work", () => ({
+						work: [{ id: "reported", description: "extension work", cancel: async () => {} }],
+					}));
+				},
+			],
+		);
+		await promptTool(harness, "deferred_run", ["foreground done", "after completion"]);
+		await run.started;
+
+		const hold = await harness.session.acquireWorkingSession();
+		try {
+			const entries = harness.sessionManager.getEntries().length;
+			expect(await listWork(harness)).toEqual([
+				{ id: run.runId(), description: "test-background run is active" },
+				{ id: "reported", description: "extension work" },
+			]);
+			expect(hold.invalidated.aborted).toBe(false);
+			expect(harness.sessionManager.getEntries()).toHaveLength(entries);
+		} finally {
+			await hold.release();
+		}
+		run.finish();
+		await waitForCompletion(harness, "test-background");
 	});
 
 	it("aborts the work of a run when the session is disposed", async () => {

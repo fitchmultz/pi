@@ -13,7 +13,7 @@ import fs, {
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
@@ -21,7 +21,10 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext, ExtensionFactory } from "../../src/core/extensions/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
-import backgroundCommand, { BACKGROUND_COMMAND_NOTICE } from "../../src/extensions/background-command/index.ts";
+import backgroundCommand, {
+	BACKGROUND_COMMAND_NOTICE,
+	createBackgroundCommandExtension,
+} from "../../src/extensions/background-command/index.ts";
 import {
 	type BackgroundCommandJob,
 	backgroundCommandDirectory,
@@ -52,6 +55,9 @@ const notices = (h: Harness) =>
 		.filter((entry) => entry.type === "custom_message" && entry.customType === BACKGROUND_COMMAND_NOTICE);
 const jobFrom = (h: Harness) =>
 	JSON.parse(getMessageText(getToolResult(h, "background_command"))) as BackgroundCommandJob;
+/** The session's background work without the cancel callbacks. */
+const listWork = async (h: Harness) =>
+	(await h.session.getBackgroundWork()).map(({ id, description }) => ({ id, description }));
 
 // Most tests here start one or two detached worker processes from TypeScript source. A start takes
 // 0.2 s on an idle machine and about 9 s on one starved enough to reproduce the CI timeouts, where the
@@ -805,4 +811,190 @@ describe("background command extension delivery", { timeout: 180_000 }, () => {
 			}
 		},
 	);
+	it("reports a job from its start until its notice is in the session", async () => {
+		const h = await harness();
+		const root = backgroundCommandDirectory(h.sessionManager);
+		const release = join(h.tempDir, "release");
+		const waitForRelease = `while [ ! -f ${quote(release)} ]; do sleep 0.02; done`;
+		const command = `${waitForRelease}\nprintf 'background result\\n'`;
+		// Sampled when the tool call ends: the job exists, and no boundary has taken the delivery lease yet.
+		let atStart: { work: ReturnType<typeof listWork>; leaseHeld: boolean } | undefined;
+		h.session.subscribe((event) => {
+			if (event.type !== "tool_execution_end" || event.toolName !== "background_command") return;
+			atStart = { work: listWork(h), leaseHeld: lockfile.checkSync(root, { realpath: false }) };
+		});
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("Launched"),
+		]);
+		await h.session.prompt("Start");
+		const item = {
+			id: jobFrom(h).id,
+			description: `${waitForRelease} printf 'background result\\n'`.slice(0, 160),
+		};
+		expect(atStart?.leaseHeld).toBe(false);
+		expect(await atStart?.work).toEqual([item]);
+
+		// Idle with the job running. Asking writes nothing.
+		const journal = h.sessionManager.getSessionFile()!;
+		const saved = readFileSync(journal, "utf8");
+		expect(h.session.isIdle).toBe(true);
+		expect(await listWork(h)).toEqual([item]);
+		expect(readFileSync(journal, "utf8")).toBe(saved);
+
+		const samples: Record<string, unknown> = {};
+		h.setResponses([
+			async () => {
+				await finish(h, release);
+				// The job has finished. Its notice enters at the end of this turn.
+				samples.finished = { work: await listWork(h), notices: notices(h).length };
+				return fauxAssistantMessage("Foreground finished");
+			},
+			async () => {
+				samples.delivered = { work: await listWork(h), notices: notices(h).length, idle: h.session.isIdle };
+				return fauxAssistantMessage("Completion consumed");
+			},
+		]);
+		await h.session.prompt("Continue");
+		expect(samples).toEqual({
+			finished: { work: [item], notices: 0 },
+			delivered: { work: [], notices: 1, idle: false },
+		});
+		expect(await listWork(h)).toEqual([]);
+	});
+	it("keeps a host that follows the idle rule waiting until the run a job's notice started has ended", async () => {
+		const h = await harness();
+		const { command, release } = held(h);
+		let woken: unknown;
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("Launched"),
+			async () => {
+				woken = { work: await listWork(h), notices: notices(h).length, idle: h.session.isIdle };
+				return fauxAssistantMessage("Idle completion consumed");
+			},
+		]);
+		await h.session.prompt("Start");
+		expect(h.session.getLastAssistantText()).toBe("Launched");
+		writeFileSync(release, "go");
+		let waits = 0;
+		for (;;) {
+			await h.session.waitForIdle();
+			const work = await h.session.getBackgroundWork();
+			if (h.session.isIdle && !h.session.isSettling && work.length === 0) break;
+			waits++;
+			await delay(25);
+		}
+		expect(waits).toBeGreaterThan(0);
+		expect(h.session.getLastAssistantText()).toBe("Idle completion consumed");
+		expect(woken).toEqual({ work: [], notices: 1, idle: false });
+		expect(notices(h)).toHaveLength(1);
+		expect(h.faux.state.callCount).toBe(3);
+	});
+	it("stops reporting a job once the model has read its final status", async () => {
+		const h = await harness();
+		const { command, release } = held(h);
+		let afterStatus: unknown;
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
+				stopReason: "toolUse",
+			}),
+			async () => {
+				await finish(h, release);
+				return fauxAssistantMessage(fauxToolCall("background_command", { action: "status", id: jobFrom(h).id }), {
+					stopReason: "toolUse",
+				});
+			},
+			async () => {
+				afterStatus = await listWork(h);
+				return fauxAssistantMessage("Inspected");
+			},
+		]);
+		await h.session.prompt("Start");
+		expect(jobFrom(h).status).toBe("failed");
+		expect(afterStatus).toEqual([]);
+		expect(notices(h)).toHaveLength(0);
+	});
+	it("cancels a job through its reported item, and the notice then records the outcome", async () => {
+		const h = await harness();
+		const { command } = held(h);
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("Launched"),
+			fauxAssistantMessage("Cancellation consumed"),
+		]);
+		await h.session.prompt("Start");
+		const job = jobFrom(h);
+		const work = await h.session.getBackgroundWork();
+		expect(work.map(({ id }) => id)).toEqual([job.id]);
+		await work[0]!.cancel();
+		const root = backgroundCommandDirectory(h.sessionManager);
+		await until(() => backgroundCommandFinished(readBackgroundCommand(root, job.id)));
+		expect(readBackgroundCommand(root, job.id).status).toBe("cancelled");
+		await until(() => notices(h).length === 1 && h.session.isIdle);
+		expect(getMessageText(h.session.messages.findLast((message) => message.role === "custom"))).toContain(
+			`"id":"${job.id}","status":"cancelled"`,
+		);
+		expect(await listWork(h)).toEqual([]);
+	});
+	it("reports nothing while another process owns delivery, or after monitoring has stopped", async () => {
+		const h = await harness();
+		const root = backgroundCommandDirectory(h.sessionManager);
+		// Another process sharing the session holds the lease before this one has a job to deliver.
+		mkdirSync(dirname(root), { recursive: true });
+		const releaseLease = lockfile.lockSync(root, { realpath: false });
+		const job = seedRunningJob(h);
+		const item = { id: listBackgroundCommands(root)[0]!.id, description: "seeded job" };
+		try {
+			expect(await listWork(h)).toEqual([]);
+		} finally {
+			releaseLease();
+		}
+		// The lease is free again: this session's monitor takes it on its next pass and sends the notice.
+		expect(await listWork(h)).toEqual([item]);
+		await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+		expect(await listWork(h)).toEqual([]);
+		job.finish();
+	});
+	it("omits the one-shot print guidance when the host waits, and keeps it otherwise", async () => {
+		const printHarness = async (hostWaits: boolean) => {
+			const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-background-session-")));
+			roots.push(root);
+			const h = await createHarness({
+				extensionFactories: [createBackgroundCommandExtension({ hostWaits })],
+				sessionManager: SessionManager.create(root, join(root, "sessions")),
+				settings: { compaction: { enabled: false }, retry: { enabled: false } },
+			});
+			harnesses.push(h);
+			await h.session.bindExtensions({ mode: "print" });
+			h.setResponses([
+				fauxAssistantMessage(fauxToolCall("background_command", { action: "start", command: held(h).command }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("Launched"),
+			]);
+			await h.session.prompt("Start");
+			const definition = h.session.getToolDefinition("background_command")!;
+			return {
+				description: definition.description,
+				guidelines: definition.promptGuidelines ?? [],
+				result: JSON.parse(getMessageText(getToolResult(h, "background_command"))) as Record<string, unknown>,
+			};
+		};
+		const plain = await printHarness(false);
+		const waiting = await printHarness(true);
+
+		expect(plain.result.guidance).toEqual(expect.stringContaining("one-shot print/JSON invocation"));
+		expect(waiting.result).not.toHaveProperty("guidance");
+		expect(Object.keys(waiting.result)).toEqual(Object.keys(plain.result).filter((key) => key !== "guidance"));
+		expect(waiting.guidelines).toHaveLength(plain.guidelines.length - 1);
+		expect(plain.guidelines).toEqual(expect.arrayContaining(waiting.guidelines));
+		expect(waiting.description).toBe(plain.description);
+	});
 });

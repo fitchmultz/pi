@@ -704,6 +704,42 @@ describe("ExtensionRunner", () => {
 				result: { output: "handled", exitCode: 0, cancelled: false, truncated: false },
 			});
 		});
+
+		it("reports a background_work handler that throws and keeps the work of the others", async () => {
+			const runtime = createExtensionRuntime();
+			const eventBus = createEventBus();
+			const item = (id: string) => ({ id, description: `${id} work`, cancel: async () => {} });
+			const first = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("background_work", () => ({ work: [item("first")] }));
+					pi.on("background_work", () => {
+						throw new Error("report failed");
+					});
+					pi.on("background_work", () => {});
+				},
+				tempDir,
+				eventBus,
+				runtime,
+			);
+			const second = await loadExtensionFromFactory(
+				(pi) => {
+					pi.on("background_work", async () => ({ work: [item("second")] }));
+				},
+				tempDir,
+				eventBus,
+				runtime,
+			);
+			const runner = new ExtensionRunner([first, second], runtime, tempDir, sessionManager, modelRegistry);
+			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			runner.onError((error) => errors.push(error));
+
+			const work = await runner.emitBackgroundWork();
+
+			expect(work.map(({ id }) => id)).toEqual(["first", "second"]);
+			expect(errors).toMatchObject([
+				{ extensionPath: first.path, event: "background_work", error: "report failed" },
+			]);
+		});
 	});
 
 	describe("message and entry renderers", () => {
