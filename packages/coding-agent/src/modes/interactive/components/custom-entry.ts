@@ -3,6 +3,7 @@ import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import type { EntryRenderer } from "../../../core/extensions/types.ts";
 import type { CustomEntry } from "../../../core/session-manager.ts";
 import { theme } from "../theme/theme.ts";
+import { CompactPreview } from "./compact-preview.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 
 /**
@@ -15,6 +16,7 @@ export class CustomEntryComponent extends Container {
 	private customComponent?: Component;
 	private _expanded = false;
 	private compactView: boolean;
+	private readonly compactPreview = new CompactPreview();
 	private outputPad: number;
 
 	constructor(entry: CustomEntry<unknown>, renderer: EntryRenderer, outputPad = 1, compactView = false) {
@@ -51,8 +53,15 @@ export class CustomEntryComponent extends Container {
 		this.compactView = compactView;
 	}
 
+	/** Compact view shows an unexpanded entry as its two-row preview, whatever its renderer returns. */
+	override render(width: number): string[] {
+		const lines = super.render(width);
+		return this.compactView && !this._expanded ? this.compactPreview.render(lines, width) : lines;
+	}
+
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
-		const result = super.handleMouse(event);
+		const native = this.compactView && !this._expanded ? this.compactPreview.toNative(event) : event;
+		const result = native && super.handleMouse(native);
 		if (result || !this.compactView || event.type !== "click" || event.button !== "left") return result;
 		this.setExpanded(!this._expanded);
 		return {
@@ -68,6 +77,7 @@ export class CustomEntryComponent extends Container {
 	}
 
 	private rebuild(): void {
+		this.compactPreview.reset();
 		this.clear();
 		this.customComponent = undefined;
 

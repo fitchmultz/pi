@@ -14,6 +14,7 @@ import type { MarkdownTransformer, MessageRenderer } from "../../../core/extensi
 import type { CustomMessage } from "../../../core/messages.ts";
 import { ensurePngTranscoder } from "../../../utils/image-convert.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { CompactPreview } from "./compact-preview.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
 
@@ -33,6 +34,7 @@ export class CustomMessageComponent extends Container {
 	private messageId?: string;
 	private timestamp?: string;
 	private compactView: boolean;
+	private readonly compactPreview = new CompactPreview();
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private imageChildren: Component[] = [];
@@ -111,8 +113,15 @@ export class CustomMessageComponent extends Container {
 		this.rebuild();
 	}
 
+	/** Compact view shows an unexpanded message as its two-row preview, whatever its renderer returns. */
+	override render(width: number): string[] {
+		const lines = super.render(width);
+		return this.compactView && !this._expanded ? this.compactPreview.render(lines, width) : lines;
+	}
+
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
-		const result = super.handleMouse(event);
+		const native = this.compactView && !this._expanded ? this.compactPreview.toNative(event) : event;
+		const result = native && super.handleMouse(native);
 		if (result || !this.compactView || event.type !== "click" || event.button !== "left") return result;
 		this.setExpanded(!this._expanded);
 		return {
@@ -128,6 +137,7 @@ export class CustomMessageComponent extends Container {
 	}
 
 	private rebuild(): void {
+		this.compactPreview.reset();
 		// Remove previous content component
 		if (this.customComponent) {
 			this.removeChild(this.customComponent);
