@@ -127,6 +127,7 @@
 - Fixed `CustomMessageComponent` taking the fork's `compactView`, `showImages` and `imageWidthCells` constructor arguments before upstream's `markdownTransformers`, `messageId` and `timestamp`. An extension that constructed the component with upstream's seven arguments turned on compact view and lost its transformers, message ID and timestamp. Upstream's arguments are in upstream's positions again; the fork's three follow them, as `compactView` does on the other message components.
 - Fixed the retained performance fixtures, which imported deleted files and called changed APIs, so the smoke command in the [performance record](../../docs/performance.md) stopped at its eleventh case. That command runs to the end again and a script test now runs it; cases whose measured code is deleted were removed. The record and its results file list only measurements for code the fork still carries, with the recorded numbers unchanged.
 - Fixed quitting while a tool runs dropping that tool's result from the saved session, which then showed `No result provided` for the call on resume. Quit now aborts the turn and waits up to 500 ms for it to settle while the shutdown handlers run. A tool that ignores cancellation still cannot hold up the handlers or the exit, and certified working-session exits still wait without a limit.
+- Fixed collapsed tool-output and bash previews returning private selection annotations from `render()` to callers outside a fullscreen frame after that frame had rendered them.
 
 ### Removed
 

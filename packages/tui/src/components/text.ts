@@ -1,4 +1,4 @@
-import { SelectionSource, SourceText } from "../selection-source.ts";
+import { isRenderingForSelectionReader, SelectionSource, SourceText } from "../selection-source.ts";
 import type { Component } from "../tui.ts";
 import {
 	applyBackgroundToLine,
@@ -21,6 +21,9 @@ export class Text implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	// Whether the cached lines carry selection sources. Only a selection reader's render gets such lines.
+	private cachedForSelectionReader = false;
+	// Source of the last render for a selection reader. Other renders leave it alone: that frame may still be selected.
 	private selectionSource?: SelectionSource;
 
 	constructor(text: string = "", paddingX: number = 1, paddingY: number = 1, customBgFn?: (text: string) => string) {
@@ -58,32 +61,47 @@ export class Text implements Component {
 	}
 
 	render(width: number): string[] {
+		const forSelectionReader = isRenderingForSelectionReader();
 		// Check cache
-		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
+		if (
+			this.cachedLines &&
+			this.cachedText === this.text &&
+			this.cachedWidth === width &&
+			this.cachedForSelectionReader === forSelectionReader
+		) {
 			return this.cachedLines;
 		}
 
 		// Don't render anything if there's no actual text
 		if (!this.text || this.text.trim() === "") {
 			const result: string[] = [];
-			this.selectionSource = undefined;
+			if (forSelectionReader) this.selectionSource = undefined;
 			this.cachedText = this.text;
 			this.cachedWidth = width;
 			this.cachedLines = result;
+			this.cachedForSelectionReader = forSelectionReader;
 			return result;
 		}
 
 		// Replace tabs with 3 spaces
 		const normalizedText = this.text.replace(/\r\n?/g, "\n").replace(/\t/g, "   ");
-		this.selectionSource = new SelectionSource(stripTerminalSequences(this.text));
-		const source = new SourceText(this.selectionSource.text).replace(/\r\n?/g, "\n").replace(/\t/g, "   ");
+		if (forSelectionReader) this.selectionSource = new SelectionSource(stripTerminalSequences(this.text));
+		const selectionSource = forSelectionReader ? this.selectionSource : undefined;
 
 		// Reduce margins when necessary so content and padding fit within the available width.
 		const paddingX = Math.min(this.paddingX, Math.max(0, Math.floor((width - 1) / 2)));
 		const contentWidth = Math.max(1, width - paddingX * 2);
 
 		// Wrap text (this preserves ANSI codes but does NOT pad)
-		const wrappedLines = wrapTextWithAnsi(this.selectionSource.annotate(normalizedText, source), contentWidth);
+		const wrappedLines = wrapTextWithAnsi(
+			selectionSource
+				? selectionSource.annotate(
+						normalizedText,
+						new SourceText(selectionSource.text).replace(/\r\n?/g, "\n").replace(/\t/g, "   "),
+					)
+				: normalizedText,
+			contentWidth,
+		);
 
 		// Add margins and background to each line
 		const leftMargin = " ".repeat(paddingX);
@@ -113,13 +131,15 @@ export class Text implements Component {
 			emptyLines.push(line);
 		}
 
-		const result = this.selectionSource.wrap([...emptyLines, ...contentLines, ...emptyLines]);
+		const lines = [...emptyLines, ...contentLines, ...emptyLines];
+		const result = selectionSource?.wrap(lines) ?? lines;
 		flattenLines(result);
 
 		// Update cache
 		this.cachedText = this.text;
 		this.cachedWidth = width;
 		this.cachedLines = result;
+		this.cachedForSelectionReader = forSelectionReader;
 
 		return result.length > 0 ? result : [""];
 	}
