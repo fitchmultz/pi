@@ -161,11 +161,11 @@ describe("read JSON selection", () => {
 		const json = { path: "/rows", fields: ["id"] };
 		const first = await read({ path, json, limit: 4 });
 		expect(textOutput(first)).toBe(
-			'[\n  {\n    "id": 0\n  },\n\n[4 more lines in JSON selection. Use offset=5 with the same json={"path":"/rows","fields":["id"]} to continue.]',
+			'[\n  {\n    "id": 0\n  },\n\n[4 more lines in JSON selection: to read them all, call read at offset 5 with the same json and no limit. For a part, use offset=5 and a limit with the same json={"path":"/rows","fields":["id"]}.]',
 		);
 		expect(textOutput(await read({ path, json, offset: 5 }))).toBe('  {\n    "id": 1\n  }\n]');
-		await expect(read({ path, json, offset: 9 })).rejects.toThrow(
-			"Offset 9 is beyond end of JSON selection (8 lines total)",
+		expect(textOutput(await read({ path, json, offset: 9, limit: 2 }))).toBe(
+			"[Offset 9 is past the end: the JSON selection has 8 lines. Reading from line 7 instead.]\n\n  }\n]",
 		);
 	});
 

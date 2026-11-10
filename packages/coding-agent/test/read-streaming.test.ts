@@ -21,19 +21,61 @@ vi.mock("util", async (importOriginal) => {
 	return { ...actual, TextDecoder: HookedTextDecoder };
 });
 
+/**
+ * The offsets a notice names for reading lines from `start` (0-indexed) to the end, found by reading page
+ * after page with truncateHead: undefined for more than five pages or a line no read can return.
+ */
+function referencePageOffsets(allLines: string[], start: number): number[] | undefined {
+	const offsets: number[] = [];
+	for (let line = start; line < allLines.length; ) {
+		const page = truncateHead(allLines.slice(line).join("\n"));
+		if (page.firstLineExceedsLimit || offsets.length === 5) return undefined;
+		offsets.push(line + 1);
+		if (!page.truncated) break;
+		line += page.outputLines;
+	}
+	return offsets;
+}
+
+function referenceReadCalls(offsets: number[], limit: number | undefined): string {
+	const list =
+		offsets.length === 1
+			? `offset ${offsets[0]}`
+			: `offsets ${offsets.slice(0, -1).join(", ")} and ${offsets.at(-1)}`;
+	return `call read at ${list}${limit === undefined ? "" : " with no limit"}${offsets.length > 1 ? " in one response" : ""}`;
+}
+
 // The read tool's text path before it streamed (#9654), kept as the reference the new path must match.
 function referenceRead(
 	textContent: string,
 	path: string,
 	offset: number | undefined,
 	limit: number | undefined,
+	// The limit and range of the call, which the notices of a read past the end keep.
+	call = {
+		limit,
+		// Fractional offsets and limits and negative limits keep their notices without named pages.
+		usualRange:
+			(offset === undefined || Number.isInteger(offset)) &&
+			(limit === undefined || (Number.isInteger(limit) && limit >= 0)),
+	},
 ): { text: string; details: { truncation: TruncationResult } | undefined } {
 	const allLines = textContent.split("\n");
 	const totalFileLines = allLines.length;
 	const startLine = offset ? Math.max(0, offset - 1) : 0;
 	const startLineDisplay = startLine + 1;
+	const { usualRange } = call;
 	if (startLine >= allLines.length) {
-		throw new Error(`Offset ${offset} is beyond end of file (${allLines.length} lines total)`);
+		// The last `limit` lines, or the last 100 without a usable limit, read without a limit.
+		const tailStart = Math.max(0, allLines.length - (usualRange && limit !== undefined ? limit : 100));
+		const note = `[Offset ${offset} is past the end: the file has ${allLines.length} lines.`;
+		// A limit of 0 asks for no lines.
+		if (tailStart === allLines.length) return { text: `${note}]`, details: undefined };
+		const tail = referenceRead(textContent, path, tailStart + 1, undefined, call);
+		return {
+			text: `${note} Reading from line ${tailStart + 1} instead.]\n\n${tail.text}`,
+			details: tail.details,
+		};
 	}
 	let selectedContent: string;
 	let userLimitedLines: number | undefined;
@@ -54,17 +96,26 @@ function referenceRead(
 	} else if (truncation.truncated) {
 		const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
 		const nextOffset = endLineDisplay + 1;
-		outputText = truncation.content;
-		if (truncation.truncatedBy === "lines") {
-			outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset} to continue.]`;
-		} else {
-			outputText += `\n\n[Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset} to continue.]`;
-		}
+		const remaining = totalFileLines - endLineDisplay;
+		const offsets = usualRange ? referencePageOffsets(allLines, nextOffset - 1) : undefined;
+		const byteLimit = truncation.truncatedBy === "lines" ? "" : ` (${formatSize(DEFAULT_MAX_BYTES)} limit)`;
+		const shown = `Showing lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}${byteLimit}.`;
+		const notice =
+			offsets === undefined
+				? `${shown} ${remaining} lines remain. Use offset=${nextOffset} to continue.`
+				: offsets.length > 1 || call.limit !== undefined
+					? `${shown} ${remaining} lines remain: to read them all, ${referenceReadCalls(offsets, call.limit)}. For a part, use offset=${nextOffset} and a limit.`
+					: `${shown} Use offset=${nextOffset} to continue.`;
+		outputText = `${truncation.content}\n\n[${notice}]`;
 		details = { truncation };
 	} else if (userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length) {
 		const remaining = allLines.length - (startLine + userLimitedLines);
 		const nextOffset = startLine + userLimitedLines + 1;
-		outputText = `${truncation.content}\n\n[${remaining} more lines in file. Use offset=${nextOffset} to continue.]`;
+		const offsets = usualRange ? referencePageOffsets(allLines, nextOffset - 1) : undefined;
+		const notice = offsets
+			? `${remaining} more lines in file: to read them all, ${referenceReadCalls(offsets, call.limit)}. For a part, use offset=${nextOffset} and a limit.`
+			: `${remaining} more lines in file. Use offset=${nextOffset} to continue.`;
+		outputText = `${truncation.content}\n\n[${notice}]`;
 	} else {
 		outputText = truncation.content;
 	}
@@ -140,6 +191,11 @@ const TEXT_CASES: Record<string, string> = {
 	"exactly 50KB and a trailing newline": `${FIFTY_KB_OF_LINES}\n`,
 	"exactly 50KB, an empty line and more": `${FIFTY_KB_OF_LINES}\n\nmore`,
 	"multi-byte characters over 50KB": lines(700, (i) => `${i} ${"€😀".repeat(13)}`),
+	// Remaining pages: a last empty line stays on a page that is full by lines.
+	"4000 lines and a trailing newline": `${lines(4000, (i) => `line ${i}`)}\n`,
+	"five pages by bytes": lines(2400, () => "z".repeat(99)),
+	// More pages remain than a notice names.
+	"13000 lines": lines(13000, (i) => `${i}`),
 };
 
 describe("read tool streaming", () => {
@@ -167,6 +223,31 @@ describe("read tool streaming", () => {
 		const streamed = (await readWith(streamingOps(Buffer.from(text), 4096), 1, undefined)) as { details: unknown };
 		const expected = referenceOutcome(text, 1, undefined) as { details: unknown };
 		expect(JSON.stringify(streamed.details)).toBe(JSON.stringify(expected.details));
+	});
+
+	it("names offsets whose reads return the rest of the file without gaps or overlap", async () => {
+		const path = join(tempDir, "paged.txt");
+		// The pages end at the byte cap, at the line cap and at the end of the file.
+		const text = [
+			lines(600, (i) => `${i} ${"b".repeat(120)}`),
+			lines(2500, (i) => `s${i}`),
+			lines(200, (i) => `${i} ${"€".repeat(60)}`),
+		].join("\n");
+		writeFileSync(path, text);
+		const tool = createReadToolDefinition(tempDir);
+		const read = async (input: { offset?: number; limit?: number }) => {
+			const result = await tool.execute("call", { path, ...input }, undefined, undefined, undefined as never);
+			return result.content[0].type === "text" ? result.content[0].text : "";
+		};
+		const first = await read({ limit: 100 });
+		const named = /to read them all, call read at offsets (.+) with no limit in one response\./.exec(first);
+		const offsets = named?.[1].split(/, | and /).map(Number) ?? [];
+		expect(offsets).toHaveLength(3);
+		const pages = await Promise.all(offsets.map((offset) => read({ offset })));
+		expect(pages.map((page) => page.replace(/\n\n\[Showing lines [^\]]*\]$/, "")).join("\n")).toBe(
+			text.split("\n").slice(100).join("\n"),
+		);
+		expect(pages[2]).not.toContain("offset=");
 	});
 
 	it("decodes multi-byte characters split across chunks and invalid UTF-8 like Buffer.toString", async () => {

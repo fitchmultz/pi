@@ -6,6 +6,7 @@ import { TextDecoder } from "util";
 import { processImage } from "../../utils/image-process.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import { localMissingPathLookup, withMissingPathHint } from "./missing-path.ts";
 import { resolveReadPathAsync } from "./path-utils.ts";
 import { extractReadJson, type ReadJsonOptions, readJsonSchema } from "./read-json.ts";
 import { readRenderers } from "./renderers/read.ts";
@@ -45,6 +46,20 @@ export type ReadToolOutput = Static<typeof readOutputSchema>;
 export interface ReadToolDetails {
 	truncation?: TruncationResult;
 }
+
+/**
+ * How many remaining pages a continuation notice names. Measured on 30 days of session journals: notices
+ * that left up to 5 pages preceded 95% of the page-by-page follow-up reads and were continued 22-30% of
+ * the time; notices that left more were continued 7% of the time.
+ */
+const MAX_NAMED_PAGES = 5;
+
+/**
+ * Lines shown from the end of the file when the offset is past the end and the call gave no limit. Measured
+ * on 30 days of session journals: after this case, retries without a limit asked for the last 62 lines at
+ * most, and 100 was the median limit of the calls that gave one.
+ */
+const PAST_END_LINES = 100;
 
 /**
  * Pluggable operations for the read tool.
@@ -119,17 +134,78 @@ interface SelectedLines {
 	truncation: TruncationResult;
 	/** Bytes of the first selected line, for the notice when it alone exceeds the byte limit. */
 	firstLineBytes: number;
+	/** UTF-8 size of a 0-indexed line from the first selected line on, or undefined when it was not measured. */
+	lineBytes: (line: number) => number | undefined;
 }
 
 /**
- * Whether a range can be streamed. Other values (fractional, negative limit) keep the whole-file path,
- * whose array slicing defines what they select, for example limit -1 as all lines but the last.
+ * Whether a range can be streamed and its remaining pages named. Other values (fractional, negative limit)
+ * keep the whole-file path, whose array slicing defines what they select, for example limit -1 as all
+ * lines but the last.
  */
 function isStreamableRange(offset: number | undefined, limit: number | undefined): boolean {
 	return (
 		(offset === undefined || Number.isInteger(offset)) &&
 		(limit === undefined || (Number.isInteger(limit) && limit >= 0))
 	);
+}
+
+/**
+ * The 1-indexed offsets of the reads without limit that return every line from `start` (0-indexed) to the
+ * end of the file, or undefined when that takes more than MAX_NAMED_PAGES reads, a line was not measured,
+ * or a line exceeds the byte limit, so no read returns it. A page ends where truncateHead ends it.
+ */
+function remainingPageOffsets(
+	lineBytes: SelectedLines["lineBytes"],
+	start: number,
+	totalFileLines: number,
+): number[] | undefined {
+	const offsets = [start + 1];
+	let pageLines = 0;
+	let pageBytes = 0;
+	for (let line = start; line < totalFileLines; line++) {
+		const size = lineBytes(line);
+		if (size === undefined || size > DEFAULT_MAX_BYTES) return undefined;
+		const joinedBytes = pageBytes + size + (pageLines > 0 ? 1 : 0);
+		if (pageLines < DEFAULT_MAX_LINES && joinedBytes <= DEFAULT_MAX_BYTES) {
+			pageLines++;
+			pageBytes = joinedBytes;
+			continue;
+		}
+		// truncateHead does not count an empty last line: it stays on a page that has room for its newline.
+		if (line === totalFileLines - 1 && size === 0 && pageBytes < DEFAULT_MAX_BYTES) break;
+		if (offsets.length === MAX_NAMED_PAGES) return undefined;
+		offsets.push(line + 1);
+		pageLines = 1;
+		pageBytes = size;
+	}
+	return offsets;
+}
+
+/** The instruction naming the reads that return every remaining line: "call read at offsets 5 and 9 in one response". */
+function readCallsAt(offsets: number[], qualifiers: string[]): string {
+	const list =
+		offsets.length === 1
+			? `offset ${offsets[0]}`
+			: `offsets ${offsets.slice(0, -1).join(", ")} and ${offsets[offsets.length - 1]}`;
+	const conditions = qualifiers.length > 0 ? ` with ${qualifiers.join(" and ")}` : "";
+	return `call read at ${list}${conditions}${offsets.length > 1 ? " in one response" : ""}`;
+}
+
+/** Select lines by streaming when the operations and the range allow it, else from the whole file. */
+async function selectLines(
+	ops: ReadOperations,
+	absolutePath: string,
+	startLine: number,
+	limit: number | undefined,
+	json: ReadJsonOptions | undefined,
+	streamableRange: boolean,
+	signal: AbortSignal | undefined,
+): Promise<SelectedLines> {
+	// A JSON selection parses the whole document, so it is never streamed.
+	return json === undefined && ops.createReadStream && streamableRange
+		? selectLinesFromStream(ops.createReadStream(absolutePath, { signal }), startLine, limit, signal)
+		: selectLinesFromBuffer(await ops.readFile(absolutePath), startLine, limit, json);
 }
 
 /**
@@ -147,12 +223,22 @@ function selectLinesFromBuffer(
 	const endLine = limit === undefined ? undefined : Math.min(startLine + limit, allLines.length);
 	const truncation = truncateHead(allLines.slice(startLine, endLine).join("\n"));
 	const firstLineBytes = truncation.firstLineExceedsLimit ? Buffer.byteLength(allLines[startLine], "utf-8") : 0;
-	return { totalFileLines: allLines.length, truncation, firstLineBytes };
+	return {
+		totalFileLines: allLines.length,
+		truncation,
+		firstLineBytes,
+		lineBytes: (line) => Buffer.byteLength(allLines[line], "utf-8"),
+	};
 }
 
+// Lines and bytes measured past the first selected line: the shown page and the pages a notice can name.
+const MEASURED_LINES = (MAX_NAMED_PAGES + 1) * DEFAULT_MAX_LINES;
+const MEASURED_BYTES = (MAX_NAMED_PAGES + 1) * DEFAULT_MAX_BYTES;
+
 /**
- * Select lines from a file read in chunks. Only lines truncateHead can show are stored; the rest are
- * counted, so memory does not grow with the file. Stops reading when the signal aborts.
+ * Select lines from a file read in chunks. Only lines truncateHead can show are stored; of the rest, the
+ * sizes of the lines that the pages named in a notice can hold are kept and the others are counted, so
+ * memory does not grow with the file. Stops reading when the signal aborts.
  */
 async function selectLinesFromStream(
 	chunks: AsyncIterable<Uint8Array>,
@@ -171,33 +257,45 @@ async function selectLinesFromStream(
 	let selectedBytes = 0;
 	let firstLineBytes = 0;
 	let lastLineEmpty = true;
+	// Sizes of the lines from startLine on, until MEASURED_LINES lines or MEASURED_BYTES bytes are measured.
+	const lineSizes: number[] = [];
+	let measuredBytes = 0;
 	// The selected line being read: its text, while it is stored, and its size.
 	let pieces: string[] | undefined = [];
 	let lineBytes = 0;
 	let lineHasText = false;
 
+	const measuring = () => lineSizes.length < MEASURED_LINES && measuredBytes <= MEASURED_BYTES;
 	const appendToLine = (text: string, start: number, end: number) => {
 		lineHasText = true;
-		if (!pieces) return;
+		const storing = line < endLine ? pieces : undefined;
+		// A line that is not stored is measured only as far as telling that it exceeds the byte cap.
+		if (!storing && (!measuring() || lineBytes > DEFAULT_MAX_BYTES)) return;
 		const piece = text.slice(start, end);
 		// A line over the byte cap is never shown, and a first line over it is only measured: never store
 		// all of a 1 GB line.
-		if (lineBytes <= DEFAULT_MAX_BYTES) pieces.push(piece);
+		if (storing && lineBytes <= DEFAULT_MAX_BYTES) storing.push(piece);
 		lineBytes += Buffer.byteLength(piece, "utf-8");
 	};
 	const finishLine = () => {
-		if (pieces) {
-			if (selectedLines === 0) firstLineBytes = lineBytes;
-			// Storing continues one line past the caps: truncateHead ignores a trailing empty line, so the
-			// line after the cap must be there for it to decide truncation as for the full text.
-			if (storedLines.length > DEFAULT_MAX_LINES || storedBytes > DEFAULT_MAX_BYTES) storedPastCaps = true;
-			const text = pieces.join("");
-			storedBytes += Buffer.byteLength(text, "utf-8") + (storedLines.length > 0 ? 1 : 0);
-			storedLines.push(text);
+		if (measuring()) {
+			lineSizes.push(lineBytes);
+			measuredBytes += lineBytes;
 		}
-		selectedLines++;
-		lastLineEmpty = !lineHasText;
-		pieces = storedPastCaps ? undefined : [];
+		if (line < endLine) {
+			if (pieces) {
+				if (selectedLines === 0) firstLineBytes = lineBytes;
+				// Storing continues one line past the caps: truncateHead ignores a trailing empty line, so the
+				// line after the cap must be there for it to decide truncation as for the full text.
+				if (storedLines.length > DEFAULT_MAX_LINES || storedBytes > DEFAULT_MAX_BYTES) storedPastCaps = true;
+				const text = pieces.join("");
+				storedBytes += Buffer.byteLength(text, "utf-8") + (storedLines.length > 0 ? 1 : 0);
+				storedLines.push(text);
+			}
+			selectedLines++;
+			lastLineEmpty = !lineHasText;
+			pieces = storedPastCaps ? undefined : [];
+		}
 		lineBytes = 0;
 		lineHasText = false;
 	};
@@ -207,17 +305,16 @@ async function selectLinesFromStream(
 		let selectionStart = -1;
 		while (true) {
 			const selected = line >= startLine && line < endLine;
+			const tracked = selected || (line >= endLine && measuring());
 			if (selected && selectionStart === -1) selectionStart = position;
 			const newline = text.indexOf("\n", position);
 			const end = newline === -1 ? text.length : newline;
-			if (selected && end > position) appendToLine(text, position, end);
+			if (tracked && end > position) appendToLine(text, position, end);
 			if (newline === -1) break;
-			if (selected) {
-				finishLine();
-				if (line + 1 === endLine) {
-					selectedBytes += Buffer.byteLength(text.slice(selectionStart, newline), "utf-8");
-					selectionStart = -1;
-				}
+			if (tracked) finishLine();
+			if (selected && line + 1 === endLine) {
+				selectedBytes += Buffer.byteLength(text.slice(selectionStart, newline), "utf-8");
+				selectionStart = -1;
 			}
 			line++;
 			position = newline + 1;
@@ -231,14 +328,14 @@ async function selectLinesFromStream(
 		select(decoder.decode(chunk, { stream: true }));
 	}
 	select(decoder.decode());
-	if (line >= startLine && line < endLine) finishLine();
+	if (line >= startLine && (line < endLine || measuring())) finishLine();
 	const truncation: TruncationResult = {
 		...truncateHead(storedLines.join("\n")),
 		// truncateHead's counts for the joined selected lines, which drop a trailing empty line.
 		totalLines: selectedBytes === 0 ? 0 : selectedLines - (lastLineEmpty ? 1 : 0),
 		totalBytes: selectedBytes,
 	};
-	return { totalFileLines: line + 1, truncation, firstLineBytes };
+	return { totalFileLines: line + 1, truncation, firstLineBytes, lineBytes: (index) => lineSizes[index - startLine] };
 }
 
 export function createReadToolDefinition(
@@ -282,7 +379,15 @@ export function createReadToolDefinition(
 							const absolutePath = await resolveReadPathAsync(path, ctx?.cwd || cwd);
 							if (aborted) return;
 							// Check if file exists and is readable.
-							await ops.access(absolutePath);
+							try {
+								await ops.access(absolutePath);
+							} catch (error) {
+								// Custom operations cannot list a directory, so their error stays as it is.
+								if (options?.operations) throw error;
+								const message = (error as Error).message;
+								const hinted = await withMissingPathHint(message, absolutePath, localMissingPathLookup);
+								throw hinted === message ? error : new Error(hinted, { cause: error });
+							}
 							if (aborted) return;
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							let content: (TextContent | ImageContent)[];
@@ -315,28 +420,50 @@ export function createReadToolDefinition(
 								// Read text content. Convert offset from 1-indexed input to 0-indexed line access.
 								const source = json === undefined ? "file" : "JSON selection";
 								const continuation = json === undefined ? "" : ` with the same json=${JSON.stringify(json)}`;
-								const startLine = offset ? Math.max(0, offset - 1) : 0;
-								const startLineDisplay = startLine + 1;
-								// A JSON selection parses the whole document, so it is never streamed.
-								const { totalFileLines, truncation, firstLineBytes } =
-									json === undefined && ops.createReadStream && isStreamableRange(offset, limit)
-										? await selectLinesFromStream(
-												ops.createReadStream(absolutePath, { signal }),
-												startLine,
-												limit,
-												signal,
-											)
-										: selectLinesFromBuffer(await ops.readFile(absolutePath), startLine, limit, json);
+								const usualRange = isStreamableRange(offset, limit);
+								let startLine = offset ? Math.max(0, offset - 1) : 0;
+								let lineLimit = limit;
+								let selection = await selectLines(
+									ops,
+									absolutePath,
+									startLine,
+									limit,
+									json,
+									usualRange,
+									signal,
+								);
 								if (aborted) return;
-								// Check if offset is out of bounds.
-								if (startLine >= totalFileLines) {
-									throw new Error(
-										`Offset ${offset} is beyond end of ${source} (${totalFileLines} lines total)`,
-									);
+								let pastEndNote = "";
+								if (startLine >= selection.totalFileLines) {
+									// An offset past the end is answered with the end of the file: the last `limit` lines,
+									// which covered 285 of 293 measured retries. An error would also end a codemode script
+									// and lose its other calls.
+									const tailLines = usualRange && limit !== undefined ? limit : PAST_END_LINES;
+									startLine = Math.max(0, selection.totalFileLines - tailLines);
+									lineLimit = undefined;
+									// A limit of 0 asks for no lines: the note alone.
+									const reading =
+										startLine < selection.totalFileLines
+											? ` Reading from line ${startLine + 1} instead.]\n\n`
+											: "]";
+									pastEndNote = `[Offset ${offset} is past the end: the ${source} has ${selection.totalFileLines} lines.${reading}`;
+									selection = await selectLines(ops, absolutePath, startLine, undefined, json, true, signal);
+									if (aborted) return;
 								}
+								const { totalFileLines, truncation, firstLineBytes, lineBytes } = selection;
+								const startLineDisplay = startLine + 1;
 								// A user-specified limit is honored before truncation.
 								const userLimitedLines =
-									limit === undefined ? undefined : Math.min(startLine + limit, totalFileLines) - startLine;
+									lineLimit === undefined
+										? undefined
+										: Math.min(startLine + lineLimit, totalFileLines) - startLine;
+								// What a notice names for reading every line after the shown ones.
+								const pageOffsets = (nextOffset: number) =>
+									usualRange ? remainingPageOffsets(lineBytes, nextOffset - 1, totalFileLines) : undefined;
+								const qualifiers = [
+									...(json === undefined ? [] : ["the same json"]),
+									...(limit === undefined ? [] : ["no limit"]),
+								];
 								let outputText: string;
 								if (truncation.firstLineExceedsLimit) {
 									// First line alone exceeds the byte limit. Point the model at a bash fallback.
@@ -350,23 +477,39 @@ export function createReadToolDefinition(
 									// Truncation occurred. Build an actionable continuation notice.
 									const endLineDisplay = startLineDisplay + truncation.outputLines - 1;
 									const nextOffset = endLineDisplay + 1;
-									outputText = truncation.content;
-									if (truncation.truncatedBy === "lines") {
-										outputText += `\n\n[Showing ${json === undefined ? "" : "JSON selection "}lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}. Use offset=${nextOffset}${continuation} to continue.]`;
+									const remaining = totalFileLines - endLineDisplay;
+									const byteLimit =
+										truncation.truncatedBy === "lines" ? "" : ` (${formatSize(DEFAULT_MAX_BYTES)} limit)`;
+									const offsets = pageOffsets(nextOffset);
+									const shown = `Showing ${json === undefined ? "" : "JSON selection "}lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines}${byteLimit}.`;
+									const next = `Use offset=${nextOffset}${continuation} to continue.`;
+									let notice: string;
+									if (offsets === undefined) {
+										notice = `${shown} ${remaining} lines remain. ${next}`;
+									} else if (offsets.length === 1 && limit === undefined) {
+										// The next offset already returns everything that is left.
+										notice = `${shown} ${next}`;
 									} else {
-										outputText += `\n\n[Showing ${json === undefined ? "" : "JSON selection "}lines ${startLineDisplay}-${endLineDisplay} of ${totalFileLines} (${formatSize(DEFAULT_MAX_BYTES)} limit). Use offset=${nextOffset}${continuation} to continue.]`;
+										// The reads for everything come before the single offset: in real runs a model that
+										// read the single offset first followed it and fetched one page per request.
+										notice = `${shown} ${remaining} lines remain: to read them all, ${readCallsAt(offsets, qualifiers)}. For a part, use offset=${nextOffset} and a limit${continuation}.`;
 									}
+									outputText = `${truncation.content}\n\n[${notice}]`;
 									details = { truncation };
 								} else if (userLimitedLines !== undefined && startLine + userLimitedLines < totalFileLines) {
 									// User-specified limit stopped early, but the file still has more content.
 									const remaining = totalFileLines - (startLine + userLimitedLines);
 									const nextOffset = startLine + userLimitedLines + 1;
-									outputText = `${truncation.content}\n\n[${remaining} more lines in ${source}. Use offset=${nextOffset}${continuation} to continue.]`;
+									const offsets = pageOffsets(nextOffset);
+									const notice = offsets
+										? `${remaining} more lines in ${source}: to read them all, ${readCallsAt(offsets, qualifiers)}. For a part, use offset=${nextOffset} and a limit${continuation}.`
+										: `${remaining} more lines in ${source}. Use offset=${nextOffset}${continuation} to continue.`;
+									outputText = `${truncation.content}\n\n[${notice}]`;
 								} else {
 									// No truncation and no remaining user-limited content.
 									outputText = truncation.content;
 								}
-								content = [{ type: "text", text: outputText }];
+								content = [{ type: "text", text: pastEndNote + outputText }];
 							}
 
 							if (aborted) return;
