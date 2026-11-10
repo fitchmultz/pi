@@ -420,7 +420,7 @@ The session file records what is needed to compare compactions with and without 
 - The compaction entry: `providerSummary` as above, on every compaction that asked for a block.
 - Each assistant message from an Anthropic Messages model whose request carried reasoning blocks: a diagnostic `{ type: "anthropic_thinking_blocks", details: { sent, dropped } }` in `message.diagnostics`. `sent` counts the reasoning blocks in the request body, `dropped` the ones the API reported as dropped. After a compaction, `dropped: 0` with `sent` above 0 on the next reply means the kept reasoning stayed valid.
 
-Do not put a message between the leading system message and the kept entries in a `context_with_system` handler, and do not change, remove or reorder the kept messages. Either one makes the model drop the kept reasoning again. Text for the model belongs after the kept entries.
+In a `context_with_system` handler, leave every message before the `compactionSummary` message as it is when the first message carries `providerSummary`. Do not change the leading system message, do not put a message between it and the kept entries, and do not change, remove or reorder the kept messages. Each of these makes the model drop the kept reasoning again; the request stays valid and nothing a handler adds is lost. State for the model belongs after the `compactionSummary` message.
 
 #### Converting Messages to Text
 

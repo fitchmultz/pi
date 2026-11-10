@@ -303,50 +303,65 @@ describe("Anthropic provider summary block", () => {
 	});
 
 	it("does not send the tools the block restores, and sends later tool changes in place", async () => {
-		const h = harness([
+		const replyTo = (): Response =>
 			sse([
 				messageStart(),
 				{ type: "content_block_start", index: 0, content_block: { type: "text", text: "ok" } },
 				{ type: "content_block_stop", index: 0 },
 				{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } },
 				{ type: "message_stop" },
-			]),
-		]);
+			]);
+		const h = harness([replyTo(), replyTo()]);
 		const ring = { name: "ring", description: "Ring the bell", parameters: Type.Object({}) };
 		const chime = { name: "chime", description: "Play the chime", parameters: Type.Object({}) };
 		const base = normalizeContext({ systemPrompt: "You are a test assistant.", tools: [lookup], messages: [] });
 		const lead = base.messages[0] as SystemMessage;
-		const context = {
-			messages: [
-				{ ...lead, providerSummary: { provider: model.provider, api: model.api, model: model.id, block } },
-				// Added in the summarized conversation: the block's `tool_changes` restore it.
-				{ role: "system", content: "", toolsAdded: [ring], timestamp: 1 },
-				assistant("call_6", "sixth"),
-				toolResult("call_6"),
-				// Added in the kept conversation.
-				{ role: "system", content: "", toolsAdded: [chime], timestamp: 1 },
-				assistant("call_7", "seventh"),
-				toolResult("call_7"),
-			],
-		} as typeof base;
+		const contextWith = (restated: SystemMessage) =>
+			({
+				messages: [
+					{ ...lead, providerSummary: { provider: model.provider, api: model.api, model: model.id, block } },
+					// Added in the summarized conversation: the block's `tool_changes` restore it.
+					restated,
+					assistant("call_6", "sixth"),
+					toolResult("call_6"),
+					// Added in the kept conversation.
+					{ role: "system", content: "", toolsAdded: [chime], timestamp: 1 },
+					assistant("call_7", "seventh"),
+					toolResult("call_7"),
+				],
+			}) as typeof base;
+		const addedTools = (messages: WireMessage[]) =>
+			messages.flatMap((message) =>
+				message.role === "system" && Array.isArray(message.content)
+					? message.content.flatMap((part: { type: string; tool?: { definition: { name: string } } }) =>
+							part.type === "tool_addition" && part.tool ? [part.tool.definition.name] : [],
+						)
+					: [],
+			);
 
-		await stream(model, context, h.options).result();
+		await stream(
+			model,
+			contextWith({ role: "system", content: "", toolsAdded: [ring], timestamp: 1 }),
+			h.options,
+		).result();
+		await stream(
+			model,
+			contextWith({ role: "system", content: "Extension state.", toolsAdded: [ring], timestamp: 1 }),
+			h.options,
+		).result();
 
-		const { body } = h.requests[0];
-		expect(body.messages[0]).toEqual({ role: "assistant", content: [block] });
+		const [toolsOnly, withText] = h.requests.map((request) => request.body);
+		expect(toolsOnly.messages[0]).toEqual({ role: "assistant", content: [block] });
 		// Anything between the block and the first kept message makes Anthropic drop the kept thinking.
-		expect(body.messages[1].role).toBe("assistant");
-		const added = body.messages.flatMap((message) =>
-			message.role === "system" && Array.isArray(message.content)
-				? message.content.flatMap((part: { type: string; tool?: { definition: { name: string } } }) =>
-						part.type === "tool_addition" && part.tool ? [part.tool.definition.name] : [],
-					)
-				: [],
-		);
-		expect(added).toEqual(["chime"]);
-		expect((body.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
+		expect(toolsOnly.messages[1].role).toBe("assistant");
+		expect(addedTools(toolsOnly.messages)).toEqual(["chime"]);
+		expect((toolsOnly.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
 			"lookup",
 			"__pi_deferred_placeholder__",
 		]);
+
+		// Text that an extension put there is not lost.
+		expect(withText.messages[1]).toEqual({ role: "system", content: [{ type: "text", text: "Extension state." }] });
+		expect(addedTools(withText.messages)).toEqual(["chime"]);
 	});
 });
