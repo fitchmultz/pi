@@ -1,7 +1,17 @@
-import { Box, Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } from "@earendil-works/pi-tui";
+import {
+	Box,
+	Container,
+	Markdown,
+	type MarkdownTheme,
+	MouseRegion,
+	Spacer,
+	Text,
+	type TuiMouseEvent,
+} from "@earendil-works/pi-tui";
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import type { BranchSummaryMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { CompactPreview } from "./compact-preview.ts";
 import { keyText } from "./keybinding-hints.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
 
@@ -16,7 +26,10 @@ export class BranchSummaryMessageComponent extends Box {
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private messageId?: string;
 	private timestamp?: string;
+	private compactView: boolean;
+	private readonly compactPreview = new CompactPreview();
 
+	/** The first six arguments are upstream's, in upstream's positions. The fork's display option follows them. */
 	constructor(
 		message: BranchSummaryMessage,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
@@ -24,6 +37,7 @@ export class BranchSummaryMessageComponent extends Box {
 		markdownTransformers: readonly MarkdownTransformer[] = [],
 		messageId?: string,
 		timestamp?: string,
+		compactView = false,
 	) {
 		super(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 		this.message = message;
@@ -31,6 +45,7 @@ export class BranchSummaryMessageComponent extends Box {
 		this.markdownTransformers = markdownTransformers;
 		this.messageId = messageId;
 		this.timestamp = timestamp;
+		this.compactView = compactView;
 		this.updateDisplay();
 	}
 
@@ -46,6 +61,21 @@ export class BranchSummaryMessageComponent extends Box {
 	override invalidate(): void {
 		super.invalidate();
 		this.updateDisplay();
+	}
+
+	setCompactView(compactView: boolean): void {
+		this.compactView = compactView;
+	}
+
+	/** Compact view shows an unexpanded summary as its two-row preview: the label and the summary row. */
+	override render(width: number): string[] {
+		const lines = super.render(width);
+		return this.compactView && !this.expanded ? this.compactPreview.render(lines, width) : lines;
+	}
+
+	override handleMouse(event: TuiMouseEvent): ReturnType<Box["handleMouse"]> {
+		const native = this.compactView && !this.expanded ? this.compactPreview.toNative(event) : event;
+		return native && super.handleMouse(native);
 	}
 
 	private updateDisplay(): void {

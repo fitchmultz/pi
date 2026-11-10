@@ -4279,6 +4279,7 @@ export class InteractiveMode {
 					this.getMarkdownTransformers(),
 					options?.messageId,
 					options?.timestamp,
+					!!this.compactView,
 				);
 				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
@@ -4293,6 +4294,7 @@ export class InteractiveMode {
 					this.getMarkdownTransformers(),
 					options?.messageId,
 					options?.timestamp,
+					!!this.compactView,
 				);
 				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
@@ -5045,7 +5047,9 @@ export class InteractiveMode {
 					child instanceof BashExecutionComponent ||
 					child instanceof AssistantMessageComponent ||
 					child instanceof CustomMessageComponent ||
-					child instanceof CustomEntryComponent
+					child instanceof CustomEntryComponent ||
+					child instanceof CompactionSummaryMessageComponent ||
+					child instanceof BranchSummaryMessageComponent
 				)
 					child.setCompactView(!!compactView);
 			}

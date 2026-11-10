@@ -121,10 +121,11 @@ describe("compact view settings and native event lifecycle", () => {
 		onTestFinished(() => harness.cleanup());
 		const message = { role: "custom" as const, customType: "status", content: "saved", display: true, timestamp: 1 };
 		const plain = { ...message, customType: "plain", content: "plain row 1\n\nplain row 2\n\nplain row 3" };
-		for (const custom of [message, plain]) {
-			harness.sessionManager.appendMessage(custom);
+		const ids = [message, plain].map((custom) => {
 			harness.session.agent.state.messages.push(custom);
-		}
+			return harness.sessionManager.appendMessage(custom);
+		});
+		harness.sessionManager.appendCompaction("summary row 1\n\nsummary row 2", ids[0], 5000);
 		harness.sessionManager.appendCustomEntry("progress", {});
 		const { view, submit, text, rebind } = await createView(harness);
 		await rebind();
@@ -164,6 +165,9 @@ describe("compact view settings and native event lifecycle", () => {
 				expect(text().includes(`${card} row 1`)).toBe(enabled !== true);
 				expect(text().includes(`${card} row 3`)).toBe(enabled === false);
 			}
+			// The compaction summary too: hidden when on, its label and summary row when hybrid, its card when off.
+			expect(text().includes("[compaction]")).toBe(enabled !== true);
+			expect(/\[compaction\] *\n *Compacted from 5,000 tokens/.test(text())).toBe(enabled === "hybrid");
 			expect(view.defaultEditor.getText()).toBe("");
 		}
 		expect(text().match(/Usage: \/compact-view \[on\|off\|hybrid\|toggle\]/g)).toHaveLength(2);
@@ -177,6 +181,9 @@ describe("compact view settings and native event lifecycle", () => {
 		await submit("/cv");
 		expect(harness.settingsManager.getCompactView()).toBe("hybrid");
 		expect(text()).toContain("▾ Activity");
+		// A rebuilt transcript, as after a compaction, makes new cards; they start in the two-row form.
+		await rebind();
+		expect(text()).toMatch(/\[compaction\] *\n *Compacted from 5,000 tokens/);
 		await submit("/compact-view");
 		expect(harness.settingsManager.getCompactView()).toBe(false);
 		expect(text()).not.toContain("Activity");
