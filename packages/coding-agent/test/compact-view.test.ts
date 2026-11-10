@@ -24,8 +24,11 @@ import { codemodeRenderers } from "../src/extensions/codemode/renderer.ts";
 import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
+import { BranchSummaryMessageComponent } from "../src/modes/interactive/components/branch-summary-message.ts";
+import { CompactionSummaryMessageComponent } from "../src/modes/interactive/components/compaction-summary-message.ts";
 import { CustomEntryComponent } from "../src/modes/interactive/components/custom-entry.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
+import { keyText } from "../src/modes/interactive/components/keybinding-hints.ts";
 import { ToolExecutionComponent, type ToolRenderers } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createInteractiveTui } from "../src/modes/interactive/tui-renderer.ts";
@@ -739,5 +742,81 @@ describe("compact Activity and messages", () => {
 			click(component, 0, 40, 3);
 			expect(stripAnsi(component.render(40).join("\n"))).toContain("detail 5");
 		}
+	});
+
+	// Pi's own summary cards follow the same rule. Their two rows are the label and the summary row.
+	const summary = `## Goal\n\n${detail.replaceAll("\n", "\n\n")}`;
+	test.each([
+		[
+			"compaction summary",
+			(compactView: boolean) =>
+				new CompactionSummaryMessageComponent(
+					{ role: "compactionSummary", summary, tokensBefore: 184320, timestamp: 1 },
+					undefined,
+					1,
+					[],
+					undefined,
+					undefined,
+					compactView,
+				),
+			"[compaction]",
+			"Compacted from 184,320 tokens",
+		],
+		[
+			"branch summary",
+			(compactView: boolean) =>
+				new BranchSummaryMessageComponent(
+					{ role: "branchSummary", summary, fromId: "e1", timestamp: 1 },
+					undefined,
+					1,
+					[],
+					undefined,
+					undefined,
+					compactView,
+				),
+			"[branch]",
+			"Branch summary",
+		],
+	] as const)("%s takes two rows until expanded and its normal card otherwise", (_name, create, label, what) => {
+		const text = (lines: string[]) => lines.map((line) => stripAnsi(line).trim());
+		const preview = [label, `${what} (${keyText("app.tools.expand")} to expand)`];
+		const component = create(true);
+		const collapsed = () => text(compactRows(component, 60));
+		expect(collapsed()).toEqual(preview);
+		for (const width of [1, 12]) compactRows(component, width);
+
+		// Normal view: the blank row above the card, then the card.
+		const normal = create(false);
+		const card = ["", "", label, "", preview[1], ""];
+		expect(text(normal.render(60))).toEqual(card);
+		normal.setExpanded(true);
+		const full = normal.render(60);
+		expect(text(full).slice(0, 4)).toEqual(["", "", label, ""]);
+		expect(text(full)).toContain("detail 11");
+
+		// A click on either row opens the card; a click on the label of the open card closes it.
+		for (const row of [0, 1]) {
+			click(component, row, 60);
+			expect(component.render(60)).toEqual(full);
+			click(component, 2, 60);
+			expect(collapsed()).toEqual(preview);
+		}
+		// Ctrl+O reaches the card through setExpanded.
+		component.setExpanded(true);
+		expect(component.render(60)).toEqual(full);
+		component.setExpanded(false);
+		// In an open group the two rows follow the heading directly, in "on" and in hybrid.
+		for (const mode of [true, "hybrid"] as const) {
+			const chat = new ChatContainer();
+			chat.setCompactView(mode);
+			chat.addChild(component);
+			if (mode === true) click(chat, 0, 60);
+			expect(text(chat.render(60))).toEqual(["▾ Activity · 1 update", ...preview]);
+		}
+		// `/compact-view` switches existing cards in place.
+		component.setCompactView(false);
+		expect(text(component.render(60))).toEqual(card);
+		component.setCompactView(true);
+		expect(collapsed()).toEqual(preview);
 	});
 });

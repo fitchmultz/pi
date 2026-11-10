@@ -1963,7 +1963,7 @@ pi.setActiveTools([...new Set([...active, "my_custom_tool"])]); // Keep current 
 pi.setActiveTools(["read", "bash"]); // Only read and bash
 ```
 
-`pi.getAllTools()` returns `name`, `description`, `parameters`, `promptGuidelines`, `exposure`, `sourceInfo`, and, when set, `namespace`, `annotations`, and `reachesTools`.
+`pi.getAllTools()` returns `name`, `description`, `parameters`, `promptGuidelines`, `exposure`, `sourceInfo`, and, when set, `namespace`, `annotations`, and `reachesTools`. `exposure` is the [exposure in effect](#tool-exposure): the `toolExposure` setting's entry for the tool, else the one it registered with.
 
 Typical `sourceInfo` values:
 - `source: "builtin"` for tools shipped with Pi: core tools (`path: "builtin:<tool>"`) and tools registered by built-in extensions such as `builtin:mcp` (`path: "builtin:<extension>"`)
@@ -2807,6 +2807,8 @@ When `search_tools` adds a match, the model receives the complete updated tool l
 `namespace: { name, aliases, description, instructions }` groups related tools, as MCP servers do. Codemode tools list a namespace under one heading with its `description`. `instructions` holds longer usage guidance; it is not listed, and codemode scripts read it with `describeNamespace(name)`. `aliases` are other names scripts may look the namespace up by, for example the server name `docs` for `mcp__docs`; a name and the same name as a script identifier (`my-docs`, `my_docs`) match alike.
 
 Registering a `direct` or `model-only` tool activates it unless it sets `defaultActive: false`; the other exposures are not activated on registration. The active set (`pi.getActiveTools()`, `pi.setActiveTools()`) is the set of tools declared to the model, except active tools whose declarations `prepareLoadout` hides. `pi.getAllTools()` reports each tool's `exposure`, `namespace`, `annotations`, and `reachesTools`.
+
+The exposure a tool registers with is its default. The user's [`toolExposure` setting](settings.md#tool-exposure) replaces it by tool name or pattern, and the tool then behaves as if it had registered with the setting's exposure. A tool registered as `hidden` stays hidden. `pi.getAllTools()` reports the exposure in effect, so an extension that adds prompt text for its tool, or activates `tool_search` for it, should read the exposure and `pi.getActiveTools()` there instead of assuming what it registered.
 
 `annotations` are hints about what a tool does, with the meaning of MCP tool annotations: `readOnlyHint`, `destructiveHint`, `idempotentHint`, and `openWorldHint`. MCP tools carry the hints their server declares. Missing hints take the MCP defaults: a tool is not read-only, and may be destructive and reach an open world. The hints are not verified, but a permission extension can use them to decide which calls to confirm. This confirms the calls Codex asks approval for:
 

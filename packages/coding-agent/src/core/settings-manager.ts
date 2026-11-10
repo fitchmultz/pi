@@ -9,7 +9,9 @@ import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { atomicWriteFileSync, resolveFileTarget } from "../utils/atomic-file.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
+import type { ToolExposure } from "./extensions/types.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import { findToolEntry } from "./mcp-servers.ts";
 import { SETTINGS_DEFAULTS } from "./settings-defaults.ts";
 import type {
 	CacheWarmingMode,
@@ -142,11 +144,50 @@ function resolveDefaultTools(entries: string[]): string[] {
 	return applyToolModifiers(plain.length > 0 || entries.length === 0 ? plain : DEFAULT_TOOL_NAMES, entries);
 }
 
+const TOOL_EXPOSURES: readonly string[] = [
+	"direct",
+	"model-only",
+	"codemode",
+	"deferred",
+	"hidden",
+] satisfies ToolExposure[];
+
+function isToolExposure(value: unknown): value is ToolExposure {
+	return typeof value === "string" && TOOL_EXPOSURES.includes(value);
+}
+
+/**
+ * The exposure a `toolExposure` setting gives a tool, or undefined when no entry gives it one. The
+ * tool's entry is the one with its exact name, else the first matching pattern.
+ */
+export function getToolExposureSetting(toolExposure: unknown, toolName: string): ToolExposure | undefined {
+	// Settings files are not validated: another shape has no entries, and an entry with another
+	// value gives no exposure.
+	if (!isMergeableObject(toolExposure)) return undefined;
+	const exposure = findToolEntry(toolExposure, toolName);
+	return isToolExposure(exposure) ? exposure : undefined;
+}
+
+/**
+ * Merge `toolExposure` of two settings layers. An entry replaces the inherited entry with the same
+ * key. The overriding layer's entries come first, so its patterns match before inherited ones.
+ */
+function mergeToolExposure(base: unknown, overrides: unknown): unknown {
+	if (overrides === undefined) return base;
+	// Settings files are not validated; a malformed value replaces instead of throwing here.
+	if (!isMergeableObject(base) || !isMergeableObject(overrides)) return overrides;
+	// The first spread fixes the key order, the last one the values.
+	return { ...overrides, ...base, ...overrides };
+}
+
 /** Deep merge settings: project/overrides take precedence, nested objects merge recursively */
 function deepMergeSettings(base: Settings, overrides: Settings): Settings {
-	const merged = deepMergeObjects(base as Record<string, unknown>, overrides as Record<string, unknown>) as Settings;
+	const merged = deepMergeObjects(base as Record<string, unknown>, overrides as Record<string, unknown>);
 	const defaultTools = mergeDefaultTools(base.defaultTools, overrides.defaultTools);
-	return defaultTools === undefined ? merged : { ...merged, defaultTools };
+	if (defaultTools !== undefined) merged.defaultTools = defaultTools;
+	const toolExposure = mergeToolExposure(base.toolExposure, overrides.toolExposure);
+	if (toolExposure !== undefined) merged.toolExposure = toolExposure;
+	return merged as Settings;
 }
 
 function parseTimeoutSetting(value: unknown, settingName: string): number | undefined {
@@ -1495,6 +1536,11 @@ export class SettingsManager {
 		const tools = this.settings.defaultTools;
 		if (tools === undefined) return undefined;
 		return resolveDefaultTools(Array.isArray(tools) ? tools.filter((tool) => typeof tool === "string") : []);
+	}
+
+	/** The exposure the `toolExposure` setting gives a tool, or undefined when no entry gives it one. */
+	getToolExposure(toolName: string): ToolExposure | undefined {
+		return getToolExposureSetting(this.settings.toolExposure, toolName);
 	}
 
 	setEnabledModels(patterns: string[] | undefined): void {
