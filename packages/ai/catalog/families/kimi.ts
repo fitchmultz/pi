@@ -1,6 +1,6 @@
 // Moonshot Kimi models, shared by Moonshot, Kimi Coding, and gateways.
 
-export { KIMI_K3_COST, KIMI_K3_OPENAI_COMPAT, KIMI_OPENAI_COMPAT } from "../../src/api/kimi.ts";
+import type { ModelCost, OpenAICompletionsCompat } from "../../src/types.ts";
 
 /**
  * Kimi K3 and its point releases (kimi-k3.1-pro, kimi-k3.1-pro-highspeed) share
@@ -12,3 +12,28 @@ export function isKimiK3FamilyId(modelId: string): boolean {
 }
 
 export const KIMI_K3_MAX_TOKENS = 131072;
+// Includes the default five-minute cache-write rate: https://platform.kimi.ai/docs/pricing/chat
+export const KIMI_K3_COST: ModelCost = {
+	input: 3,
+	output: 15,
+	cacheRead: 0.3,
+	cacheWrite: 3,
+};
+
+// Kimi Chat Completions settings shared by Moonshot and Kimi Coding.
+export const KIMI_OPENAI_COMPAT: OpenAICompletionsCompat = {
+	supportsStore: false,
+	supportsDeveloperRole: false,
+	supportsReasoningEffort: false,
+	maxTokensField: "max_tokens",
+	supportsStrictMode: false,
+	thinkingFormat: "deepseek",
+};
+
+// Kimi K3-style models take reasoning_effort and need earlier reasoning sent back.
+export const KIMI_K3_OPENAI_COMPAT: OpenAICompletionsCompat = {
+	...KIMI_OPENAI_COMPAT,
+	requiresReasoningContentOnAssistantMessages: true,
+	thinkingFormat: "openai",
+	supportsReasoningEffort: true,
+};
