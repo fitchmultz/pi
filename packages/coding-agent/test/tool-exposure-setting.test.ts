@@ -171,6 +171,8 @@ describe("toolExposure setting through the SDK", () => {
 			writeGlobal({ ...DEFERRED, defaultTools: ["-lookup_weather"] });
 			const session = await createFileSession();
 			expect(session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+			// The entry leaves the deferred tool reachable from scripts.
+			expect(session.getCallableToolNames()).toContain("lookup_weather");
 
 			// A new session would not declare the tool either.
 			writeGlobal({ defaultTools: ["-lookup_weather"] });

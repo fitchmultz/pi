@@ -173,6 +173,20 @@ describe("defaultTools setting", () => {
 		session.setActiveToolsByName([...session.getActiveToolNames(), "dynamic_tool"]);
 		expect(session.getActiveToolNames()).toEqual(["read", "edit", "write", "kept_tool", "dynamic_tool"]);
 		session.dispose();
+
+		// Plain names replace the built-in selection only; the -name entry still applies.
+		const extension: InlineExtension = (pi) => {
+			pi.registerTool(activeTool("static_tool"));
+			pi.registerTool(activeTool("kept_tool"));
+		};
+		const plain = await createSession(["read", "-static_tool"], {}, [extension]);
+		expect(plain.getActiveToolNames()).toEqual(["read", "kept_tool"]);
+		plain.dispose();
+
+		// Entries apply in order, so a later +name adds the tool again.
+		const readded = await createSession(["read", "-static_tool", "+static_tool"], {}, [extension]);
+		expect(readded.getActiveToolNames()).toEqual(["read", "static_tool", "kept_tool"]);
+		readded.dispose();
 	});
 
 	it("preserves explicit tool option precedence", async () => {

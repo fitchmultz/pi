@@ -105,6 +105,7 @@ The tool then behaves like a tool that registered with that exposure:
 - A `codemode` or `deferred` tool is declared only when a selection names it: `defaultTools` (`"+macuse"` or a plain name), `--tools`, the SDK `tools` option, or an extension's `pi.setActiveTools()`. The default selection names `read`, `bash`, `edit` and `write`, so also remove a built-in default tool from it: `"defaultTools": ["-edit"]`.
 - `--tools` with plain names and `--exclude-tools` still remove the tools they exclude. An MCP tool that no `--tools` entry names or matches is never declared directly, whatever its exposure; only `tool_search`, if listed, can load it, and it loads only tools with `codemode` or `deferred` exposure (see [Tools](cli.md#mcp-tools)). A `--tools` pattern that matches a `codemode` or `deferred` tool keeps it registered without declaring it.
 - A resumed session keeps the tools its journal recorded as declared, also when the setting now defers them.
+- A `-name` entry in `defaultTools` or `--tools` does not make a `codemode` or `deferred` tool unreachable: scripts still call it, and `tool_search` still loads it. Set the tool to `hidden` or use `--exclude-tools` for that.
 - An entry wins over the exposure an MCP server entry in `mcp.json` gives the tool.
 - A tool that its extension registered as `hidden` stays hidden.
 
