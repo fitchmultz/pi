@@ -1,6 +1,6 @@
 import { createReadStream, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import lockfile from "proper-lockfile";
 import type {
 	BoundaryState,
@@ -9,6 +9,7 @@ import type {
 	ExtensionFactory,
 } from "../../core/extensions/types.ts";
 import { type FileEntry, parseSessionEntries } from "../../core/session-manager.ts";
+import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
 import {
 	type BackgroundCommandJob,
 	backgroundCommandDirectory,
@@ -22,6 +23,10 @@ import { createBackgroundCommandTool } from "./tool.ts";
 
 export const BACKGROUND_COMMAND_NOTICE = "background-command-complete";
 const RUN_STATE = "background-command-run-state";
+/** First line of every notice. The card's summary row says the same, so the preview leaves it out. */
+const NOTICE_HEADING = "Background commands finished:\n";
+/** Rows of a notice before it is expanded: the row count of collapsed bash output. */
+const NOTICE_PREVIEW_LINES = 5;
 
 interface BackgroundCommandNoticeDetails {
 	jobIds: string[];
@@ -173,7 +178,7 @@ export function createBackgroundCommandExtension(options: BackgroundCommandExten
 					jobIds: completed.map((job) => job.id),
 					jobs: completed.map(({ id, status }) => ({ id, status })),
 				} satisfies BackgroundCommandNoticeDetails,
-				content: `Background commands finished:\n${completed
+				content: `${NOTICE_HEADING}${completed
 					.map((job) => {
 						const { id, status, exitCode, commandPreview, logFile, error } = summarizeBackgroundCommand(job);
 						const summary = JSON.stringify({ id, status, exitCode, commandPreview, logFile, error });
@@ -227,7 +232,8 @@ export function createBackgroundCommandExtension(options: BackgroundCommandExten
 		pi.registerMessageRenderer<BackgroundCommandNoticeDetails>(
 			BACKGROUND_COMMAND_NOTICE,
 			(message, options, theme) => {
-				if (!options.compactView || options.expanded) return;
+				// Expanded, Pi draws its default card: the label and the whole notice.
+				if (options.expanded) return;
 				const jobs = message.details?.jobs;
 				const count = jobs?.length ?? message.details?.jobIds.length ?? 0;
 				const unsuccessful = new Map<BackgroundCommandJob["status"], number>();
@@ -243,8 +249,36 @@ export function createBackgroundCommandExtension(options: BackgroundCommandExten
 						),
 					),
 				].join(theme.fg("muted", ", "));
-				const line = " ".repeat(options.outputPad) + summary;
-				return { render: (width: number) => [truncateToWidth(line, width)], invalidate() {} };
+				if (options.compactView) {
+					const line = " ".repeat(options.outputPad) + summary;
+					return { render: (width: number) => [truncateToWidth(line, width)], invalidate() {} };
+				}
+				const text =
+					typeof message.content === "string"
+						? message.content
+						: message.content
+								.filter((part) => part.type === "text")
+								.map((part) => part.text)
+								.join("\n");
+				const body = text.startsWith(NOTICE_HEADING) ? text.slice(NOTICE_HEADING.length) : text;
+				const card = new Box(options.outputPad, 1, (line) => theme.bg("customMessageBg", line));
+				card.addChild(new Text(summary, 0, 0));
+				// A failed job's output is last in the notice and ends with its error, so the preview keeps
+				// the end, like collapsed bash output.
+				card.addChild(
+					new VisualLinePreview({
+						text: body
+							.trimEnd()
+							.split("\n")
+							.map((line) => theme.fg("customMessageText", line))
+							.join("\n"),
+						maxVisualLines: NOTICE_PREVIEW_LINES,
+						keep: "end",
+						formatHint: (hidden) =>
+							`${theme.fg("muted", `... (${hidden} earlier lines,`)} ${options.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+					}),
+				);
+				return card;
 			},
 		);
 		pi.on("session_start", (_event, ctx) => {

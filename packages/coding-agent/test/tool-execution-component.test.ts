@@ -9,7 +9,7 @@ import { type BashOperations, createBashToolDefinition } from "../src/core/tools
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { withBuiltInRenderers } from "../src/core/tools/renderers/index.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
-import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { ToolExecutionComponent, type ToolRenderers } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -513,6 +513,86 @@ describe("ToolExecutionComponent parity", () => {
 		const expanded = stripAnsi(component.render(120).join("\n"));
 		expect(expanded).toContain("line-15");
 		expect(expanded).not.toContain("more lines");
+	});
+
+	// A saved call of a tool that is no longer registered has no definition in the session that shows it.
+	test("draws a tool without a definition like a definition without renderers", () => {
+		// Shape of recorded `agent_browser_code` calls: a script on one long line and a long text result.
+		const script = `const page = await browser.open("https://example.com/${"path/".repeat(60)}"); return page.title();`;
+		const args = { code: script, timeoutMs: 30000 };
+		const output = Array.from({ length: 40 }, (_, index) => `step ${index + 1}: ok`).join("\n");
+		const create = (definition: ToolRenderers | undefined, toolArgs: unknown = args) =>
+			new ToolExecutionComponent(
+				"agent_browser_code",
+				"tool-retired",
+				toolArgs,
+				{},
+				definition,
+				createFakeTui(),
+				process.cwd(),
+			);
+		const states = (definition: ToolRenderers | undefined) => {
+			const component = create(definition);
+			const pending = component.render(120);
+			component.updateResult({ content: [{ type: "text", text: output }], isError: false }, false);
+			const collapsed = component.render(120);
+			component.setExpanded(true);
+			const expanded = component.render(120);
+			component.setExpanded(false);
+			component.updateResult({
+				content: [{ type: "text", text: "Tool agent_browser_code not found" }],
+				isError: true,
+			});
+			return { pending, collapsed, expanded, error: component.render(120) };
+		};
+		const card = states(undefined);
+		expect(card).toEqual(states({}));
+
+		// Collapsed: a blank row, two padding rows, the cut arguments on two title rows, ten output lines and the hint.
+		const collapsed = stripAnsi(card.collapsed.join("\n"));
+		expect(card.collapsed).toHaveLength(16);
+		expect(collapsed).toContain('agent_browser_code code="const page');
+		expect(collapsed).not.toContain("page.title()");
+		expect(collapsed).toContain("step 10: ok");
+		expect(collapsed).not.toContain("step 11: ok");
+		expect(collapsed).toContain("... (30 more lines,");
+		expect(collapsed).toContain("to expand)");
+
+		const expanded = stripAnsi(card.expanded.join("\n")).replace(/\s+/g, "");
+		expect(expanded).toContain(script.replace(/\s+/g, ""));
+		expect(expanded).toContain("timeoutMs:30000");
+		expect(expanded).toContain("step40:ok");
+		expect(expanded).not.toContain("toexpand");
+
+		// Nothing hidden: no hint.
+		const short = create(undefined, { enable: ["browser"] });
+		short.updateResult({ content: [{ type: "text", text: "Enabled 1 tool" }], isError: false });
+		const shortLines = short.render(120);
+		expect(stripAnsi(shortLines.join("\n"))).toContain('agent_browser_code enable=["browser"]');
+		expect(stripAnsi(shortLines.join("\n"))).toContain("Enabled 1 tool");
+		expect(stripAnsi(shortLines.join("\n"))).not.toContain("to expand");
+
+		// A click expands the card, like Ctrl+O.
+		const clicked = create(undefined);
+		clicked.updateResult({ content: [{ type: "text", text: output }], isError: false });
+		const lines = clicked.render(120);
+		const row = lines.findIndex((line) => stripAnsi(line).includes("step 1: ok"));
+		const event: TuiMouseEvent = {
+			type: "click",
+			button: "left",
+			x: 2,
+			y: row,
+			screenX: 2,
+			screenY: row,
+			width: 120,
+			height: lines.length,
+			shift: false,
+			alt: false,
+			ctrl: false,
+			clickCount: 1,
+		};
+		expect(clicked.handleMouse(event)?.handled).toBe(true);
+		expect(clicked.render(120)).toEqual(card.expanded);
 	});
 
 	test("trims trailing blank display lines from write previews", () => {
