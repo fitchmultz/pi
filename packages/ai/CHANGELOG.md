@@ -40,13 +40,18 @@
 - Fixed canonical Cloudflare AI Gateway Opus 5.5 catalog defaults omitting positional system, tool and effort controls and five-minute/one-hour cache lifetimes, including pinned catalog hydration; explicit metadata, compatibility opt-outs and catalog entries with a non-canonical `baseUrl` remain unchanged.
 - Fixed Cloudflare AI Gateway GPT models on the `/openai` Responses route rewriting the cached prompt prefix after every mid-session system update or tool load. Models that accept mid-conversation developer messages and `additional_tools` at OpenAI now default to both on Cloudflare, including fetched and restored catalog overlays; explicit metadata and catalog entries with a non-canonical `baseUrl` remain unchanged.
 - Cloudflare AI Gateway `/openai` GPT-5.4 and GPT-5.5 entries no longer default `supportsAdditionalTools`, matching direct OpenAI, and GPT-6.1 Terra gets both positional defaults.
-- Fixed Anthropic OAuth requests reporting an outdated Claude Code version.
 
 ### Removed
 
 - Retired the fork's unreleased Anthropic stall timing hooks and lifecycle/Undici observation helper.
 - Removed the fork's temporary passive cache tracing: the `cacheTraceContext` request option and `CacheTraceContext` type, the `@earendil-works/pi-ai/utils/cache-trace` module, and the recorder hooks in the Anthropic, OpenAI Completions, OpenAI Responses and Codex adapters. `PI_CACHE_TRACE_DIR` and `PI_CACHE_TRACE_SESSION_ID` are no longer read. Requests, cache warming, usage accounting and prompt-cache options are unchanged.
 - Retired the fork's unreleased migration of legacy Kimi Coding Anthropic catalog entries during hydration and overlay merges; pi.dev serves those entries only to pi older than 1.2.1. `@earendil-works/pi-ai/api/kimi` now exports only `restoreKimiK3CacheWriteCost`.
+
+## [1.5.2] - 2026-11-10
+
+### Fixed
+
+- Fixed Anthropic OAuth requests reporting an outdated Claude Code version.
 
 ## [1.5.1] - 2026-11-09
 

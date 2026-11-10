@@ -212,7 +212,9 @@ Do not publish the owner link or paste it into logs. A valid saved remote cookie
 
 ## Configuration
 
-Edit `<P2_DATA_DIR>/settings.json` as a file; there is no Settings editor UI. Valid changes hot-reload without a
+Edit `<P2_DATA_DIR>/settings.json` as a file, or in the Settings window (the gear beside the sidebar's theme switch,
+owner only), which saves each change to the file at once. The window also holds Providers, MCP servers,
+Environments, Ports, Devices, Discord, Voice and Logs. Valid changes hot-reload without a
 restart, and in-flight requests keep their configuration. Set the default model and thinking level with
 **Make default for new sessions** in the model picker. `ownerName` (1 to 40 characters, no control characters, `<`
 or `>`; default "Owner") is the name your messages carry from then on; messages already written keep theirs.
@@ -231,9 +233,11 @@ A project is one codebase in several places, one per environment. `<P2_DATA_DIR>
 
 Object order is display order; array order is preference. A place without `env` is this device; `path` is absolute or
 starts with `~` (that machine's home); a project has at most one place per environment. p2 watches the file: valid edits
-apply at once, an invalid one keeps the last valid projects and shows why. Projects are owner-only and, for now, TUI-only:
+apply at once, an invalid one keeps the last valid projects and shows why. Projects are owner-only; the TUI's session
+selector and the web sidebar (below) group sessions by them:
 
-- A session belongs to a project only when it was started from the project's row (below), or copied (`/clone`,
+- A session belongs to a project only when it was started from the project's row (below) or its section's **+** in
+  the web sidebar, or copied (`/clone`,
   `/fork`) from a session that does. Its folder does not matter: "+ New session" never puts a session in a project,
   and `/cd` and `/move` keep its project. p2 stores this itself (not in projects.json).
 - With an empty search the session selector is grouped: each project's row, then its sessions below it (newest first,
@@ -255,6 +259,29 @@ apply at once, an invalid one keeps the last valid projects and shows why. Proje
   machine, it keeps the subfolder (`.../pi/apps/p2` to `.../pi/apps/p2`) if the target has it, else it goes to the
   target place itself with a notice; that is read from the paths alone, so `/move` works while the session's machine is
   unreachable.
+
+**The web sidebar** (owner) is made of rollups: rules that collect sessions into one section each, all of them always
+shown (a rollup's row is where you manage it). **Recents** lists every session; **Projects** has a group per project
+(projects.json and the sessions started in a project); **Folders** has a group per folder sessions work in (a lock
+instead of the folder icon for a sandbox); the **Archive** shows its name and count. A session shows in every rollup and
+group that has it, and is selected in the place you opened it from. The sidebar shows the sessions that matter now:
+pinned ones, the open one, working ones, ones with an unread answer or a failure, and those active within the rollup's
+window (its **⋯**: **Show sessions active within** 24 hours, 3 days by default, 1 week, or Forever; the same menu moves
+the rollup up or down); a group without such a session is left out, and a rollup without any says **No activity**.
+Every row has one shape: the activity dot or the group's icon in one column, the name (cut with "…" when long), then
+the details with the time of the last activity last. A click on a group's row (its name in medium weight) shows or hides its
+sessions (an arrow after the name says which), their activity dots in the same column as every other session's. A click anywhere on a session's row opens its main conversation and selects the row.
+Its other conversations (its `/tree` branches, subagents and code mode's one-shot agents) are below it, shown or hidden
+only by the arrow after its name (opening a subagent shows them), in the secondary style with their labels and activity
+dots in the session's columns. A rollup's name opens its list in the main
+area (`/list/<key>`), the arrow after it shows or hides its sessions; in a rollup's list, a group's name opens the
+group's own list. A list holds every session, those outside the window after the others in the secondary colour but still openable, in groups for a rollup
+of groups (every project, with or without sessions), with a search within the list's sessions; the Archive's list
+searches the archive and restores a session when you open it. A group's **+** (on the sidebar row or the list) starts a
+session in it: a folder's in that folder, a project's at its place on the machine of its most recently active session
+(else its first place), joining the project once created. Session rows are links, so Cmd/Ctrl-click and the middle
+button open a session in another tab. The rollups' order, windows and collapsed rollups and groups are stored on the
+server, the same on every device.
 
 `cacheWarming` (`"idle"` by default, `"streaming"` or `"off"`) keeps prompt caches warm as pi does: before the cache
 entry of a conversation's last request expires (5 minutes for Anthropic and Claude on Radius), p2 sends the request

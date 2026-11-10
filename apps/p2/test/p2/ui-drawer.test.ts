@@ -163,7 +163,7 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		await browser.evaluate("localStorage.removeItem('pi-sidebar-width')");
 	});
 
-	it("groups cwd identities, orders pinned sessions first, expands child rows in the header, and keeps child busy dots visible when collapsed", async () => {
+	it("orders pinned sessions first, expands child rows in the header, and keeps child busy dots visible when collapsed", async () => {
 		const owner = fixture.browser();
 		const sessions = await holdIn(owner, Sessions, {}, "owner");
 		const second = join(fixture.workspace, "second");
@@ -181,24 +181,11 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		await browser.metrics(1280, 900);
 		await browser.open(`http://127.0.0.1:${fixture.server.port}/s/${pinned.id}`);
 		await browser.wait(`[...document.querySelectorAll('.session-title')].some(e=>e.textContent==='Pinned parent')`);
-		const groups = await browser.evaluate<{ cwd: string; titles: string[] }[]>(
-			`[...document.querySelectorAll('.session-scroll .group')].map(g=>({cwd:g.querySelector('h3').title,titles:[...g.querySelectorAll('.session-main .session-title')].map(e=>e.textContent)}))`,
+		// Recents, across folders: pinned first, then the most recently active.
+		const titles = await browser.evaluate<string[]>(
+			`[...document.querySelectorAll('.sidebar-section[data-key=recent] .session-main .session-title')].map(e=>e.textContent)`,
 		);
-		assert.equal(groups[0].cwd, second);
-		assert.deepEqual(groups.find((group) => group.cwd === fixture.workspace)?.titles.slice(0, 2), [
-			"Pinned parent",
-			"Recent sibling",
-		]);
-		// A folder's "+" opens a new session in that folder.
-		const label = await browser.evaluate<string>(
-			`document.querySelector('.session-scroll .group h3 .group-label').textContent`,
-		);
-		await browser.click(".session-scroll .group h3 .group-new");
-		await browser.wait(
-			`location.pathname==='/' && document.querySelector('.cwd-pick span')?.textContent===${JSON.stringify(label)}`,
-		);
-		await browser.open(`http://127.0.0.1:${fixture.server.port}/s/${pinned.id}`);
-		await browser.wait(`[...document.querySelectorAll('.session-title')].some(e=>e.textContent==='Pinned parent')`);
+		assert.deepEqual(titles.slice(0, 3), ["Pinned parent", "Other directory", "Recent sibling"]);
 		const chat = await holdIn(owner, Chat, { session: pinned.id, conversation: 1 }, "participant");
 		await chat.send({ text: "subagent", requestId: "drawer-child" }, BACKGROUND_CONTEXT);
 		const agents = await holdIn(owner, Subagents, {}, "reader");
@@ -212,15 +199,21 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 			),
 			0,
 		);
-		await browser.click(".session-header.has-subagents .subagent-toggle");
+		// The open session's row is selected; the arrow after its title shows its other conversations, and hides them.
+		const conversations = `document.getElementById(document.querySelector('.sidebar-section[data-key=recent] .session-header.has-subagents .subagent-toggle').getAttribute('aria-controls'))`;
 		await browser.wait(
-			`document.querySelector('.subagent-row') && !document.querySelector('.subagent-row').parentElement.hidden`,
+			`${conversations}?.hidden && document.querySelector('.sidebar-section[data-key=recent] .nav-row.selected > .session-main')`,
 		);
+		await browser.click(".session-header.has-subagents .subagent-toggle");
+		await browser.wait(`!${conversations}.hidden && ${conversations}.querySelector('.subagent-row')`);
 		assert.equal(
-			await browser.evaluate<string>(`document.querySelector('.subagent-row .session-meta').textContent.trim()`),
+			await browser.evaluate<string>(
+				`document.querySelector('.nav-row:has(> .subagent-row) .subagent-model').textContent`,
+			),
 			"faux-1",
 		);
 		await browser.click(".session-header.has-subagents .subagent-toggle");
+		await browser.wait(`${conversations}.hidden`);
 		const childChat = await holdIn(
 			owner,
 			Chat,
@@ -230,7 +223,9 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		await childChat.send({ text: "slow child", requestId: "drawer-busy" }, BACKGROUND_CONTEXT);
 		await browser.wait(`document.querySelector('.session-header.has-subagents .live-dot')`);
 		await browser.click(".session-header.has-subagents .subagent-toggle");
-		await browser.wait(`document.querySelector('.subagent-row .live-dot')`);
+		await browser.wait(
+			`!${conversations}.hidden && document.querySelector('.nav-row:has(> .subagent-row) .live-dot')`,
+		);
 		await browser.click(".subagent-row");
 		await browser.wait(
 			`location.pathname.endsWith('/c/${child.conversationId}') && document.querySelector('.subagent-row.active')`,
@@ -245,22 +240,18 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		await tree.navigate({ entry: first.entry }, BACKGROUND_CONTEXT);
 		await tree.select({ conversation: 1 }, BACKGROUND_CONTEXT);
 		tree.release();
-		const toggle = `document.querySelector('.subagent-toggle[aria-controls="branches-${pinned.id} subagents-${pinned.id}"]')`;
-		await browser.wait(`${toggle}?.getAttribute('aria-label')==='Collapse branches and subagents'`);
-		assert.deepEqual(
-			await browser.evaluate<string[]>(
-				`[...document.getElementById('branches-${pinned.id}').parentElement.children].slice(1).map(e=>e.id+(e.hidden?':hidden':''))`,
-			),
-			[`branches-${pinned.id}`, `subagents-${pinned.id}`],
+		// One disclosure shows the session's conversations: its branches and its subagents, in one list.
+		const toggle = `document.querySelector('.sidebar-section[data-key=recent] .session-header.has-subagents .subagent-toggle')`;
+		const list = `document.getElementById(${toggle}.getAttribute('aria-controls'))`;
+		await browser.wait(`${list}?.querySelectorAll('.branch-row').length===2`);
+		assert.equal(await browser.evaluate<string>(`${toggle}.getAttribute('aria-expanded')`), "true");
+		assert.equal(
+			await browser.evaluate<number>(`${list}.querySelectorAll('.subagent-row:not(.branch-row)').length`),
+			1,
 		);
 		await browser.evaluate(`${toggle}.click()`);
-		await browser.wait(
-			`document.getElementById('branches-${pinned.id}').hidden && document.getElementById('subagents-${pinned.id}').hidden`,
-		);
-		assert.equal(
-			await browser.evaluate<string>(`${toggle}.getAttribute('aria-label')`),
-			"Expand branches and subagents",
-		);
+		await browser.wait(`${list}.hidden`);
+		assert.equal(await browser.evaluate<string>(`${toggle}.getAttribute('aria-expanded')`), "false");
 	});
 
 	it("preserves rename, pin and archive after moving actions out of session rows", async () => {
@@ -278,7 +269,8 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		await browser.click("[role=dialog] .row-button.danger");
 		await browser.wait(`location.pathname==='/' && !document.querySelector('[role=dialog]')`);
 		await until(sessions.sessions, (list) => Boolean(list?.find((row) => row.id === session.id)?.archivedAt));
-		await browser.click(".drawer-foot .foot-button");
+		// The Archive's heading opens its list in the main area; a row there restores and opens the session.
+		await browser.click(".sidebar-section[data-key=archive] .group-label");
 		await browser.wait(
 			`[...document.querySelectorAll('.session-main .session-title')].some(e=>e.textContent==='Options renamed')`,
 		);
