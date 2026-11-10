@@ -5,7 +5,10 @@ export interface VisualTruncateResult {
 	skippedCount: number;
 }
 
-/** Return a styled visual-line snapshot. Retained components use Text directly to keep selection source alive. */
+/**
+ * Return a styled visual-line snapshot. Its Text is discarded, so inside a fullscreen frame the lines are detached
+ * from that Text's selection source. Retained components use Text directly to keep the source alive.
+ */
 export function truncateToVisualLines(
 	text: string,
 	maxVisualLines: number,

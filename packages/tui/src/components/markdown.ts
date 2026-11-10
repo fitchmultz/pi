@@ -12,7 +12,7 @@ import {
 import markedCjkFriendly from "marked-cjk-friendly";
 import { renderLatex } from "../latex.ts";
 import { SELECTION_METADATA, SELECTION_SOURCE_END } from "../selection-markers.ts";
-import { SelectionDocument, SourceText } from "../selection-source.ts";
+import { isRenderingForSelectionReader, SelectionDocument, SourceText } from "../selection-source.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, cjkPunctuationRegex, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -662,6 +662,8 @@ export class Markdown implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	// Whether the cached lines carry selection sources. Only a selection reader's render gets such lines.
+	private cachedForSelectionReader = false;
 	// Parsed tokens depend only on the source, so they survive theme and width invalidation. Held weakly: a token tree is
 	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
 	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
@@ -674,7 +676,9 @@ export class Markdown implements Component {
 	// Highlighted code of the block being rendered, only set while renderBlock runs.
 	private blockHighlightedCode?: Map<string, string[]>;
 	private blockSource?: MarkdownSource;
-	private readonly selectionDocument = new SelectionDocument();
+	// The document of the last render for a selection reader; it holds that frame's sources. Other renders leave it
+	// alone: that frame may still be selected.
+	private selectionDocument?: SelectionDocument;
 
 	constructor(
 		text: string,
@@ -711,17 +715,28 @@ export class Markdown implements Component {
 	}
 
 	render(width: number): string[] {
+		const forSelectionReader = isRenderingForSelectionReader();
 		// Check cache
-		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
+		if (
+			this.cachedLines &&
+			this.cachedText === this.text &&
+			this.cachedWidth === width &&
+			this.cachedForSelectionReader === forSelectionReader
+		) {
 			return this.cachedLines;
 		}
-		this.selectionDocument.sources.length = 0;
 
 		// Calculate available width for content (subtract horizontal padding)
 		const contentWidth = Math.max(1, width - this.paddingX * 2);
 		const text = this.options.transform?.(this.text, contentWidth) ?? this.text;
-		const sourceUnchanged = text === this.text;
-		this.selectionDocument.text = text;
+		if (forSelectionReader) this.selectionDocument ??= new SelectionDocument();
+		const selectionDocument = forSelectionReader ? this.selectionDocument : undefined;
+		if (selectionDocument) {
+			selectionDocument.sources.length = 0;
+			selectionDocument.text = text;
+		}
+		// Sources map rendered text back to this.text, so transformed text has none.
+		const mapSource = selectionDocument !== undefined && text === this.text;
 
 		// Don't render anything if there's no actual text
 		if (!text || text.trim() === "") {
@@ -731,6 +746,7 @@ export class Markdown implements Component {
 			this.cachedText = this.text;
 			this.cachedWidth = width;
 			this.cachedLines = result;
+			this.cachedForSelectionReader = forSelectionReader;
 			return result;
 		}
 
@@ -770,10 +786,10 @@ export class Markdown implements Component {
 			if (
 				block.width !== width ||
 				block.nextTokenType !== nextTokenType ||
-				!!block.source !== sourceUnchanged ||
+				!!block.source !== mapSource ||
 				(block.source && block.source.offset !== originalStart)
 			) {
-				this.blockSource = sourceUnchanged
+				this.blockSource = mapSource
 					? new MarkdownSource(
 							original,
 							new SourceText(
@@ -785,7 +801,7 @@ export class Markdown implements Component {
 								})),
 							),
 							token,
-							this.selectionDocument,
+							selectionDocument,
 							originalStart,
 						)
 					: undefined;
@@ -793,7 +809,7 @@ export class Markdown implements Component {
 				block.source = this.blockSource;
 				this.blockSource = undefined;
 			}
-			if (block.source) this.selectionDocument.sources.push(block.source);
+			if (block.source) selectionDocument?.sources.push(block.source);
 			if (reuseBlocks) blocks.set(original, block);
 			for (const line of block.lines) {
 				contentLines.push(line);
@@ -817,6 +833,7 @@ export class Markdown implements Component {
 		this.cachedText = this.text;
 		this.cachedWidth = width;
 		this.cachedLines = result;
+		this.cachedForSelectionReader = forSelectionReader;
 
 		return result.length > 0 ? result : [""];
 	}

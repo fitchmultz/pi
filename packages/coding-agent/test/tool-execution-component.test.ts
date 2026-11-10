@@ -3,7 +3,6 @@ import { resetCapabilitiesCache, setCapabilities, Text, type TUI, type TuiMouseE
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 
-import { SELECTION_METADATA } from "../../tui/src/selection-markers.ts";
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
@@ -63,9 +62,7 @@ describe("ToolExecutionComponent parity", () => {
 
 		// Invalidation reuses the converted Image, so the Kitty image ID stays the same.
 		component.invalidate();
-		expect(component.render(120).join("\n").replace(SELECTION_METADATA, "")).toBe(
-			rendered.replace(SELECTION_METADATA, ""),
-		);
+		expect(component.render(120).join("\n")).toBe(rendered);
 	});
 
 	test("stacks custom call and result renderers like the old implementation", () => {
