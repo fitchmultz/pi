@@ -1,7 +1,7 @@
 import { gunzipSync } from "node:zlib";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { type AnthropicOptions, stream } from "../src/api/anthropic-messages.ts";
+import { type AnthropicOptions, stream, streamSimple } from "../src/api/anthropic-messages.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type { AssistantMessage, JsonObject, Message, Model, SystemMessage, ToolResultMessage } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
@@ -178,8 +178,14 @@ describe("Anthropic provider summary block", () => {
 			messages: [user("walk the stations"), assistant("call_1", "first"), toolResult("call_1")],
 		});
 
-		const summary = await stream(model, context, {
-			...h.options,
+		// Through the entry point the coding agent calls, which builds the provider options itself.
+		const { apiKey, fetch, sessionId, maxRetries } = h.options;
+		const summary = await streamSimple(model, context, {
+			apiKey,
+			fetch,
+			sessionId,
+			maxRetries,
+			reasoning: "high",
 			disableContinuation: true,
 			providerSummary: { instructions: "One line. No next step." },
 		}).result();
