@@ -123,6 +123,7 @@
 - Fixed aborting or timing out a bash command on macOS sometimes leaving the next command of a list such as `long_step; next_step` running after the abort was reported, when the abort landed while the shell was starting that command. pi now kills the command's process group once more after the shell exits.
 - Fixed `/import` of a session whose working directory no longer exists leaving a copy in the session directory, and continuing it leaving a second copy with the same ID (`s.jsonl` and `s-1.jsonl`); the failed copy is now removed ([#11060](https://github.com/earendil-works/pi/issues/11060))
 - Fixed the fork's own changelog entries never appearing in Pi. On a fork installation, `/changelog` now lists them last, under "Fork changes", after upstream's releases, and the startup "What's New" shows them once after each update to another fork commit. Their relative links open the fork repository at the installed commit instead of missing upstream pages. Builds without a fork release are unchanged. See [Fork installation](docs/quickstart.md#fork-installation).
+- Fixed `npm run check` failing on Termux, where Biome runs through WebAssembly: that fallback now reads each package's `package.json`, so it applies the same React and test-runner lint rules as native Biome instead of skipping them and reporting their suppressions as unused.
 
 ### Removed
 
