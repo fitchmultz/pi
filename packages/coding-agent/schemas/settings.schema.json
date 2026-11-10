@@ -11,6 +11,10 @@
     "lastChangelogVersion": {
       "type": "string"
     },
+    "lastChangelogForkCommit": {
+      "type": "string",
+      "description": "Fork commit whose changelog entries were last shown."
+    },
     "extensionChangelogVersions": {
       "type": "object",
       "patternProperties": {
