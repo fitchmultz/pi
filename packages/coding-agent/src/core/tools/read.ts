@@ -6,6 +6,7 @@ import { TextDecoder } from "util";
 import { processImage } from "../../utils/image-process.ts";
 import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import { localMissingPathLookup, withMissingPathHint } from "./missing-path.ts";
 import { resolveReadPathAsync } from "./path-utils.ts";
 import { extractReadJson, type ReadJsonOptions, readJsonSchema } from "./read-json.ts";
 import { readRenderers } from "./renderers/read.ts";
@@ -378,7 +379,15 @@ export function createReadToolDefinition(
 							const absolutePath = await resolveReadPathAsync(path, ctx?.cwd || cwd);
 							if (aborted) return;
 							// Check if file exists and is readable.
-							await ops.access(absolutePath);
+							try {
+								await ops.access(absolutePath);
+							} catch (error) {
+								// Custom operations cannot list a directory, so their error stays as it is.
+								if (options?.operations) throw error;
+								const message = (error as Error).message;
+								const hinted = await withMissingPathHint(message, absolutePath, localMissingPathLookup);
+								throw hinted === message ? error : new Error(hinted, { cause: error });
+							}
 							if (aborted) return;
 							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
 							let content: (TextContent | ImageContent)[];

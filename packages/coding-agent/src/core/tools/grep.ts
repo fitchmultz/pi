@@ -5,6 +5,7 @@ import path from "path";
 import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import { localMissingPathLookup, withMissingPathHint } from "./missing-path.ts";
 import { resolveToCwd } from "./path-utils.ts";
 import { grepRenderers } from "./renderers/grep.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -140,7 +141,12 @@ export function createGrepToolDefinition(
 						try {
 							isDirectory = await ops.isDirectory(searchPath);
 						} catch {
-							settle(() => reject(new Error(`Path not found: ${searchPath}`)));
+							// Custom operations cannot list a directory, so their error stays as it is.
+							const notFound = `Path not found: ${searchPath}`;
+							const message = customOps
+								? notFound
+								: await withMissingPathHint(notFound, searchPath, localMissingPathLookup);
+							settle(() => reject(new Error(message)));
 							return;
 						}
 
