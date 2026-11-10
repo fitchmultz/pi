@@ -515,6 +515,36 @@
       },
       "description": "Initial tool selection. Plain names replace the inherited selection; +name and -name entries add or remove tools."
     },
+    "toolExposure": {
+      "type": "object",
+      "patternProperties": {
+        "^.*$": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "direct"
+            },
+            {
+              "type": "string",
+              "const": "model-only"
+            },
+            {
+              "type": "string",
+              "const": "codemode"
+            },
+            {
+              "type": "string",
+              "const": "deferred"
+            },
+            {
+              "type": "string",
+              "const": "hidden"
+            }
+          ]
+        }
+      },
+      "description": "Exposure of registered tools, replacing the exposure each tool registered with. Keys are tool names or patterns where * matches any characters; an exact name wins over patterns, and among patterns the first match wins."
+    },
     "doubleEscapeAction": {
       "anyOf": [
         {

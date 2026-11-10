@@ -26,6 +26,18 @@ function toolPatternRegExp(pattern: string): RegExp {
 	return new RegExp(`^${source}$`);
 }
 
+/**
+ * The value `entries` gives a tool: the entry with the tool's exact name, else the first entry in
+ * object order whose `*` pattern matches it. The rule of every `toolExposure` object.
+ */
+export function findToolEntry<T>(entries: Readonly<Record<string, T>>, toolName: string): T | undefined {
+	if (Object.hasOwn(entries, toolName)) return entries[toolName];
+	for (const [pattern, value] of Object.entries(entries)) {
+		if (pattern.includes("*") && toolPatternRegExp(pattern).test(toolName)) return value;
+	}
+	return undefined;
+}
+
 /** Whether a tool name matches any of the entries, each an exact name or a pattern. */
 export function createToolNameMatcher(entries: readonly string[]): (name: string) => boolean {
 	const names = new Set(entries.filter((entry) => !entry.includes("*")));
@@ -168,13 +180,7 @@ function resolveExposureAliases(value: Record<string, unknown>): Record<string, 
 
 /** Exposure of one tool of a server: its `toolExposure` entry, else the server's `exposure`. */
 export function getMcpToolExposure(config: McpServerConfig, toolName: string): McpExposure {
-	const overrides = config.toolExposure ?? {};
-	const exact = overrides[toolName];
-	if (exact !== undefined) return exact;
-	for (const [pattern, exposure] of Object.entries(overrides)) {
-		if (pattern.includes("*") && toolPatternRegExp(pattern).test(toolName)) return exposure;
-	}
-	return config.exposure ?? "codemode";
+	return findToolEntry(config.toolExposure ?? {}, toolName) ?? config.exposure ?? "codemode";
 }
 
 /** Checks `exposure` and `toolExposure`, after aliases were resolved. Returns an error message. */

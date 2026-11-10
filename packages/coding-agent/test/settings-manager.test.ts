@@ -690,6 +690,55 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("toolExposure", () => {
+		it("gives a tool the entry with its name, else the first matching pattern", () => {
+			const manager = SettingsManager.inMemory({
+				toolExposure: { "mcp__docs__*": "hidden", "mcp__*": "deferred", mcp__docs__search: "direct" },
+			});
+
+			expect(manager.getToolExposure("mcp__docs__search")).toBe("direct");
+			expect(manager.getToolExposure("mcp__docs__fetch")).toBe("hidden");
+			expect(manager.getToolExposure("mcp__linear__list")).toBe("deferred");
+			expect(manager.getToolExposure("read")).toBeUndefined();
+			// Property names every object inherits are not entries.
+			expect(manager.getToolExposure("constructor")).toBeUndefined();
+			expect(SettingsManager.inMemory().getToolExposure("read")).toBeUndefined();
+		});
+
+		it("matches the entries of an overriding layer before the inherited ones", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({ toolExposure: { "mcp__*": "deferred", macuse: "deferred", calculator: "codemode" } }),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ toolExposure: { "mcp__docs__*": "direct", macuse: "direct" } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getToolExposure("mcp__docs__search")).toBe("direct");
+			expect(manager.getToolExposure("mcp__linear__list")).toBe("deferred");
+			expect(manager.getToolExposure("macuse")).toBe("direct");
+			expect(manager.getToolExposure("calculator")).toBe("codemode");
+
+			manager.applyOverrides({ toolExposure: { "mcp__docs__s*": "hidden", calculator: "deferred" } });
+			expect(manager.getToolExposure("mcp__docs__search")).toBe("hidden");
+			expect(manager.getToolExposure("mcp__docs__fetch")).toBe("direct");
+			expect(manager.getToolExposure("calculator")).toBe("deferred");
+		});
+
+		it("ignores values that are not exposures", () => {
+			expect(
+				SettingsManager.inMemory({ toolExposure: { read: "sometimes" } } as unknown as Settings).getToolExposure(
+					"read",
+				),
+			).toBeUndefined();
+			expect(
+				SettingsManager.inMemory({ toolExposure: ["read"] } as unknown as Settings).getToolExposure("0"),
+			).toBeUndefined();
+		});
+	});
+
 	describe("getSessionDir", () => {
 		it("should return undefined when not set", () => {
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ theme: "dark" }));
