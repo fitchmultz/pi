@@ -53,13 +53,52 @@ const message: AssistantMessage = {
 type NoticeContext = {
 	chatContainer: Container;
 	settingsManager: { getShowCacheMissNotices(): boolean };
-	sessionManager: { getBranch(): Array<{ type: "message"; message: AssistantMessage }> };
+	sessionManager: Pick<SessionManager, "getBranch">;
 };
 
 const maybeShowThinkingDropNotice = Reflect.get(InteractiveMode.prototype, "maybeShowThinkingDropNotice") as (
 	this: NoticeContext,
 	message: AssistantMessage,
 ) => void;
+
+/** An assistant message with `thinking` thinking blocks whose request had `drops` thinking blocks dropped. */
+function reply(drops: number, thinking = 0): AssistantMessage {
+	return {
+		...message,
+		content: [
+			...Array.from({ length: thinking }, () => ({ type: "thinking" as const, thinking: "reasoning" })),
+			{ type: "text", text: "reply" },
+		],
+		diagnostics:
+			drops === 0
+				? undefined
+				: [
+						{
+							type: "anthropic_input_transformations",
+							timestamp: 1,
+							details: {
+								transformations: Array.from({ length: drops }, (_, index) => ({
+									type: "thinking_dropped",
+									path: `messages.${index}.content.0`,
+									reason: "prefix_binding_mismatch",
+								})),
+							},
+						},
+					],
+	};
+}
+
+/** The notice text shown for `current`, the response after the session's branch; empty when none is shown. */
+function thinkingDropNotice(sessionManager: SessionManager, current: AssistantMessage): string {
+	initTheme("dark");
+	const context = {
+		chatContainer: new Container(),
+		settingsManager: { getShowCacheMissNotices: () => true },
+		sessionManager,
+	};
+	maybeShowThinkingDropNotice.call(context, current);
+	return stripAnsi(context.chatContainer.render(120).join("\n")).trim();
+}
 
 describe("InteractiveMode assistant diagnostics", () => {
 	test("shows Anthropic thinking drops when cache miss notices are enabled", () => {
@@ -71,7 +110,9 @@ describe("InteractiveMode assistant diagnostics", () => {
 		};
 		maybeShowThinkingDropNotice.call(enabled, message);
 		const output = stripAnsi(enabled.chatContainer.render(120).join("\n"));
-		expect(output).toContain("Anthropic dropped 3 thinking blocks (details in session)");
+		expect(output).toContain(
+			"Anthropic dropped 3 thinking blocks after the earlier prompt changed (details in session)",
+		);
 
 		const disabled = {
 			chatContainer: new Container(),
@@ -83,16 +124,67 @@ describe("InteractiveMode assistant diagnostics", () => {
 	});
 
 	test("does not repeat unchanged Anthropic thinking drops", () => {
-		initTheme("dark");
-		const context = {
-			chatContainer: new Container(),
-			settingsManager: { getShowCacheMissNotices: () => true },
-			sessionManager: { getBranch: () => [{ type: "message" as const, message }] },
-		};
+		const manager = SessionManager.inMemory();
+		manager.appendMessage(message);
 
-		maybeShowThinkingDropNotice.call(context, { ...message, timestamp: 2 });
+		expect(thinkingDropNotice(manager, { ...message, timestamp: 2 })).toBe("");
+	});
 
-		expect(context.chatContainer.children).toHaveLength(0);
+	test("does not repeat a drop count reported before responses without a report", () => {
+		// With message threads only a full request gets a report; a restarted thread repeats the last one.
+		const manager = SessionManager.inMemory();
+		manager.appendMessage(reply(3));
+		manager.appendMessage(reply(0, 1));
+		manager.appendMessage(reply(0, 1));
+
+		expect(thinkingDropNotice(manager, reply(3))).toBe("");
+		expect(thinkingDropNotice(manager, reply(5))).toBe(
+			"Anthropic dropped 5 thinking blocks after the earlier prompt changed (details in session)",
+		);
+	});
+
+	test("does not announce the drop of the thinking blocks a compaction kept", () => {
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "user", content: "summarized", timestamp: 0 });
+		manager.appendMessage(reply(5, 4));
+		const firstKept = manager.appendMessage({ role: "user", content: "kept", timestamp: 0 });
+		manager.appendMessage(reply(0, 2));
+		manager.appendMessage(reply(0, 1));
+		manager.appendCompaction("summary", firstKept, 1000);
+		manager.appendMessage({ role: "user", content: "next", timestamp: 0 });
+
+		expect(thinkingDropNotice(manager, reply(3))).toBe("");
+		// Neither the summarized thinking blocks nor the report before the compaction raise the baseline.
+		expect(thinkingDropNotice(manager, reply(4))).toBe(
+			"Anthropic dropped 4 thinking blocks after the earlier prompt changed (details in session)",
+		);
+
+		// One kept block was not sent as thinking: the window's first report is lower and replaces the expectation.
+		manager.appendMessage(reply(2));
+		expect(thinkingDropNotice(manager, reply(3))).toBe(
+			"Anthropic dropped 3 thinking blocks after the earlier prompt changed (details in session)",
+		);
+	});
+
+	test("counts kept thinking blocks on both sides of an older compaction", () => {
+		const manager = SessionManager.inMemory();
+		const firstKept = manager.appendMessage(reply(0, 1));
+		manager.appendCompaction("older summary", firstKept, 1000);
+		manager.appendMessage(reply(0, 2));
+		manager.appendCompaction("summary", firstKept, 1000);
+
+		expect(thinkingDropNotice(manager, reply(3))).toBe("");
+		expect(thinkingDropNotice(manager, reply(4))).toContain("Anthropic dropped 4 thinking blocks");
+	});
+
+	test("announces a drop after a compaction that kept nothing", () => {
+		const manager = SessionManager.inMemory();
+		manager.appendMessage(reply(0, 2));
+		manager.appendCompaction("summary", null, 1000);
+
+		expect(thinkingDropNotice(manager, reply(1))).toBe(
+			"Anthropic dropped 1 thinking block after the earlier prompt changed (details in session)",
+		);
 	});
 });
 

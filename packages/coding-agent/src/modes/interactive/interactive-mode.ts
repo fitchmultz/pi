@@ -4565,31 +4565,60 @@ export class InteractiveMode {
 		return count;
 	}
 
+	/**
+	 * Count the dropped thinking blocks that a response in the current context window need not
+	 * announce. The window starts at the branch's latest compaction.
+	 *
+	 * - Reported: the highest count of an earlier response in the window. The last response is not
+	 *   enough: a report lists every block dropped from its request, and with message threads only
+	 *   a full request gets one, so a restarted thread repeats the report of several responses ago.
+	 * - Expected, until the window has a report: the thinking blocks the compaction kept. Anthropic
+	 *   drops them because the summary replaced the history they were written for. Kept blocks that
+	 *   are not sent as thinking lower the real count, so a report replaces this one.
+	 */
+	private static countKnownThinkingDrops(branch: SessionEntry[]): number {
+		let reported = 0;
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type === "message" && entry.message.role === "assistant") {
+				reported = Math.max(reported, InteractiveMode.countDroppedThinkingBlocks(entry.message));
+			}
+			if (entry.type !== "compaction") continue;
+			if (reported > 0) return reported;
+
+			// A compaction that kept nothing names itself as the first kept entry.
+			const firstKept = branch.findIndex((kept) => kept.id === entry.firstKeptEntryId);
+			let keptThinkingBlocks = 0;
+			for (const kept of firstKept < 0 ? [] : branch.slice(firstKept, i)) {
+				if (kept.type === "message" && kept.message.role === "assistant") {
+					keptThinkingBlocks += kept.message.content.filter((block) => block.type === "thinking").length;
+				}
+			}
+			return keptThinkingBlocks;
+		}
+		return reported;
+	}
+
 	private maybeShowThinkingDropNotice(message: AssistantMessage): void {
 		if (!this.settingsManager.getShowCacheMissNotices()) return;
 
 		const droppedCount = InteractiveMode.countDroppedThinkingBlocks(message);
 		if (droppedCount === 0) return;
 
-		let previousDroppedCount = 0;
 		// message_end reaches the UI before the current message is persisted,
-		// so the branch's last assistant message is the previous response.
-		const branch = this.sessionManager.getBranch();
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i];
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				previousDroppedCount = InteractiveMode.countDroppedThinkingBlocks(entry.message);
-				break;
-			}
-		}
-		if (droppedCount <= previousDroppedCount) return;
+		// so the branch holds only the responses before it.
+		if (droppedCount <= InteractiveMode.countKnownThinkingDrops(this.sessionManager.getBranch())) return;
 
 		const noun = droppedCount === 1 ? "thinking block" : "thinking blocks";
 		this.chatContainer.addChild(new Spacer(1));
 		addChatActivity(
 			this.chatContainer,
 			new ThemedText(
-				() => theme.fg("warning", `Anthropic dropped ${droppedCount} ${noun} (details in session)`),
+				() =>
+					theme.fg(
+						"warning",
+						`Anthropic dropped ${droppedCount} ${noun} after the earlier prompt changed (details in session)`,
+					),
 				1,
 				0,
 			),
