@@ -13,8 +13,17 @@ import { SessionManager } from "../session-manager.ts";
  * Used by agent-session to pre-render extension tool output.
  */
 export interface ToolHtmlRenderer {
-	/** Render a tool call to HTML. Returns undefined if tool has no custom renderer. */
-	renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined;
+	/**
+	 * Render a tool call to HTML in its expanded form, because a page cannot expand a call. `result` is the call's
+	 * saved result: with it the call is rendered as finished, without it as still running. Returns undefined if the
+	 * tool has no renderer; the page then shows the arguments as JSON.
+	 */
+	renderCall(
+		toolCallId: string,
+		toolName: string,
+		args: unknown,
+		result?: { isError: boolean; durationMs?: number },
+	): string | undefined;
 	/** Render a tool result to HTML. Returns collapsed/expanded or undefined if tool has no custom renderer. */
 	renderResult(
 		toolCallId: string,
@@ -22,6 +31,7 @@ export interface ToolHtmlRenderer {
 		result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 		details: unknown,
 		isError: boolean,
+		durationMs?: number,
 	): { collapsed?: string; expanded?: string } | undefined;
 }
 
@@ -188,6 +198,15 @@ function preRenderCustomTools(
 ): Record<string, RenderedToolHtml> {
 	const renderedTools: Record<string, RenderedToolHtml> = {};
 
+	// A call's renderer reads its saved result, which follows the call in the entries.
+	const savedResults = new Map<string, { isError: boolean; durationMs?: number }>();
+	for (const entry of entries) {
+		if (entry.type === "message" && entry.message.role === "toolResult") {
+			const msg = entry.message;
+			savedResults.set(msg.toolCallId, { isError: msg.isError || false, durationMs: msg.durationMs });
+		}
+	}
+
 	for (const entry of entries) {
 		if (entry.type !== "message") continue;
 		const msg = entry.message;
@@ -196,7 +215,12 @@ function preRenderCustomTools(
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
 			for (const block of msg.content) {
 				if (block.type === "toolCall" && !TEMPLATE_RENDERED_TOOLS.has(block.name)) {
-					const callHtml = toolRenderer.renderCall(block.id, block.name, block.arguments);
+					const callHtml = toolRenderer.renderCall(
+						block.id,
+						block.name,
+						block.arguments,
+						savedResults.get(block.id),
+					);
 					if (callHtml) {
 						renderedTools[block.id] = { callHtml };
 					}
@@ -216,6 +240,7 @@ function preRenderCustomTools(
 					msg.content,
 					msg.details,
 					msg.isError || false,
+					msg.durationMs,
 				);
 				if (rendered) {
 					renderedTools[msg.toolCallId] = {
