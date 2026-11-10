@@ -59,6 +59,7 @@ import type {
 } from "@earendil-works/pi-tui";
 import type { Static, TSchema } from "typebox";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
+import type { BackgroundWorkEvent, BackgroundWorkEventResult } from "../background-work.ts";
 import type { BashResult } from "../bash-executor.ts";
 import type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../cache-warmer.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
@@ -1492,6 +1493,7 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 /** Union of all event types */
 export type ExtensionEvent =
 	| WorkingSessionSaveEvent
+	| BackgroundWorkEvent
 	| ProjectTrustEvent
 	| ResourcesDiscoverEvent
 	| McpServersChangeEvent
@@ -1736,6 +1738,7 @@ export interface ExtensionAPI {
 		event: "working_session_save",
 		handler: ExtensionHandler<WorkingSessionSaveEvent, WorkingSessionReadiness>,
 	): () => void;
+	on(event: "background_work", handler: ExtensionHandler<BackgroundWorkEvent, BackgroundWorkEventResult>): () => void;
 	on(event: "mcp_servers_change", handler: ExtensionHandler<McpServersChangeEvent>): () => void;
 	on(
 		event: "session_before_tree",

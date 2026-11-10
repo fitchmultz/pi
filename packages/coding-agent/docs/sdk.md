@@ -79,7 +79,7 @@ Ordinary custom loaders need no persistence method. Complete capture/restore req
 
 The CLI loads `builtin:background-command` for detached local shell jobs that survive exit/restart and deliver bounded completion notices. SDK hosts opt in with `createBackgroundCommandExtension()` in `DefaultResourceLoader.extensionFactories`, then call `session.bindExtensions({})` to initialize resume monitoring.
 
-See [Background commands](background-command.md) for tool parameters, storage, cancellation, print-mode limits and permission/cwd integration.
+See [Background commands](background-command.md) for tool parameters, storage, cancellation, print-mode limits and permission/cwd integration. A host that waits for jobs passes `{ hostWaits: true }`; see [Background work](#background-work).
 
 ## Prompting
 
@@ -90,6 +90,36 @@ A prompt sent while the session is already streaming must specify whether it sho
 A steering message enters after the current assistant turn and its tool calls. A follow-up enters after the current run finishes its pending work. `steer()` and `followUp()` expose those behaviors directly and return `"queued"` if the input was queued (including after an extension transformed it), or `"handled"` if an extension consumed it.
 
 `abort()` stops the active operation and waits for the session to become idle. `waitForIdle()` waits without aborting it.
+
+<a id="background-work"></a>
+
+### Background work
+
+An idle session can start a run without new input when background work ends. `waitForIdle()` does not wait for that work. `getBackgroundWork()` lists it:
+
+- Background tool runs started with `ctx.runInBackground()`, such as a `codemode` background script. A run is listed from its start until the run that its completion message started has ended.
+- Work that extensions report through the [`background_work`](extensions.md#background_work) event. The `background_command` extension reports each job from its start until its completion notice is in the session; see [Background commands](background-command.md#completion-and-lifetime).
+
+Each item has an `id`, a one-line `description` and `cancel()`. `cancel()` resolves when cancellation is requested; the work may still be stopping, and a cancelled job stays listed until its notice records the outcome. `getBackgroundWork()` only asks: it writes nothing, cancels nothing and does not disturb a working-session save.
+
+The rule for a host: a session that is idle, is not settling and has no background work stays idle until new input. To keep a run open until then:
+
+```typescript
+await session.prompt(text);
+for (;;) {
+  await session.waitForIdle();
+  const work = await session.getBackgroundWork();
+  if (session.isIdle && !session.isSettling && work.length === 0) break;
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+}
+const finalText = session.getLastAssistantText();
+```
+
+Read `isIdle` and `isSettling` after `getBackgroundWork()` resolves, with no `await` in between. `isSettling` is true while `agent_settled` handlers run and while the prompts and messages they sent are being started; `isIdle` is already true then. The session marks a run active in the same call that delivers a completion, so no completion is taken off the list while the session still looks idle. One second is the `background_command` monitor's own delivery interval; a shorter wait learns nothing sooner about jobs.
+
+New input is anything the list does not cover: a prompt or message from the host, and a message from an extension that does not report its work. Await your own `prompt()` calls before ending the loop: a prompt is not a run until its input handlers and auth check have finished. A steering or follow-up message queued on an idle session holds job notices back until a prompt consumes it.
+
+After `abort()`, and in a session without a model, a job's notice is recorded without starting a run. The job is listed until then.
 
 ## Subscribing to events
 

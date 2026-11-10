@@ -24,6 +24,7 @@ export {
 	type SessionStats,
 } from "./core/agent-session.ts";
 export { readStoredCredential } from "./core/auth-storage.ts";
+export type { BackgroundWork, BackgroundWorkEvent, BackgroundWorkEventResult } from "./core/background-work.ts";
 export type { CacheWarmingDecision, CacheWarmingStatus } from "./core/cache-warmer.ts";
 // Compaction
 export {
@@ -442,7 +443,10 @@ export {
 	writeWorkingSession,
 } from "./core/working-session.ts";
 // Built-in extensions. The CLI loads them; SDK sessions add them to their extension factories.
-export { createBackgroundCommandExtension } from "./extensions/background-command/index.ts";
+export {
+	type BackgroundCommandExtensionOptions,
+	createBackgroundCommandExtension,
+} from "./extensions/background-command/index.ts";
 export { type CodemodeExtensionOptions, createCodemodeExtension } from "./extensions/codemode/index.ts";
 export type { CodemodeStoreEntryData, CodemodeToolDetails } from "./extensions/codemode/tool.ts";
 export type { LoadedMcpConfig, McpExposure, McpServerConfig, McpServerEntry } from "./extensions/mcp/config.ts";
