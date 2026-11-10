@@ -119,10 +119,11 @@ export class CustomMessageComponent extends Container {
 		return this.compactView && !this._expanded ? this.compactPreview.render(lines, width) : lines;
 	}
 
+	/** A left click that no inner control handles toggles this card, in every view, like a click on a tool card. */
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		const native = this.compactView && !this._expanded ? this.compactPreview.toNative(event) : event;
 		const result = native && super.handleMouse(native);
-		if (result || !this.compactView || event.type !== "click" || event.button !== "left") return result;
+		if (result || event.type !== "click" || event.button !== "left") return result;
 		this.setExpanded(!this._expanded);
 		return {
 			handled: true,

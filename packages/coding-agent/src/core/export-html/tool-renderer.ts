@@ -109,10 +109,12 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					return undefined;
 				}
 
+				// The page has no control that expands a call, so the call is rendered expanded. A renderer
+				// that shortens an unexpanded call would otherwise lose that text in every export.
 				const component = toolDef.renderCall(
 					args,
 					theme,
-					createRenderContext(toolCallId, renderedCallComponents.get(toolCallId), false, true, false),
+					createRenderContext(toolCallId, renderedCallComponents.get(toolCallId), true, true, false),
 				);
 				renderedCallComponents.set(toolCallId, component);
 				const lines = component.render(width);

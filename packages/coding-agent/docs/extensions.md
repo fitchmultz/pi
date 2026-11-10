@@ -2561,7 +2561,7 @@ export default function (pi: ExtensionAPI) {
 
 Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
 
-By default, tool output is wrapped in a `Box` that handles background and horizontal padding from the `outputPad` setting. Tool renderers are also used in HTML exports. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
+By default, tool output is wrapped in a `Box` that handles background and horizontal padding from the `outputPad` setting. Tool renderers are also used in HTML exports. An export renders a call expanded, because the page has no control that expands a call. It renders a result collapsed and expanded, and a click on the page switches between the two. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
 
 Set `renderShell: "self"` when the tool should render its own shell instead of using the default `Box`. This is useful for tools that need complete control over framing or background behavior, for example large previews that must stay visually stable after the tool settles.
 
@@ -2682,8 +2682,10 @@ Custom editors and `ctx.ui.custom()` components receive `keybindings: Keybinding
 #### Fallback
 
 If a slot renderer is not defined or throws:
-- `renderCall`: Shows the tool name
-- `renderResult`: Shows raw text from `content`
+- `renderCall`: Shows the tool name and the arguments. Until the card is expanded, the arguments are cut to one short line.
+- `renderResult`: Shows raw text from `content`. Until the card is expanded, it shows the first 10 lines and names the expand key.
+
+A tool without a definition gets both fallbacks. This is the card of a saved call whose tool the session does not register, for example a tool of an extension that is no longer installed.
 
 ### Dynamic Tool Loading
 

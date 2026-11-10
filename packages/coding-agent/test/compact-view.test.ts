@@ -180,6 +180,9 @@ describe("compact tool cards", () => {
 		const ordinary = new ToolExecutionComponent("generic", "id", args, {}, undefined, ui, process.cwd());
 		ordinary.updateResult(result);
 		const normal = ordinary.render(40);
+		ordinary.setExpanded(true);
+		const full = ordinary.render(40);
+		expect(full.length).toBeGreaterThan(normal.length);
 		const component = new ToolExecutionComponent(
 			"generic",
 			"id",
@@ -192,7 +195,7 @@ describe("compact tool cards", () => {
 		component.updateResult(result);
 		compactRows(component, 40);
 		component.setExpanded(true);
-		expect(component.render(40)).toEqual(normal);
+		expect(component.render(40)).toEqual(full);
 		component.setExpanded(false);
 		component.setCompactView(false);
 		expect(component.render(40)).toEqual(normal);
