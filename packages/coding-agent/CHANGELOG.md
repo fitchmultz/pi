@@ -45,6 +45,7 @@
 - Codemode keeps 6000 estimated tokens of script output by default instead of 10000. Longer output still links to the omitted and full output files; `max_output_tokens` raises the limit for one script.
 - Shortened the `read`, `codemode` and `background_command` prompt guidelines.
 - `read` continuation notices name the offsets of the remaining pages when at most five remain, so one response can request them all. A read that used `limit` is told that those offsets without a limit return the rest. Longer files keep one next offset and the count of remaining lines.
+- `read` with an offset past the end of the file returns a result instead of an error: a note with the real line count, then the last `limit` lines, or the last 100 lines without a limit. A codemode script that reads past the end keeps running.
 - A native working-session artifact that fails validation is now refused with the path of the first field that failed, for example `Invalid native working session at entries[12].message.content[0].type`, on `--working-session` restore, managed restart and SDK restore. The same artifacts are accepted and rejected as before. See [Native working sessions](docs/working-session.md#restore).
 
 ### Fixed

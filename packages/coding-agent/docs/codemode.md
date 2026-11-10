@@ -68,7 +68,7 @@ What a call resolves to depends on the tool:
 
 - Tools with an output schema resolve to a structured value. `bash` resolves to `{ output, truncated, full_output_path?, exit_code, wall_time_seconds }`, also for non-zero exit codes. Its `output` is not limited to the 2000 lines or 50KB the model sees: it holds up to 1 MiB, and longer output keeps its first and last 512 KiB around an omission marker, with `truncated` set and the full output in `full_output_path`.
 - MCP tools resolve to their `CallToolResult`, including `isError` and `structuredContent`.
-- `read` resolves to the text the model would see: at most 2000 lines or 50KB of the file, then a notice that gives the next offset and, when at most five pages remain, the offsets of all of them. For an image it resolves to an image block `{ type: "image", data, mimeType, note }` that `image()` shows. `data` is the base64 image the model would see and `note` the text that goes with it, such as resize hints.
+- `read` resolves to the text the model would see: at most 2000 lines or 50KB of the file, then a notice that gives the next offset and, when at most five pages remain, the offsets of all of them. An offset past the end does not reject: the text is a note with the line count, then the last lines of the file. For an image it resolves to an image block `{ type: "image", data, mimeType, note }` that `image()` shows. `data` is the base64 image the model would see and `note` the text that goes with it, such as resize hints.
 - Other tools, such as `edit` and `write`, resolve to their text output.
 
 A call that fails, is blocked, or gets invalid arguments rejects with an `Error` that carries the tool's error text. Use `Promise.allSettled()` to keep the results of the calls that succeed.

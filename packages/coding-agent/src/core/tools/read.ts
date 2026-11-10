@@ -54,6 +54,13 @@ export interface ReadToolDetails {
 const MAX_NAMED_PAGES = 5;
 
 /**
+ * Lines shown from the end of the file when the offset is past the end and the call gave no limit. Measured
+ * on 30 days of session journals: after this case, retries without a limit asked for the last 62 lines at
+ * most, and 100 was the median limit of the calls that gave one.
+ */
+const PAST_END_LINES = 100;
+
+/**
  * Pluggable operations for the read tool.
  * Override these to delegate file reading to remote systems (for example SSH).
  */
@@ -182,6 +189,22 @@ function readCallsAt(offsets: number[], qualifiers: string[]): string {
 			: `offsets ${offsets.slice(0, -1).join(", ")} and ${offsets[offsets.length - 1]}`;
 	const conditions = qualifiers.length > 0 ? ` with ${qualifiers.join(" and ")}` : "";
 	return `call read at ${list}${conditions}${offsets.length > 1 ? " in one response" : ""}`;
+}
+
+/** Select lines by streaming when the operations and the range allow it, else from the whole file. */
+async function selectLines(
+	ops: ReadOperations,
+	absolutePath: string,
+	startLine: number,
+	limit: number | undefined,
+	json: ReadJsonOptions | undefined,
+	streamableRange: boolean,
+	signal: AbortSignal | undefined,
+): Promise<SelectedLines> {
+	// A JSON selection parses the whole document, so it is never streamed.
+	return json === undefined && ops.createReadStream && streamableRange
+		? selectLinesFromStream(ops.createReadStream(absolutePath, { signal }), startLine, limit, signal)
+		: selectLinesFromBuffer(await ops.readFile(absolutePath), startLine, limit, json);
 }
 
 /**
@@ -388,29 +411,40 @@ export function createReadToolDefinition(
 								// Read text content. Convert offset from 1-indexed input to 0-indexed line access.
 								const source = json === undefined ? "file" : "JSON selection";
 								const continuation = json === undefined ? "" : ` with the same json=${JSON.stringify(json)}`;
-								const startLine = offset ? Math.max(0, offset - 1) : 0;
-								const startLineDisplay = startLine + 1;
 								const usualRange = isStreamableRange(offset, limit);
-								// A JSON selection parses the whole document, so it is never streamed.
-								const { totalFileLines, truncation, firstLineBytes, lineBytes } =
-									json === undefined && ops.createReadStream && usualRange
-										? await selectLinesFromStream(
-												ops.createReadStream(absolutePath, { signal }),
-												startLine,
-												limit,
-												signal,
-											)
-										: selectLinesFromBuffer(await ops.readFile(absolutePath), startLine, limit, json);
+								let startLine = offset ? Math.max(0, offset - 1) : 0;
+								let lineLimit = limit;
+								let selection = await selectLines(
+									ops,
+									absolutePath,
+									startLine,
+									limit,
+									json,
+									usualRange,
+									signal,
+								);
 								if (aborted) return;
-								// Check if offset is out of bounds.
-								if (startLine >= totalFileLines) {
-									throw new Error(
-										`Offset ${offset} is beyond end of ${source} (${totalFileLines} lines total)`,
+								let pastEndNote = "";
+								if (startLine >= selection.totalFileLines) {
+									// An offset past the end is answered with the end of the file: the last `limit` lines,
+									// which covered 285 of 293 measured retries. An error would also end a codemode script
+									// and lose its other calls.
+									startLine = Math.max(
+										0,
+										selection.totalFileLines - (usualRange && limit ? limit : PAST_END_LINES),
 									);
+									lineLimit = undefined;
+									pastEndNote = `[Offset ${offset} is past the end: the ${source} has ${selection.totalFileLines} lines. Reading from line ${startLine + 1} instead.]\n\n`;
+									selection = await selectLines(ops, absolutePath, startLine, undefined, json, true, signal);
+									if (aborted) return;
 								}
+								const { totalFileLines, truncation, firstLineBytes, lineBytes } = selection;
+								const startLineDisplay = startLine + 1;
 								// A user-specified limit is honored before truncation.
 								const userLimitedLines =
-									limit === undefined ? undefined : Math.min(startLine + limit, totalFileLines) - startLine;
+									lineLimit === undefined
+										? undefined
+										: Math.min(startLine + lineLimit, totalFileLines) - startLine;
 								// What a notice names for reading every line after the shown ones.
 								const pageOffsets = (nextOffset: number) =>
 									usualRange ? remainingPageOffsets(lineBytes, nextOffset - 1, totalFileLines) : undefined;
@@ -463,7 +497,7 @@ export function createReadToolDefinition(
 									// No truncation and no remaining user-limited content.
 									outputText = truncation.content;
 								}
-								content = [{ type: "text", text: outputText }];
+								content = [{ type: "text", text: pastEndNote + outputText }];
 							}
 
 							if (aborted) return;

@@ -51,17 +51,28 @@ function referenceRead(
 	path: string,
 	offset: number | undefined,
 	limit: number | undefined,
+	// The limit and range of the call, which the notices of a read past the end keep.
+	call = {
+		limit,
+		// Fractional offsets and limits and negative limits keep their notices without named pages.
+		usualRange:
+			(offset === undefined || Number.isInteger(offset)) &&
+			(limit === undefined || (Number.isInteger(limit) && limit >= 0)),
+	},
 ): { text: string; details: { truncation: TruncationResult } | undefined } {
 	const allLines = textContent.split("\n");
 	const totalFileLines = allLines.length;
 	const startLine = offset ? Math.max(0, offset - 1) : 0;
 	const startLineDisplay = startLine + 1;
-	// Fractional offsets and limits and negative limits keep their notices without named pages.
-	const usualRange =
-		(offset === undefined || Number.isInteger(offset)) &&
-		(limit === undefined || (Number.isInteger(limit) && limit >= 0));
+	const { usualRange } = call;
 	if (startLine >= allLines.length) {
-		throw new Error(`Offset ${offset} is beyond end of file (${allLines.length} lines total)`);
+		// The last `limit` lines, or the last 100 without a usable limit, read without a limit.
+		const tailStart = Math.max(0, allLines.length - (usualRange && limit ? limit : 100));
+		const tail = referenceRead(textContent, path, tailStart + 1, undefined, call);
+		return {
+			text: `[Offset ${offset} is past the end: the file has ${allLines.length} lines. Reading from line ${tailStart + 1} instead.]\n\n${tail.text}`,
+			details: tail.details,
+		};
 	}
 	let selectedContent: string;
 	let userLimitedLines: number | undefined;
@@ -89,8 +100,8 @@ function referenceRead(
 		const notice =
 			offsets === undefined
 				? `${shown} ${remaining} lines remain. Use offset=${nextOffset} to continue.`
-				: offsets.length > 1 || limit !== undefined
-					? `${shown} ${remaining} lines remain: to read them all, ${referenceReadCalls(offsets, limit)}. For a part, use offset=${nextOffset} and a limit.`
+				: offsets.length > 1 || call.limit !== undefined
+					? `${shown} ${remaining} lines remain: to read them all, ${referenceReadCalls(offsets, call.limit)}. For a part, use offset=${nextOffset} and a limit.`
 					: `${shown} Use offset=${nextOffset} to continue.`;
 		outputText = `${truncation.content}\n\n[${notice}]`;
 		details = { truncation };
@@ -99,7 +110,7 @@ function referenceRead(
 		const nextOffset = startLine + userLimitedLines + 1;
 		const offsets = usualRange ? referencePageOffsets(allLines, nextOffset - 1) : undefined;
 		const notice = offsets
-			? `${remaining} more lines in file: to read them all, ${referenceReadCalls(offsets, limit)}. For a part, use offset=${nextOffset} and a limit.`
+			? `${remaining} more lines in file: to read them all, ${referenceReadCalls(offsets, call.limit)}. For a part, use offset=${nextOffset} and a limit.`
 			: `${remaining} more lines in file. Use offset=${nextOffset} to continue.`;
 		outputText = `${truncation.content}\n\n[${notice}]`;
 	} else {
