@@ -7,9 +7,8 @@
  */
 
 import { Text } from "@earendil-works/pi-tui";
-import { keyHint } from "../../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../../modes/interactive/theme/theme.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
+import type { KeybindingHints, ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
 import type { GrepToolDetails } from "../grep.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "../render-utils.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "../truncate.ts";
@@ -41,6 +40,7 @@ function formatGrepResult(
 	options: ToolRenderResultOptions,
 	theme: Theme,
 	showImages: boolean,
+	keyHint: KeybindingHints["keyHint"],
 ): string {
 	const output = getTextOutput(result, showImages).trim();
 	let text = "";
@@ -76,7 +76,7 @@ export const grepRenderers: Pick<ToolDefinition<any, any>, "renderCall" | "rende
 	},
 	renderResult(result, options, theme, context) {
 		const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-		text.setText(formatGrepResult(result as any, options, theme, context.showImages));
+		text.setText(formatGrepResult(result as any, options, theme, context.showImages, context.keyHint));
 		return text;
 	},
 };

@@ -2561,7 +2561,7 @@ export default function (pi: ExtensionAPI) {
 
 Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
 
-By default, tool output is wrapped in a `Box` that handles background and horizontal padding from the `outputPad` setting. Tool renderers are also used in HTML exports. An export renders a call expanded, because the page has no control that expands a call. It renders a result collapsed and expanded, and a click on the page switches between the two. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
+By default, tool output is wrapped in a `Box` that handles background and horizontal padding from the `outputPad` setting. Tool renderers are also used in HTML exports, see [HTML Exports](#html-exports). A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
 
 Set `renderShell: "self"` when the tool should render its own shell instead of using the default `Box`. This is useful for tools that need complete control over framing or background behavior, for example large previews that must stay visually stable after the tool settles.
 
@@ -2666,6 +2666,16 @@ Use namespaced keybinding ids:
 For the exhaustive list of keybinding ids and defaults, see [keybindings.md](keybindings.md). `keybindings.json` uses those same namespaced ids.
 
 Custom editors and `ctx.ui.custom()` components receive `keybindings: KeybindingsManager` as an injected argument. They should use that injected manager directly instead of calling `getKeybindings()` or `setKeybindings()`.
+
+#### HTML Exports
+
+`/export`, `/share` and the RPC `export_html` command draw tool cards with the same renderers and store the rows in the page. The page is static, so the render context differs from the terminal's:
+
+- A call is rendered once, with `expanded: true`, because the page has no control that expands a call. A result is rendered collapsed and expanded, and a click on the page switches between the two.
+- A call with a saved result is rendered as finished: `isPartial` is `false`, and `isError` and `durationMs` are those of the result, in `renderCall` and `renderResult`. A call without a saved result is rendered with `isPartial: true`.
+- `context.keyText("app.tools.expand")` returns `click`, so `context.keyHint("app.tools.expand", "to expand")` reads `click to expand`. No key expands a result on the page. A hint built from an imported `keyHint()` or from a literal key name still names the terminal's key.
+- A tool with `renderResult` and no `renderCall` gets the expanded [fallback](#fallback) header: the tool name and one `key: value` line per argument.
+- `showImages` is `false` and `invalidate()` does nothing.
 
 #### Best Practices
 
