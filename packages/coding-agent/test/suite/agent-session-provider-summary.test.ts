@@ -183,11 +183,20 @@ describe("AgentSession provider summary block", () => {
 	});
 
 	it("declares a tool loaded in the summarized conversation once, directly after the leading system message", async () => {
+		let runs = 0;
 		const harness = await createHarness({
 			tools: [lookup, ring],
 			initialActiveToolNames: ["lookup"],
 			settings: { compaction: { enabled: false } },
-			extensionFactories: [compactAtTurns([2], { providerSummary: {} })],
+			extensionFactories: [
+				compactAtTurns([2], { providerSummary: {} }),
+				(pi) => {
+					// A prompt section that changes in the conversation the block summarizes.
+					pi.on("before_agent_start", (event) => {
+						if (++runs === 2) event.systemPromptOptions.sections.note = "second";
+					});
+				},
+			],
 		});
 		harnesses.push(harness);
 		const requests = useSummaryModel(harness);
@@ -217,15 +226,19 @@ describe("AgentSession provider summary block", () => {
 		expect(compaction.providerSummary?.toolsAdded?.map((tool) => tool.name)).toEqual(["ring"]);
 		expect(compaction.providerSummary).not.toHaveProperty("toolsRemoved");
 
-		// The tool is declared before the kept turn and not again after it.
+		// The tool is declared before the kept turn and not again after it. The block does not carry
+		// the prompt section, so it is stated again after the summary and the leading message stays.
 		expect(describeMessages(third.messages)).toEqual([
 			"system+block +lookup",
 			"system +ring",
 			'assistant: lookup({"key":"b"})',
 			"toolResult: value of b",
 			expect.stringContaining("summary before turn 2"),
+			"system",
 		]);
 		expect(getCurrentTools(third.messages).map((tool) => tool.name)).toEqual(["lookup", "ring"]);
+		expect(third.messages.at(-1)).toMatchObject({ sections: { note: expect.stringContaining("second") } });
+		expect(third.messages[0]).toEqual({ ...second.messages[0], providerSummary: { ...writer(harness), block } });
 	});
 
 	it("chains a second block on the first and keeps the first leading system message", async () => {
