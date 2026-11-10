@@ -64,7 +64,7 @@
 - Fixed quitting an unready restarted worker rolling back to the previous worker instead of exiting, including when its shutdown handlers outlast the startup deadline.
 - Fixed messages sent while Pi quits, such as a child completion arriving during a shutdown hook, starting a new turn. A managed restart then failed its final capture and stopped unfinished children; quit now admits shutdown persistence but no new or steered turn.
 - Fixed non-strict session shutdowns waiting on unresponsive provider aborts, interactive startup prompts bypassing the working-session save gate or losing compact-view expansion on restore, and managed launcher `SIGINT`/`SIGHUP` forwarding when the worker runs outside the terminal process group.
-- Fixed newer fetched or cached legacy Kimi Coding catalogs reverting the native OpenAI protocol and tool/thinking compatibility after offline hydration.
+- Fixed Kimi K3.1 Pro and K3.1 Pro Highspeed cache writes costing $0 on Moonshot, Moonshot China and Kimi Coding, including when a newer pi.dev catalog replaces the built-in entry. They now cost the published five-minute rate ($2 and $4 per million tokens).
 - Fixed stale footer branches when a branch change is missed during Git watcher startup.
 - Fixed the footer showing the previous repository's branch after switching to a session in another directory while a branch lookup in a reftable repository was still running. Outside a repository, the wrong branch stayed until the next switch.
 - Fixed model refreshes rereading every provider's model catalog once per provider, which slowed startup and raised memory use, more so when an extension registered or overrode a provider. Each refresh now reads a provider's catalog a fixed number of times.
