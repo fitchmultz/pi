@@ -354,6 +354,22 @@ describe("toolExposure setting", () => {
 			expect(notifications).toEqual([]);
 		});
 
+		it("does not warn when tool_search is turned off later and another tool registers", async () => {
+			const notifications: string[] = [];
+			const apis: ExtensionAPI[] = [];
+			const harness = await setup(
+				{
+					settings,
+					initialActiveToolNames: ["tool_search"],
+					extensionFactories: [(pi) => void apis.push(pi), weatherExtension, ...discovery],
+				},
+				notifications,
+			);
+			harness.session.setActiveToolsByName([]);
+			apis[0].registerTool(weatherTool({ name: "forecast" }));
+			expect(notifications).toEqual([]);
+		});
+
 		it("does not warn for a declared tool or for tools the setting does not change", async () => {
 			const notifications: string[] = [];
 			await setup(

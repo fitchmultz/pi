@@ -465,7 +465,8 @@ export class ExtensionRunner {
 	private readonly reportedMcpServers = new Set<string>();
 	/**
 	 * The `toolExposure` setting while registered tools are checked against it: from `session_start`
-	 * until the unreachable-tools warning was shown. Unset, registering a tool costs nothing more.
+	 * until the unreachable-tools warning was shown or the codemode or tool_search tool was found
+	 * active. Unset, registering a tool costs nothing more.
 	 */
 	private watchedToolExposure: Settings["toolExposure"];
 	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
@@ -893,8 +894,9 @@ export class ExtensionRunner {
 	/**
 	 * Warn when the `toolExposure` setting makes tools reachable only from the codemode or
 	 * tool_search tool and neither is active, as the MCP extension warns for its tools. Call it
-	 * after `session_start`, whose handlers activate those tools. The warning is shown once per
-	 * call: now, or when the first such tool registers later.
+	 * after `session_start`, whose handlers activate those tools. The warning is shown at most once
+	 * per call: now, or when the first such tool registers later. Registrations are checked until
+	 * then, or until one of the two tools is found active.
 	 */
 	reportUnreachableTools(): void {
 		this.watchedToolExposure = this.runtime.getSettings().toolExposure;
@@ -909,7 +911,11 @@ export class ExtensionRunner {
 		// Only a tool of these names that declares `reachesTools` reaches other tools.
 		const reaches = (name: string) =>
 			active.has(name) && tools.some((tool) => tool.name === name && tool.reachesTools !== undefined);
-		if (reaches("codemode") || reaches("tool_search")) return;
+		if (reaches("codemode") || reaches("tool_search")) {
+			// Turning the tool off later is the user's choice: no warning follows it.
+			this.watchedToolExposure = undefined;
+			return;
+		}
 		const unreachable = tools.some(
 			(tool) =>
 				(tool.exposure === "codemode" || tool.exposure === "deferred") &&
