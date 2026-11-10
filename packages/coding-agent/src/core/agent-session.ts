@@ -300,12 +300,14 @@ export interface AgentSessionConfig {
 	/**
 	 * Whether the initial tools come from the `defaultTools` setting. When true, a resumed session
 	 * replaces them with the loadout its transcript records, with `defaultToolModifiers` applied, and
-	 * reload activates tools newly added to the setting. Tools removed from it stay active.
+	 * reload activates tools newly added to the setting. Tools removed from it stay active. The
+	 * setting's `-name` entries also keep tools inactive that registering would activate.
 	 */
 	usesDefaultTools?: boolean;
 	/**
 	 * `+name`/`-name` entries applied on top of the `defaultTools` setting, from `--tools`. Reload
-	 * applies them to the reloaded setting too, so a removed tool stays removed.
+	 * applies them to the reloaded setting too, so a removed tool stays removed. A `-name` entry also
+	 * keeps a tool inactive that registering would activate.
 	 */
 	defaultToolModifiers?: string[];
 	/**
@@ -4510,9 +4512,19 @@ export class AgentSession {
 		return exposure === "direct" || exposure === "model-only";
 	}
 
-	/** Whether registering the tool activates it, which declares it to the model. */
+	/**
+	 * Whether registering the tool activates it, which declares it to the model. A `-name` entry of
+	 * the `defaultTools` setting or of `--tools`, which apply in that order, keeps the tool inactive.
+	 */
 	private _isActivatedOnRegistration(name: string): boolean {
-		return this._isDeclarable(name) && this._toolDefinitions.get(name)?.definition.defaultActive !== false;
+		if (!this._isDeclarable(name) || this._toolDefinitions.get(name)?.definition.defaultActive === false)
+			return false;
+		// Options that override the setting, such as `--no-builtin-tools`, override its entries too.
+		const modifiers = this._usesDefaultTools
+			? [...this.settingsManager.getDefaultToolModifiers(), ...this._defaultToolModifiers]
+			: this._defaultToolModifiers;
+		// The tool joins the default selection, and the entries apply to it in order.
+		return applyToolModifiers([name], modifiers).includes(name);
 	}
 
 	private _buildRuntime(options: {

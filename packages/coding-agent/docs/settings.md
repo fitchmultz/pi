@@ -54,7 +54,7 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 | `codemode.mode` | `"on"` \| `"only"` | `"on"` | How the `codemode` tool presents tools while it is active. `on`: declared tools get a note on calling them from scripts appended to their description, and `codemode` lists only tools that are not declared. `only`: `codemode` lists every tool scripts can call, and active built-in and extension tools are hidden from the model, so it reaches them through `codemode`. |
 | `codemode.inlineBudget` | number | `3000` | Estimated tokens (characters / 4) the `codemode` tool's description may spend on tool declarations. Tools that do not fit are left out and found with `searchTools()`. `0` lists only namespaces. |
 
-The `builtin:background-command` extension registers `background_command` active by default. Use `"defaultTools": ["-background_command"]` to disable the tool, or `"extensions": ["-builtin:background-command"]` to disable the extension and its completion monitor. Plain `defaultTools` lists replace the complete selection. [Background commands](sdk.md#background-commands) use `shellPath` and `shellCommandPrefix` and store artifacts in the session directory.
+The `builtin:background-command` extension registers `background_command` active by default. Use `"defaultTools": ["-background_command"]` to disable the tool, or `"extensions": ["-builtin:background-command"]` to disable the extension and its completion monitor. A plain `defaultTools` list keeps the tool enabled unless the list also holds `-background_command`. [Background commands](sdk.md#background-commands) use `shellPath` and `shellCommandPrefix` and store artifacts in the session directory.
 
 Available built-in tools are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`. `defaultTools` can also name `codemode` and `tool_search`, which built-in extensions register inactive, and other extension tools registered inactive.
 
@@ -68,7 +68,11 @@ A list of only `+name` and `-name` entries changes the inherited selection inste
 
 This replaces `bash` with `powershell` and enables `grep`: `["-bash", "+powershell", "+grep"]`. Project settings apply on top of user settings: a project list with only `+name` and `-name` entries changes the user's selection, and a project list with a plain name replaces it. In one list, plain names form the selection, and `+name` and `-name` then apply in order.
 
-`/reload` enables tools newly added to `defaultTools`. It does not disable tools removed from it or re-enable unchanged tools you turned off. `--tools` with plain names, `--no-tools`, and `--no-builtin-tools` override `defaultTools`, also on reload.
+`-name` also disables a tool that an extension or the SDK registers enabled, such as `background_command` or an MCP tool with `direct` exposure, also when the tool registers after startup. The tool stays registered, so `--tools +name` or an extension's `pi.setActiveTools()` can still enable it.
+
+A resumed session keeps the tools its journal recorded: a `defaultTools` entry added since then does not change them. `--tools -name` removes a tool from a resumed session too.
+
+`/reload` enables tools newly added to `defaultTools`. It does not disable tools removed from it or re-enable unchanged tools you turned off. For a `-name` entry this means that removing the entry enables its tool, and adding one does not disable a tool that is on. `--tools` with plain names, `--no-tools`, and `--no-builtin-tools` override `defaultTools`, also on reload.
 
 CLI tool options override this setting for one invocation. `--tools` with only `+name` and `-name` entries changes the resolved `defaultTools` selection instead, for example `pi --tools +codemode`. On `/reload`, these entries apply to the reloaded setting too, so a tool removed with `-name` stays removed. See [Command Line](cli.md#tools).
 
@@ -101,6 +105,7 @@ The tool then behaves like a tool that registered with that exposure:
 - A `codemode` or `deferred` tool is declared only when a selection names it: `defaultTools` (`"+macuse"` or a plain name), `--tools`, the SDK `tools` option, or an extension's `pi.setActiveTools()`. The default selection names `read`, `bash`, `edit` and `write`, so also remove a built-in default tool from it: `"defaultTools": ["-edit"]`.
 - `--tools` with plain names and `--exclude-tools` still remove the tools they exclude. An MCP tool that no `--tools` entry names or matches is never declared directly, whatever its exposure; only `tool_search`, if listed, can load it, and it loads only tools with `codemode` or `deferred` exposure (see [Tools](cli.md#mcp-tools)). A `--tools` pattern that matches a `codemode` or `deferred` tool keeps it registered without declaring it.
 - A resumed session keeps the tools its journal recorded as declared, also when the setting now defers them.
+- A `-name` entry in `defaultTools` or `--tools` does not make a `codemode` or `deferred` tool unreachable: scripts still call it, and `tool_search` still loads it. Set the tool to `hidden` or use `--exclude-tools` for that.
 - An entry wins over the exposure an MCP server entry in `mcp.json` gives the tool.
 - A tool that its extension registered as `hidden` stays hidden.
 
