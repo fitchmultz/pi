@@ -44,6 +44,7 @@
 - Codemode keeps 6000 estimated tokens of script output by default instead of 10000. Longer output still links to the omitted and full output files; `max_output_tokens` raises the limit for one script.
 - Shortened the `read`, `codemode` and `background_command` prompt guidelines.
 - When a session's working directory no longer exists, for example after the project folder was renamed, interactive mode now offers `Continue`, `Fork`, or `Cancel` instead of only continuing. `Continue` runs the session in the current directory without storing the choice, as before; `Fork` copies it into the current directory as a new session with a new ID, like `--fork`, so the next resume no longer asks. This applies at startup (`--session`, `--resume`), to `/resume`, to `/import`, and to `ctx.switchSession()` from extensions ([#11060](https://github.com/earendil-works/pi/issues/11060))
+- A native working-session artifact that fails validation is now refused with the path of the first field that failed, for example `Invalid native working session at entries[12].message.content[0].type`, on `--working-session` restore, managed restart and SDK restore. The same artifacts are accepted and rejected as before. See [Native working sessions](docs/working-session.md#restore).
 
 ### Fixed
 
