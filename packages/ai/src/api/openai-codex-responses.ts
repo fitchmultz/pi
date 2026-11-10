@@ -2,6 +2,7 @@ import type * as NodeZlib from "node:zlib";
 import type {
 	Tool as OpenAITool,
 	ResponseCreateParamsStreaming,
+	ResponseFailedEvent,
 	ResponseInput,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
@@ -17,7 +18,6 @@ import type {
 	StreamFunction,
 	StreamOptions,
 	TranscriptContext,
-	Usage,
 } from "../types.ts";
 import { combineAbortSignals } from "../utils/abort-signals.ts";
 import {
@@ -43,6 +43,7 @@ import { uuidv7 } from "../utils/uuid.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
+	applyServiceTierPricing,
 	convertResponsesMessages,
 	convertResponsesTools,
 	getResponsesToolSupport,
@@ -606,38 +607,6 @@ function buildRequestBody(
 	return body;
 }
 
-function getServiceTierCostMultiplier(
-	model: Pick<Model<"openai-codex-responses">, "id">,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-): number {
-	switch (serviceTier) {
-		case "ultrafast":
-			return model.id === "gpt-6-astra" ? 6 : 1;
-		case "flex":
-			return 0.5;
-		case "priority":
-		case "fast":
-			return model.id === "gpt-5.5" ? 2.5 : 2;
-		default:
-			return 1;
-	}
-}
-
-function applyServiceTierPricing(
-	usage: Usage,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	model: Pick<Model<"openai-codex-responses">, "id">,
-) {
-	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
-	if (multiplier === 1) return;
-
-	usage.cost.input *= multiplier;
-	usage.cost.output *= multiplier;
-	usage.cost.cacheRead *= multiplier;
-	usage.cost.cacheWrite *= multiplier;
-	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
-}
-
 function resolveCodexServiceTier(
 	responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -689,15 +658,16 @@ async function processStream(
 			grammarToolInputProperties,
 			resolveServiceTier: resolveCodexServiceTier,
 			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+			failedResponseError: codexFailedResponseError,
 		},
 	);
 }
 
 class CodexApiError extends Error {
 	readonly code?: string;
-	readonly payload?: Record<string, unknown>;
+	readonly payload?: unknown;
 
-	constructor(message: string, options?: { code?: string; payload?: Record<string, unknown>; cause?: unknown }) {
+	constructor(message: string, options?: { code?: string; payload?: unknown; cause?: unknown }) {
 		super(options?.code ? `${options.code}: ${message}` : message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
@@ -741,6 +711,12 @@ function isPreviousResponseNotFoundError(error: unknown): boolean {
 	return error instanceof CodexApiError && error.code === PREVIOUS_RESPONSE_NOT_FOUND_CODE;
 }
 
+/** The typed error for a failed response; transport recovery reads its code. */
+function codexFailedResponseError(event: ResponseFailedEvent): CodexApiError {
+	const error = event.response.error;
+	return new CodexApiError(error?.message || "Codex response failed", { code: error?.code, payload: event });
+}
+
 function extractCodexEventError(event: Record<string, unknown>): { code?: string; message?: string } {
 	const nested = event.error && typeof event.error === "object" ? (event.error as Record<string, unknown>) : undefined;
 	return {
@@ -776,15 +752,6 @@ async function* mapCodexEvents(
 				code,
 				payload: event,
 			});
-		}
-
-		if (type === "response.failed") {
-			// Preserve terminal usage before the typed error used by transport recovery.
-			yield { ...event, type: "response.completed" } as unknown as ResponseStreamEvent;
-			const response = (event as { response?: { error?: { code?: string; message?: string } } }).response;
-			const code = response?.error?.code;
-			const message = response?.error?.message;
-			throw new CodexApiError(message || "Codex response failed", { code, payload: event });
 		}
 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {
@@ -1318,7 +1285,7 @@ async function* parseWebSocket(
 	signal?: AbortSignal,
 	idleTimeoutMs?: number,
 ): AsyncGenerator<Record<string, unknown>> {
-	let queue: (Record<string, unknown> | undefined)[] = [];
+	const queue: Record<string, unknown>[] = [];
 	let head = 0;
 	let pending: (() => void) | null = null;
 	let done = false;
@@ -1394,13 +1361,9 @@ async function* parseWebSocket(
 				throw new Error("Request was aborted");
 			}
 			if (head < queue.length) {
-				const event = queue[head]!;
-				queue[head++] = undefined;
+				const event = queue[head++];
 				if (head === queue.length) {
 					queue.length = 0;
-					head = 0;
-				} else if (head >= 1024 && head * 2 >= queue.length) {
-					queue = queue.slice(head);
 					head = 0;
 				}
 				yield event;
@@ -1577,6 +1540,7 @@ async function processWebSocketStream(
 				grammarToolInputProperties,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				failedResponseError: codexFailedResponseError,
 			},
 		);
 		if (options?.signal?.aborted) {

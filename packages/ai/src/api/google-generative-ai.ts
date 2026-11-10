@@ -4,25 +4,18 @@ import type {
 	ProviderHeaders,
 	SimpleStreamOptions,
 	StreamFunction,
-	StreamOptions,
 	ThinkingBudgets,
 	TranscriptContext,
 } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { providerHeadersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
-import type { GoogleApiThinkingLevel, ResolvedGoogleThinkingLevel } from "./google-shared.ts";
+import type { GoogleOptions, ResolvedGoogleThinkingLevel } from "./google-shared.ts";
 import { resolveGoogleSimpleThinking, streamGoogle } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
-export interface GoogleOptions extends StreamOptions {
-	toolChoice?: "auto" | "none" | "any";
-	thinking?: {
-		enabled: boolean;
-		budgetTokens?: number; // -1 for dynamic, 0 to disable
-		level?: GoogleApiThinkingLevel;
-	};
-}
+// This adapter takes the shared options unchanged; the type stays exported from this path.
+export type { GoogleOptions };
 
 export const stream: StreamFunction<"google-generative-ai", GoogleOptions> = (
 	model: Model<"google-generative-ai">,
