@@ -24,6 +24,18 @@ export function withoutAssertion() {
 }
 `;
 
+// Biome enables its React rules only where the nearest package.json declares React.
+const reactManifest = { path: "packages/chord/package.json", content: '{ "dependencies": { "react": "19.3.0" } }\n' };
+const suppressedHook = (dependencies) => `import { useEffect } from "react";
+
+export function useTitle(title: string) {
+	// biome-ignore lint/correctness/useExhaustiveDependencies: fixture.
+	useEffect(() => {
+		document.title = title;
+	}, [${dependencies}]);
+}
+`;
+
 const cases = [
 	{
 		name: "rejects discarded catalog compat with and without a non-null assertion",
@@ -56,19 +68,35 @@ export function withCompat() {
 		message: /Chat models may omit type/g,
 		errors: 1,
 	},
+	{
+		name: "accepts a suppression of a React rule enabled by the nearest package.json",
+		path: "packages/chord/src/react/hooks.ts",
+		content: suppressedHook(""),
+		manifest: reactManifest,
+	},
+	{
+		name: "rejects a suppression that suppresses nothing",
+		path: "packages/chord/src/react/hooks.ts",
+		content: suppressedHook("title"),
+		manifest: reactManifest,
+		message: /Suppression comment has no effect/g,
+		errors: 1,
+	},
 ];
 
 for (const engine of ["native", "wasm"]) {
-	test(`Biome ${engine} enforces scoped payload fixtures`, { skip: engine === "native" && !hasNativeBinary }, async (t) => {
+	test(`Biome ${engine} check`, { skip: engine === "native" && !hasNativeBinary }, async (t) => {
 		for (const fixture of cases) {
 			await t.test(fixture.name, async (t) => {
 				const directory = await mkdtemp(join(tmpdir(), "pi-biome-check-"));
 				t.after(() => rm(directory, { recursive: true, force: true }));
 				await writeFile(join(directory, "biome.json"), configuration);
 				await cp(join(root, "scripts/biome"), join(directory, "scripts/biome"), { recursive: true });
-				const path = join(directory, fixture.path);
-				await mkdir(dirname(path), { recursive: true });
-				await writeFile(path, fixture.content);
+				for (const file of [fixture, ...(fixture.manifest ? [fixture.manifest] : [])]) {
+					const path = join(directory, file.path);
+					await mkdir(dirname(path), { recursive: true });
+					await writeFile(path, file.content);
+				}
 				const git = spawnSync("git", ["init", "--quiet"], { cwd: directory, encoding: "utf8" });
 				assert.equal(git.status, 0, git.stderr);
 
