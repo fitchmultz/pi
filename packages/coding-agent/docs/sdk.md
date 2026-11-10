@@ -156,8 +156,21 @@ Each boundary can be supplied explicitly:
 - `sessionManager` supplies persistent or in-memory conversation history.
 - `resourceLoader` supplies extensions, skills, prompt templates, themes, and context files.
 - `tools`, `noTools`, `excludeTools`, and `customTools` control the active tool set.
+- The [`toolExposure` setting](settings.md#tool-exposure) controls how the model reaches individual tools: declared, loaded by `tool_search`, or called from codemode scripts.
 
 Use `DefaultResourceLoader` when you want standard discovery with selected overrides. Supply a custom `ResourceLoader` when the host owns resource storage and discovery completely. Its optional `getWorkingSessionResources()` enables complete persistence by returning the current explicit extension, skill, prompt and theme paths, discovery switches and prompt inputs; `reload({ workingSession })` must restore those selections before discovery under the saved settings.
+
+<a id="settings-overrides"></a>
+
+`settingsManager.applyOverrides()` changes settings for one process without writing a file. A file-backed manager drops them when it reloads its files, and `DefaultResourceLoader.reload()` reloads them. Apply overrides after the loader has loaded: between `createAgentSessionServices()` and `createAgentSessionFromServices()`, or after `resourceLoader.reload()` when you pass your own loader constructed with the same manager. `SettingsManager.inMemory()` has no files and keeps its settings. This gives one session its own `toolExposure`, for example a child agent that rarely needs a tool its parent declares:
+
+```typescript
+const services = await createAgentSessionServices({ cwd, settingsManager: SettingsManager.create(cwd) });
+services.settingsManager.applyOverrides({ toolExposure: { macuse: "deferred" } });
+const { session } = await createAgentSessionFromServices({ services, sessionManager, model });
+```
+
+Override entries match before the entries of the settings files. `session.reload()` drops the overrides with the rest; a tool that `toolExposure` no longer defers is then declared. A [saved working session](#complete-working-session-save-and-restore) records the effective settings, overrides included, and restores them.
 
 <a id="inlineextension"></a>
 

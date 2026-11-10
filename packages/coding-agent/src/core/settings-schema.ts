@@ -168,6 +168,15 @@ const CodemodeSettingsSchema = Type.Object({
 	),
 });
 
+/** The values of `ToolExposure` (`core/extensions/types.ts`), which the `toolExposure` setting replaces. */
+const ToolExposureSchema = Type.Union([
+	Type.Literal("direct"),
+	Type.Literal("model-only"),
+	Type.Literal("codemode"),
+	Type.Literal("deferred"),
+	Type.Literal("hidden"),
+]);
+
 const PackageSourceSchema = Type.Union(
 	[
 		Type.String({ description: "Load all resources from the package." }),
@@ -356,6 +365,12 @@ export const SettingsSchema = Type.Object(
 			Type.Array(Type.String(), {
 				description:
 					"Initial tool selection. Plain names replace the inherited selection; +name and -name entries add or remove tools.",
+			}),
+		),
+		toolExposure: Type.Optional(
+			Type.Record(Type.String(), ToolExposureSchema, {
+				description:
+					"Exposure of registered tools, replacing the exposure each tool registered with. Keys are tool names or patterns where * matches any characters; an exact name wins over patterns, and among patterns the first match wins.",
 			}),
 		),
 		doubleEscapeAction: Type.Optional(
