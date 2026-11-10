@@ -8,13 +8,21 @@ export interface ChangelogEntry {
 	content: string;
 }
 
+/** The repository and ref that a changelog section's relative links are read from. */
+interface LinkSource {
+	repo: string;
+	ref: string;
+}
+
 const GITHUB_REPO = "earendil-works/pi";
+const FORK_GITHUB_REPO = "fitchmultz/pi";
 const CHANGELOG_LINK_BASE_PATH = "packages/coding-agent";
 const LEGACY_REPO_RE = /^https:\/\/github\.com\/(?:badlogic|earendil-works)\/pi-mono(?=\/|$)/;
 const URL_SCHEME_RE = /^[a-z][a-z0-9+.-]*:/i;
 const INLINE_MARKDOWN_LINK_RE = /(!?\[[^\]\n]+\]\()([^\s)]+)((?:\s+[^)]*)?\))/g;
 
-function entryVersion(entry: ChangelogEntry): string {
+/** The entry's version as major.minor.patch. */
+export function entryVersion(entry: ChangelogEntry): string {
 	return `${entry.major}.${entry.minor}.${entry.patch}`;
 }
 
@@ -66,15 +74,15 @@ function isDirectoryTarget(originalPath: string, repositoryPath: string): boolea
 	return !basename.includes(".");
 }
 
-function normalizeChangelogLinkTarget(target: string, tag: string): string {
+function normalizeChangelogLinkTarget(target: string, source: LinkSource): string {
 	let canonicalTarget = target.replace(LEGACY_REPO_RE, `https://github.com/${GITHUB_REPO}`);
-	const repoUrl = `https://github.com/${GITHUB_REPO}`;
+	const repoUrl = `https://github.com/${source.repo}`;
 
 	for (const route of ["blob", "tree"]) {
 		for (const branch of ["main", "master"]) {
 			const floatingRefPrefix = `${repoUrl}/${route}/${branch}/`;
 			if (canonicalTarget.startsWith(floatingRefPrefix)) {
-				canonicalTarget = `${repoUrl}/${route}/${tag}/${canonicalTarget.slice(floatingRefPrefix.length)}`;
+				canonicalTarget = `${repoUrl}/${route}/${source.ref}/${canonicalTarget.slice(floatingRefPrefix.length)}`;
 			}
 		}
 	}
@@ -94,77 +102,76 @@ function normalizeChangelogLinkTarget(target: string, tag: string): string {
 	}
 
 	const route = isDirectoryTarget(pathPart, repositoryPath) ? "tree" : "blob";
-	return `https://github.com/${GITHUB_REPO}/${route}/${tag}/${encodeURI(repositoryPath)}${query}${fragment}`;
+	return `${repoUrl}/${route}/${source.ref}/${encodeURI(repositoryPath)}${query}${fragment}`;
 }
 
-export function normalizeChangelogLinks(markdown: string, version: string | ChangelogEntry): string {
-	const tag = normalizeTag(version);
+function normalizeLinks(markdown: string, source: LinkSource): string {
 	return markdown.replace(INLINE_MARKDOWN_LINK_RE, (_match, prefix, target, suffix) => {
-		return `${prefix}${normalizeChangelogLinkTarget(target, tag)}${suffix}`;
+		return `${prefix}${normalizeChangelogLinkTarget(target, source)}${suffix}`;
 	});
 }
 
+/** Point a released entry's links at the upstream repository, pinned to the entry's version tag. */
+export function normalizeChangelogLinks(markdown: string, version: string | ChangelogEntry): string {
+	return normalizeLinks(markdown, { repo: GITHUB_REPO, ref: normalizeTag(version) });
+}
+
 /**
- * Parse changelog entries from CHANGELOG.md
- * Scans for ## lines and collects content until next ## or EOF
+ * Read the "## " sections of a changelog in file order. Each section's text starts with its heading line
+ * and runs to the next heading or EOF.
  */
-export function parseChangelog(changelogPath: string): ChangelogEntry[] {
+function readSections(changelogPath: string): { heading: string; text: string }[] {
 	if (!existsSync(changelogPath)) {
 		return [];
 	}
 
 	try {
-		const content = readFileSync(changelogPath, "utf-8");
-		const lines = content.split("\n");
-		const entries: ChangelogEntry[] = [];
-
-		let currentLines: string[] = [];
-		let currentVersion: { major: number; minor: number; patch: number } | null = null;
-
-		for (const line of lines) {
-			// Check if this is a version header (## [x.y.z] ...)
-			if (line.startsWith("## ")) {
-				// Save previous entry if exists
-				if (currentVersion && currentLines.length > 0) {
-					entries.push({
-						...currentVersion,
-						content: currentLines.join("\n").trim(),
-					});
-				}
-
-				// Try to parse version from this line
-				const versionMatch = line.match(/##\s+\[?(\d+)\.(\d+)\.(\d+)\]?/);
-				if (versionMatch) {
-					currentVersion = {
-						major: Number.parseInt(versionMatch[1], 10),
-						minor: Number.parseInt(versionMatch[2], 10),
-						patch: Number.parseInt(versionMatch[3], 10),
-					};
-					currentLines = [line];
-				} else {
-					// Reset if we can't parse version
-					currentVersion = null;
-					currentLines = [];
-				}
-			} else if (currentVersion) {
-				// Collect lines for current version
-				currentLines.push(line);
-			}
-		}
-
-		// Save last entry
-		if (currentVersion && currentLines.length > 0) {
-			entries.push({
-				...currentVersion,
-				content: currentLines.join("\n").trim(),
-			});
-		}
-
-		return entries;
+		return readFileSync(changelogPath, "utf-8")
+			.split(/(?<=\n)(?=## )/)
+			.filter((section) => section.startsWith("## "))
+			.map((section) => ({ heading: section.split("\n", 1)[0], text: section.trim() }));
 	} catch (error) {
 		console.error(`Warning: Could not parse changelog: ${error}`);
 		return [];
 	}
+}
+
+/**
+ * Parse the released entries from CHANGELOG.md: the sections with a version heading (## [x.y.z] ...).
+ */
+export function parseChangelog(changelogPath: string): ChangelogEntry[] {
+	const entries: ChangelogEntry[] = [];
+
+	for (const { heading, text } of readSections(changelogPath)) {
+		const versionMatch = heading.match(/##\s+\[?(\d+)\.(\d+)\.(\d+)\]?/);
+		if (versionMatch) {
+			entries.push({
+				major: Number.parseInt(versionMatch[1], 10),
+				minor: Number.parseInt(versionMatch[2], 10),
+				patch: Number.parseInt(versionMatch[3], 10),
+				content: text,
+			});
+		}
+	}
+
+	return entries;
+}
+
+/**
+ * Get the fork's own entries. They stay under "## [Unreleased]" because the released sections mirror
+ * upstream's, so parseChangelog never returns them. The section is headed as fork changes and its relative
+ * links point at the fork repository, pinned to the installed commit. Returns undefined when it has no entries.
+ */
+export function getForkChangelog(changelogPath: string, commit: string): string | undefined {
+	const section = readSections(changelogPath).find(({ heading }) => /^##\s+\[Unreleased\]/.test(heading));
+	const entries = section?.text.slice(section.heading.length).trim();
+	if (!entries) {
+		return undefined;
+	}
+
+	// Seven characters is Git's default abbreviation of a commit (core.abbrev).
+	const heading = `## Fork changes (${FORK_GITHUB_REPO}@${commit.slice(0, 7)})`;
+	return `${heading}\n\n${normalizeLinks(entries, { repo: FORK_GITHUB_REPO, ref: commit })}`;
 }
 
 /**
