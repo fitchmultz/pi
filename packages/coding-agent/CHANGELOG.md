@@ -44,6 +44,7 @@
 - `--session` and `--fork` lookups by partial, cross-project or missing ID now stop parsing each non-matching session after its header instead of reading every saved transcript in full. Matching sessions are still read in full, and matching, ordering, prompts and exit codes are unchanged ([#251](https://github.com/fitchmultz/pi/issues/251)).
 - Codemode keeps 6000 estimated tokens of script output by default instead of 10000. Longer output still links to the omitted and full output files; `max_output_tokens` raises the limit for one script.
 - Shortened the `read`, `codemode` and `background_command` prompt guidelines.
+- `read` continuation notices name the offsets of the remaining pages when at most five remain, so one response can request them all. A read that used `limit` is told that those offsets without a limit return the rest. Longer files keep one next offset and the count of remaining lines.
 - A native working-session artifact that fails validation is now refused with the path of the first field that failed, for example `Invalid native working session at entries[12].message.content[0].type`, on `--working-session` restore, managed restart and SDK restore. The same artifacts are accepted and rejected as before. See [Native working sessions](docs/working-session.md#restore).
 
 ### Fixed

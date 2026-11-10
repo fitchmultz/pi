@@ -129,7 +129,9 @@ describe("Coding Agent Tools", () => {
 
 			expect(output).toContain("Line 1:");
 			// Should show byte limit message
-			expect(output).toMatch(/\[Showing lines 1-\d+ of 500 \(.* limit\)\. Use offset=\d+ to continue\.\]/);
+			expect(output).toMatch(
+				/\[Showing lines 1-\d+ of 500 \(.* limit\)\. \d+ lines remain: to read them all, call read at offsets \d+ and \d+ in one response\. For a part, use offset=\d+ and a limit\.\]/,
+			);
 		});
 
 		it("should handle offset parameter", async () => {
@@ -158,7 +160,9 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 1");
 			expect(output).toContain("Line 10");
 			expect(output).not.toContain("Line 11");
-			expect(output).toContain("[90 more lines in file. Use offset=11 to continue.]");
+			expect(output).toContain(
+				"[90 more lines in file: to read them all, call read at offset 11 with no limit. For a part, use offset=11 and a limit.]",
+			);
 		});
 
 		it("should handle offset + limit together", async () => {
@@ -177,7 +181,9 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 41");
 			expect(output).toContain("Line 60");
 			expect(output).not.toContain("Line 61");
-			expect(output).toContain("[40 more lines in file. Use offset=61 to continue.]");
+			expect(output).toContain(
+				"[40 more lines in file: to read them all, call read at offset 61 with no limit. For a part, use offset=61 and a limit.]",
+			);
 		});
 
 		it("should show error when offset is beyond file length", async () => {
@@ -268,7 +274,9 @@ describe("Coding Agent Tools", () => {
 			pending.resolve(Buffer.from("after\n"));
 			await rejected;
 			const result = await tool.execute("read-after-abort", { path: "remote.txt", limit: 1 });
-			expect(getTextOutput(result)).toBe("after\n\n[1 more lines in file. Use offset=2 to continue.]");
+			expect(getTextOutput(result)).toBe(
+				"after\n\n[1 more lines in file: to read them all, call read at offset 2 with no limit. For a part, use offset=2 and a limit.]",
+			);
 		});
 
 		it("should detect image MIME type from file magic (not extension)", async () => {
