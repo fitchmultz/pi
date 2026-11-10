@@ -15,6 +15,7 @@
 - Added lossless request-body compression for direct Anthropic Messages (gzip) and public OpenAI Responses (zstd), with runtime/size guards and explicit encoding opt-out. Restricted existing Codex SSE zstd to its canonical endpoint rather than arbitrary custom URLs. See [support boundaries and measurement](../../docs/compression.md).
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
 - Extended temporary opt-in Anthropic cache tracing with payload-pass and attempt identities, validated `request-id` headers and exact-session filtering. Native stream behavior is unchanged.
+- Bedrock Claude requests budget Claude's strict tool limits (20 strict tools, 16 union parameters) before they are sent, as Anthropic requests do: `strict: "require"` tools first, then `strict: "prefer"` tools in declaration order, with the preferred tools that do not fit sent non-strict. This avoids the rejected request and keeps strict mode on the tools that fit; a request whose required tools alone exceed the limits fails before it is sent. Other Bedrock models are unchanged.
 
 ### Fixed
 
@@ -36,6 +37,7 @@
 - Fixed model switches reducing the next response's output allowance for foreign reasoning that is omitted from replay.
 - Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
 - Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
+- Fixed Anthropic requests failing before they are sent, on every turn, when `strict: "prefer"` tools used up Claude's strict tool limits ahead of a `strict: "require"` tool. Required tools are budgeted first, then preferred tools in declaration order; the request fails only when the required tools alone exceed the limits.
 - Fixed canonical Cloudflare AI Gateway Opus 5.5 catalog defaults omitting positional system, tool and effort controls and five-minute/one-hour cache lifetimes, including pinned catalog hydration; explicit metadata, compatibility opt-outs and catalog entries with a non-canonical `baseUrl` remain unchanged.
 - Fixed Cloudflare AI Gateway GPT models on the `/openai` Responses route rewriting the cached prompt prefix after every mid-session system update or tool load. Models that accept mid-conversation developer messages and `additional_tools` at OpenAI now default to both on Cloudflare, including fetched and restored catalog overlays; explicit metadata and catalog entries with a non-canonical `baseUrl` remain unchanged.
 - Cloudflare AI Gateway `/openai` GPT-5.4 and GPT-5.5 entries no longer default `supportsAdditionalTools`, matching direct OpenAI, and GPT-6.1 Terra gets both positional defaults.

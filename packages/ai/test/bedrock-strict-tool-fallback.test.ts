@@ -92,9 +92,9 @@ function successResponse(): Promise<unknown> {
 	});
 }
 
-function run(tools: Tool[], onPayload?: (payload: unknown) => unknown, sessionId?: string) {
+function run(tools: Tool[], onPayload?: (payload: unknown) => unknown, sessionId?: string, runModel = model) {
 	return streamBedrock(
-		model,
+		runModel,
 		normalizeContext({ tools, messages: [{ role: "user", content: "Hello", timestamp: 1 }] }),
 		{ cacheRetention: "none", onPayload, sessionId },
 	).result();
@@ -219,5 +219,33 @@ describe("Bedrock preferred strict tool fallback", () => {
 		await run([tool("preferred", "prefer")], undefined, "cleaned");
 
 		expect(strictFlags()).toEqual([[true], [undefined], [true]]);
+	});
+
+	// 17 strict tools with one optional parameter each: one union more than Claude's limit of 16.
+	const overUnionLimit = [
+		...Array.from({ length: 16 }, (_, index) => tool(`preferred_${index}`, "prefer")),
+		tool("required", "require"),
+	];
+
+	it("budgets Claude's strict tool limits before sending, required tools first", async () => {
+		bedrockMock.respond = () => successResponse();
+
+		const result = await run(overUnionLimit);
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.diagnostics).toBeUndefined();
+		expect(strictFlags()).toEqual([[...Array.from({ length: 15 }, () => true), undefined, true]]);
+	});
+
+	it("does not apply Claude's limits to other Bedrock models", async () => {
+		bedrockMock.respond = () => successResponse();
+
+		await run(overUnionLimit, undefined, undefined, {
+			...model,
+			id: "global.openai.gpt-6-sol",
+			name: "GPT-6 Sol (Global)",
+		});
+
+		expect(strictFlags()).toEqual([Array.from({ length: 17 }, () => true)]);
 	});
 });

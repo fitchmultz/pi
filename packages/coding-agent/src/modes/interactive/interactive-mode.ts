@@ -64,6 +64,7 @@ import {
 	getAuthPath,
 	getDebugLogPath,
 	getDocsPath,
+	getForkRelease,
 	VERSION,
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
@@ -125,7 +126,14 @@ import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { addMcpServerConfig } from "../../extensions/mcp/config.ts";
 import type { ManagedRestart } from "../../extensions/restart/index.ts";
-import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
+import {
+	entryVersion,
+	getChangelogPath,
+	getForkChangelog,
+	getNewEntries,
+	normalizeChangelogLinks,
+	parseChangelog,
+} from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardFilePaths, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
@@ -463,6 +471,12 @@ export interface InteractiveModeOptions {
 	terminal?: Terminal;
 }
 
+/** Pi's own changelog entries to show at startup, and what the condensed notice calls the update. */
+interface ChangelogUpdate {
+	label: string;
+	markdown: string;
+}
+
 interface ExtensionChangelogUpdate {
 	name: string;
 	version: string;
@@ -528,7 +542,7 @@ export class InteractiveMode {
 
 	private lastSigintTime = 0;
 	private lastEscapeTime = 0;
-	private changelogMarkdown: string | undefined = undefined;
+	private changelogUpdate: ChangelogUpdate | undefined = undefined;
 	private extensionChangelogUpdates: ExtensionChangelogUpdate[] = [];
 	private startupNoticesShown = false;
 	/** Last cache-warming notice, extended in place while it is the last chat line. */
@@ -931,7 +945,7 @@ export class InteractiveMode {
 		}
 		this.startupNoticesShown = true;
 
-		if (!this.changelogMarkdown && this.extensionChangelogUpdates.length === 0) {
+		if (!this.changelogUpdate && this.extensionChangelogUpdates.length === 0) {
 			return;
 		}
 
@@ -939,21 +953,19 @@ export class InteractiveMode {
 			this.chatContainer.addChild(new Spacer(1));
 		}
 		this.chatContainer.addChild(new DynamicBorder());
-		if (this.changelogMarkdown) {
+		if (this.changelogUpdate) {
 			if (this.settingsManager.getCollapseChangelog()) {
-				const versionMatch = this.changelogMarkdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/);
-				const latestVersion = versionMatch ? versionMatch[1] : this.version;
-				const condensedText = `Updated to v${latestVersion}. Use ${theme.bold("/changelog")} to view full changelog.`;
+				const condensedText = `Updated to ${this.changelogUpdate.label}. Use ${theme.bold("/changelog")} to view full changelog.`;
 				this.chatContainer.addChild(new Text(condensedText, 1, 0));
 			} else {
 				this.chatContainer.addChild(new ThemedText(() => theme.bold(theme.fg("accent", "What's New")), 1, 0));
 				this.chatContainer.addChild(new Spacer(1));
-				this.chatContainer.addChild(this.createChangelogMarkdown(this.changelogMarkdown.trim(), 1, 0));
+				this.chatContainer.addChild(this.createChangelogMarkdown(this.changelogUpdate.markdown.trim(), 1, 0));
 				this.chatContainer.addChild(new Spacer(1));
 			}
 		}
 		if (this.extensionChangelogUpdates.length > 0) {
-			if (this.changelogMarkdown) {
+			if (this.changelogUpdate) {
 				this.chatContainer.addChild(new Spacer(1));
 			}
 			if (this.settingsManager.getCollapseChangelog()) {
@@ -1052,7 +1064,7 @@ export class InteractiveMode {
 		this.registerSignalHandlers();
 
 		// Load changelogs (only show new entries, skip for resumed sessions)
-		this.changelogMarkdown = this.getChangelogForDisplay();
+		this.changelogUpdate = this.getChangelogForDisplay();
 		this.extensionChangelogUpdates = this.getExtensionChangelogUpdates();
 
 		// Fullscreen renders on the alternate screen, so text printed to stdout here would stay in the shell
@@ -1441,9 +1453,9 @@ export class InteractiveMode {
 
 	/**
 	 * Get changelog entries to display on startup.
-	 * Only shows new entries since last seen version, skips for resumed sessions.
+	 * Only shows entries new since the last seen version and the last seen fork build, skips for resumed sessions.
 	 */
-	private getChangelogForDisplay(): string | undefined {
+	private getChangelogForDisplay(): ChangelogUpdate | undefined {
 		// Skip changelog for resumed/continued sessions (already have messages)
 		if (this.session.state.messages.length > 0) {
 			return undefined;
@@ -1451,7 +1463,14 @@ export class InteractiveMode {
 
 		const lastVersion = this.settingsManager.getLastChangelogVersion();
 		const changelogPath = getChangelogPath();
-		const entries = parseChangelog(changelogPath);
+
+		// A fork update keeps the package version, so the installed commit tells when its entries are due.
+		const forkCommit = getForkRelease()?.commit;
+		const isNewForkBuild =
+			forkCommit !== undefined && forkCommit !== this.settingsManager.getLastChangelogForkCommit();
+		if (isNewForkBuild) {
+			this.settingsManager.setLastChangelogForkCommit(forkCommit);
+		}
 
 		if (!lastVersion) {
 			// Fresh install - record the version, send telemetry, don't show changelog
@@ -1460,19 +1479,26 @@ export class InteractiveMode {
 			return undefined;
 		}
 
-		const newEntries = getNewEntries(entries, lastVersion);
-		if (!newEntries) {
-			// Unreadable saved version: show nothing and record the current one so later updates compare again
-			this.settingsManager.setLastChangelogVersion(VERSION);
-			return undefined;
-		}
-		if (newEntries.length > 0) {
-			this.settingsManager.setLastChangelogVersion(VERSION);
-			this.reportInstallTelemetry(VERSION);
-			return newEntries.map((e) => normalizeChangelogLinks(e.content, e)).join("\n\n");
+		const sections: string[] = [];
+		// The condensed notice names the newest release shown, or the fork build when only that changed.
+		let label = "a new fork build";
+		const forkChangelog = isNewForkBuild ? getForkChangelog(changelogPath, forkCommit) : undefined;
+		if (forkChangelog) {
+			sections.push(forkChangelog);
 		}
 
-		return undefined;
+		const newEntries = getNewEntries(parseChangelog(changelogPath), lastVersion);
+		if (!newEntries) {
+			// Unreadable saved version: show no release notes and record the current one so later updates compare again
+			this.settingsManager.setLastChangelogVersion(VERSION);
+		} else if (newEntries.length > 0) {
+			this.settingsManager.setLastChangelogVersion(VERSION);
+			this.reportInstallTelemetry(VERSION);
+			label = `v${entryVersion(newEntries[0])}`;
+			sections.push(...newEntries.map((e) => normalizeChangelogLinks(e.content, e)));
+		}
+
+		return sections.length > 0 ? { label, markdown: sections.join("\n\n") } : undefined;
 	}
 
 	private getExtensionChangelogUpdates(): ExtensionChangelogUpdate[] {
@@ -4222,12 +4248,12 @@ export class InteractiveMode {
 						renderer,
 						this.getMarkdownThemeWithSettings(),
 						this.outputPad,
-						!!this.compactView,
-						this.settingsManager.getShowImages(),
-						this.settingsManager.getImageWidthCells(),
 						this.getMarkdownTransformers(),
 						options?.messageId,
 						options?.timestamp,
+						!!this.compactView,
+						this.settingsManager.getShowImages(),
+						this.settingsManager.getImageWidthCells(),
 					);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
@@ -7259,15 +7285,18 @@ export class InteractiveMode {
 
 	private handleChangelogCommand(): void {
 		const changelogPath = getChangelogPath();
-		const allEntries = parseChangelog(changelogPath);
+		// Oldest first, so the newest notes end up next to the editor. A fork build's own entries are newer
+		// than every release.
+		const sections = parseChangelog(changelogPath)
+			.reverse()
+			.map((e) => normalizeChangelogLinks(e.content, e));
+		const forkCommit = getForkRelease()?.commit;
+		const forkChangelog = forkCommit && getForkChangelog(changelogPath, forkCommit);
+		if (forkChangelog) {
+			sections.push(forkChangelog);
+		}
 
-		const changelogMarkdown =
-			allEntries.length > 0
-				? allEntries
-						.reverse()
-						.map((e) => normalizeChangelogLinks(e.content, e))
-						.join("\n\n")
-				: "No changelog entries found.";
+		const changelogMarkdown = sections.length > 0 ? sections.join("\n\n") : "No changelog entries found.";
 
 		this.chatContainer.addChild(new Spacer(1));
 		this.chatContainer.addChild(new DynamicBorder());

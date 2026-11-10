@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxText, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
 import { Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -323,6 +323,36 @@ describe("Native working sessions", () => {
 			}),
 		).rejects.toThrow("Invalid native working session");
 		expect(factories).toBe(0);
+	});
+
+	// The rejections above match only the leading text. These pin the field path printed on restart and restore.
+	it.each([
+		["entries[1].message.content[0].type", "citation"],
+		["entries[1].message.content[1].arguments", []],
+		["entries[0].message.timestamp", "1"],
+		["entries[1].parentId", "missing"],
+		["steering[0].role", ""],
+		["header.version", 2],
+		["thinkingLevel", "extreme"],
+		["launch.themes", [7]],
+		["prompt.toolSnippets.read", 7],
+	])("names the field that fails validation: %s", async (path, value) => {
+		const h = await createHarness();
+		harnesses.push(h);
+		h.sessionManager.appendMessage({ role: "user", content: "question", timestamp: 1 });
+		h.sessionManager.appendMessage(fauxAssistantMessage([fauxText("answer"), fauxToolCall("read", {})]));
+		h.session.agent.steer({ role: "user", content: "queued", timestamp: 2 });
+		const hold = await h.session.acquireWorkingSession();
+		await hold.release();
+		const saved = JSON.parse(JSON.stringify(hold.state));
+		expect(parseWorkingSession(JSON.stringify(saved))).toEqual(saved);
+		const keys = path.match(/[^.[\]]+/g)!;
+		let parent = saved as Record<string, unknown>;
+		for (const key of keys.slice(0, -1)) parent = parent[key] as Record<string, unknown>;
+		parent[keys.at(-1)!] = value;
+		expect(() => parseWorkingSession(JSON.stringify(saved))).toThrow(
+			new Error(`Invalid native working session at ${path}`),
+		);
 	});
 
 	it("restores older v1 prompts without hiddenTools", async () => {
