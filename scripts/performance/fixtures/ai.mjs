@@ -6,7 +6,7 @@ import { Agent } from "/pi-performance-source/packages/agent/src/agent.ts";
 import { transformMessages } from "/pi-performance-source/packages/ai/src/api/transform-messages.ts";
 import { estimateContextTokens } from "/pi-performance-source/packages/ai/src/utils/estimate.ts";
 import { AssistantMessageEventStream, EventStream } from "/pi-performance-source/packages/ai/src/utils/event-stream.ts";
-import { parseStreamingJson, repairJson } from "/pi-performance-source/packages/ai/src/utils/json-parse.ts";
+import { repairJson } from "/pi-performance-source/packages/ai/src/utils/json-parse.ts";
 import {
 	getCurrentTools,
 	getToolStateChanges,
@@ -28,13 +28,12 @@ const integer = (name, fallback) => {
 	return value;
 };
 const size = integer("size", smoke ? 512 : 65536);
-const chunkSize = integer("chunk", 64);
 const toolCount = integer("tools", smoke ? 4 : 128);
 const messageCount = integer("messages", smoke ? 12 : 3000);
 const eventCount = integer("events", smoke ? 32 : 100000);
 const iterations = integer("iterations", smoke ? 1 : 5);
 const samples = integer("samples", smoke ? 1 : 7);
-const selected = new Set(option("cases", "parse,repair,tools,transform,estimate,validate,queue,agent").split(","));
+const selected = new Set(option("cases", "repair,tools,transform,estimate,validate,queue,agent").split(","));
 const usage = () => ({
 	input: 0,
 	output: 0,
@@ -67,9 +66,6 @@ const answer = (content, stopReason = "stop") => ({
 });
 const text = "abcdefgh ijklmnop qrstuvwx yz".repeat(Math.ceil(size / 27)).slice(0, size);
 const payload = JSON.stringify({ path: "src/test.ts", content: text });
-const prefixes = [];
-for (let end = chunkSize; end < payload.length; end += chunkSize) prefixes.push(payload.slice(0, end));
-prefixes.push(payload);
 const tools = Array.from({ length: toolCount }, (_, i) => ({
 	name: `tool_${i}`,
 	description: `Tool ${i}. ${"schema documentation ".repeat(30)}`,
@@ -125,10 +121,6 @@ const validationCall = {
 assert.deepEqual(validateToolArguments(validationTool, validationCall), { path: "file.ts", content: text });
 let sink;
 const cases = {
-	parse: () => {
-		for (const prefix of prefixes) sink = parseStreamingJson(prefix);
-		assert.equal(sink.content, text);
-	},
 	repair: () => {
 		sink = repairJson(payload.slice(0, -1));
 		assert.equal(sink, payload.slice(0, -1));
@@ -194,7 +186,6 @@ console.log(
 		revision: execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
 		smoke,
 		size,
-		chunkSize,
 		toolCount,
 		messageCount,
 		eventCount,
@@ -222,5 +213,5 @@ for (const [name, run] of Object.entries(cases)) {
 	}
 	const sorted = timings.map((row) => row.msPerOperation).sort((a, b) => a - b);
 	console.log(JSON.stringify({ case: name, medianMs: sorted[Math.floor(sorted.length / 2)], timings }));
-	witness(name, { payload, declared, history, eventCount, chunkSize }, sink);
+	witness(name, { payload, declared, history, eventCount }, sink);
 }

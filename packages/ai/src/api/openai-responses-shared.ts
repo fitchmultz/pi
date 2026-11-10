@@ -3,6 +3,7 @@ import type {
 	Tool as OpenAITool,
 	ResponseConfigurationUpdateItemParam,
 	ResponseCreateParamsStreaming,
+	ResponseFailedEvent,
 	ResponseInput,
 	ResponseInputContent,
 	ResponseInputImage,
@@ -121,6 +122,8 @@ export interface OpenAIResponsesStreamOptions {
 		usage: Usage,
 		serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	) => void;
+	/** Builds the error thrown for a `response.failed` event, after its usage is recorded. Default: a plain `Error`. */
+	failedResponseError?: (event: ResponseFailedEvent) => Error;
 }
 
 export interface ConvertResponsesMessagesOptions {
@@ -804,6 +807,7 @@ export async function processResponsesStream<TApi extends Api>(
 			throw new Error(`Error Code ${event.code}: ${event.message}` || "Unknown error");
 		} else if (event.type === "response.failed") {
 			finalizeResponse(event.response);
+			if (options?.failedResponseError) throw options.failedResponseError(event);
 			const error = event.response?.error;
 			const details = event.response?.incomplete_details;
 			const msg = error
@@ -889,5 +893,38 @@ function mapStopReason(
 			const _exhaustive: never = status;
 			throw new Error(`Unhandled stop reason: ${_exhaustive}`);
 		}
+	}
+}
+
+/** Scales the cost of `usage` by the price multiplier of the service tier for this model. */
+export function applyServiceTierPricing(
+	usage: Usage,
+	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+	model: Pick<Model<Api>, "id">,
+): void {
+	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
+	if (multiplier === 1) return;
+
+	usage.cost.input *= multiplier;
+	usage.cost.output *= multiplier;
+	usage.cost.cacheRead *= multiplier;
+	usage.cost.cacheWrite *= multiplier;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+}
+
+function getServiceTierCostMultiplier(
+	model: Pick<Model<Api>, "id">,
+	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+): number {
+	switch (serviceTier) {
+		case "ultrafast":
+			return model.id === "gpt-6-astra" ? 6 : 1;
+		case "flex":
+			return 0.5;
+		case "priority":
+		case "fast":
+			return model.id === "gpt-5.5" ? 2.5 : 2;
+		default:
+			return 1;
 	}
 }

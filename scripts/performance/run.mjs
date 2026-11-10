@@ -67,7 +67,7 @@ for (const limit of [4718592, 50000])
 add("ai", "ai-common", "ai.mjs", [
 	smoke ? "--smoke" : "--iterations=3",
 	`--samples=${samples}`,
-	"--cases=parse,repair,tools,transform,estimate,validate,agent",
+	"--cases=repair,tools,transform,estimate,validate,agent",
 ]);
 add("ai", "ai-queue-control", "ai.mjs", [
 	smoke ? "--smoke" : "--iterations=1",

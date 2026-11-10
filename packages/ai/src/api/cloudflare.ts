@@ -21,13 +21,6 @@ export const CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL =
 export const CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL =
 	"https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/anthropic";
 
-/** /anthropic forwards the ID unchanged; Anthropic accepts hyphenated Claude versions. */
-export function normalizeCloudflareModelId(provider: string, api: string, id: string): string {
-	return provider === "cloudflare-ai-gateway" && api === "anthropic-messages" && id.startsWith("claude-")
-		? id.replaceAll(".", "-")
-		: id;
-}
-
 /**
  * Direct OpenAI models that accept `additional_tools` items, and those that accept developer messages
  * mid-conversation (`OPENAI_TOOL_SEARCH_MODEL_IDS` and `OPENAI_MID_CONVO_MODEL_IDS` in
@@ -54,42 +47,40 @@ const OPENAI_MID_CONVO_MODEL_IDS = new Set([
 ]);
 
 export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel): TModel {
-	const id = normalizeCloudflareModelId(model.provider, model.api, model.id);
-	const normalized = id === model.id ? model : { ...model, id };
-	if (!isModelType(normalized, "chat") || normalized.provider !== "cloudflare-ai-gateway") return normalized;
+	if (!isModelType(model, "chat") || model.provider !== "cloudflare-ai-gateway") return model;
 	if (
-		normalized.api === "openai-responses" &&
-		normalized.baseUrl === CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL &&
-		OPENAI_MID_CONVO_MODEL_IDS.has(normalized.id)
+		model.api === "openai-responses" &&
+		model.baseUrl === CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL &&
+		OPENAI_MID_CONVO_MODEL_IDS.has(model.id)
 	) {
 		return {
-			...normalized,
+			...model,
 			compat: {
 				supportsMidConvoSystemMessages: true,
-				...(OPENAI_ADDITIONAL_TOOLS_MODEL_IDS.has(normalized.id) ? { supportsAdditionalTools: true } : {}),
-				...normalized.compat,
+				...(OPENAI_ADDITIONAL_TOOLS_MODEL_IDS.has(model.id) ? { supportsAdditionalTools: true } : {}),
+				...model.compat,
 			},
 		};
 	}
 	if (
-		normalized.api !== "anthropic-messages" ||
-		(normalized.id !== "claude-opus-5-5" && normalized.id !== "claude-fable-5-2") ||
-		normalized.baseUrl !== CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL
+		model.api !== "anthropic-messages" ||
+		(model.id !== "claude-opus-5-5" && model.id !== "claude-fable-5-2") ||
+		model.baseUrl !== CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL
 	) {
-		return normalized;
+		return model;
 	}
 	const compat = {
 		supportsMidConvoSystemMessages: true,
 		supportsMidConvoToolChanges: true,
 		supportsMidConvoEffort: true,
 		forceAdaptiveThinking: true,
-		...(normalized.id === "claude-fable-5-2" ? { supportsTemperature: false } : {}),
-		...normalized.compat,
+		...(model.id === "claude-fable-5-2" ? { supportsTemperature: false } : {}),
+		...model.compat,
 	};
 	return {
-		...normalized,
-		promptCache: normalized.promptCache ?? { short: 300, long: 3600 },
+		...model,
+		promptCache: model.promptCache ?? { short: 300, long: 3600 },
 		compat,
-		...(compat.supportsMidConvoEffort ? { thinkingLevelMap: { ...normalized.thinkingLevelMap, off: null } } : {}),
+		...(compat.supportsMidConvoEffort ? { thinkingLevelMap: { ...model.thinkingLevelMap, off: null } } : {}),
 	};
 }
