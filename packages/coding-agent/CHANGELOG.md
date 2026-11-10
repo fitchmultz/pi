@@ -43,7 +43,6 @@
 - `--session` and `--fork` lookups by partial, cross-project or missing ID now stop parsing each non-matching session after its header instead of reading every saved transcript in full. Matching sessions are still read in full, and matching, ordering, prompts and exit codes are unchanged ([#251](https://github.com/fitchmultz/pi/issues/251)).
 - Codemode keeps 6000 estimated tokens of script output by default instead of 10000. Longer output still links to the omitted and full output files; `max_output_tokens` raises the limit for one script.
 - Shortened the `read`, `codemode` and `background_command` prompt guidelines.
-- When a session's working directory no longer exists, for example after the project folder was renamed, interactive mode now offers `Continue`, `Fork`, or `Cancel` instead of only continuing. `Continue` runs the session in the current directory without storing the choice, as before; `Fork` copies it into the current directory as a new session with a new ID, like `--fork`, so the next resume no longer asks. This applies at startup (`--session`, `--resume`), to `/resume`, to `/import`, and to `ctx.switchSession()` from extensions ([#11060](https://github.com/earendil-works/pi/issues/11060))
 - A native working-session artifact that fails validation is now refused with the path of the first field that failed, for example `Invalid native working session at entries[12].message.content[0].type`, on `--working-session` restore, managed restart and SDK restore. The same artifacts are accepted and rejected as before. See [Native working sessions](docs/working-session.md#restore).
 
 ### Fixed
@@ -122,7 +121,6 @@
 - Fixed `/mcp` showing `Failed to refresh tools: MCP connection closed` instead of why an MCP server disconnected, such as a stdio server's error output, when the connection dropped while its tools were being refreshed.
 - Fixed quitting right after `/mcp reconnect` leaving a stdio MCP server that ignores SIGTERM running. Ending a session now waits for MCP connections dropped by a reconnect, sign-out or required sign-in to finish closing, as it already did for current connections.
 - Fixed aborting or timing out a bash command on macOS sometimes leaving the next command of a list such as `long_step; next_step` running after the abort was reported, when the abort landed while the shell was starting that command. pi now kills the command's process group once more after the shell exits.
-- Fixed `/import` of a session whose working directory no longer exists leaving a copy in the session directory, and continuing it leaving a second copy with the same ID (`s.jsonl` and `s-1.jsonl`); the failed copy is now removed ([#11060](https://github.com/earendil-works/pi/issues/11060))
 - Fixed the fork's own changelog entries never appearing in Pi. On a fork installation, `/changelog` now lists them last, under "Fork changes", after upstream's releases, and the startup "What's New" shows them once after each update to another fork commit. Their relative links open the fork repository at the installed commit instead of missing upstream pages. Builds without a fork release are unchanged. See [Fork installation](docs/quickstart.md#fork-installation).
 - Fixed `CustomMessageComponent` taking the fork's `compactView`, `showImages` and `imageWidthCells` constructor arguments before upstream's `markdownTransformers`, `messageId` and `timestamp`. An extension that constructed the component with upstream's seven arguments turned on compact view and lost its transformers, message ID and timestamp. Upstream's arguments are in upstream's positions again; the fork's three follow them, as `compactView` does on the other message components.
 - Fixed the retained performance fixtures, which imported deleted files and called changed APIs, so the smoke command in the [performance record](../../docs/performance.md) stopped at its eleventh case. That command runs to the end again and a script test now runs it; cases whose measured code is deleted were removed. The record and its results file list only measurements for code the fork still carries, with the recorded numbers unchanged.
@@ -130,6 +128,21 @@
 ### Removed
 
 - Removed the `discover_tools` builtin, its `instructionGroupsExtension` export and the `pi.refreshTools()` extension method. Extensions keep optional tools out of the prompt with `exposure: "deferred"`, and `tool_search` loads them on demand. On resume, a tool that discovery hid before it was ever declared comes back like a newly registered tool.
+
+## [1.5.2] - 2026-11-10
+
+### New Features
+
+- **Fork sessions whose folder is gone**: when a session's original folder was moved or deleted, you can now fork it into the current folder instead of only continuing, so later resumes no longer ask. See [Continue or switch sessions](docs/sessions.md#continue-or-switch-sessions).
+
+### Changed
+
+- When a session's working directory no longer exists, for example after the project folder was renamed, interactive mode now offers `Continue`, `Fork`, or `Cancel` instead of only continuing. `Continue` runs the session in the current directory without storing the choice, as before; `Fork` copies it into the current directory as a new session with a new ID, like `--fork`, so the next resume no longer asks. This applies at startup (`--session`, `--resume`), to `/resume`, to `/import`, and to `ctx.switchSession()` from extensions ([#11975](https://github.com/earendil-works/pi/pull/11975) by [@petrroll](https://github.com/petrroll), fixes [#11060](https://github.com/earendil-works/pi/issues/11060))
+
+### Fixed
+
+- Fixed `/import` of a session whose working directory no longer exists leaving a copy in the session directory, and continuing it leaving a second copy with the same ID (`s.jsonl` and `s-1.jsonl`); the failed copy is now removed ([#11975](https://github.com/earendil-works/pi/pull/11975) by [@petrroll](https://github.com/petrroll), fixes [#11060](https://github.com/earendil-works/pi/issues/11060))
+- Fixed Anthropic OAuth requests reporting an outdated Claude Code version
 
 ## [1.5.1] - 2026-11-09
 
@@ -315,6 +328,7 @@
 - Fixed `tool_search` and codemode `searchTools()` ranking a tool below tools that only mention its name in their descriptions, for example `peekaboo app` ranking `mcp__peekaboo__app` 14th. A tool matching more of the query's words now ranks above one matching fewer, a query word in a tool's name scores more than any number of mentions in its description, a tool whose whole name is in the query gets a large bonus, and long server instructions no longer lower the scores of that server's tools ([#11331](https://github.com/earendil-works/pi/issues/11331))
 - Fixed `tool_search` and codemode `searchTools()` finding nothing for Chinese, Japanese, Thai, and other non-ASCII queries, because the tokenizer kept only ASCII letters and digits. Words in any script now match, text without spaces between words such as `搜索记录` is split into words, and canonically equivalent text such as `café` and `cafe\u0301` matches ([#10816](https://github.com/earendil-works/pi/issues/10816), [#11037](https://github.com/earendil-works/pi/pull/11037) by [@haoqixu](https://github.com/haoqixu))
 - Fixed `pi update` stopping with `git clean -fdx failed with code 1` on Windows when another pi session had a git extension's native module or executable open. Windows cannot delete such files, so the update left the new code with the old dependencies. pi now warns, installs the dependencies anyway, and retries the clean on the next update ([#11597](https://github.com/earendil-works/pi/issues/11597))
+- Fixed two pi processes refreshing OAuth credentials at the same time when they reach the same `auth.json` through different paths, such as a symlinked `auth.json` in a separate agent directory. The auth lock now uses the file's resolved path ([#11655](https://github.com/earendil-works/pi/issues/11655))
 - Fixed tool rows and streamed answers highlighting the same code again on every redraw. A running codemode row highlighted its whole script on every progress update and timer tick, a complete `write` row its whole file on every update and expand toggle, a streamed `write` its first 50 lines on every delta, and a streamed answer every earlier code block on every delta. Rows now reuse their last highlighting until the code, theme, or loaded grammars change, and assistant messages keep their rendered Markdown blocks while streaming ([#10971](https://github.com/earendil-works/pi/issues/10971))
 - Fixed resized photos being sent as multi-megabyte PNGs even when JPEG was much smaller, causing large requests to fail or time out. Image resizing now tries the smaller encoding first ([#11551](https://github.com/earendil-works/pi/issues/11551))
 - Fixed `pi update --extensions` reporting success without warning when npm's stale registry metadata left a package at its old version. pi now reports the installed and expected versions ([#11536](https://github.com/earendil-works/pi/issues/11536))

@@ -46,6 +46,12 @@
 
 - Retired the fork's unreleased Anthropic stall timing hooks and lifecycle/Undici observation helper; generic opt-in cache tracing and retained investigation evidence remain.
 
+## [1.5.2] - 2026-11-10
+
+### Fixed
+
+- Fixed Anthropic OAuth requests reporting an outdated Claude Code version.
+
 ## [1.5.1] - 2026-11-09
 
 ### Breaking Changes
