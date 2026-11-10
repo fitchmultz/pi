@@ -10,6 +10,9 @@ import { createBashTool, createLocalBashOperations } from "../src/core/tools/bas
 const createWriteStream = fs.createWriteStream;
 let directory: string;
 const spills: fs.WriteStream[] = [];
+// The local shell stops reading at 1 MiB of unwritten output. The chunk that reaches the limit, one more
+// when Node resumes the pipes at exit, and the in-memory prefix written at spill creation come on top.
+const maximumQueuedBytes = 1048576 + 262144;
 
 function quote(value: string): string {
 	return `'${value.replace(/\\/g, "/").replace(/'/g, `'"'"'`)}'`;
@@ -78,7 +81,7 @@ describe("native Bash spill backpressure", () => {
 		"preserves all %s bytes with bounded slow-file queuing and a closed result",
 		async (owner) => {
 			const maximumQueued = spillSink(10);
-			const rows = Array.from({ length: 65536 }, (_, index) => `${String(index).padStart(6, "0")}abcdefghij\n`);
+			const rows = Array.from({ length: 262144 }, (_, index) => `${String(index).padStart(6, "0")}abcdefghij\n`);
 			const expected = `BEGIN\n${rows.join("")}END\n`;
 			const input = join(directory, "input");
 			fs.writeFileSync(input, expected);
@@ -91,11 +94,11 @@ describe("native Bash spill backpressure", () => {
 					exit_code: 0,
 					truncated: true,
 					full_output_path: path,
-					output: `${expected.slice(0, 524288)}\n\n[... 65546 bytes omitted ...]\n\n${expected.slice(-524288)}`,
+					output: `${expected.slice(0, 524288)}\n\n[... 3407882 bytes omitted ...]\n\n${expected.slice(-524288)}`,
 				});
 				expect(result.details!.truncation).toMatchObject({
-					totalBytes: 1114122,
-					totalLines: 65538,
+					totalBytes: 4456458,
+					totalLines: 262146,
 					outputLines: 2000,
 				});
 			} else {
@@ -105,15 +108,17 @@ describe("native Bash spill backpressure", () => {
 				expect(result.output).toBe(`${rows.slice(-1999).join("")}END`);
 			}
 			expect(fs.readFileSync(path, "utf8")).toBe(expected);
-			// The budget is independent of total output size and allows two OS pipe chunks at spill creation.
-			expect(maximumQueued()).toBeLessThanOrEqual(262144);
+			// The budget is independent of total output size.
+			expect(maximumQueued()).toBeLessThanOrEqual(maximumQueuedBytes);
+			// The command is read while earlier chunks are written. Waiting for each chunk's write queues two chunks.
+			expect(maximumQueued()).toBeGreaterThan(262144);
 			expect(spills.every((stream) => stream.closed && stream.writableFinished)).toBe(true);
 		},
 	);
 
 	it("preserves each pipe's byte order when stdout and stderr share a slow spill", async () => {
 		const maximumQueued = spillSink(10);
-		const stdout = Array.from({ length: 32768 }, (_, index) => String(index).padStart(6, "0")).join("");
+		const stdout = Array.from({ length: 262144 }, (_, index) => String(index).padStart(6, "0")).join("");
 		const stderr = stdout.replace(/\d/g, (digit) => String.fromCharCode(65 + Number(digit)));
 		const stdoutPath = join(directory, "stdout");
 		const stderrPath = join(directory, "stderr");
@@ -127,19 +132,23 @@ describe("native Bash spill backpressure", () => {
 		const combined = fs.readFileSync(result.details!.fullOutputPath!, "utf8");
 		expect(combined.replace(/[A-J]/g, "")).toBe(stdout);
 		expect(combined.replace(/\d/g, "")).toBe(stderr);
-		expect(maximumQueued()).toBeLessThanOrEqual(262144);
+		expect(maximumQueued()).toBeLessThanOrEqual(maximumQueuedBytes);
 	});
 
 	it("drains a slow final spill after the child exits without invoking the orphan-stdio cutoff", async () => {
 		spillSink(150);
-		const expected = `${"last chunk\n".repeat(20000)}END\n`;
+		const expected = `${"last chunk\n".repeat(200000)}END\n`;
 		const input = join(directory, "input");
 		fs.writeFileSync(input, expected);
 		const result = await createBashTool(directory).execute("final-drain", {
 			command: producer(`require('fs').createReadStream(${JSON.stringify(input)}).pipe(process.stdout)`),
 		});
 		expect(fs.readFileSync(result.details!.fullOutputPath!, "utf8")).toBe(expected);
-		expect(result.structuredContent).toMatchObject({ output: expected, exit_code: 0, truncated: false });
+		expect(result.structuredContent).toMatchObject({
+			output: `${expected.slice(0, 524288)}\n\n[... 1151428 bytes omitted ...]\n\n${expected.slice(-524288)}`,
+			exit_code: 0,
+			truncated: true,
+		});
 	});
 
 	it("retains literal raw binary bytes while decoding the structured result", async () => {

@@ -1,6 +1,6 @@
 # Performance results and reproduction
 
-The fork removes repeated work from native file tools, TUI rendering, model metadata, provider stream handling, Chord/MCP transport, sessions, Durable, Env, background jobs, evals and packaging. The recorded fixtures show large reductions on those paths. A matched rerun confirmed the branch-preparation, current-directory listing and long-token wrap/preview gains. AI tool validation (+33%), transform (+5.4%) and prose preview (+6.1%) were slower in all four matched pairs, with overlapping ranges and no isolated source attribution. One deliberate trade-off is slower: the native Bash tool and executor now keep the spill-file write queue at 64 KiB instead of letting it grow to 6.9-10.1 MiB, and writing 64 MiB of command output took about 28% longer. Startup and Biome showed no clear change.
+The fork removes repeated work from native file tools, TUI rendering, model metadata, provider stream handling, Chord/MCP transport, sessions, Durable, Env, background jobs, evals and packaging. The recorded fixtures show large reductions on those paths. A matched rerun confirmed the branch-preparation, current-directory listing and long-token wrap/preview gains. AI tool validation (+33%), transform (+5.4%) and prose preview (+6.1%) were slower in all four matched pairs, with overlapping ranges and no isolated source attribution. One deliberate trade-off is slower: the native Bash tool and executor bound the spill-file write queue instead of letting it grow to 6.9-10.1 MiB. Writing 64 MiB of command output took about 28% longer with the first bound of 64 KiB; with the current 1 MiB bound it took 1-3% longer than without a bound ([Bash output spill](#bash-output-spill-2026-11-10)). Startup and Biome showed no clear change.
 
 These are source-owner measurements of two measured source trees on one workstation, not of the final runtime: later prompt-cache, model-catalog and upstream v1.2.0 integration changes were not timed. They do not show that every CLI invocation, provider, device or downstream adapter becomes faster. Functional tests remain the authority for behavior, safety, cancellation and mutation isolation.
 
@@ -29,6 +29,37 @@ node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" \
 ```
 
 These results are separate from the older measurements below. Setup and source-root isolation follow the same reproduction instructions.
+
+## Bash output spill (2026-11-10)
+
+A command whose output exceeds the display limit has its full output written to a private file. Since the [matched qualification](#matched-qualification), the local shell had stopped reading from the command after every chunk until that chunk was written. Reads and writes never overlapped: at most one 64 KiB chunk waited, and writing 64 MiB took 28-29% longer.
+
+The local shell now counts the bytes it has handed over whose write is still pending. It stops reading from the command while 1 MiB is pending and reads again as soon as less is. `BashOperations` states the contract in its type: `onData` may return a promise that settles once the chunk is stored. A failed write still stops the command, and the tool and the executor still return only after the file is closed.
+
+The retained `bash` fixture compared three source roots. **Unbounded** is the fork with upstream's five spill files, which queue without limit and whose executor returns before the file is closed. **Per chunk** is `058648c75`, the code before this change. **1 MiB** is this change. Each row is 24 matched pairs of fresh processes in alternating order: 64 MiB of output in 64 KiB chunks to a normal file, timed from the native call to the spill stream's `close`. Values are median (minimum-maximum) milliseconds. Paired is the median of the 24 per-pair ratios.
+
+| Case | From | To 1 MiB | Paired | Faster pairs |
+| --- | ---: | ---: | ---: | ---: |
+| Bash tool, from per chunk | 134.4 (129.3-141.6) | 129.6 (121.4-153.6) | -3.6% | 19/24 |
+| Bash executor, from per chunk | 92.6 (88.6-113.5) | 84.9 (82.6-95.5) | -8.2% | 24/24 |
+| Bash tool, from unbounded | 121.5 (119.0-143.6) | 123.2 (118.8-134.9) | +1.3% | 6/24 |
+| Bash executor, from unbounded | 82.7 (79.5-154.5) | 84.7 (82.7-107.2) | +2.7% | 5/24 |
+
+In 16 further pairs per case, per chunk was 10.6% (tool) and 20.5% (executor) slower than unbounded on this workstation. The from-per-chunk rows varied most between runs: 12 earlier pairs per case at load 3.3-3.8 gave -9.2% and -15.4%, every pair faster.
+
+Memory: the spill-file write queue peaked at exactly 1,024 KiB in every 1 MiB process, against 64 KiB per chunk and 1.4-8.5 MiB unbounded. Median peak RSS was 192-200 MiB for the tool and 178 MiB for the executor, against 178 and 172 MiB per chunk and 209 and 185 MiB unbounded. The queue can exceed the limit by the chunk that reaches it, by one more chunk when Node resumes the pipes at shell exit, and by the in-memory prefix of at most 51,200 bytes written when the file is created: under 1.2 MiB with the 64 KiB pipe chunks seen in every run.
+
+With the fixture's 20 ms delayed file sink, three pairs per case took 22.4 s per chunk and 2.8 s with the limit.
+
+The limit and the rule for reading again come from measurement. Against unbounded, 16 pairs per case, limits of 128 KiB, 256 KiB, 512 KiB, 1 MiB, 2 MiB and 4 MiB were 4.3%, 2.3%, 1.7%, 3.4%, 2.4% and 2.5% slower for the tool and 7.7%, 6.6%, 4.4%, 2.8%, 3.5% and 3.9% slower for the executor. Nothing is gained above 1 MiB, the executor loses below 512 KiB, and 1 MiB is the amount Durable's shell spill buffers. Reading again only once every pending write has finished, as a stream's `drain` event does, was 4.3% (tool) and 8.1% (executor) slower than unbounded, and 1.9% (14/24 pairs) and 3.0% (20/24 pairs) slower than reading again below the limit. A 1 MiB stream high-water mark with `drain` measured the same as that: 3.5% and 6.6% slower than unbounded. The limit sweep and the 12 earlier pairs ran on an earlier revision of this change with the same two rules.
+
+Host: Node 24.22.2, macOS (Darwin 27.2.0) arm64, Apple M5 Max, 18 logical CPUs. The workstation was shared: one-minute load at process start was 4.2-5.8 for the four table rows and the read-again comparison, 4.9-9.9 for the limit sweep and the per-chunk-against-unbounded pairs, and 51-111 for the delayed sink, whose clock is set by its timers. All processes passed with identical output witnesses per case.
+
+```sh
+# BEFORE and AFTER are checkouts prepared as in "Setup and commands".
+node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --groups bash-tool-normal,bash-executor-normal --repeat 24 --out "$RESULTS/bash-spill"
+node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --groups bash-tool-slow,bash-executor-slow --repeat 3 --out "$RESULTS/bash-spill-slow"
+```
 
 ## Recorded results
 
@@ -104,7 +135,7 @@ Each process yields one value: the median of its emitted samples, or its one log
 
 Startup ran each root's built CLI in RPC mode with no session, a temporary HOME and agent directory, network calls denied and no personal extensions or settings. Each process timed nine starts after two warmups. Earlier scratch startup figures used a different command and are not comparable.
 
-The Bash rows are the measured cost of bounding memory. With a normal file sink, the baseline's spill-file write queue reached 6.9-10.1 MiB (median 8.4 MiB for the tool and 9.2 MiB for the executor); the final code's queue never exceeded 64 KiB, Node's default high-water mark. Writing 64 MiB took 28-29% longer, and every rotation pair was slower. The baseline executor returned before its spill stream closed in all four processes; the final executor returned after close in all four. The tool returned after close in both roots. Every process wrote exactly 67,108,864 bytes with the same SHA-256, and the display, truncation and structured-result witnesses matched. Stream `close` is not an `fsync` or crash-durability guarantee. The 20 ms delayed-sink backpressure control was not part of this rerun.
+The Bash rows are the measured cost of bounding memory. With a normal file sink, the baseline's spill-file write queue reached 6.9-10.1 MiB (median 8.4 MiB for the tool and 9.2 MiB for the executor); the final code's queue never exceeded 64 KiB, Node's default high-water mark. Writing 64 MiB took 28-29% longer, and every rotation pair was slower. The baseline executor returned before its spill stream closed in all four processes; the final executor returned after close in all four. The tool returned after close in both roots. Every process wrote exactly 67,108,864 bytes with the same SHA-256, and the display, truncation and structured-result witnesses matched. Stream `close` is not an `fsync` or crash-durability guarantee. The 20 ms delayed-sink backpressure control was not part of this rerun. The bound is now 1 MiB; [Bash output spill](#bash-output-spill-2026-11-10) has its measurement.
 
 Biome ran each root's `scripts/biome-check.mjs` wrapper without `--write` over one shared payload: a clean detached checkout of the baseline commit. The fixture hashed the payload's 1,967-file Git inventory, including `biome.json` and its Grit plugin, before and after every run; it never changed. The locked Biome packages are identical in both roots. The fallback row forces the unsupported-platform branch, which checks one file at a time through Biome's Node WASM bindings. The witness is the wrapper's exit status, not its diagnostics. The slowest baseline fallback process (61.7 s) started at load 34.1.
 
