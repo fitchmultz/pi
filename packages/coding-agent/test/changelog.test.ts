@@ -1,5 +1,13 @@
-import { describe, expect, test } from "vitest";
-import { type ChangelogEntry, getNewEntries, normalizeChangelogLinks } from "../src/utils/changelog.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import {
+	type ChangelogEntry,
+	getForkChangelog,
+	getNewEntries,
+	normalizeChangelogLinks,
+} from "../src/utils/changelog.ts";
 
 const entry: ChangelogEntry = {
 	major: 0,
@@ -45,6 +53,61 @@ describe("normalizeChangelogLinks", () => {
 				"[Local anchor](#settings)",
 			].join("\n"),
 		);
+	});
+});
+
+describe("getForkChangelog", () => {
+	const commit = "3c5823a7110f5ab73ae782aed162289eac7e3c89";
+	let tempDir: string;
+
+	function writeChangelog(lines: string[]): string {
+		const changelogPath = join(tempDir, "CHANGELOG.md");
+		writeFileSync(changelogPath, lines.join("\n"));
+		return changelogPath;
+	}
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-fork-changelog-"));
+	});
+
+	afterEach(() => {
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	test("returns the unreleased entries headed as fork changes, with relative links pinned to the fork commit", () => {
+		const changelogPath = writeChangelog([
+			"# Changelog",
+			"",
+			"## [Unreleased]",
+			"",
+			"### Added",
+			"",
+			"- Added managed restart. See [Restart](docs/restart.md#work-that-outlives-a-worker) ([#251](https://github.com/fitchmultz/pi/issues/251))",
+			"- Kept an upstream fix ([#11060](https://github.com/earendil-works/pi/issues/11060))",
+			"",
+			"## [1.5.1] - 2026-11-09",
+			"",
+			"- Released change. See [Settings](docs/settings.md)",
+			"",
+		]);
+
+		expect(getForkChangelog(changelogPath, commit)).toBe(
+			[
+				"## Fork changes (fitchmultz/pi@3c5823a)",
+				"",
+				"### Added",
+				"",
+				`- Added managed restart. See [Restart](https://github.com/fitchmultz/pi/blob/${commit}/packages/coding-agent/docs/restart.md#work-that-outlives-a-worker) ([#251](https://github.com/fitchmultz/pi/issues/251))`,
+				"- Kept an upstream fix ([#11060](https://github.com/earendil-works/pi/issues/11060))",
+			].join("\n"),
+		);
+	});
+
+	test("returns undefined when the changelog has no unreleased entries", () => {
+		expect(
+			getForkChangelog(writeChangelog(["## [Unreleased]", "", "## [1.5.1]", "", "- Released change"]), commit),
+		).toBe(undefined);
+		expect(getForkChangelog(writeChangelog(["## [1.5.1]", "", "- Released change"]), commit)).toBe(undefined);
 	});
 });
 
