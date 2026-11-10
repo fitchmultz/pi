@@ -5,12 +5,22 @@ import { getModel } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
+import type { ToolDefinition } from "../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { type CreateAgentSessionOptions, createAgentSession, type InlineExtension } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 
 type ToolOptions = Pick<CreateAgentSessionOptions, "tools" | "excludeTools" | "noTools" | "customTools">;
+
+/** A tool that registers active, as tools do unless they set `defaultActive: false`. */
+const activeTool = (name: string): ToolDefinition => ({
+	name,
+	label: name,
+	description: `Tool ${name} registered active`,
+	parameters: Type.Object({}),
+	execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+});
 
 describe("defaultTools setting", () => {
 	let tempDir: string;
@@ -141,6 +151,30 @@ describe("defaultTools setting", () => {
 		session.dispose();
 	});
 
+	it("removes tools that extensions and the SDK register active with -name", async () => {
+		const session = await createSession(
+			["-static_tool", "-dynamic_tool", "-sdk_tool", "-bash"],
+			{ customTools: [activeTool("sdk_tool")] },
+			[
+				(pi) => {
+					pi.registerTool(activeTool("static_tool"));
+					pi.registerTool(activeTool("kept_tool"));
+					// An extension's replacement of a built-in tool.
+					pi.registerTool(activeTool("bash"));
+					// Registered after the session started, as MCP tools are.
+					pi.on("session_start", () => pi.registerTool(activeTool("dynamic_tool")));
+				},
+			],
+		);
+		await session.bindExtensions({});
+
+		expect(session.getActiveToolNames()).toEqual(["read", "edit", "write", "kept_tool"]);
+		// The tools stay registered, so a later selection can activate them.
+		session.setActiveToolsByName([...session.getActiveToolNames(), "dynamic_tool"]);
+		expect(session.getActiveToolNames()).toEqual(["read", "edit", "write", "kept_tool", "dynamic_tool"]);
+		session.dispose();
+	});
+
 	it("preserves explicit tool option precedence", async () => {
 		const allowlistedSession = await createSession(["grep"], { tools: ["read"] });
 		expect(allowlistedSession.getActiveToolNames()).toEqual(["read"]);
@@ -191,6 +225,27 @@ describe("defaultTools setting", () => {
 		toolLess.dispose();
 	});
 
+	it("applies -name tool options to tools registered active", async () => {
+		const extension: InlineExtension = (pi) => pi.registerTool(activeTool("active_tool"));
+
+		const removed = await createSession(["+grep"], { tools: ["-active_tool"] }, [extension]);
+		expect(removed.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "grep"]);
+		removed.dispose();
+
+		// Tool options apply after the setting, so +name re-adds a tool the setting removes.
+		const readded = await createSession(["-active_tool"], { tools: ["+active_tool"] }, [extension]);
+		expect(readded.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "active_tool"]);
+		readded.dispose();
+
+		// noTools "builtin" overrides the setting, -name entries included, but not the tools option.
+		const overridden = await createSession(["-active_tool"], { noTools: "builtin" }, [extension]);
+		expect(overridden.getActiveToolNames()).toEqual(["active_tool"]);
+		overridden.dispose();
+		const builtinless = await createSession([], { noTools: "builtin", tools: ["-active_tool"] }, [extension]);
+		expect(builtinless.getActiveToolNames()).toEqual([]);
+		builtinless.dispose();
+	});
+
 	it("rejects invalid tool modifier options", async () => {
 		await expect(createSession([], { tools: ["read", "+grep"] })).rejects.toThrow(
 			"Invalid tools option: tool names cannot be mixed with +name or -name entries",
@@ -214,6 +269,10 @@ describe("defaultTools setting", () => {
 
 		const writeSettings = (settings: object) =>
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify(settings));
+		const writeProjectSettings = (settings: object) => {
+			mkdirSync(join(tempDir, ".pi"), { recursive: true });
+			writeFileSync(join(tempDir, ".pi", "settings.json"), JSON.stringify(settings));
+		};
 
 		async function createFileSession(
 			options: ToolOptions = {},
@@ -298,6 +357,70 @@ describe("defaultTools setting", () => {
 			},
 		);
 
+		it.each([
+			{ source: "user settings", user: { defaultTools: ["-default_tool", "-new_default"] }, project: {} },
+			{ source: "project settings", user: {}, project: { defaultTools: ["-default_tool", "-new_default"] } },
+			{ source: "tool options", user: {}, project: {}, tools: ["-default_tool", "-new_default"] },
+		])("keeps tools registered active off that $source remove with -name", async ({ user, project, tools }) => {
+			writeSettings(user);
+			writeProjectSettings(project);
+			let reloaded = false;
+			const session = await createFileSession({ tools }, [
+				(pi) => {
+					pi.registerTool(activeTool("default_tool"));
+					// Registered by the reloaded extension only.
+					if (reloaded) pi.registerTool(activeTool("new_default"));
+				},
+			]);
+			expect(session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+
+			reloaded = true;
+			await session.reload();
+			expect(session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+			session.dispose();
+		});
+
+		it("enables a tool registered active once no -name entry removes it", async () => {
+			writeSettings({ defaultTools: ["-default_tool", "-other_default"] });
+			const session = await createFileSession({}, [
+				(pi) => {
+					pi.registerTool(activeTool("default_tool"));
+					pi.registerTool(activeTool("other_default"));
+				},
+			]);
+			expect(session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+
+			// A project +name entry changes the user's selection.
+			writeProjectSettings({ defaultTools: ["+default_tool"] });
+			await session.reload();
+			expect(session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "default_tool"]);
+
+			writeSettings({ defaultTools: ["-default_tool"] });
+			await session.reload();
+			expect(session.getActiveToolNames()).toEqual([
+				"read",
+				"bash",
+				"edit",
+				"write",
+				"default_tool",
+				"other_default",
+			]);
+
+			// Like other tools removed from the setting, a tool that is on stays on when its entry returns.
+			writeSettings({ defaultTools: ["-default_tool", "-other_default"] });
+			writeProjectSettings({});
+			await session.reload();
+			expect(session.getActiveToolNames()).toEqual([
+				"read",
+				"bash",
+				"edit",
+				"write",
+				"default_tool",
+				"other_default",
+			]);
+			session.dispose();
+		});
+
 		it("keeps tools removed by -name tool options removed on reload", async () => {
 			writeSettings({ defaultTools: ["read"] });
 			const session = await createFileSession({ tools: ["-bash", "+grep"] });
@@ -380,8 +503,8 @@ describe("defaultTools setting", () => {
 			return sessionManager;
 		}
 
-		async function resume(sessionManager: SessionManager, options: ToolOptions = {}) {
-			const settingsManager = SettingsManager.inMemory();
+		async function resume(sessionManager: SessionManager, options: ToolOptions = {}, defaultTools?: string[]) {
+			const settingsManager = SettingsManager.inMemory(defaultTools ? { defaultTools } : {});
 			const resourceLoader = new DefaultResourceLoader({
 				cwd: tempDir,
 				agentDir,
@@ -413,6 +536,40 @@ describe("defaultTools setting", () => {
 			// Built-in tools and tools registered inactive stay inactive.
 			const session = await resume(createRecordedSession(["read", "grep"]));
 			expect(session.getActiveToolNames().sort()).toEqual(["active_tool", "grep", "read"]);
+			session.dispose();
+		});
+
+		/** A session whose branch to `target` records `read` and `grep`, and whose leaf removed `grep`. */
+		function createNavigableSession(): { sessionManager: SessionManager; target: string } {
+			const sessionManager = createRecordedSession(["read", "grep"]);
+			const target = sessionManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+			recordLoadoutChange(sessionManager, [], ["grep"]);
+			return { sessionManager, target };
+		}
+
+		it("keeps a never-mentioned extension tool off that the setting removes with -name", async () => {
+			const { sessionManager, target } = createNavigableSession();
+			const session = await resume(sessionManager, {}, ["-active_tool"]);
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+
+			// The target branch never mentions active_tool either.
+			await session.navigateTree(target, { summarize: false });
+			expect(session.getActiveToolNames()).toEqual(["read", "grep"]);
+			session.dispose();
+
+			// The setting forms the selection of a new session; a recorded tool stays in a resumed one.
+			const recorded = await resume(createRecordedSession(["read", "active_tool"]), {}, ["-active_tool"]);
+			expect(recorded.getActiveToolNames()).toEqual(["read", "active_tool"]);
+			recorded.dispose();
+		});
+
+		it("keeps a never-mentioned extension tool off on tree navigation that -name tool options remove", async () => {
+			const { sessionManager, target } = createNavigableSession();
+			const session = await resume(sessionManager, { tools: ["-active_tool"] });
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+
+			await session.navigateTree(target, { summarize: false });
+			expect(session.getActiveToolNames()).toEqual(["read", "grep"]);
 			session.dispose();
 		});
 

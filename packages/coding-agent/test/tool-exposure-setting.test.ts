@@ -167,6 +167,18 @@ describe("toolExposure setting through the SDK", () => {
 			expect(session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write", "lookup_weather"]);
 		});
 
+		it("leaves a tool undeclared whose entry was removed when defaultTools removes the tool", async () => {
+			writeGlobal({ ...DEFERRED, defaultTools: ["-lookup_weather"] });
+			const session = await createFileSession();
+			expect(session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+
+			// A new session would not declare the tool either.
+			writeGlobal({ defaultTools: ["-lookup_weather"] });
+			await session.reload();
+			expect(exposureOf(session)).toBe("direct");
+			expect(session.getActiveToolNames()).toEqual(["read", "bash", "edit", "write"]);
+		});
+
 		it("follows defaultTools for built-in tools whose entry was removed", async () => {
 			writeGlobal({ toolExposure: { edit: "hidden", grep: "deferred" } });
 			const session = await createFileSession();
