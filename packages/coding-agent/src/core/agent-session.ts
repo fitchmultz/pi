@@ -3879,10 +3879,12 @@ export class AgentSession {
 		const summarized = getMessagesBeforeKept(projection, firstKeptEntryId);
 		const firstKept = summarized && projection.messages[summarized.length];
 		// The provider keeps the reasoning of the kept turns only when they start with its reply to the
-		// summarized request. A failed reply is not sent again, so it cannot start them either.
+		// summarized request. A failed reply is not sent again, so it cannot start them either. A block
+		// written from an earlier block alone does not keep it (measured), so messages must precede.
 		if (
 			!summarized ||
 			summarized[0]?.role !== "system" ||
+			summarized.every((message) => message.role === "system") ||
 			firstKept?.role !== "assistant" ||
 			firstKept.stopReason === "error" ||
 			firstKept.stopReason === "aborted"

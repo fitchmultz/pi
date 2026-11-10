@@ -355,6 +355,54 @@ describe("AgentSession provider summary block", () => {
 		expect(getMessageText(harness.session.messages.at(-1))).toBe("done");
 	});
 
+	it("stores the compaction without a block when it keeps from the first kept turn of the block before it", async () => {
+		let turn = 0;
+		let firstKeptEntryId: string | undefined;
+		const harness = await createHarness({
+			tools: [lookup],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", (event) => {
+						turn++;
+						if (turn !== 2 && turn !== 3) return;
+						firstKeptEntryId ??= event.messageEntryId;
+						return {
+							entries: [
+								...event.entries,
+								{
+									type: "compaction",
+									summary: `summary at turn ${turn}`,
+									firstKeptEntryId,
+									providerSummary: {},
+								},
+							],
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const requests = useSummaryModel(harness);
+		harness.setResponses([
+			callLookup("a"),
+			callLookup("b"),
+			blockReply(harness),
+			callLookup("c"),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("start");
+
+		// Only the first block stands before the kept turns of the second compaction: nothing to summarize.
+		const [first, second] = getCompactions(harness);
+		expect(first.providerSummary?.block).toEqual(block);
+		expect(second.providerSummary).toMatchObject({ reason: "cut", seconds: 0 });
+		expect(second.providerSummary).not.toHaveProperty("block");
+		expect(requests.filter((request) => request.options?.providerSummary)).toHaveLength(1);
+		expect(getMessageText(harness.session.messages.at(-1))).toBe("done");
+	});
+
 	it("asks for the block of a session_before_compact result, and Escape stops only that request", async () => {
 		const harness = await createHarness({
 			tools: [lookup],

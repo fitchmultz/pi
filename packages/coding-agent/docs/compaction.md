@@ -369,7 +369,7 @@ Entry with a block, request to the model that made it:
 
 The leading system message is the one that led the context before the compaction. Pi does not fold later prompt and tool changes into it for such an entry, because a changed prompt or tool list also invalidates the kept reasoning. The summarized messages can have changed the tools and the prompt:
 
-- **Tools.** The block restores the tools that the summarized messages added, for the model that made it. Pi stores the same changes on the entry (`providerSummary.toolsAdded`, `providerSummary.toolsRemoved`) and puts them in a system message directly after the leading one. That message tells Pi's own tool state and every other model which tools exist. It is not sent to the model that made the block, so no tool definition is sent twice.
+- **Tools.** The block restores the tools that the summarized messages added and removed, for the model that made it. Pi stores the same changes on the entry (`providerSummary.toolsAdded`, `providerSummary.toolsRemoved`) and puts them in a system message directly after the leading one. That message tells Pi's own tool state and every other model which tools exist. It is not sent to the model that made the block, so no tool definition is sent twice.
 - **Prompt sections.** The block does not restore them. Pi states the changed sections again in a system message before the next model request, after the kept entries.
 
 In messages, the context of such an entry is:
@@ -384,7 +384,7 @@ Only the model that made a block can read it, and only below the leading system 
 - a request whose conversation a `context` handler changed
 - a request with a system prompt that a `before_agent_start` handler replaced
 
-The first kept message must be an assistant message, and it must not have failed or been aborted. The block request is then the request that this message answered, sent again with `instructions`. With any other start Pi stores the compaction without a block (`reason: "cut"`): a user message, a custom message or a tool result as first kept message, no kept message at all (`firstKeptEntryId` is the compaction's own ID or an entry without a message, or `null` in a `turn_end` draft), or no leading system message.
+The first kept message must be an assistant message, and it must not have failed or been aborted. The block request is then the request that this message answered, sent again with `instructions`. With any other start Pi stores the compaction without a block (`reason: "cut"`): a user message, a custom message or a tool result as first kept message, no kept message at all (`firstKeptEntryId` is the compaction's own ID or an entry without a message, or `null` in a `turn_end` draft), no leading system message, or no message before the first kept one (the kept entries start where those of an earlier block started; a block written from a block alone does not keep the reasoning).
 
 Pi never cancels the compaction and never runs its own summarizer because of `providerSummary`. In each of these cases it stores the entry without a block, and the compaction behaves as without the opt-in:
 
@@ -418,7 +418,7 @@ A compaction entry in a `turn_end` result accepts the same `providerSummary` fie
 The session file records what is needed to compare compactions with and without a block:
 
 - The compaction entry: `providerSummary` as above, on every compaction that asked for a block.
-- Each assistant message from an Anthropic Messages model whose request carried reasoning blocks: a diagnostic `{ type: "anthropic_thinking_blocks", details: { sent, dropped } }` in `message.diagnostics`. `sent` counts the reasoning blocks in the request body, `dropped` the ones the API reported as dropped. After a compaction, `dropped: 0` with `sent` above 0 on the next reply means the kept reasoning stayed valid.
+- Each assistant message from an Anthropic Messages model whose request carried reasoning blocks: a diagnostic `{ type: "anthropic_thinking_blocks", details: { sent, dropped } }` in `message.diagnostics`. `sent` counts the reasoning blocks in the request body, `dropped` the ones the API reported as dropped. After a compaction, `dropped: 0` with `sent` above 0 on the next reply means the kept reasoning stayed valid. On the direct Anthropic route Pi sends message threads when the context has no block: such a request body holds only the new messages, so the diagnostic is absent on most replies and appears on the first request after a compaction, which is sent in full.
 
 In a `context_with_system` handler, leave every message before the `compactionSummary` message as it is when the first message carries `providerSummary`. Do not change the leading system message, do not put a message between it and the kept entries, and do not change, remove or reorder the kept messages. Each of these makes the model drop the kept reasoning again; the request stays valid and nothing a handler adds is lost. State for the model belongs after the `compactionSummary` message.
 
