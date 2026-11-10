@@ -210,7 +210,7 @@ describe("Bm25Ranker", () => {
 		const all = (query: string) => ranker.rank(query, documents, 8).map((match) => match.name);
 
 		it("needs more than half of the query's terms in the tool, one of them in a name", () => {
-			expect(strong("tracker list issues")).toEqual(["mcp__tracker__list_issues", "mcp__tracker__save_issue"]);
+			expect(strong("tracker issues list")).toEqual(["mcp__tracker__list_issues", "mcp__tracker__save_issue"]);
 			// Two of four terms is not more than half.
 			expect(strong("tracker issue comment thread")).toEqual([]);
 			// Server instructions are shared by every tool of the server and do not count.
@@ -239,7 +239,14 @@ describe("Bm25Ranker", () => {
 
 		it("takes only the named tools when the query is nothing but names", () => {
 			// `list_issues` has three of the four terms of the first query, in its name.
-			for (const query of ["mcp__tracker__save_issue", "tracker__save_issue", "save issue"]) {
+			for (const query of [
+				"mcp__tracker__save_issue",
+				"tracker__save_issue",
+				"save issue",
+				// A `__` separator written as models write it.
+				"tracker_save_issue",
+				"tracker save issue",
+			]) {
 				expect(strong(query)).toEqual(["mcp__tracker__save_issue"]);
 			}
 			expect(strong("save_issue get_metric").sort()).toEqual([
@@ -270,6 +277,8 @@ describe("Bm25Ranker", () => {
 			// The namespace name counts, the namespace instructions do not.
 			expect(all("+datadog query")).toEqual(["mcp__datadog__get_metric"]);
 			expect(all("+skill query")).toEqual([]);
+			// A word in another script is a requirement too: no name has it.
+			expect(all("+文档 query")).toEqual([]);
 		});
 	});
 });

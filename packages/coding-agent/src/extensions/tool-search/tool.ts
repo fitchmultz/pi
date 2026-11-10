@@ -166,11 +166,14 @@ function normalizeName(name: string): string {
 
 /**
  * Whether `query` is the tool's name: its full name or a suffix after a `__` separator, so
- * `thread_read` and `app__thread_read` both name `mcp__app__thread_read`.
+ * `thread_read` and `app__thread_read` both name `mcp__app__thread_read`. A `__` separator may be
+ * written `_`, as models do: `app_thread_read` and `app thread read` name it too.
  */
 function isExactNameQuery(query: string, name: string): boolean {
-	const normalized = normalizeName(name);
-	return normalized === query || normalized.endsWith(`__${query}`);
+	const single = (text: string) => text.replace(/_+/g, "_");
+	const wanted = single(query);
+	const segments = normalizeName(name).split("__");
+	return segments.some((_, index) => single(segments.slice(index).join("__")) === wanted);
 }
 
 /** A query word that names a tool or a server instead of describing one. */
@@ -183,8 +186,8 @@ interface NameWord {
 	required: boolean;
 }
 
-/** Leading and trailing characters that are not part of a name, such as `+`, quotes, and commas. */
-const NAME_EDGES = /^[^A-Za-z0-9_$]+|[^A-Za-z0-9_$]+$/g;
+/** Leading and trailing characters that are not part of a word, such as `+`, quotes, and commas. */
+const NAME_EDGES = /^[^\p{L}\p{M}\p{N}_$]+|[^\p{L}\p{M}\p{N}_$]+$/gu;
 
 /**
  * The words of a query that name a tool or a server: each `+word`, each word with an underscore, as

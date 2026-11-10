@@ -187,7 +187,7 @@ Scripts run in a QuickJS sandbox and reach the other tools through `tools.<name>
 
 A tool is a good match when one of these holds:
 
-- The query names it. The whole query is its name, as in `linear_list_teams` or `linear list teams`, or one word is and is written as a name: with an underscore, or as `+word`.
+- The query names it. The whole query is its name, or the part of its name after a `__` separator, with `_` or spaces between the parts: `linear_list_teams` and `linear list teams` name `mcp__linear__list_teams`. One word of a longer query names a tool when it is written as a name: with an underscore, or as `+word`.
 - Every word of the query is in the tool's name, its description and parameters, or its server's name.
 - More than half of the words are, and one or more of them is in the tool's name or its server's name.
 

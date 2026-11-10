@@ -248,6 +248,7 @@ describe("tool_search", () => {
 			{ query: "fleet_runs inspect", limit: 1 },
 			{ query: "+background_command start command", limit: 2 },
 			{ query: "background_command start command", limit: 1 },
+			{ query: "+café query" },
 		);
 		expect(results[0]).toEqual({
 			text: "fleet_runs is not available in this session; tool_search cannot load it.",
@@ -264,6 +265,10 @@ describe("tool_search", () => {
 				"- metrics_query: Query metrics. Set start and end to choose the command interval.",
 			].join("\n"),
 			details: { loaded: [], listed: ["metrics_query"], unavailable: ["background_command"] },
+		});
+		expect(results[3]).toEqual({
+			text: "No tool or server in this session has café in its name.",
+			details: { loaded: [], unavailable: ["café"] },
 		});
 		expect(active).toEqual(["tool_search", "board_status"]);
 	});
