@@ -1,6 +1,5 @@
 import type * as NodeZlib from "node:zlib";
 import { raceWithAbortSignal } from "./abort.ts";
-import type { CacheTrace } from "./cache-trace.ts";
 
 const MIN_COMPRESSION_BYTES = 1024;
 const MAX_OPENAI_BYTES = 128 * 1024 * 1024;
@@ -90,15 +89,6 @@ async function compressRequest(
 export function createRequestCompressionFetch(
 	api: CompressedApi,
 	fetch?: typeof globalThis.fetch,
-	trace?: CacheTrace,
 ): typeof globalThis.fetch {
-	return async (input, init) => {
-		const compressed = await compressRequest(api, input, init);
-		// Preserve both the SDK's final JSON and the actual wire bytes in opt-in tracing.
-		return (
-			trace?.wrapFetch(fetch, typeof init?.body === "string" ? init.body : undefined) ??
-			fetch ??
-			globalThis.fetch
-		)(input, compressed);
-	};
+	return async (input, init) => (fetch ?? globalThis.fetch)(input, await compressRequest(api, input, init));
 }

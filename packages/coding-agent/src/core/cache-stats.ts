@@ -6,7 +6,7 @@ const NOISE_FLOOR_TOKENS = 1024;
 
 type ReadPriceSource = "usage" | "ancestor" | "catalog" | "unknown";
 
-// ponytail: token counts do not establish prefix identity; use native cache traces to diagnose causes.
+// ponytail: token counts do not establish prefix identity.
 /** A token-count overlap estimate, not proof of a changed cache key or avoidable billing. */
 export interface CacheMiss {
 	/** min(previous prompt, current prompt) - current cache reads; prefixes are not compared. */

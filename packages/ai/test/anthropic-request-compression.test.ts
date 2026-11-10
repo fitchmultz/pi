@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,7 +50,6 @@ function request(body: RequestInit["body"] = JSON.stringify({ text: content })):
 afterEach(() => {
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
-	vi.unstubAllEnvs();
 	for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -154,10 +153,7 @@ describe("direct Anthropic request gzip", () => {
 		expect(paths).toEqual(["/v1/oauth/token", "/v1/messages", "/v1/messages"]);
 	});
 
-	it("keeps retry payloads and opt-in logical/wire tracing accurate without recording plaintext", async () => {
-		const dir = directory();
-		vi.stubEnv("PI_CACHE_TRACE_DIR", dir);
-		vi.stubEnv("PI_CACHE_TRACE_SESSION_ID", "");
+	it("sends the same compressed payload on a retry", async () => {
 		const bodies: Uint8Array[] = [];
 		const result = await stream(model, context, {
 			apiKey: "private-api-key",
@@ -178,23 +174,7 @@ describe("direct Anthropic request gzip", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(bodies).toHaveLength(2);
 		expect(bodies[0]).toEqual(bodies[1]);
-		const log = readdirSync(dir)
-			.filter((name) => name.endsWith(".jsonl"))
-			.map((name) => readFileSync(join(dir, name), "utf8"))
-			.join("");
-		const records = log
-			.trim()
-			.split("\n")
-			.map((line) => JSON.parse(line));
-		const logical = records.filter((record) => record.kind === "logical");
-		expect(logical).toHaveLength(1);
-		expect(logical[0].fullBody.bytes).toBe(gunzipSync(bodies[0]).byteLength);
-		const wire = records.filter((record) => record.kind === "wire");
-		expect(wire).toHaveLength(2);
-		expect(wire[0].envelope.bytes).toBe(bodies[0].byteLength);
-		expect(records.filter((record) => record.kind === "coverage_gap")).toEqual([]);
-		expect(log).not.toContain("private-api-key");
-		expect(log).not.toContain("日本語");
+		expect(gunzipSync(bodies[0]).toString()).toContain("日本語");
 	});
 
 	it("sends correct bytes over HTTP and lets native fetch decode compressed SSE responses", async () => {

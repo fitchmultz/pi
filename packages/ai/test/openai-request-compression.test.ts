@@ -1,8 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type * as NodeZlib from "node:zlib";
 import { gzipSync, zstdCompressSync, zstdDecompressSync } from "node:zlib";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -38,7 +35,6 @@ const sse = `data: ${JSON.stringify({
 	},
 })}\n\n`;
 const response = () => new Response(sse, { headers: { "content-type": "text/event-stream" } });
-const directories: string[] = [];
 function request(body: RequestInit["body"] = JSON.stringify({ text: content })): RequestInit {
 	return { method: "POST", headers: { "content-type": "application/json" }, body };
 }
@@ -46,8 +42,6 @@ function request(body: RequestInit["body"] = JSON.stringify({ text: content })):
 afterEach(() => {
 	vi.restoreAllMocks();
 	vi.unstubAllGlobals();
-	vi.unstubAllEnvs();
-	for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 describe("direct OpenAI Responses request zstd", () => {
@@ -120,11 +114,7 @@ describe("direct OpenAI Responses request zstd", () => {
 		expect(fetch).toHaveBeenCalledOnce();
 	});
 
-	it("keeps retry payloads and opt-in logical/wire trace fingerprints accurate", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-openai-compression-"));
-		directories.push(dir);
-		vi.stubEnv("PI_CACHE_TRACE_DIR", dir);
-		vi.stubEnv("PI_CACHE_TRACE_SESSION_ID", "");
+	it("sends the same compressed payload on a retry", async () => {
 		const bodies: Uint8Array[] = [];
 		const result = await stream(model, context, {
 			apiKey: "sk-private-test-key",
@@ -139,23 +129,7 @@ describe("direct OpenAI Responses request zstd", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(bodies).toHaveLength(2);
 		expect(bodies[0]).toEqual(bodies[1]);
-		const log = readdirSync(dir)
-			.filter((name) => name.endsWith(".jsonl"))
-			.map((name) => readFileSync(join(dir, name), "utf8"))
-			.join("");
-		const records = log
-			.trim()
-			.split("\n")
-			.map((line) => JSON.parse(line));
-		const logical = records.filter((record) => record.kind === "logical");
-		expect(logical).toHaveLength(1);
-		expect(logical[0].fullBody.bytes).toBe(zstdDecompressSync(bodies[0]).byteLength);
-		const wire = records.filter((record) => record.kind === "wire");
-		expect(wire).toHaveLength(2);
-		expect(wire[0].envelope.bytes).toBe(bodies[0].byteLength);
-		expect(records.filter((record) => record.kind === "coverage_gap")).toEqual([]);
-		expect(log).not.toContain("sk-private-test-key");
-		expect(log).not.toContain("日本語");
+		expect(zstdDecompressSync(bodies[0]).toString()).toContain("日本語");
 	});
 
 	it("sends compressed bytes over HTTP without changing compressed SSE response handling", async () => {
