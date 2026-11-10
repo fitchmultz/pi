@@ -195,7 +195,7 @@ Each server tool is registered as `mcp__<server>__<tool>`. The server's `exposur
 | Exposure | Behavior | Typical use |
 |---|---|---|
 | `codemode` (default) | Callable from [`codemode`](cli.md#tools) scripts, but neither declared to the model nor listed in the codemode description. Scripts find tools with `searchTools()`, `describeTool()`, or `ALL_TOOLS`. | General MCP servers, especially when scripts should combine or filter calls. |
-| `deferred` | Not declared until [`tool_search`](cli.md#tools) loads a match for the next model call. | Large servers whose tools should be called directly after discovery. |
+| `deferred` | Not declared until [`tool_search`](cli.md#tool-search) loads a good match for the next model call. | Large servers whose tools should be called directly after discovery. |
 | `direct` | Declared to the model like a built-in tool and also callable from codemode. | Small, frequently used tool sets. |
 | `hidden` | Registered but unreachable. | Servers or tools that should remain unavailable. |
 

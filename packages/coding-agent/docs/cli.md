@@ -157,7 +157,7 @@ Built-in extensions also add the following tools. `background_command` starts, i
 |---|---|
 | `background_command` | Start, inspect, and cancel durable background shell commands that survive Pi exit and report completion later |
 | `codemode` | Run JavaScript that calls the other tools, for example in parallel with `Promise.allSettled`; only the script's output reaches the model |
-| `tool_search` | Search tools that are not declared to the model (`codemode` and `deferred` exposure, such as MCP tools) and declare the matches for the next call |
+| `tool_search` | Search tools that are not declared to the model (`codemode` and `deferred` exposure, such as MCP tools) and declare the good matches for the next call |
 
 ### Enable codemode
 
@@ -183,7 +183,30 @@ Scripts run in a QuickJS sandbox and reach the other tools through `tools.<name>
 
 ### Tool search
 
-`tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`. It uses the same ranking as `searchTools()` over tools that are not declared yet and declares the matches for the next model call. Loaded tools are recorded in the session like other tool changes, so they stay declared on that branch.
+`tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`. It uses the same ranking as `searchTools()` over the tools with `codemode` or `deferred` exposure and declares the good matches for the next model call, up to `limit` (default 8). Loaded tools are recorded in the session like other tool changes, so they stay declared on that branch.
+
+A tool is a good match when one of these holds:
+
+- The query names it. The whole query is its name, or the part of its name after a `__` separator, with `_` or spaces between the parts: `linear_list_teams` and `linear list teams` name `mcp__linear__list_teams`. One word of a longer query names a tool when it is written as a name: with an underscore, or as `+word`.
+- Every word of the query is in the tool's name, its description and parameters, or its server's name.
+- More than half of the words are, and one or more of them is in the tool's name or its server's name.
+
+The description and instructions of an MCP server rank its tools but do not make one a good match, because every tool of the server shares them. A query that only names tools loads only those tools.
+
+A `+word` is a requirement: only tools whose name or server name contains the word are matches. `+linear create issue` searches the `linear` server's tools only.
+
+The result tells the model what to do next:
+
+| Case | Result |
+| --- | --- |
+| Good matches | `Loaded 2 tools. They are available from your next call:` and one line per tool: its name and the first line of its description. |
+| No good match | `No tool is a close match, so none was loaded. Closest matches; search for an exact name to load one:` and the same lines for the best `limit` matches. Nothing is loaded. A second search for one of the names loads that tool. |
+| A good match, or a tool the query names, is already declared | `<name> is already active; call it directly.` The search does not load the next best tool instead. |
+| The query names a registered tool that `tool_search` does not search, for example a `hidden` tool or a deselected built-in tool | `<name> is not available in this session; tool_search cannot load it.` |
+| The query names something that no tool name and no server name contains, and nothing was loaded | `No tool or server in this session has <name> in its name.` |
+| Nothing shares a word with the query | `No matching tools found.` |
+
+Words that name a tool or a server in these messages are the `+words`, the words with an underscore, and a query of one word.
 
 <a id="resource-options"></a>
 

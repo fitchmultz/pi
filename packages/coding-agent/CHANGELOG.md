@@ -49,6 +49,7 @@
 - `read`, `grep`, `ls` and `find` errors for a path that is not found add one line: the nearest existing parent directory and up to 12 of its entries closest to the missing name. See [Remote Execution](docs/extensions.md#remote-execution) for custom operations.
 - Shortened the `read`, `codemode` and `background_command` prompt guidelines.
 - A native working-session artifact that fails validation is now refused with the path of the first field that failed, for example `Invalid native working session at entries[12].message.content[0].type`, on `--working-session` restore, managed restart and SDK restore. The same artifacts are accepted and rejected as before. See [Native working sessions](docs/working-session.md#restore).
+- `tool_search` loads only good matches: a tool the query names, or one whose name, description and parameters hold every word of the query, or more than half of them with one in the tool or server name. Otherwise it lists the closest tools without loading them, and a search for one of the names loads it. It used to load every tool that shared one word with the query, so a search for a tool that did not exist declared unrelated tools for the rest of the session. A `+word` now requires the word in the tool or server name, also in codemode's `searchTools()`. The result says when a tool it found or the query names is already active, cannot be loaded in this session, or is not registered. See [Tool search](docs/cli.md#tool-search).
 
 ### Fixed
 

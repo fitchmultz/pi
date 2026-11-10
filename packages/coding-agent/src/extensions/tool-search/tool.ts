@@ -2,10 +2,11 @@
  * Tool discovery: a BM25 ranker over tool metadata, shared by `searchTools()` in codemode scripts and
  * the optional `tool_search` tool.
  *
- * `tool_search` searches tools that are not declared to
- * the model (`codemode` and `deferred` exposure) and loads the matches, so they are declared for the
- * next model call. Loading goes through the active tool set, so it is recorded in the transcript
- * like any other tool change and survives `/tree`, resume, and fork on that branch.
+ * `tool_search` searches the tools that are declared to the model only once loaded (`codemode` and
+ * `deferred` exposure) and loads the good matches, so they are declared for the next model call. It
+ * lists weaker matches without loading them, and says when the query names a tool that is already
+ * active or that it cannot load. Loading goes through the active tool set, so it is recorded in the
+ * transcript like any other tool change and survives `/tree`, resume, and fork on that branch.
  */
 
 import { resolveSchemaRef } from "@earendil-works/pi-codemode/declarations";
@@ -26,6 +27,8 @@ export interface ToolSearchDocument {
 	name: string;
 	/** Description, schema descriptions, and property names. */
 	text: string;
+	/** Name of the tool's namespace, for example `mcp__docs`. */
+	namespaceName?: string;
 	/** Name, description, and instructions of the tool's namespace. */
 	namespaceText?: string;
 }
@@ -33,6 +36,14 @@ export interface ToolSearchDocument {
 export interface ToolSearchMatch {
 	name: string;
 	score: number;
+	/**
+	 * Whether the tool is a good match, not one that only shares words with the query. The query names
+	 * it, or enough of the query's terms are the tool's own, that is, in its name, its description and
+	 * schema, or its namespace name: all of them, or more than half when one is in a name. A long
+	 * description mentions many words, so some of them say little. A query that only names tools has no
+	 * other good match: `mcp__app__thread_read` does not make `mcp__app__thread_list` one.
+	 */
+	strong: boolean;
 }
 
 /** Ranks tools for a query. BM25 today; a hybrid ranker with embeddings can replace it. */
@@ -137,7 +148,12 @@ export function createToolSearchDocument(
 	const namespaceText = namespace
 		? [namespace.name, namespace.description ?? "", namespace.instructions ?? ""].join(" ")
 		: "";
-	return { name: tool.name, text: parts.filter((part) => part.trim()).join(" "), namespaceText };
+	return {
+		name: tool.name,
+		text: parts.filter((part) => part.trim()).join(" "),
+		namespaceName: namespace?.name,
+		namespaceText,
+	};
 }
 
 /** Lowercase with characters invalid in script identifiers as `_`, so `dev-radius` matches `dev_radius`. */
@@ -149,12 +165,51 @@ function normalizeName(name: string): string {
 }
 
 /**
- * Whether the whole query is the tool's name: its full name or a suffix after a `__` separator, so
- * `thread_read` and `app__thread_read` both name `mcp__app__thread_read`.
+ * Whether `query` is the tool's name: its full name or a suffix after a `__` separator, so
+ * `thread_read` and `app__thread_read` both name `mcp__app__thread_read`. A `__` separator may be
+ * written `_`, as models do: `app_thread_read` and `app thread read` name it too.
  */
 function isExactNameQuery(query: string, name: string): boolean {
-	const normalized = normalizeName(name);
-	return normalized === query || normalized.endsWith(`__${query}`);
+	const single = (text: string) => text.replace(/_+/g, "_");
+	const wanted = single(query);
+	const segments = normalizeName(name).split("__");
+	return segments.some((_, index) => single(segments.slice(index).join("__")) === wanted);
+}
+
+/** A query word that names a tool or a server instead of describing one. */
+interface NameWord {
+	/** The word without its `+` and the punctuation around it. */
+	text: string;
+	/** Its search terms. A name contains the word when it has them all. */
+	terms: readonly string[];
+	/** Written `+word`: a tool is a match only if its name or its namespace name contains the word. */
+	required: boolean;
+}
+
+/** Leading and trailing characters that are not part of a word, such as `+`, quotes, and commas. */
+const NAME_EDGES = /^[^\p{L}\p{M}\p{N}_$]+|[^\p{L}\p{M}\p{N}_$]+$/gu;
+
+/**
+ * The words of a query that name a tool or a server: each `+word`, each word with an underscore, as
+ * tool names are written, and the query itself when it is one word.
+ */
+function nameWords(query: string): NameWord[] {
+	const words = query.trim().split(/\s+/);
+	return words.flatMap((word) => {
+		const text = word.replace(NAME_EDGES, "");
+		const required = word.startsWith("+");
+		if (!required && !text.includes("_") && words.length > 1) return [];
+		const terms = tokenize(text);
+		return terms.length === 0 ? [] : [{ text, terms, required }];
+	});
+}
+
+/** Whether the query names the tool: as a whole, or with one of its name words. */
+function namesTool(query: string, words: readonly NameWord[], name: string): boolean {
+	return (
+		isExactNameQuery(normalizeName(query.trim().replace(NAME_EDGES, "")), name) ||
+		words.some((word) => isExactNameQuery(normalizeName(word.text), name))
+	);
 }
 
 /** A document split into the fields the ranker weighs differently. */
@@ -166,6 +221,8 @@ interface IndexedDocument {
 	localNameTerms: readonly string[];
 	textCounts: ReadonlyMap<string, number>;
 	textLength: number;
+	/** Terms of the namespace name, for example `mcp`, `app` for `mcp__app`. */
+	namespaceNameTerms: ReadonlySet<string>;
 	namespaceTerms: ReadonlySet<string>;
 }
 
@@ -179,6 +236,7 @@ function indexDocument(document: ToolSearchDocument): IndexedDocument {
 		localNameTerms: [...new Set(tokenize(segments[segments.length - 1]))],
 		textCounts,
 		textLength: [...textCounts.values()].reduce((sum, count) => sum + count, 0),
+		namespaceNameTerms: new Set(tokenize(document.namespaceName ?? "")),
 		namespaceTerms: new Set(tokenize(document.namespaceText ?? "")),
 	};
 }
@@ -198,14 +256,20 @@ const NAMESPACE_WEIGHT = 0.5;
 
 /**
  * Okapi BM25 over the description, with the name and the namespace as separate fields:
- * - a tool that matches more of the query's terms, in any field, ranks above one that matches
+ * - a `+word` in the query is a requirement: only tools whose name or namespace name contains the
+ *   word are matches;
+ * - a good match (see {@link ToolSearchMatch.strong}) ranks above the others. The namespace
+ *   description and instructions do not make a tool a good match: every tool of the server shares
+ *   them;
+ * - then a tool that matches more of the query's terms, in any field, ranks above one that matches
  *   fewer, whatever their scores: for `screenshot window`, a tool whose description has both words
  *   beats `window`, whose name has one;
  * - a query term in the name scores more than any number of mentions in the description;
  * - a tool whose whole local name is in the query (`app` in `peekaboo app` for
  *   `mcp__peekaboo__app`) gets a bonus worth one more match of every query term, so among tools
  *   matching as many terms it mostly wins over tools that only mention the words;
- * - a query that is exactly a tool's name ranks that tool first, before coverage.
+ * - a query that names a tool ranks that tool first, before coverage: the whole query is its name, or
+ *   one of its words is and is written as a name (`+word`, or with an underscore).
  *
  * The description alone is length-normalized, so a long name or long namespace instructions do
  * not lower a tool's score. Ties keep document order.
@@ -222,6 +286,8 @@ export class Bm25Ranker implements ToolRanker {
 	rank(query: string, documents: readonly ToolSearchDocument[], limit: number): ToolSearchMatch[] {
 		const queryTerms = new Set(tokenize(query));
 		if (queryTerms.size === 0 || documents.length === 0 || limit <= 0) return [];
+		const names = nameWords(query);
+		const required = names.filter((word) => word.required);
 		const indexed = documents.map(indexDocument);
 		const averageLength = indexed.reduce((sum, document) => sum + document.textLength, 0) / indexed.length || 1;
 		const idf = new Map(
@@ -234,12 +300,19 @@ export class Bm25Ranker implements ToolRanker {
 			}),
 		);
 		const fullNameBonus = [...idf.values()].reduce((sum, value) => sum + value, 0);
-		const exactQuery = normalizeName(query);
+		const named = indexed.filter((document) => namesTool(query, names, document.name));
+		// Every term belongs to the name of a tool the query names: the query names tools and describes none.
+		const onlyNames =
+			named.length > 0 && [...queryTerms].every((term) => named.some((document) => document.nameTerms.has(term)));
 		const matches: (ToolSearchMatch & { covered: number; exact: boolean })[] = [];
 		for (const document of indexed) {
+			const inName = (term: string) => document.nameTerms.has(term) || document.namespaceNameTerms.has(term);
+			if (!required.every((word) => word.terms.every(inName))) continue;
 			const norm = this.k1 * (1 - this.b + (this.b * document.textLength) / averageLength);
 			let score = 0;
 			let covered = 0;
+			let own = 0;
+			let inNames = 0;
 			for (const term of queryTerms) {
 				const count = document.textCounts.get(term) ?? 0;
 				const weight =
@@ -247,17 +320,28 @@ export class Bm25Ranker implements ToolRanker {
 					(document.namespaceTerms.has(term) ? NAMESPACE_WEIGHT : 0) +
 					(count * (this.k1 + 1)) / (count + norm);
 				if (weight > 0) covered++;
+				if (count > 0 || inName(term)) own++;
+				if (inName(term)) inNames++;
 				score += (idf.get(term) ?? 0) * weight;
 			}
 			if (score === 0) continue;
 			const local = document.localNameTerms;
 			if (local.length > 0 && local.every((term) => queryTerms.has(term))) score += fullNameBonus;
-			matches.push({ name: document.name, score, covered, exact: isExactNameQuery(exactQuery, document.name) });
+			const exact = named.includes(document);
+			const most = own === queryTerms.size || (inNames > 0 && own * 2 > queryTerms.size);
+			const strong = exact || (!onlyNames && most);
+			matches.push({ name: document.name, score, covered, exact, strong });
 		}
 		return matches
-			.sort((a, b) => Number(b.exact) - Number(a.exact) || b.covered - a.covered || b.score - a.score)
+			.sort(
+				(a, b) =>
+					Number(b.exact) - Number(a.exact) ||
+					Number(b.strong) - Number(a.strong) ||
+					b.covered - a.covered ||
+					b.score - a.score,
+			)
 			.slice(0, limit)
-			.map(({ name, score }) => ({ name, score }));
+			.map(({ name, score, strong }) => ({ name, score, strong }));
 	}
 }
 
@@ -270,22 +354,37 @@ export const toolSearchSchema = Type.Object({
 
 export type ToolSearchInput = Static<typeof toolSearchSchema>;
 
-export interface ToolSearchResultTool {
-	name: string;
-	description: string;
-}
-
 export interface ToolSearchToolDetails {
 	/** Tools loaded by this call. */
 	loaded: string[];
+	/** The closest matches that the result lists when none is good. Not loaded. */
+	listed?: string[];
+	/** Tools that were already active: good matches, and tools named in the query. */
+	active?: string[];
+	/** Names in the query that `tool_search` cannot load: a tool it does not search, or no tool or server at all. */
+	unavailable?: string[];
 }
 
 export interface ToolSearchToolOptions {
 	/**
-	 * The session's tools. `tool_search` searches the tools that are not declared to the model and
-	 * activates the matches. Without it, the tool finds nothing. An `ExtensionAPI` fits.
+	 * The session's tools. `tool_search` searches the tools that are declared to the model only once
+	 * loaded and activates the good matches. Without it, the tool finds nothing. An `ExtensionAPI` fits.
 	 */
 	tools?: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "setActiveTools">;
+}
+
+/** What one search found. */
+interface ToolSearchOutcome {
+	/** Good matches that were not active, best first: loaded by this call. */
+	loaded: ToolInfo[];
+	/** The best matches when none is good, with whether each is active. Not loaded. */
+	closest: { tool: ToolInfo; active: boolean }[];
+	/** Tools that are already active: good matches, and tools named in the query. */
+	active: string[];
+	/** Tools named in the query that are registered but that `tool_search` does not search. */
+	notOffered: string[];
+	/** Name words of the query that no tool name and no namespace name of the session contains. */
+	unknown: string[];
 }
 
 /** Whether `tool_search` can load a tool with this exposure. */
@@ -294,23 +393,104 @@ function isSearchable(exposure: ToolExposure): boolean {
 }
 
 /**
- * Rank the searchable tools that are not active yet and activate the matches, so the next model
+ * Rank the searchable tools and activate the good matches that are not active yet, so the next model
  * call declares them. Activation is recorded in the transcript like any tool change.
+ *
+ * Active tools are ranked too. Otherwise a search for a tool that is already loaded would find the
+ * next best tool instead and load it.
  */
 function searchAndLoad(
 	tools: NonNullable<ToolSearchToolOptions["tools"]>,
 	query: string,
 	limit: number,
-): ToolSearchResultTool[] {
-	const active = tools.getActiveTools();
-	const candidates = tools.getAllTools().filter((tool) => isSearchable(tool.exposure) && !active.includes(tool.name));
-	const documents = candidates.map((tool) => createToolSearchDocument(tool, tool.namespace));
-	const matches = new Bm25Ranker().rank(query, documents, limit);
-	if (matches.length > 0) tools.setActiveTools([...active, ...matches.map((match) => match.name)]);
-	return matches.map((match) => ({
-		name: match.name,
-		description: candidates.find((tool) => tool.name === match.name)?.description ?? "",
-	}));
+): ToolSearchOutcome {
+	const activeNames = tools.getActiveTools();
+	const isActive = (tool: ToolInfo) => activeNames.includes(tool.name);
+	const all = tools.getAllTools();
+	const searchable = all.filter((tool) => isSearchable(tool.exposure));
+	const documents = searchable.map((tool) => createToolSearchDocument(tool, tool.namespace));
+	const matches = new Bm25Ranker().rank(query, documents, documents.length).flatMap((match) => {
+		const tool = searchable.find((candidate) => candidate.name === match.name);
+		return tool ? [{ tool, strong: match.strong }] : [];
+	});
+	const loaded: ToolInfo[] = [];
+	const active: string[] = [];
+	// Good matches that are already active are reported when they rank above a tool this call loads, or
+	// when it loads none: the tool the model wants may be one of them.
+	let passed: string[] = [];
+	for (const { tool, strong } of matches) {
+		if (!strong || loaded.length === limit) break;
+		if (isActive(tool)) {
+			passed.push(tool.name);
+		} else {
+			loaded.push(tool);
+			active.push(...passed);
+			passed = [];
+		}
+	}
+	if (loaded.length === 0) active.push(...passed);
+	// `limit` bounds what one call returns, also for names.
+	active.splice(limit);
+	// Names in the query that the ranking does not answer for: tools it does not search, and names that
+	// nothing in the session has.
+	const notOffered: string[] = [];
+	const unknown: string[] = [];
+	const names = nameWords(query);
+	for (const tool of all) {
+		if (isSearchable(tool.exposure) || !namesTool(query, names, tool.name)) continue;
+		(isActive(tool) ? active : notOffered).push(tool.name);
+	}
+	for (const word of names) {
+		const known = all.some((tool) => {
+			const terms = new Set([...tokenize(tool.name), ...tokenize(tool.namespace?.name ?? "")]);
+			return word.terms.every((term) => terms.has(term));
+		});
+		if (!known && loaded.length === 0) unknown.push(word.text);
+	}
+	const closest =
+		loaded.length > 0 || active.length > 0
+			? []
+			: matches.slice(0, limit).map(({ tool }) => ({ tool, active: isActive(tool) }));
+	if (loaded.length > 0) tools.setActiveTools([...activeNames, ...loaded.map((tool) => tool.name)]);
+	return { loaded, closest, active: [...new Set(active)], notOffered, unknown: [...new Set(unknown)] };
+}
+
+/** The first line of a tool's description. */
+function summary(tool: ToolInfo): string {
+	return tool.description.trim().split(/\r?\n/)[0];
+}
+
+/**
+ * The result text: first what the query named or matched that needs no loading or cannot be loaded, then the
+ * loaded tools or, when there is no good match, the closest ones.
+ */
+function describeOutcome({ loaded, closest, active, notOffered, unknown }: ToolSearchOutcome): string {
+	const lines: string[] = [];
+	if (active.length > 0) {
+		lines.push(
+			`${active.join(", ")} ${active.length === 1 ? "is already active; call it" : "are already active; call them"} directly.`,
+		);
+	}
+	if (notOffered.length > 0) {
+		lines.push(
+			`${notOffered.join(", ")} ${notOffered.length === 1 ? "is" : "are"} not available in this session; ${TOOL_SEARCH_TOOL_NAME} cannot load ${notOffered.length === 1 ? "it" : "them"}.`,
+		);
+	}
+	if (unknown.length > 0) lines.push(`No tool or server in this session has ${unknown.join(" or ")} in its name.`);
+	if (loaded.length > 0) {
+		lines.push(
+			`Loaded ${loaded.length} tool${loaded.length === 1 ? "" : "s"}. They are available from your next call:`,
+			...loaded.map((tool) => `- ${tool.name}: ${summary(tool)}`),
+		);
+	} else if (closest.length > 0) {
+		lines.push(
+			"No tool is a close match, so none was loaded. Closest matches; search for an exact name to load one:",
+			...closest.map((match) => `- ${match.tool.name}: ${match.active ? "already active" : summary(match.tool)}`),
+		);
+	} else if (lines.length === 0) {
+		lines.push("No matching tools found.");
+	}
+	return lines.join("\n");
 }
 
 /**
@@ -336,14 +516,19 @@ export function createToolSearchToolDefinition(
 			if (query.trim() === "") throw new Error("query must not be empty");
 			const max = limit ?? DEFAULT_TOOL_SEARCH_LIMIT;
 			if (!Number.isInteger(max) || max <= 0) throw new Error("limit must be a positive integer");
-			const tools = options.tools ? searchAndLoad(options.tools, query, max) : [];
-			const text =
-				tools.length === 0
-					? "No matching tools found."
-					: `Loaded ${tools.length} tool${tools.length === 1 ? "" : "s"}. They are available from your next call:\n${tools
-							.map((tool) => `- ${tool.name}: ${tool.description.trim().split(/\r?\n/)[0]}`)
-							.join("\n")}`;
-			return { content: [{ type: "text", text }], details: { loaded: tools.map((tool) => tool.name) } };
+			if (!options.tools)
+				return { content: [{ type: "text", text: "No matching tools found." }], details: { loaded: [] } };
+			const outcome = searchAndLoad(options.tools, query, max);
+			const unavailable = [...outcome.notOffered, ...outcome.unknown];
+			return {
+				content: [{ type: "text", text: describeOutcome(outcome) }],
+				details: {
+					loaded: outcome.loaded.map((tool) => tool.name),
+					...(outcome.closest.length > 0 ? { listed: outcome.closest.map((match) => match.tool.name) } : {}),
+					...(outcome.active.length > 0 ? { active: outcome.active } : {}),
+					...(unavailable.length > 0 ? { unavailable } : {}),
+				},
+			};
 		},
 	};
 }

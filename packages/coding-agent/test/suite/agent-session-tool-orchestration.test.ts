@@ -143,3 +143,137 @@ describe("AgentSession tool orchestration", () => {
 		expect(result && "nestedCalls" in result).toBe(false);
 	});
 });
+
+/** Tools as a session with MCP servers has them: some loadable by `tool_search`, one active, one unreachable. */
+function searchCatalogExtension(pi: ExtensionAPI): void {
+	const register = (name: string, description: string, exposure?: "deferred" | "hidden") =>
+		pi.registerTool({
+			name,
+			label: name,
+			description,
+			parameters: Type.Object({}),
+			...(exposure ? { exposure } : {}),
+			execute: async () => ({ content: [{ type: "text", text: name }], details: {} }),
+		});
+	register("tracker_list_issues", "List the issues of a project.\nSupports paging.", "deferred");
+	register("tracker_save_issue", "Create or update an issue.", "deferred");
+	register("metrics_query", "Query metrics. Set start and end to choose the command interval.", "deferred");
+	register("board_status", "Show the board.");
+	register("fleet_runs", "Inspect runs.", "hidden");
+}
+
+describe("tool_search", () => {
+	const harnesses: Harness[] = [];
+
+	afterEach(() => {
+		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	});
+
+	/** Runs the searches in one prompt and returns each result's text and details. */
+	async function search(...queries: { query: string; limit?: number }[]) {
+		const harness = await createHarness({
+			initialActiveToolNames: ["tool_search", "board_status"],
+			extensionFactories: [createToolSearchExtension(), searchCatalogExtension],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		harness.setResponses([
+			...queries.map((args) => fauxAssistantMessage([fauxToolCall("tool_search", args)], { stopReason: "toolUse" })),
+			fauxAssistantMessage("done"),
+		]);
+		await harness.session.prompt("go");
+		const results = harness.session.messages
+			.filter((message): message is ToolResultMessage => message.role === "toolResult")
+			.map((message) => ({ text: (message.content[0] as { text: string }).text, details: message.details }));
+		return { results, active: harness.session.getActiveToolNames() };
+	}
+
+	it("lists the closest tools without loading them when none is a good match, and loads one by its name", async () => {
+		// A search for a tool that does not exist: `metrics_query` shares three of its four words, in its description.
+		const { results, active } = await search(
+			{ query: "background job start command interval", limit: 2 },
+			{ query: "metrics_query" },
+		);
+		expect(results[0]).toEqual({
+			text: [
+				"No tool is a close match, so none was loaded. Closest matches; search for an exact name to load one:",
+				"- metrics_query: Query metrics. Set start and end to choose the command interval.",
+			].join("\n"),
+			details: { loaded: [], listed: ["metrics_query"] },
+		});
+		expect(results[1]).toEqual({
+			text: [
+				"Loaded 1 tool. They are available from your next call:",
+				"- metrics_query: Query metrics. Set start and end to choose the command interval.",
+			].join("\n"),
+			details: { loaded: ["metrics_query"] },
+		});
+		expect(active).toEqual(["tool_search", "board_status", "metrics_query"]);
+	});
+
+	it("loads the tools that match most of the query, within the names a +word requires", async () => {
+		// `metrics_query` has `query`, but `+tracker` leaves it out.
+		const { results, active } = await search({ query: "+tracker issues query" });
+		expect(results[0].text).toBe(
+			[
+				"Loaded 2 tools. They are available from your next call:",
+				"- tracker_save_issue: Create or update an issue.",
+				"- tracker_list_issues: List the issues of a project.",
+			].join("\n"),
+		);
+		expect(results[0].details).toEqual({ loaded: ["tracker_save_issue", "tracker_list_issues"] });
+		expect(active).toEqual(["tool_search", "board_status", "tracker_save_issue", "tracker_list_issues"]);
+	});
+
+	it("says when a tool it found or the query names is already active", async () => {
+		const { results, active } = await search(
+			{ query: "tracker_save_issue" },
+			// Once loaded, the tool is not replaced by the next best match.
+			{ query: "tracker save issue", limit: 1 },
+			{ query: "+board_status show" },
+		);
+		expect(results[1]).toEqual({
+			text: "tracker_save_issue is already active; call it directly.",
+			details: { loaded: [], active: ["tracker_save_issue"] },
+		});
+		expect(results[2]).toEqual({
+			text: "board_status is already active; call it directly.",
+			details: { loaded: [], active: ["board_status"] },
+		});
+		expect(active).toEqual(["tool_search", "board_status", "tracker_save_issue"]);
+	});
+
+	it("says when the query names a tool it cannot load or that is not registered", async () => {
+		const { results, active } = await search(
+			{ query: "fleet_runs inspect", limit: 1 },
+			{ query: "+background_command start command", limit: 2 },
+			{ query: "background_command start command", limit: 1 },
+			{ query: "+café query" },
+			{ query: "fleet runs" },
+		);
+		const notAvailable = {
+			text: "fleet_runs is not available in this session; tool_search cannot load it.",
+			details: { loaded: [], unavailable: ["fleet_runs"] },
+		};
+		expect(results[0]).toEqual(notAvailable);
+		// The whole query is the name, written with a space.
+		expect(results[4]).toEqual(notAvailable);
+		expect(results[1]).toEqual({
+			text: "No tool or server in this session has background_command in its name.",
+			details: { loaded: [], unavailable: ["background_command"] },
+		});
+		expect(results[2]).toEqual({
+			text: [
+				"No tool or server in this session has background_command in its name.",
+				"No tool is a close match, so none was loaded. Closest matches; search for an exact name to load one:",
+				"- metrics_query: Query metrics. Set start and end to choose the command interval.",
+			].join("\n"),
+			details: { loaded: [], listed: ["metrics_query"], unavailable: ["background_command"] },
+		});
+		expect(results[3]).toEqual({
+			text: "No tool or server in this session has café in its name.",
+			details: { loaded: [], unavailable: ["café"] },
+		});
+		expect(active).toEqual(["tool_search", "board_status"]);
+	});
+});
