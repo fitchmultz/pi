@@ -945,7 +945,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		// Component and scrollbar gestures receive every event until their release, wherever the pointer is,
 		// so an overlay that opens during the drag cannot take the release. A text selection lets components
-		// under the pointer handle its events first.
+		// under the pointer handle its events first. One of them may take the release, so the release ends the
+		// selection gesture here.
 		const gesture = this.gesture;
 		if (gesture.kind === "component") {
 			this.continueComponentGesture(gesture, event, raw);
@@ -955,6 +956,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.continueScrollbarDrag(gesture, raw);
 			return;
 		}
+		if (gesture.kind === "selection" && raw.release) this.endGesture();
 
 		if (this.handleSearchMouseEvent(raw)) return;
 
@@ -979,7 +981,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 
 		if (this.handleRightClickPaste(raw)) return;
-		this.handleSelectionMouseEvent(raw);
+		this.handleSelectionMouseEvent(raw, gesture);
 	}
 
 	/** Sends an event to the component that owns the gesture; a release where it was pressed also clicks it. */
@@ -1345,16 +1347,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		gesture.autoScroll = undefined;
 	}
 
-	private handleSelectionMouseEvent(event: SgrMouseEvent): void {
+	/**
+	 * Starts, extends or completes a text selection for an event no component handled. `gesture` is the one
+	 * the event arrived in; a release has already ended it.
+	 */
+	private handleSelectionMouseEvent(event: SgrMouseEvent, gesture: NoGesture | SelectionGesture): void {
 		const button = event.button & 3;
 		if (button !== 0 && !(event.release && button === 3)) return;
-		const gesture = this.gesture;
 		const anchorScrollView = this.selectionAnchor?.scrollView;
 		const point = this.getSelectionPoint(event, anchorScrollView);
 		if (event.release) {
-			if (gesture.kind !== "selection") return;
-			this.endGesture();
-			if (!this.selectionAnchor) return;
+			if (gesture.kind !== "selection" || !this.selectionAnchor) return;
 			this.updateSelectionFocus(gesture, point);
 			const isClick =
 				!gesture.dragged &&
