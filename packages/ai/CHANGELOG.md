@@ -20,7 +20,7 @@
 
 - Fixed successful retry backoffs retaining abort listeners ([#10506](https://github.com/earendil-works/pi/issues/10506)).
 - Fixed Kimi K3 fallback, canonical Kimi/Moonshot catalog overlays, and Kimi Coding implied estimates, including `k3-256k`, omitting the default five-minute cache-write price.
-- Fixed offline builds from published catalogs still containing legacy Kimi Coding Anthropic entries; hydration now applies the native OpenAI protocol and compatibility metadata without changing custom endpoints.
+- Fixed Kimi K3.1 Pro and K3.1 Pro Highspeed cache writes costing $0 on Moonshot, Moonshot China and Kimi Coding, in generated data, Kimi Coding implied estimates, offline hydration and pi.dev catalog overlays. They now cost the published five-minute rate, which equals the input rate ($2 and $4 per million tokens).
 - Fixed Radius gateway catalogs accepting incomplete pricing that produces `NaN` cost estimates ([#10507](https://github.com/earendil-works/pi/issues/10507)).
 - Fixed the abort-test helper returning before checking the aborted result and follow-up; added an offline regression ([#10508](https://github.com/earendil-works/pi/issues/10508)).
 - Fixed Cloudflare AI Gateway Claude models failing with a 404 by using dashed model IDs during generation, provider construction, and remote-catalog loading.
@@ -45,6 +45,7 @@
 
 - Retired the fork's unreleased Anthropic stall timing hooks and lifecycle/Undici observation helper.
 - Removed the fork's temporary passive cache tracing: the `cacheTraceContext` request option and `CacheTraceContext` type, the `@earendil-works/pi-ai/utils/cache-trace` module, and the recorder hooks in the Anthropic, OpenAI Completions, OpenAI Responses and Codex adapters. `PI_CACHE_TRACE_DIR` and `PI_CACHE_TRACE_SESSION_ID` are no longer read. Requests, cache warming, usage accounting and prompt-cache options are unchanged.
+- Retired the fork's unreleased migration of legacy Kimi Coding Anthropic catalog entries during hydration and overlay merges; pi.dev serves those entries only to pi older than 1.2.1. `@earendil-works/pi-ai/api/kimi` now exports only `restoreKimiK3CacheWriteCost`.
 
 ## [1.5.1] - 2026-11-09
 

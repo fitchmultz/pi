@@ -9,7 +9,6 @@ import {
 	type Provider,
 	type RefreshModelsContext,
 } from "@earendil-works/pi-ai";
-import { kimiCodingProvider } from "@earendil-works/pi-ai/providers/kimi-coding";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VERSION } from "../src/config.ts";
 import {
@@ -80,54 +79,25 @@ async function refreshProvider(
 afterEach(() => vi.restoreAllMocks());
 
 describe("remote catalog provider", () => {
-	it("migrates fetched and restored legacy Kimi Coding catalogs over an offline-hydrated baseline", async () => {
-		const baseline = kimiCodingProvider().getModels();
-		const legacyIds = new Set(["k3", "kimi-for-coding", "kimi-for-coding-highspeed"]);
-		const legacy = baseline
-			.filter((entry) => legacyIds.has(entry.id))
-			.map((entry) => ({
-				...entry,
-				name: `Published ${entry.id}`,
-				api: "anthropic-messages",
-				baseUrl: "https://api.kimi.com/coding",
-				compat: { allowEmptySignature: true, forceAdaptiveThinking: true },
-				thinkingLevelMap: entry.id === "kimi-for-coding-highspeed" ? undefined : entry.thinkingLevelMap,
-				cost: { ...entry.cost, cacheWrite: 0 },
-			}));
-		const expected = baseline.map((entry) =>
-			legacyIds.has(entry.id) ? { ...entry, name: `Published ${entry.id}` } : entry,
-		);
-		const fetchSpy = vi
-			.spyOn(globalThis, "fetch")
-			.mockResolvedValue(
-				new Response(JSON.stringify(legacy), { headers: { "last-modified": "Thu, 15 Oct 2026 00:00:00 GMT" } }),
-			);
-		// Nix's deterministic hydration stamp is 1970, so the published body is newer.
-		const makeProvider = () => withRemoteCatalog(kimiCodingProvider(), "https://pi.dev", 0);
-		const store = new InMemoryModelsStore();
-		const provider = makeProvider();
-		await refreshProvider(provider, store);
-		expect(provider.getModels()).toEqual(expected);
-		const restored = makeProvider();
-		await refreshProvider(restored, store, { allowNetwork: false });
-		expect(restored.getModels()).toEqual(expected);
-		expect(restored.getAllModels?.()).toEqual(expected);
-		expect(fetchSpy).toHaveBeenCalledTimes(1);
-	});
-
+	// The last column is the five-minute cache-write rate: https://platform.kimi.ai/docs/pricing/chat.
 	it.each([
-		["kimi-coding", "k3", "https://api.kimi.com/coding/v1"],
-		["kimi-coding", "k3-256k", "https://api.kimi.com/coding/v1"],
-		["moonshotai", "kimi-k3", "https://api.moonshot.ai/v1"],
-		["moonshotai-cn", "kimi-k3", "https://api.moonshot.cn/v1"],
+		["kimi-coding", "k3", "https://api.kimi.com/coding/v1", 3],
+		["kimi-coding", "k3-256k", "https://api.kimi.com/coding/v1", 3],
+		["kimi-coding", "k3.1-pro", "https://api.kimi.com/coding/v1", 2],
+		["kimi-coding", "k3.1-pro-highspeed", "https://api.kimi.com/coding/v1", 4],
+		["moonshotai", "kimi-k3", "https://api.moonshot.ai/v1", 3],
+		["moonshotai", "kimi-k3.1-pro", "https://api.moonshot.ai/v1", 2],
+		["moonshotai", "kimi-k3.1-pro-highspeed", "https://api.moonshot.ai/v1", 4],
+		["moonshotai-cn", "kimi-k3", "https://api.moonshot.cn/v1", 3],
 	])(
-		"preserves Kimi K3 $3/M cacheWrite rate on fetched and restored %s/%s OpenAI catalogs",
-		async (providerId, id, baseUrl) => {
+		"preserves the Kimi K3 five-minute cacheWrite rate on fetched and restored %s/%s OpenAI catalogs",
+		async (providerId, id, baseUrl, rate) => {
 			const baseline: Model<"openai-completions"> = {
 				...model(id),
 				provider: providerId,
 				baseUrl,
-				cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 },
+				// Kimi bills five-minute cache writes at the input rate.
+				cost: { input: rate, output: 15, cacheRead: 0.3, cacheWrite: rate },
 			};
 			const remote = [{ ...baseline, name: `Published ${id}`, cost: { ...baseline.cost, cacheWrite: 0 } }];
 			vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -154,10 +124,10 @@ describe("remote catalog provider", () => {
 			const store = new InMemoryModelsStore();
 			const provider = makeProvider();
 			await refreshProvider(provider, store);
-			expect(provider.getModels()[0]?.cost.cacheWrite).toBe(3);
+			expect(provider.getModels()[0]?.cost.cacheWrite).toBe(rate);
 			const restored = makeProvider();
 			await refreshProvider(restored, store, { allowNetwork: false });
-			expect(restored.getModels()[0]?.cost.cacheWrite).toBe(3);
+			expect(restored.getModels()[0]?.cost.cacheWrite).toBe(rate);
 		},
 	);
 

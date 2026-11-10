@@ -2,7 +2,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Container } from "@earendil-works/pi-tui";
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import * as config from "../src/config.ts";
+import { VERSION } from "../src/config.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import type { Extension, MarkdownMessageType, MarkdownTransformer } from "../src/core/extensions/types.ts";
 import { InMemorySettingsStorage, SettingsManager } from "../src/core/settings-manager.ts";
@@ -22,19 +24,32 @@ type ExtensionChangelogContext = {
 	readPackageJson(packageRoot: string): { name?: string; version?: string } | undefined;
 };
 
+type ChangelogUpdate = { label: string; markdown: string };
+
+type StartupChangelogContext = {
+	session: { state: { messages: unknown[] } };
+	settingsManager: SettingsManager;
+	reportInstallTelemetry(version: string): void;
+};
+
 type StartupNoticesContext = {
 	startupNoticesShown: boolean;
-	changelogMarkdown: string | undefined;
+	changelogUpdate: ChangelogUpdate | undefined;
 	extensionChangelogUpdates: ExtensionChangelogUpdate[];
-	version: string;
 	chatContainer: Container;
 	settingsManager: SettingsManager;
 	mermaidMarkdownTransformer: MarkdownTransformer;
 	session: { extensionRunner: { getMarkdownTransformers(): MarkdownTransformer[] } };
 };
 
+type ChangelogCommandContext = Omit<StartupNoticesContext, "startupNoticesShown" | "changelogUpdate"> & {
+	ui: { requestRender(): void };
+};
+
 const prototype = InteractiveMode.prototype as unknown as {
+	getChangelogForDisplay(this: StartupChangelogContext): ChangelogUpdate | undefined;
 	getExtensionChangelogUpdates(this: ExtensionChangelogContext): ExtensionChangelogUpdate[];
+	handleChangelogCommand(this: ChangelogCommandContext): void;
 	readPackageJson(packageRoot: string): { name?: string; version?: string } | undefined;
 	showStartupNoticesIfNeeded(this: StartupNoticesContext): void;
 };
@@ -192,7 +207,7 @@ describe("InteractiveMode startup notices", () => {
 		const runner = { extensions } as unknown as ExtensionRunner;
 		const context: StartupNoticesContext = {
 			startupNoticesShown: false,
-			changelogMarkdown: "## [2.0.0]\n\n- :warning: Pi change",
+			changelogUpdate: { label: "v2.0.0", markdown: "## [2.0.0]\n\n- :warning: Pi change" },
 			extensionChangelogUpdates: [
 				{
 					name: "pi-demo",
@@ -200,7 +215,6 @@ describe("InteractiveMode startup notices", () => {
 					markdown: "## pi-demo [1.2.0]\n\n- :warning: Demo change",
 				},
 			],
-			version: "2.0.0",
 			chatContainer: new Container(),
 			settingsManager: SettingsManager.fromStorage(new InMemorySettingsStorage()),
 			mermaidMarkdownTransformer: (markdown) => markdown,
@@ -232,5 +246,126 @@ describe("InteractiveMode startup notices", () => {
 
 		expect(rendered).toContain(":warning: Pi change");
 		expect(rendered).toContain(":warning: Demo change");
+	});
+});
+
+describe("InteractiveMode fork changelog", () => {
+	const firstCommit = "3c5823a7110f5ab73ae782aed162289eac7e3c89";
+	const secondCommit = "058648c75090dd02c59b50abdbdf9488482d2d34";
+	const releaseNotes = `## [${VERSION}]\n\n- Released change`;
+	let packageDir: string;
+	let settingsManager: SettingsManager;
+
+	function installForkRelease(commit: string | undefined): void {
+		vi.spyOn(config, "getForkRelease").mockReturnValue(
+			commit
+				? {
+						commit,
+						catalogSha256: "catalog",
+						archiveSha256: "archive",
+						node: process.versions.node,
+						npm: "11.19.1",
+						platform: process.platform,
+						arch: process.arch,
+						validated: true,
+					}
+				: undefined,
+		);
+	}
+
+	function startupChangelog(): ChangelogUpdate | undefined {
+		return prototype.getChangelogForDisplay.call({
+			session: { state: { messages: [] } },
+			settingsManager,
+			reportInstallTelemetry: () => {},
+		});
+	}
+
+	function renderChangelogCommand(): string {
+		const context: ChangelogCommandContext = {
+			extensionChangelogUpdates: [],
+			chatContainer: new Container(),
+			settingsManager,
+			mermaidMarkdownTransformer: (markdown) => markdown,
+			session: { extensionRunner: { getMarkdownTransformers: () => [] } },
+			ui: { requestRender: () => {} },
+		};
+		Object.setPrototypeOf(context, InteractiveMode.prototype);
+		prototype.handleChangelogCommand.call(context);
+		return stripAnsi(context.chatContainer.render(120).join("\n"));
+	}
+
+	beforeAll(() => initTheme("dark"));
+
+	beforeEach(() => {
+		packageDir = mkdtempSync(join(tmpdir(), "pi-fork-changelog-"));
+		writeFileSync(
+			join(packageDir, "CHANGELOG.md"),
+			`# Changelog\n\n## [Unreleased]\n\n- Fork change\n\n${releaseNotes}\n\n## [0.0.1]\n\n- First release\n`,
+		);
+		vi.stubEnv("PI_PACKAGE_DIR", packageDir);
+		settingsManager = SettingsManager.fromStorage(new InMemorySettingsStorage());
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
+		rmSync(packageDir, { recursive: true, force: true });
+	});
+
+	test("shows the fork entries once after each change of the installed fork commit", () => {
+		settingsManager.setLastChangelogVersion(VERSION);
+
+		installForkRelease(firstCommit);
+		expect(startupChangelog()).toEqual({
+			label: "a new fork build",
+			markdown: "## Fork changes (fitchmultz/pi@3c5823a)\n\n- Fork change",
+		});
+		expect(startupChangelog()).toBeUndefined();
+
+		installForkRelease(secondCommit);
+		expect(startupChangelog()?.markdown).toBe("## Fork changes (fitchmultz/pi@058648c)\n\n- Fork change");
+		expect(startupChangelog()).toBeUndefined();
+	});
+
+	test("shows the fork entries ahead of new release notes", () => {
+		settingsManager.setLastChangelogVersion("0.0.1");
+		installForkRelease(firstCommit);
+
+		expect(startupChangelog()).toEqual({
+			label: `v${VERSION}`,
+			markdown: `## Fork changes (fitchmultz/pi@3c5823a)\n\n- Fork change\n\n${releaseNotes}`,
+		});
+		expect(startupChangelog()).toBeUndefined();
+	});
+
+	test("records a fresh fork install without showing its entries", () => {
+		installForkRelease(firstCommit);
+
+		expect(startupChangelog()).toBeUndefined();
+		expect(startupChangelog()).toBeUndefined();
+	});
+
+	test("shows release notes only when there is no fork release", () => {
+		installForkRelease(undefined);
+		settingsManager.setLastChangelogVersion(VERSION);
+		expect(startupChangelog()).toBeUndefined();
+
+		settingsManager.setLastChangelogVersion("0.0.1");
+		expect(startupChangelog()).toEqual({ label: `v${VERSION}`, markdown: releaseNotes });
+		expect(renderChangelogCommand()).not.toContain("Fork change");
+	});
+
+	test("/changelog lists the fork entries after the newest release", () => {
+		installForkRelease(firstCommit);
+
+		const rendered = renderChangelogCommand();
+		const positions = ["First release", "Released change", "Fork changes (fitchmultz/pi@3c5823a)"].map((text) =>
+			rendered.indexOf(text),
+		);
+
+		expect(positions[0]).toBeGreaterThan(-1);
+		expect(positions).toEqual([...positions].sort((a, b) => a - b));
+		expect(rendered.lastIndexOf("Fork change")).toBeGreaterThan(positions[2]);
 	});
 });
