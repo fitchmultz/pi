@@ -268,21 +268,21 @@ so it gets a transport over an abstract pipe that `RemoteProcess` satisfies with
    ```ts
    /** A running program's stdio, as `@earendil-works/pi-env`'s `RemoteProcess` provides it. */
    export interface McpPipe {
-       write(data: Uint8Array | string): void;
-       closeStdin(): void;
-       /** Kill the program (and what it started). */
-       close(): void;
-       /** Settles when the program has ended, whatever the reason. */
-       readonly exited: Promise<unknown>;
+   	write(data: Uint8Array | string): void;
+   	closeStdin(): void;
+   	/** Kill the program (and what it started). */
+   	close(): void;
+   	/** Settles when the program has ended, whatever the reason. */
+   	readonly exited: Promise<unknown>;
    }
    export interface PipeTransportOptions {
-       /** Start the program; `onStdout`/`onStderr` receive its output from then on. */
-       open(handlers: { onStdout(bytes: Uint8Array): void; onStderr(bytes: Uint8Array): void }): Promise<McpPipe>;
-       maxMessageBytes?: number;
-       maxStderrBytes?: number;
-       onStderr?: (chunk: string) => void;
-       /** After closing stdin, how long the program may take to exit before `close()` kills it. Default 2000. */
-       closeTimeoutMs?: number;
+   	/** Start the program; `onStdout`/`onStderr` receive its output from then on. */
+   	open(handlers: { onStdout(bytes: Uint8Array): void; onStderr(bytes: Uint8Array): void }): Promise<McpPipe>;
+   	maxMessageBytes?: number;
+   	maxStderrBytes?: number;
+   	onStderr?: (chunk: string) => void;
+   	/** After closing stdin, how long the program may take to exit before `close()` kills it. Default 2000. */
+   	closeTimeoutMs?: number;
    }
    export class PipeTransport extends TransportEvents implements McpTransport { ... }
    ```
@@ -297,7 +297,7 @@ so it gets a transport over an abstract pipe that `RemoteProcess` satisfies with
 
    ```ts
    const transport = new PipeTransport({
-       open: (handlers) => openProcess(connection, { cwd, argv, ...handlers }),
+   	open: (handlers) => openProcess(connection, { cwd, argv, ...handlers }),
    });
    ```
 
