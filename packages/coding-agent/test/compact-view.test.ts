@@ -444,7 +444,7 @@ describe("compact Activity and messages", () => {
 	);
 
 	// #237: the one presentation render still establishes native mouse layouts.
-	test.each([true, "hybrid"] as const)("thinking clicks refresh assistant grouping (compact=%s)", (mode) => {
+	test.each([true, "hybrid"] as const)("thinking clicks and hiding refresh assistant rows (compact=%s)", (mode) => {
 		const chat = new ChatContainer();
 		chat.setCompactView(mode);
 		chat.addActivity(new Text("before", 0, 0));
@@ -468,9 +468,22 @@ describe("compact Activity and messages", () => {
 			lines.findIndex((line) => stripAnsi(line).includes("visible reasoning")),
 			80,
 		);
+		// The collapsed run keeps its label, which still separates the groups and expands the run when clicked.
+		const collapsedLines = chat.render(80);
+		const collapsed = stripAnsi(collapsedLines.join("\n"));
+		expect(collapsed.match(/Activity/g)).toHaveLength(2);
+		expect(collapsed).not.toContain("visible reasoning");
+		click(
+			chat,
+			collapsedLines.findIndex((line) => stripAnsi(line).includes("Thinking...")),
+			80,
+		);
+		expect(stripAnsi(chat.render(80).join("\n"))).toContain("visible reasoning");
+		// Thinking hidden by the setting takes no rows, so the groups join.
+		assistant.setHideThinkingBlock(true);
 		const hidden = stripAnsi(chat.render(80).join("\n"));
 		expect(hidden.match(/Activity/g)).toHaveLength(1);
-		expect(hidden).not.toContain("visible reasoning");
+		expect(hidden).not.toContain("Thinking...");
 		assistant.setHideThinkingBlock(false);
 		expect(stripAnsi(chat.render(80).join("\n"))).toContain("visible reasoning");
 	});

@@ -205,9 +205,13 @@ export class AssistantMessageComponent extends Container {
 				}
 
 				const runIndex = thinkingRunIndex++;
-				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
-				// A hidden run renders nothing in compact view or with an empty label, including no spacing.
-				if (hidden && (this.compactView || !this.hiddenThinkingLabel.trim())) {
+				const override = this.thinkingVisibilityOverrides.get(runIndex);
+				const hidden = override ?? this.hideThinkingBlock;
+				const hasLabel = this.hiddenThinkingLabel.trim() !== "";
+				// A hidden run with an empty label renders nothing, including no spacing. So does a run the
+				// setting hides in compact view. A run collapsed by a click keeps its label there: the label
+				// is the only place a click can expand it again.
+				if (hidden && (!hasLabel || (this.compactView && override === undefined))) {
 					continue;
 				}
 				const thinking = thinkingBlocks.join("\n\n");
@@ -240,6 +244,8 @@ export class AssistantMessageComponent extends Container {
 				addVisibleChild(
 					new MouseRegion(thinkingComponent, (event) => {
 						if (event.type !== "click" || event.button !== "left") return undefined;
+						// Without a label a collapsed run has no row, so a click could not bring it back.
+						if (!hidden && !hasLabel) return undefined;
 						this.thinkingVisibilityOverrides.set(runIndex, !hidden);
 						if (this.lastMessage) this.updateContent(this.lastMessage);
 						return { handled: true };
