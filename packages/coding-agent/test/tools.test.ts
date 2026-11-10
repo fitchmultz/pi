@@ -885,11 +885,11 @@ describe("Coding Agent Tools", () => {
 		it("should expose local bash operations for extension reuse", async () => {
 			const ops = createLocalBashOperations();
 			const chunks: Buffer[] = [];
+			// An extension written for the `(data: Buffer) => void` type may return a value. It is ignored.
+			const onData: (data: Buffer) => void = (data) => chunks.push(data);
 
 			const result = await ops.exec("echo $TEST_LOCAL_BASH_OPS", testDir, {
-				onData: (data) => {
-					chunks.push(data);
-				},
+				onData,
 				env: { ...process.env, TEST_LOCAL_BASH_OPS: "from-local-ops" },
 			});
 
