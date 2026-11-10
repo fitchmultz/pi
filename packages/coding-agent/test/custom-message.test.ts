@@ -2,7 +2,7 @@ import { resetCapabilitiesCache, setCapabilities, Text } from "@earendil-works/p
 import { afterEach, describe, expect, test } from "vitest";
 import type { MarkdownTransformContext, MessageRenderer, MessageRenderOptions } from "../src/core/extensions/types.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
-import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
+import { CustomMessageComponent } from "../src/index.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -42,9 +42,12 @@ describe("CustomMessageComponent", () => {
 		).toBe(true);
 	});
 
-	test("runs Markdown transformers on default-rendered content", () => {
+	// Upstream's seven positional arguments keep upstream's positions: an extension written for upstream gets its
+	// transformers, message ID and timestamp, and does not turn on compact view.
+	test("runs Markdown transformers on default-rendered content when constructed the upstream way", () => {
 		initTheme("dark");
 		const contexts: MarkdownTransformContext[] = [];
+		const optionsSeen: MessageRenderOptions[] = [];
 		const message: CustomMessage = {
 			role: "custom",
 			customType: "test",
@@ -54,12 +57,12 @@ describe("CustomMessageComponent", () => {
 		};
 		const component = new CustomMessageComponent(
 			message,
-			undefined,
+			(_message, options) => {
+				optionsSeen.push(options);
+				return undefined;
+			},
 			undefined,
 			1,
-			false,
-			true,
-			60,
 			[
 				(markdown, context) => {
 					contexts.push(context);
@@ -79,6 +82,7 @@ describe("CustomMessageComponent", () => {
 			messageId: "entry-1",
 			timestamp: "2025-01-15T10:30:00.000Z",
 		});
+		expect(optionsSeen).toMatchObject([{ compactView: false }]);
 	});
 });
 
@@ -124,7 +128,7 @@ describe("CustomMessageComponent images", () => {
 			display: true,
 			timestamp: Date.now(),
 		};
-		const component = new CustomMessageComponent(message, undefined, undefined, 1, true);
+		const component = new CustomMessageComponent(message, undefined, undefined, 1, [], undefined, undefined, true);
 
 		expect(component.render(40).join("\n")).not.toContain("\x1b_G");
 		component.setExpanded(true);

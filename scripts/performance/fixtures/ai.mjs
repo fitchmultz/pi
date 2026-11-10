@@ -1,13 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
+import { Type } from "typebox";
 import { Agent } from "/pi-performance-source/packages/agent/src/agent.ts";
 import { transformMessages } from "/pi-performance-source/packages/ai/src/api/transform-messages.ts";
-import { Type } from "/pi-performance-source/packages/ai/src/index.ts";
-import {
-	AssistantMessageFrameEncoder,
-	reduceAssistantMessageFrames,
-} from "/pi-performance-source/packages/ai/src/utils/assistant-message-frame.ts";
 import { estimateContextTokens } from "/pi-performance-source/packages/ai/src/utils/estimate.ts";
 import { AssistantMessageEventStream, EventStream } from "/pi-performance-source/packages/ai/src/utils/event-stream.ts";
 import { parseStreamingJson, repairJson } from "/pi-performance-source/packages/ai/src/utils/json-parse.ts";
@@ -38,9 +34,7 @@ const messageCount = integer("messages", smoke ? 12 : 3000);
 const eventCount = integer("events", smoke ? 32 : 100000);
 const iterations = integer("iterations", smoke ? 1 : 5);
 const samples = integer("samples", smoke ? 1 : 7);
-const selected = new Set(
-	option("cases", "parse,repair,tools,transform,estimate,validate,frames,queued-frames,queue,agent").split(","),
-);
+const selected = new Set(option("cases", "parse,repair,tools,transform,estimate,validate,queue,agent").split(","));
 const usage = () => ({
 	input: 0,
 	output: 0,
@@ -129,25 +123,6 @@ const validationCall = {
 	arguments: { path: "file.ts", content: text, offset: null },
 };
 assert.deepEqual(validateToolArguments(validationTool, validationCall), { path: "file.ts", content: text });
-const toolCall = { type: "toolCall", id: "c", name: "write", arguments: JSON.parse(payload) };
-const frameMessage = answer([toolCall], "toolUse");
-const toolEvents = [
-	{ type: "start", partial: frameMessage },
-	{ type: "toolcall_start", contentIndex: 0, partial: frameMessage },
-];
-for (let start = 0; start < payload.length; start += chunkSize)
-	toolEvents.push({
-		type: "toolcall_delta",
-		contentIndex: 0,
-		delta: payload.slice(start, start + chunkSize),
-		partial: frameMessage,
-	});
-toolEvents.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: frameMessage });
-const rawFrames = [
-	{ type: "start", partial: answer([]) },
-	{ type: "toolcall_start", contentIndex: 0, toolCall: { ...toolCall, arguments: {} } },
-	...toolEvents.slice(2, -1).map(({ type, contentIndex, delta }) => ({ type, contentIndex, delta })),
-];
 let sink;
 const cases = {
 	parse: () => {
@@ -175,20 +150,6 @@ const cases = {
 		assert.equal(sink.content, text);
 		assert.equal(sink.offset, undefined);
 		assert.equal(validationCall.arguments.offset, null);
-	},
-	frames: () => {
-		sink = reduceAssistantMessageFrames(rawFrames);
-		assert.equal(sink.content[0].arguments.content, text);
-	},
-	"queued-frames": () => {
-		const encoder = new AssistantMessageFrameEncoder();
-		const frames = [];
-		for (const event of toolEvents) {
-			const frame = encoder.encode(event);
-			if (frame) frames.push(frame);
-		}
-		sink = reduceAssistantMessageFrames(frames);
-		assert.equal(sink.content[0].arguments.content, text);
 	},
 	queue: async () => {
 		const stream = new EventStream(

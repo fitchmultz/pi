@@ -9,7 +9,8 @@ import { witness } from "../proof.mjs";
 
 const repo = process.env.PI_PERF_REPO;
 const payload = process.env.PI_PERF_ARTIFACT_REPO ?? repo;
-const names = ["chord", "telemetry", "ai", "tui", "agent", "codemode", "mcp", "coding-agent"];
+// The archives nix/package.nix packs in its install phase, in its order.
+const names = ["chord", "telemetry", "schema", "ai", "tui", "agent", "codemode", "mcp", "durable", "coding-agent"];
 const driver = join(repo, "scripts/pack-nix-packages.mjs");
 const scratch = mkdtempSync(join(tmpdir(), "pi-nix-pack-"));
 try {
