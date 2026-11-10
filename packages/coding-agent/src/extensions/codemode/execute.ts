@@ -484,7 +484,8 @@ async function truncateOutput(
  * The value a script receives for a nested call: a tool that declares
  * `outputSchema` resolves to its `structuredContent`, also for error results that carry one (such
  * as MCP results with `isError`); any other tool resolves to its text content. Other failures
- * reject with the tool's error text.
+ * reject with the tool's error text. A string `structuredContent` longer than the text content is
+ * an {@link UncutValue}.
  */
 function toScriptValue(tool: AgentTool<any>, outcome: AgentToolCallOutcome): unknown {
 	const { result } = outcome;
@@ -492,6 +493,42 @@ function toScriptValue(tool: AgentTool<any>, outcome: AgentToolCallOutcome): unk
 	const text = textOf(result);
 	if (outcome.isError) throw new Error(text || `Tool "${tool.name}" failed`);
 	return text;
+}
+
+/** A nested call's string value that holds more than the text of its result: a cut `read` resolves to all of its text. */
+interface UncutValue {
+	value: string;
+	/** The text a direct call shows the model: the page and its notice. */
+	shown: string;
+}
+
+/**
+ * Where a script prints an uncut value unchanged, show the text of the call instead, as a string or
+ * inside JSON. A script gets all the text to parse or search; the model gets the page whose notice
+ * names the offsets to continue with. Printed whole, a long file would be cut by the output budget
+ * to its head and tail with no notice.
+ */
+function showCallText(output: CodemodeOutputItem[], uncut: readonly UncutValue[]): CodemodeOutputItem[] {
+	if (uncut.length === 0) return output;
+	let longestText = 0;
+	for (const item of output) {
+		if (item.type === "text") longestText = Math.max(longestText, item.text.length);
+	}
+	const forms = uncut
+		.filter(({ value }) => value.length <= longestText)
+		// Longest first: a read from a later offset resolves to the end of a read of the whole file.
+		.sort((a, b) => b.value.length - a.value.length)
+		.flatMap(({ value, shown }) => [
+			[JSON.stringify(value).slice(1, -1), JSON.stringify(shown).slice(1, -1)],
+			[value, shown],
+		]);
+	if (forms.length === 0) return output;
+	return output.map((item) => {
+		if (item.type !== "text") return item;
+		let { text } = item;
+		for (const [from, to] of forms) text = text.replaceAll(from, () => to);
+		return { ...item, text };
+	});
 }
 
 /**
@@ -579,6 +616,8 @@ function startScript(
 		modelUsage = modelUsage ? combineUsage(modelUsage, usage) : usage;
 	};
 
+	const uncutValues: UncutValue[] = [];
+
 	const snapshot = (): CodemodeToolDetails => ({ calls: calls.map((call) => ({ ...call })) });
 	const publish = () => onUpdate?.({ content: [], details: snapshot() });
 	// Show the script as running before its first nested call, so the row's timer starts.
@@ -615,7 +654,13 @@ function startScript(
 				record.status = "ok";
 			}
 			publish();
-			return toScriptValue(tool, outcome);
+			const value = toScriptValue(tool, outcome);
+			if (typeof value === "string") {
+				const shown = textOf(outcome.result);
+				// Only a longer value: its text then never lengthens the output, and no empty value is searched for.
+				if (value.length > shown.length) uncutValues.push({ value, shown });
+			}
+			return value;
 		},
 	}));
 
@@ -687,7 +732,7 @@ function startScript(
 			// pi extension: a returned value is appended like text().
 			if (result.value !== undefined) scriptOutput.push({ type: "text", text: valueText(result.value) });
 		}
-		const items = formatOutput(scriptOutput);
+		const items = formatOutput(showCallText(scriptOutput, uncutValues));
 		if (!result.ok) items.push({ type: "text", text: `Script error:\n${formatError(result, calls)}` });
 		if (generatedImages > 0 && !items.some((item) => item.type === "image")) {
 			items.push({

@@ -3266,6 +3266,8 @@ pi.registerEntryRenderer("my-card", (entry, options, theme) => {
 pi.appendEntry("my-card", { status: "done" });
 ```
 
+In [compact view](settings.md#compact-view), Pi shows a message or entry that is not expanded as the first two rows of what its renderer returns, skipping blank rows. A renderer needs no code for this. A message renderer that wants a different summary can return it when `options.compactView` is `true` and `options.expanded` is `false`; see [Keep rendering responsive](tui.md#keep-rendering-responsive).
+
 ### Theme Colors
 
 All render functions receive a `theme` object. See [themes.md](themes.md) for creating custom themes and the full color palette.

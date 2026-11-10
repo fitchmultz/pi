@@ -1624,7 +1624,10 @@ export interface SessionBeforeTreeResult {
 // ============================================================================
 
 export interface MessageRenderOptions extends KeybindingHints {
-	/** Compact transcript density; independent of expansion. */
+	/**
+	 * Compact view is on; independent of expansion. Pi cuts an unexpanded message to two rows itself, so a
+	 * renderer reads this only to return its own summary.
+	 */
 	compactView?: boolean;
 	expanded: boolean;
 	/** Horizontal padding configured by the outputPad setting. */

@@ -9,7 +9,6 @@ import {
 	Text,
 	type TUI,
 	type TuiMouseEvent,
-	truncateToWidth,
 } from "@earendil-works/pi-tui";
 import type { ToolDefinition, ToolRenderContext, ToolRenderers } from "../../../core/extensions/types.ts";
 
@@ -17,9 +16,9 @@ import type { ToolDefinition, ToolRenderContext, ToolRenderers } from "../../../
 export type { ToolRenderers };
 
 import { formatToolCallWithArgs, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
-import { stripAnsi } from "../../../utils/ansi.ts";
 import { ensurePngTranscoder } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
+import { CompactPreview } from "./compact-preview.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 
 const FALLBACK_PREVIEW_LINES = 10;
@@ -49,9 +48,7 @@ export class ToolExecutionComponent extends Container {
 	private args: any;
 	private expanded = false;
 	private compactView: boolean;
-	private compactRows: number[] = [];
-	private compactHeight = 0;
-	private compactPreview?: { width: number; source: string[]; resultStart: number; lines: string[] };
+	private readonly compactPreview = new CompactPreview();
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private outputPad: number;
@@ -267,31 +264,7 @@ export class ToolExecutionComponent extends Container {
 				this.hasRendererDefinition() && this.result
 					? 1 + (self ? 0 : 1) + (container.children[0]?.render(Math.max(1, width - paddingX * 2)).length ?? 0)
 					: 0;
-			const cached = this.compactPreview;
-			if (
-				cached?.width === width &&
-				cached.resultStart === resultStart &&
-				cached.source.length === source.length &&
-				cached.source.every((line, i) => line === source[i])
-			) {
-				return cached.lines;
-			}
-			const rows = source.flatMap((line, y) =>
-				/\x1b(?:_G|\]1337;File=)/.test(line) || stripAnsi(line).trim() ? [y] : [],
-			);
-			const second = rows.find((y) => y > rows[0] && y >= resultStart) ?? rows[1];
-			this.compactRows = [rows[0], second].filter((y) => y !== undefined);
-			this.compactHeight = source.length;
-			const lines = this.compactRows.map((y) => {
-				const line = source[y];
-				const imageStart = line.search(/\x1b(?:_G|\]1337;File=)/);
-				return truncateToWidth(
-					imageStart === -1 ? line : stripAnsi(line.slice(0, imageStart)) + theme.fg("muted", "[image]"),
-					width,
-				);
-			});
-			this.compactPreview = { width, source, resultStart, lines };
-			return lines;
+			return this.compactPreview.render(source, width, resultStart);
 		}
 
 		if (this.hasRendererDefinition() && this.getRenderShell() === "self") {
@@ -324,8 +297,8 @@ export class ToolExecutionComponent extends Container {
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		if (this.compactView && !this.expanded) {
-			const y = this.compactRows[event.y];
-			return y === undefined ? undefined : super.handleMouse({ ...event, y, height: this.compactHeight });
+			const native = this.compactPreview.toNative(event);
+			return native && super.handleMouse(native);
 		}
 		if (!this.hasRendererDefinition() || this.getRenderShell() !== "self") return super.handleMouse(event);
 		if (event.y <= 0 || event.y > this.selfRenderHeight) return undefined;
@@ -337,7 +310,7 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private updateDisplay(): void {
-		this.compactPreview = undefined;
+		this.compactPreview.reset();
 		this.argsPending = false;
 		const bgFn = this.isPartial
 			? (text: string) => theme.bg("toolPendingBg", text)

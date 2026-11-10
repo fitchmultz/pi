@@ -2,7 +2,7 @@
 
 Runs model-written JavaScript in a QuickJS VM (compiled to WebAssembly) where the only capability is calling injected tools. Nested tool calls never enter the LLM context; only the script's output and return value do.
 
-Scripts use `tools`, `ALL_TOOLS`, `text`, `image`, `exit`, `store`, and `load`, and may start with a `// @options:` line. The coding agent uses it for its built-in `codemode` tool. It has no pi dependencies and can be used on its own to expose any functions (remote APIs, MCP servers, application services) to model-written scripts.
+Scripts use `tools`, `ALL_TOOLS`, `text`, `image`, `show`, `exit`, `store`, and `load`, and may start with a `// @options:` line. The coding agent uses it for its built-in `codemode` tool. It has no pi dependencies and can be used on its own to expose any functions (remote APIs, MCP servers, application services) to model-written scripts.
 
 The package runs in two kinds of environments. Each has its own sandbox class, but they share one API, one script environment, and one result format:
 
@@ -50,6 +50,7 @@ await sandbox.close();
 - `ALL_TOOLS` lists `{ name, description }` for every tool, with `name` as the identifier.
 - `text(value)` appends a text item to `result.output`; values other than strings are JSON-stringified. `console.log/info/warn/error/debug` append text items with `console: true`.
 - `image(urlOrItem)` appends an image item. It accepts a base64 `data:` URL, `{ image_url }`, or an image block (`{ type: "image", data, mimeType }`, as MCP tools and `@earendil-works/pi-ai` produce). Remote URLs are rejected.
+- `await show(...calls)` takes promises returned by `tools.<name>()`, or arrays of them, and appends one text item per call: a label (the tool's name and the argument JSON, cut after 200 characters), then the result. A string is appended as it is, an image block as an image item after its `note`, an MCP result as its content blocks, and any other object as one line of JSON followed by each of its string fields that has a line break. A rejected call appends `FAILED:` and its error message. It resolves to the `Promise.allSettled()` results and never rejects for a failed call.
 - `exit()` ends the script successfully right away, keeping its output and store writes.
 - `globals` passed to the sandbox are called as top-level functions, for example a host helper `image(ref)`. They behave like tools but are not recorded in `result.calls`. A name like `models.classify` puts the function on a frozen `models` object. With `spread: true`, `execute` receives all call arguments as an array instead of the first one, and `signature` replaces the declaration generated from the schemas.
 - `store(key, value)` and `load(key)` read and write JSON values synchronously. See [Store](#store).

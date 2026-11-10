@@ -113,17 +113,23 @@ describe("compact view settings and native event lifecycle", () => {
 						(_message, options) =>
 							new Text(options.compactView && !options.expanded ? "status" : "status\nfull detail", 0, 0),
 					);
+					// Written without compact view in mind, like most extension renderers.
+					pi.registerEntryRenderer("progress", () => new Text("entry row 1\nentry row 2\nentry row 3", 0, 0));
 				},
 			],
 		});
 		onTestFinished(() => harness.cleanup());
 		const message = { role: "custom" as const, customType: "status", content: "saved", display: true, timestamp: 1 };
-		harness.sessionManager.appendMessage(message);
-		harness.session.agent.state.messages.push(message);
+		const plain = { ...message, customType: "plain", content: "plain row 1\n\nplain row 2\n\nplain row 3" };
+		for (const custom of [message, plain]) {
+			harness.sessionManager.appendMessage(custom);
+			harness.session.agent.state.messages.push(custom);
+		}
+		harness.sessionManager.appendCustomEntry("progress", {});
 		const { view, submit, text, rebind } = await createView(harness);
 		await rebind();
 		expect(text()).toContain("full detail");
-		const child = view.chatContainer.children[0];
+		const children = [...view.chatContainer.children];
 		const saved = structuredClone(harness.session.messages);
 		for (const [command, enabled] of [
 			["/compact-view", true],
@@ -152,7 +158,12 @@ describe("compact view settings and native event lifecycle", () => {
 			await submit(command);
 			expect(harness.settingsManager.getCompactView()).toBe(enabled);
 			expect(text().includes("Activity")).toBe(!!enabled);
-			expect(view.chatContainer.children[0]).toBe(child);
+			for (const [index, child] of children.entries()) expect(view.chatContainer.children[index]).toBe(child);
+			// Existing cards switch form in place: hidden when on, two rows each when hybrid, complete when off.
+			for (const card of ["plain", "entry"]) {
+				expect(text().includes(`${card} row 1`)).toBe(enabled !== true);
+				expect(text().includes(`${card} row 3`)).toBe(enabled === false);
+			}
 			expect(view.defaultEditor.getText()).toBe("");
 		}
 		expect(text().match(/Usage: \/compact-view \[on\|off\|hybrid\|toggle\]/g)).toHaveLength(2);

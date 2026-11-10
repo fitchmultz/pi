@@ -12,6 +12,12 @@
  * `{ image_url }` object, or an image block `{ type: "image", data, mimeType }`, and `exit()` ends the script
  * successfully. `console.*` appends text items marked as console output.
  *
+ * `show(...calls)` is for calls whose results the model wants to read: it waits for every given promise, then
+ * appends one text item per promise, in the order given: a label naming the tool call that created the promise,
+ * then its result, or `FAILED:` and the error text of a rejected one. It never rejects for a failed call and
+ * resolves to the `Promise.allSettled()` results. The shortest script, `text(await tools.a()); text(await
+ * tools.b());`, ends at the first rejection and never makes the later calls.
+ *
  * `store(key, value)` and `load(key)` are synchronous: they work on a snapshot of
  * JSON text passed in as `storeJson`, and the keys the script wrote are reported
  * with a successful "done".
@@ -41,6 +47,13 @@ export const MAX_STORE_TOTAL_CHARS = 1024 * 1024;
  */
 export const MAX_OUTPUT_CHARS = 16 * 1024 * 1024;
 export const MAX_OUTPUT_ITEMS = 100_000;
+
+/**
+ * Characters of a call's argument JSON in a `show()` label; longer arguments are cut. The label only has to tell
+ * the calls of one script apart. Measured on 30 days of session journals: the arguments of 93% of nested `read`,
+ * 77% of `grep`, and 99% of `ls` and `find` calls fit.
+ */
+const SHOW_LABEL_ARGS_CHARS = 200;
 
 const IMAGE_HELPER_EXPECTS =
 	'image expects a non-empty image URL string, an object with image_url, or an image block { type: "image", data, mimeType }';
@@ -196,10 +209,13 @@ export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson
 		}
 	}
 
+	// The name and argument JSON of the call that created each promise, for the labels of show().
+	const callsByPromise = new WeakMap();
+
 	function caller(kind, name, spread) {
-		return (...args) =>
-			new Promise((resolve, reject) => {
-				let json;
+		return (...args) => {
+			let json;
+			const promise = new Promise((resolve, reject) => {
 				try {
 					json = serialize(spread ? args : args[0]);
 				} catch (error) {
@@ -210,6 +226,9 @@ export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson
 				pending.set(id, { resolve, reject });
 				bridge(kind, id, name, json);
 			});
+			callsByPromise.set(promise, { name, json });
+			return promise;
+		};
 	}
 
 	const tools = Object.create(null);
@@ -442,6 +461,80 @@ export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson
 		throw EXIT;
 	}
 
+	function isBlock(value, type) {
+		return typeof value === "object" && value !== null && value.type === type;
+	}
+
+	// The text lines and image blocks show() prints for a result, in the forms tools resolve to:
+	// - a string: as it is;
+	// - an image block, as a read of an image file resolves to: its note, then the image;
+	// - an MCP result ({ content: blocks, structuredContent?, isError? }): the blocks, as a direct call shows
+	//   them, after "FAILED:" for an error result and one line of JSON with any other fields. structuredContent
+	//   repeats the blocks and is left out;
+	// - any other object: its fields as one line of JSON, except each string field with a line break (a command's
+	//   output), which follows under its name as it is. JSON would escape the line breaks of long text.
+	function describeResult(value, lines, images) {
+		if (typeof value === "string") {
+			lines.push(value);
+		} else if (isBlock(value, "image")) {
+			if (typeof value.note === "string" && value.note !== "") lines.push(value.note);
+			images.push(value);
+		} else if (typeof value !== "object" || value === null || Array.isArray(value)) {
+			lines.push(format(value));
+		} else if (Array.isArray(value.content) && value.content.length > 0) {
+			const { content, structuredContent, isError, ...fields } = value;
+			if (isError === true) lines.push("FAILED:");
+			if (Object.keys(fields).length > 0) lines.push(format(fields));
+			for (const block of content) {
+				if (isBlock(block, "text") && typeof block.text === "string") lines.push(block.text);
+				else if (isBlock(block, "image")) images.push(block);
+				else lines.push(format(block));
+			}
+		} else {
+			const fields = {};
+			const texts = [];
+			for (const key of Object.keys(value)) {
+				if (typeof value[key] === "string" && value[key].includes("\\n")) texts.push(key + ":\\n" + value[key]);
+				else fields[key] = value[key];
+			}
+			lines.push(format(fields), ...texts);
+		}
+	}
+
+	// "read {"path":"a.md"}": the tool and its arguments, cut without splitting a surrogate pair.
+	function callLabel({ name, json }) {
+		if (json === undefined) return name;
+		if (json.length <= ${SHOW_LABEL_ARGS_CHARS}) return name + " " + json;
+		const last = json.charCodeAt(${SHOW_LABEL_ARGS_CHARS} - 1);
+		return name + " " + json.slice(0, last >= 0xd800 && last <= 0xdbff ? ${SHOW_LABEL_ARGS_CHARS} - 1 : ${SHOW_LABEL_ARGS_CHARS}) + "...";
+	}
+
+	function failure(reason) {
+		return "FAILED: " + (reason instanceof ErrorCtor ? reason.message : format(reason));
+	}
+
+	async function show(...calls) {
+		const promises = calls.flat();
+		const settled = await Promise.allSettled(promises);
+		settled.forEach((result, index) => {
+			const call = callsByPromise.get(promises[index]);
+			const lines = call ? [callLabel(call)] : [];
+			const images = [];
+			if (result.status === "rejected") lines.push(failure(result.reason));
+			else describeResult(result.value, lines, images);
+			output("text", lines.join("\\n"));
+			for (const block of images) {
+				// An image that image() rejects must not end the script and lose the results after it.
+				try {
+					image(block);
+				} catch (error) {
+					output("text", failure(error));
+				}
+			}
+		});
+		return settled;
+	}
+
 	const console = {};
 	for (const level of ["log", "info", "warn", "error", "debug"]) {
 		console[level] = (...args) => {
@@ -456,6 +549,7 @@ export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson
 	Object.defineProperty(globalThis, "text", { value: text, enumerable: true });
 	Object.defineProperty(globalThis, "image", { value: image, enumerable: true });
 	Object.defineProperty(globalThis, "exit", { value: exit, enumerable: true });
+	Object.defineProperty(globalThis, "show", { value: show, enumerable: true });
 
 	return {
 		settle(id, ok, payload, propertiesJson) {

@@ -181,7 +181,11 @@ Rendering runs on the interactive path. Cache expensive layout and highlighting 
 
 Keep the default view compact and reveal detail through expansion or a dedicated screen. For custom tool rendering, handle partial results and reuse the previous component when it can be updated safely.
 
-In [compact view](settings.md#compact-view) (`true` or `"hybrid"`), Activity groups start collapsed for on and expanded for hybrid; both use the same compact cards. Clicking a heading toggles its group, and Ctrl+O expands full output. In these modes, `MessageRenderOptions.compactView` is an optional density hint; absence means normal view. Custom status renderers can use one content row when compact and unexpanded, keeping full details when expanded. Core does not truncate custom messages. Native tool cards reuse their existing renderers with a two-terminal-row preview and image placeholders; expansion reveals full content and images. Inner mouse controls retain priority over card expansion.
+In [compact view](settings.md#compact-view) (`true` or `"hybrid"`), Activity groups start collapsed for on and expanded for hybrid; both use the same compact cards. Clicking a heading toggles its group, and Ctrl+O expands full output.
+
+Pi makes the compact cards itself. It renders a tool card, custom message or custom entry with its normal renderer and, while the card is not expanded, shows at most two terminal rows of that rendering: rows that are not blank, shortened to the terminal width, with `[image]` in place of an inline image. A renderer needs no compact-view code. Expansion shows the full rendering and images. Inner mouse controls retain priority over card expansion.
+
+`MessageRenderOptions.compactView` is optional. It is `true` in these modes; absence means normal view. Use it only when a message renderer should supply its own summary: return one or two rows while `compactView` is `true` and `expanded` is `false`, and the full details when expanded. Pi still cuts a longer result to two rows. Entry renderers do not receive this option.
 
 Use `PI_TUI_WRITE_LOG` to capture the raw ANSI stream when diagnosing rendering problems. Test narrow widths, wide characters, resize events, theme changes, focus transitions, and both regular and fullscreen modes.
 
