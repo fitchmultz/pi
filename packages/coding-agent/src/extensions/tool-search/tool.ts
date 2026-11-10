@@ -435,11 +435,12 @@ function searchAndLoad(
 	// nothing in the session has.
 	const notOffered: string[] = [];
 	const unknown: string[] = [];
-	for (const word of nameWords(query)) {
-		for (const tool of all) {
-			if (isSearchable(tool.exposure) || !isExactNameQuery(normalizeName(word.text), tool.name)) continue;
-			(isActive(tool) ? active : notOffered).push(tool.name);
-		}
+	const names = nameWords(query);
+	for (const tool of all) {
+		if (isSearchable(tool.exposure) || !namesTool(query, names, tool.name)) continue;
+		(isActive(tool) ? active : notOffered).push(tool.name);
+	}
+	for (const word of names) {
 		const known = all.some((tool) => {
 			const terms = new Set([...tokenize(tool.name), ...tokenize(tool.namespace?.name ?? "")]);
 			return word.terms.every((term) => terms.has(term));

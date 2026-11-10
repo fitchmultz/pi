@@ -249,11 +249,15 @@ describe("tool_search", () => {
 			{ query: "+background_command start command", limit: 2 },
 			{ query: "background_command start command", limit: 1 },
 			{ query: "+café query" },
+			{ query: "fleet runs" },
 		);
-		expect(results[0]).toEqual({
+		const notAvailable = {
 			text: "fleet_runs is not available in this session; tool_search cannot load it.",
 			details: { loaded: [], unavailable: ["fleet_runs"] },
-		});
+		};
+		expect(results[0]).toEqual(notAvailable);
+		// The whole query is the name, written with a space.
+		expect(results[4]).toEqual(notAvailable);
 		expect(results[1]).toEqual({
 			text: "No tool or server in this session has background_command in its name.",
 			details: { loaded: [], unavailable: ["background_command"] },
