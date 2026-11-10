@@ -137,6 +137,7 @@
 - Fixed collapsed tool-output and bash previews returning private selection annotations from `render()` to callers outside a fullscreen frame after that frame had rendered them.
 - Fixed background-command tests timing out on slow machines. They wait for the monitor's passes and the lease refresh instead of fixed sleeps, start a worker process only where the worker is under test, and take their limits from measured process start-up time.
 - Fixed a click on a visible thinking block in compact view removing the block with nothing left to click. The collapsed block keeps its label, and a click on the label expands the block again. With an empty hidden-thinking label, a click no longer collapses a block.
+- Fixed switching to a Gemini 3 or Gemini 4 model on the Gemini API in the middle of a turn failing with `400 Function call is missing a thought_signature`. Tool calls the previous model made are now replayed with Google's documented value that skips the signature check. Google Vertex is unchanged.
 
 ### Removed
 

@@ -3,6 +3,10 @@ import { convertMessages, requiresToolCallId } from "../src/api/google-shared.ts
 import type { Context, Model } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
+const SKIP_VALUE = "skip_thought_signature_validator";
+/** The model a session used before it switched to Gemini; its tool calls carry no Google signature. */
+const OTHER_MODEL = { api: "openai-codex-responses", provider: "openai-codex", id: "gpt-6.1-sol" };
+
 function makeGemini3Model<TApi extends "google-generative-ai" | "google-vertex">(
 	api: TApi,
 	provider: Model<TApi>["provider"],
@@ -78,6 +82,13 @@ function makeContext(model: { api: string; provider: string; id: string }, thoug
 	};
 }
 
+function functionCallSignatures(contents: ReturnType<typeof convertMessages>): (string | undefined)[] {
+	return contents
+		.flatMap((content) => content.parts ?? [])
+		.filter((part) => part.functionCall !== undefined)
+		.map((part) => part.thoughtSignature);
+}
+
 describe("google-shared convertMessages — Gemini 3 unsigned tool calls", () => {
 	it.each([
 		makeGemini3Model("google-generative-ai", "google"),
@@ -97,49 +108,49 @@ describe("google-shared convertMessages — Gemini 3 unsigned tool calls", () =>
 		expect(functionResponseIds).toEqual(["call_1", "call_2"]);
 	});
 
-	it("does not add skip_thought_signature_validator for unsigned Google Gen AI tool calls", () => {
+	// The Gemini API rejects the request (400) when the first call of a step in the current turn has
+	// no signature. The value must not depend on the model ID: Gemini 4 and Gemma 4 need or accept it.
+	it.each(["gemini-4-carbon", "gemma-4-31b-it"])(
+		"puts the skip value on the first call of another model's message for %s on the Gemini API",
+		(id) => {
+			const model = makeGemini3Model("google-generative-ai", "google", id);
+			const contents = convertMessages(model, normalizeContext(makeContext(OTHER_MODEL)));
+
+			expect(functionCallSignatures(contents)).toEqual([SKIP_VALUE, undefined]);
+		},
+	);
+
+	// The value stays on the message after its turn ends, so the request prefix does not change.
+	it("keeps the skip value on another model's message in a previous turn", () => {
 		const model = makeGemini3Model("google-generative-ai", "google");
-		const contents = convertMessages(model, normalizeContext(makeContext({ ...model, id: "other-model" })));
+		const currentTurn = makeContext(OTHER_MODEL);
+		const previousTurn: Context = {
+			messages: [...currentTurn.messages, { role: "user", content: "Thanks", timestamp: Date.now() }],
+		};
 
-		const modelTurn = contents.find((c) => c.role === "model");
-		expect(modelTurn).toBeTruthy();
+		const current = convertMessages(model, normalizeContext(currentTurn));
+		const previous = convertMessages(model, normalizeContext(previousTurn));
 
-		const functionCallParts = modelTurn?.parts?.filter((p) => p.functionCall !== undefined) ?? [];
-		expect(functionCallParts).toHaveLength(2);
-		expect(functionCallParts[0]?.thoughtSignature).toBeUndefined();
-		expect(functionCallParts[1]?.thoughtSignature).toBeUndefined();
-		expect(JSON.stringify(modelTurn)).not.toContain("skip_thought_signature_validator");
-
-		const textParts = modelTurn?.parts?.filter((p) => p.text !== undefined) ?? [];
-		const historicalText = textParts.filter((p) => p.text?.includes("Historical context"));
-		expect(historicalText).toHaveLength(0);
+		expect(functionCallSignatures(previous)).toEqual([SKIP_VALUE, undefined]);
+		expect(previous.slice(0, current.length)).toEqual(current);
 	});
 
-	it("does not add skip_thought_signature_validator for unsigned Vertex tool calls", () => {
+	it("does not add the skip value for unsigned Vertex tool calls", () => {
 		const model = makeGemini3Model("google-vertex", "google-vertex");
-		const contents = convertMessages(model, normalizeContext(makeContext(model)));
-		const modelTurn = contents.find((c) => c.role === "model");
-		const functionCallParts = modelTurn?.parts?.filter((p) => p.functionCall !== undefined) ?? [];
+		const contents = convertMessages(model, normalizeContext(makeContext(OTHER_MODEL)));
 
-		expect(functionCallParts).toHaveLength(2);
-		expect(functionCallParts[0]?.thoughtSignature).toBeUndefined();
-		expect(functionCallParts[1]?.thoughtSignature).toBeUndefined();
-		expect(JSON.stringify(modelTurn)).not.toContain("skip_thought_signature_validator");
+		expect(functionCallSignatures(contents)).toEqual([undefined, undefined]);
 	});
 
-	it("preserves valid thoughtSignature when present for the same provider and model", () => {
+	it("keeps a same-model signature and adds no skip value to that message", () => {
 		const model = makeGemini3Model("google-generative-ai", "google");
 		const validSig = "AAAAAAAAAAAAAAAAAAAAAA==";
 		const contents = convertMessages(model, normalizeContext(makeContext(model, validSig)));
-		const modelTurn = contents.find((c) => c.role === "model");
-		const functionCallParts = modelTurn?.parts?.filter((p) => p.functionCall !== undefined) ?? [];
 
-		expect(functionCallParts).toHaveLength(2);
-		expect(functionCallParts[0]?.thoughtSignature).toBe(validSig);
-		expect(functionCallParts[1]?.thoughtSignature).toBeUndefined();
+		expect(functionCallSignatures(contents)).toEqual([validSig, undefined]);
 	});
 
-	it("does not add a thoughtSignature for non-Gemini-3 models", () => {
+	it("does not add tool call IDs for non-Gemini-3 models", () => {
 		const model = makeGemini3Model("google-generative-ai", "google", "gemini-2.5-flash");
 		const contents = convertMessages(model, normalizeContext(makeContext({ ...model, id: "other-model" })));
 		const modelTurn = contents.find((c) => c.role === "model");
@@ -150,7 +161,6 @@ describe("google-shared convertMessages — Gemini 3 unsigned tool calls", () =>
 
 		expect(functionCallParts).toHaveLength(2);
 		expect(functionCallParts.every((part) => part.functionCall?.id === undefined)).toBe(true);
-		expect(functionCallParts.every((part) => part.thoughtSignature === undefined)).toBe(true);
 		expect(functionResponseParts).toHaveLength(2);
 		expect(functionResponseParts.every((part) => part.functionResponse?.id === undefined)).toBe(true);
 	});
