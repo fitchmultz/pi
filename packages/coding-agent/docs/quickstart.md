@@ -46,6 +46,12 @@ Self-update commands recognize the fork receipt and follow fork main. An explici
 `PI_SELF_UPDATE_COMMAND` or `selfUpdateCommand` takes precedence. Use
 `pi update --fork` to select the fork updater explicitly.
 
+The fork's own changes are the `[Unreleased]` entries of the changelog. On a fork
+installation, `/changelog` lists them last, under "Fork changes", after upstream's
+releases. The first new session after an update to another fork commit shows them
+once under "What's New", or as a one-line notice with `collapseChangelog`. Relative
+links in these entries open the fork repository at the installed commit.
+
 The updater fetches and pins fork main, hydrates model data in an isolated home,
 then uses the installer to build, validate, and atomically select the release
 under `~/.local/share/pi-fork/releases`. It does not edit settings, credentials,

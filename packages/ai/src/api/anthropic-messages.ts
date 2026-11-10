@@ -38,7 +38,6 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
-import { createCacheTrace } from "../utils/cache-trace.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { withCauseDetail } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -67,15 +66,18 @@ import {
 import {
 	getJsonSchemaToolParameters,
 	prefersJsonSchemaStrictSampling,
+	requiresJsonSchemaStrictSampling,
 	resolveJsonSchemaStrictSampling,
 	type UnsupportedStrictSchemaKeywordCheck,
 } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampMaxTokensToContext } from "./simple-options.ts";
 import {
+	admitStrictTool,
 	hasExceededStrictToolLimits,
 	isStrictToolLimitErrorMessage,
 	markStrictToolLimitsExceeded,
+	startStrictToolBudget,
 } from "./strict-tool-limits.ts";
 import { splitErrorToolResultImages, transformMessages } from "./transform-messages.ts";
 
@@ -110,7 +112,7 @@ function getCacheControl(
 }
 
 // Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.280";
+const claudeCodeVersion = "2.1.322";
 
 // Claude Code 2.x tool names (canonical casing)
 // Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
@@ -841,10 +843,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 
 		try {
 			let client: Anthropic;
-			const trace = createCacheTrace(model, options, undefined, () => ({
-				...model.compat,
-				...getAnthropicCompat(model),
-			}));
 			let isOAuth: boolean;
 			let usageModel = model;
 			let inputTransformations: BetaInputTransformation[] | undefined;
@@ -858,8 +856,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			if (options?.client) {
 				client = options.client;
 				isOAuth = false;
-				trace?.gap("injected_client_wire_unobserved");
-				trace?.gap("logical_capture_incomplete");
 			} else {
 				const apiKey = options?.apiKey;
 				const federation = getAnthropicFederation(model, apiKey, options?.headers, options?.env);
@@ -878,7 +874,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					model,
 					apiKey,
 					options?.headers,
-					federation ? options?.fetch : createRequestCompressionFetch("anthropic-messages", options?.fetch, trace),
+					federation ? options?.fetch : createRequestCompressionFetch("anthropic-messages", options?.fetch),
 					copilotDynamicHeaders,
 					cacheSessionId,
 					federation,
@@ -888,7 +884,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				// Keep the federation owner's shared credential cache and original fetch identity.
 				if (federation)
 					client = client.withOptions({
-						fetch: createRequestCompressionFetch("anthropic-messages", options?.fetch, trace),
+						fetch: createRequestCompressionFetch("anthropic-messages", options?.fetch),
 					});
 				isOAuth = created.isOAuthToken;
 			}
@@ -898,17 +894,11 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				maxRetries: 0,
 			};
 			const send = (body: ThreadedParams) =>
-				retryProviderRequest(
-					() => {
-						if (options?.client) trace?.attempt("sse");
-						return client.beta.messages.create(body, requestOptions).asResponse();
-					},
-					{
-						maxRetries: options?.maxRetries,
-						maxRetryDelayMs: options?.maxRetryDelayMs,
-						signal: options?.signal,
-					},
-				);
+				retryProviderRequest(() => client.beta.messages.create(body, requestOptions).asResponse(), {
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				});
 			let disablePreferredStrictTools = hasExceededStrictToolLimits(options?.sessionId);
 			let response: Response;
 			let params: MessageCreateParamsStreaming;
@@ -922,7 +912,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				});
 				if (built.providerThinkingLevel) output.providerThinkingLevel = built.providerThinkingLevel;
 				params = built.params;
-				trace?.payloadPass();
 				const nextParams = await options?.onPayload?.(params, model);
 				if (nextParams !== undefined) {
 					params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
@@ -967,7 +956,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			const openBlocks = new Map<number, OpenBlock>();
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
-				trace?.terminal(event);
 				await options?.onProviderStreamEvent?.(event, model);
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
@@ -993,7 +981,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(usageModel, output.usage);
-					trace?.parsed(output.usage);
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "fallback") {
 						if (output.content.length > 0) {
@@ -1159,7 +1146,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							event.usage as typeof event.usage & OpenRouterUsageAccounting,
 						);
 					}
-					trace?.parsed(output.usage, Boolean(event.usage));
 				}
 			}
 
@@ -1462,18 +1448,32 @@ function buildParams(
 	// by value in a `tool_addition` block, which also expresses same-name redefinitions.
 	// Anthropic rejects a tool list where every tool is deferred, so there must be an initial
 	// active tool to anchor the placeholder. Otherwise the current tool list is sent.
+	const initialTools = initialSystemMessage?.toolsAdded ?? [];
+	const nativeToolChanges =
+		compat.supportsMidConvoSystemMessages && compat.supportsMidConvoToolChanges && initialTools.length > 0;
+	const requestToolList = nativeToolChanges ? initialTools : getCurrentTools(context.messages);
+	const resolveStrict = (tool: Tool): boolean | undefined =>
+		flags.disablePreferredStrictTools && prefersJsonSchemaStrictSampling(tool)
+			? undefined
+			: resolveJsonSchemaStrictSampling(tool, compat.supportsStrictTools, isAnthropicStrictUnsupportedKeyword);
+	// Claude's strict tool limits cover the whole request: the request-level tools and every inline definition.
+	// Required tools anywhere in it are budgeted before the first preferred tool.
+	const inlineTools = nativeToolChanges
+		? conversationMessages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []) : []))
+		: [];
+	const strictBudget = startStrictToolBudget(
+		[...requestToolList, ...inlineTools].filter(
+			(tool) => requiresJsonSchemaStrictSampling(tool) && resolveStrict(tool) === true,
+		),
+	);
 	let hasPreferredStrictTools = false;
-	// Anthropic's strict limits apply to the whole request: initial tools first, then inline definitions.
-	const strictBudget = { tools: 0, unions: 0 };
 	const convertToolDefinitions = (tools: Tool[], toolCacheControl?: CacheControlEphemeral): BetaTool[] => {
 		const definitions = convertTools(
 			tools,
 			isOAuthToken,
 			compat.supportsEagerToolInputStreaming,
-			compat.supportsStrictTools,
-			strictBudget,
+			(tool) => resolveStrict(tool) === true && admitStrictTool(strictBudget, tool),
 			toolCacheControl,
-			flags.disablePreferredStrictTools,
 		);
 		if (
 			definitions.some(
@@ -1484,11 +1484,8 @@ function buildParams(
 		}
 		return definitions;
 	};
-	const initialTools = initialSystemMessage?.toolsAdded ?? [];
-	const nativeToolChanges =
-		compat.supportsMidConvoSystemMessages && compat.supportsMidConvoToolChanges && initialTools.length > 0;
 	const requestTools = convertToolDefinitions(
-		nativeToolChanges ? initialTools : getCurrentTools(context.messages),
+		requestToolList,
 		compat.supportsCacheControlOnTools ? cacheControl : undefined,
 	);
 	const thinkingDisabled =
@@ -1913,56 +1910,18 @@ const isAnthropicStrictUnsupportedKeyword: UnsupportedStrictSchemaKeywordCheck =
 	return false;
 };
 
-// Request-wide limits: https://platform.claude.com/docs/en/build-with-claude/structured-outputs#schema-complexity-limits
-// Strict conversion requires every property, so the 24 optional-parameter limit cannot bind.
-function countUnionParameters(schema: unknown): number {
-	if (typeof schema !== "object" || schema === null) return 0;
-	const { properties, items, anyOf } = schema as {
-		properties?: Record<string, unknown>;
-		items?: unknown;
-		anyOf?: unknown[];
-	};
-	let count = 0;
-	for (const child of [...Object.values(properties ?? {}), ...(items === undefined ? [] : [items])]) {
-		const { anyOf: union, type } = (child ?? {}) as { anyOf?: unknown; type?: unknown };
-		if (Array.isArray(union) || Array.isArray(type)) count++;
-		count += countUnionParameters(child);
-	}
-	for (const variant of anyOf ?? []) count += countUnionParameters(variant);
-	return count;
-}
-
 function convertTools(
 	tools: Tool[],
 	isOAuthToken: boolean,
 	supportsEagerToolInputStreaming: boolean,
-	supportsStrictTools: boolean,
-	strictBudget: { tools: number; unions: number },
+	/** Decides whether a definition is sent strict. Called once per definition, in declaration order. */
+	sendsStrict: (tool: Tool) => boolean,
 	cacheControl?: CacheControlEphemeral,
-	disablePreferredStrictTools = false,
 ): BetaTool[] {
 	if (!tools) return [];
 
 	return tools.map((tool, index) => {
-		const config = tool.constrainedSampling;
-		let strict =
-			disablePreferredStrictTools && prefersJsonSchemaStrictSampling(tool)
-				? undefined
-				: resolveJsonSchemaStrictSampling(tool, supportsStrictTools, isAnthropicStrictUnsupportedKeyword);
-		if (strict === true) {
-			const unions = countUnionParameters(getJsonSchemaToolParameters(tool, true));
-			// Budget every emitted definition, including inline redefinitions, in declaration order.
-			if (strictBudget.tools < 20 && strictBudget.unions + unions <= 16) {
-				strictBudget.tools++;
-				strictBudget.unions += unions;
-			} else if (config && config.type === "json_schema" && config.strict === "require") {
-				throw new Error(
-					`Tool "${tool.name}" requires strict sampling, but exceeds Anthropic's strict tool limits.`,
-				);
-			} else {
-				strict = undefined;
-			}
-		}
+		const strict = sendsStrict(tool);
 		const parameters = getJsonSchemaToolParameters(tool, strict);
 		const schema = parameters as {
 			properties?: unknown;
@@ -1979,19 +1938,18 @@ function convertTools(
 			...(schema.$defs === undefined ? {} : { $defs: schema.$defs }),
 			...(schema.definitions === undefined ? {} : { definitions: schema.definitions }),
 		};
-		const inputSchema =
-			strict === true
-				? {
-						...(parameters as Record<string, unknown>),
-						...legacyInputSchema,
-					}
-				: legacyInputSchema;
+		const inputSchema = strict
+			? {
+					...(parameters as Record<string, unknown>),
+					...legacyInputSchema,
+				}
+			: legacyInputSchema;
 
 		return {
 			name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name,
 			description: tool.description,
 			...(supportsEagerToolInputStreaming ? { eager_input_streaming: true } : {}),
-			...(strict === true ? { strict: true } : {}),
+			...(strict ? { strict: true } : {}),
 			input_schema: inputSchema,
 			...(cacheControl && index === tools.length - 1 ? { cache_control: cacheControl } : {}),
 		};

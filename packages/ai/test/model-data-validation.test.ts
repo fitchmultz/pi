@@ -165,112 +165,66 @@ describe("published model catalog hydration", () => {
 		});
 	});
 
-	it.each(["k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed"])(
-		"migrates published Kimi Coding %s to its native protocol and cache-write metadata",
-		(id) => {
-			const { dataDir, packageRoot, values } = createFixture("kimi-coding");
-			const catalogPath = join(packageRoot, "catalog.json");
-			const isK3Style = id !== "kimi-for-coding-highspeed";
-			const model = {
-				...chatModel(values),
-				id,
-				api: "anthropic-messages",
-				baseUrl: "https://api.kimi.com/coding",
-				compat: { allowEmptySignature: true, forceAdaptiveThinking: true },
-				reasoning: true,
-				cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
-				...(isK3Style
-					? {
-							thinkingLevelMap: {
-								minimal: null,
-								low: "low",
-								medium: null,
-								high: "high",
-								xhigh: null,
-								max: "max",
-							},
-						}
-					: {}),
-			};
-			writeFileSync(catalogPath, JSON.stringify({ "kimi-coding": [model] }));
-
-			hydrateModelCatalog(packageRoot, catalogPath);
-			const groups: Record<string, Record<string, unknown>> = JSON.parse(
-				readFileSync(join(dataDir, "kimi-coding.json"), "utf8"),
-			);
-			expect(Object.keys(groups)).toEqual(["openai-completions"]);
-			expect(groups["openai-completions"][`chat:${id}`]).toEqual({
-				...model,
-				api: "openai-completions",
-				baseUrl: "https://api.kimi.com/coding/v1",
-				compat: {
-					supportsStore: false,
-					supportsDeveloperRole: false,
-					supportsReasoningEffort: isK3Style,
-					maxTokensField: "max_tokens",
-					supportsStrictMode: false,
-					thinkingFormat: isK3Style ? "openai" : "deepseek",
-					supportsMidConvoSystemMessages: true,
-					...(isK3Style
-						? { requiresReasoningContentOnAssistantMessages: true, supportsMidConvoToolAdditions: true }
-						: {}),
-				},
-				thinkingLevelMap: { ...model.thinkingLevelMap, off: null },
-				cost: { ...model.cost, cacheWrite: id === "k3" || id === "k3-256k" ? 3 : 0 },
-			});
-			expect(() => validateModelDataDirectory(readModelDataStructure(packageRoot), dataDir)).not.toThrow();
-		},
-	);
-
 	it.each([
-		["kimi-coding", "openai-completions", "https://api.kimi.com/coding/v1"],
-		["kimi-coding", "anthropic-messages", "https://proxy.example.test/coding"],
-		["test-provider", "anthropic-messages", "https://api.kimi.com/coding"],
-	])("preserves explicit metadata for %s %s at %s", (provider, api, baseUrl) => {
+		["kimi-coding", "https://api.kimi.com/coding/v1", 5],
+		["kimi-coding", "https://proxy.example.test/coding/v1", 0],
+		["test-provider", "https://api.kimi.com/coding/v1", 0],
+	])("keeps the published cost of %s k3 at %s with cacheWrite %d", (provider, baseUrl, cacheWrite) => {
 		const { dataDir, packageRoot, values } = createFixture(provider);
 		const catalogPath = join(packageRoot, "catalog.json");
 		const model = {
 			...chatModel(values),
 			id: "k3",
-			api,
-			baseUrl,
-			compat: { supportsMidConvoSystemMessages: false },
-			thinkingLevelMap: { off: "none", low: "low" },
-			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 5 },
-		};
-		writeFileSync(catalogPath, JSON.stringify({ [provider]: [model] }));
-		hydrateModelCatalog(packageRoot, catalogPath);
-		const groups: Record<string, Record<string, unknown>> = JSON.parse(
-			readFileSync(join(dataDir, `${provider}.json`), "utf8"),
-		);
-		expect(groups[api]["chat:k3"]).toEqual(model);
-	});
-
-	it.each([
-		["kimi-coding", "k3", "https://api.kimi.com/coding/v1"],
-		["kimi-coding", "k3-256k", "https://api.kimi.com/coding/v1"],
-		["moonshotai", "kimi-k3", "https://api.moonshot.ai/v1"],
-		["moonshotai-cn", "kimi-k3", "https://api.moonshot.cn/v1"],
-	])("restores Kimi K3 $3/M cacheWrite rate for canonical %s/%s during hydration", (provider, id, baseUrl) => {
-		const { dataDir, packageRoot, values } = createFixture(provider);
-		const catalogPath = join(packageRoot, "catalog.json");
-		const model = {
-			...chatModel(values),
-			id,
 			api: "openai-completions",
 			baseUrl,
-			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite },
 		};
 		writeFileSync(catalogPath, JSON.stringify({ [provider]: [model] }));
 		hydrateModelCatalog(packageRoot, catalogPath);
 		const groups: Record<string, Record<string, unknown>> = JSON.parse(
 			readFileSync(join(dataDir, `${provider}.json`), "utf8"),
 		);
-		expect(groups["openai-completions"][`chat:${id}`]).toEqual({
-			...model,
-			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 },
-		});
+		expect(groups["openai-completions"]["chat:k3"]).toEqual(model);
 	});
+
+	// pi.dev publishes these entries with cacheWrite 0. The last column is the five-minute
+	// cache-write rate: https://platform.kimi.ai/docs/pricing/chat, and for moonshotai-cn
+	// the CNY rate on https://platform.kimi.com/docs/pricing/chat as models.dev converts it.
+	it.each([
+		["kimi-coding", "k3", "https://api.kimi.com/coding/v1", 3],
+		["kimi-coding", "k3-256k", "https://api.kimi.com/coding/v1", 3],
+		["kimi-coding", "k3.1-pro", "https://api.kimi.com/coding/v1", 2],
+		["kimi-coding", "k3.1-pro-highspeed", "https://api.kimi.com/coding/v1", 4],
+		["moonshotai", "kimi-k3", "https://api.moonshot.ai/v1", 3],
+		["moonshotai", "kimi-k3.1-pro", "https://api.moonshot.ai/v1", 2],
+		["moonshotai", "kimi-k3.1-pro-highspeed", "https://api.moonshot.ai/v1", 4],
+		["moonshotai-cn", "kimi-k3", "https://api.moonshot.cn/v1", 3],
+		["moonshotai-cn", "kimi-k3.1-pro", "https://api.moonshot.cn/v1", 1.9437],
+		["moonshotai-cn", "kimi-k3.1-pro-highspeed", "https://api.moonshot.cn/v1", 3.8874],
+	])(
+		"restores the Kimi K3 five-minute cacheWrite rate for canonical %s/%s during hydration",
+		(provider, id, baseUrl, rate) => {
+			const { dataDir, packageRoot, values } = createFixture(provider);
+			const catalogPath = join(packageRoot, "catalog.json");
+			const model = {
+				...chatModel(values),
+				id,
+				api: "openai-completions",
+				baseUrl,
+				// Kimi bills five-minute cache writes at the input rate.
+				cost: { input: rate, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+			};
+			writeFileSync(catalogPath, JSON.stringify({ [provider]: [model] }));
+			hydrateModelCatalog(packageRoot, catalogPath);
+			const groups: Record<string, Record<string, unknown>> = JSON.parse(
+				readFileSync(join(dataDir, `${provider}.json`), "utf8"),
+			);
+			expect(groups["openai-completions"][`chat:${id}`]).toEqual({
+				...model,
+				cost: { ...model.cost, cacheWrite: rate },
+			});
+		},
+	);
 
 	it("keys chat and image models with the same id separately", () => {
 		const { packageRoot, values } = createFixture();

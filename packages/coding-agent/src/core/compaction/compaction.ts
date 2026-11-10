@@ -592,9 +592,6 @@ export async function completeSummarization(
 		...options,
 		cacheRetention: "none",
 		sessionId: options.sessionId ?? uuidv7(),
-		...(process.env.PI_CACHE_TRACE_DIR
-			? { cacheTraceContext: { ...options.cacheTraceContext, purpose: "summary" as const } }
-			: {}),
 	};
 	const produce = async (): Promise<AssistantMessage> =>
 		streamFn

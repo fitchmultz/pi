@@ -14,13 +14,13 @@
 - Reused the shared cancellation-aware sleep helper for retry backoff, preserving aborted results, callback ordering and completed-listener cleanup.
 - Added lossless request-body compression for direct Anthropic Messages (gzip) and public OpenAI Responses (zstd), with runtime/size guards and explicit encoding opt-out. Restricted existing Codex SSE zstd to its canonical endpoint rather than arbitrary custom URLs. See [support boundaries and measurement](../../docs/compression.md).
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
-- Extended temporary opt-in Anthropic cache tracing with payload-pass and attempt identities, validated `request-id` headers and exact-session filtering. Native stream behavior is unchanged.
+- Bedrock Claude requests budget Claude's strict tool limits (20 strict tools, 16 union parameters) before they are sent, as Anthropic requests do: `strict: "require"` tools first, then `strict: "prefer"` tools in declaration order, with the preferred tools that do not fit sent non-strict. This avoids the rejected request and keeps strict mode on the tools that fit; a request whose required tools alone exceed the limits fails before it is sent. Other Bedrock models are unchanged.
 
 ### Fixed
 
 - Fixed successful retry backoffs retaining abort listeners ([#10506](https://github.com/earendil-works/pi/issues/10506)).
 - Fixed Kimi K3 fallback, canonical Kimi/Moonshot catalog overlays, and Kimi Coding implied estimates, including `k3-256k`, omitting the default five-minute cache-write price.
-- Fixed offline builds from published catalogs still containing legacy Kimi Coding Anthropic entries; hydration now applies the native OpenAI protocol and compatibility metadata without changing custom endpoints.
+- Fixed Kimi K3.1 Pro and K3.1 Pro Highspeed cache writes costing $0 on Moonshot, Moonshot China and Kimi Coding, in generated data, Kimi Coding implied estimates, offline hydration and pi.dev catalog overlays. They now cost the published five-minute rate, which equals the input rate ($2 and $4 per million tokens).
 - Fixed Radius gateway catalogs accepting incomplete pricing that produces `NaN` cost estimates ([#10507](https://github.com/earendil-works/pi/issues/10507)).
 - Fixed the abort-test helper returning before checking the aborted result and follow-up; added an offline regression ([#10508](https://github.com/earendil-works/pi/issues/10508)).
 - Fixed Cloudflare AI Gateway Claude models failing with a 404 by using dashed model IDs during generation, provider construction, and remote-catalog loading.
@@ -36,13 +36,17 @@
 - Fixed model switches reducing the next response's output allowance for foreign reasoning that is omitted from replay.
 - Fixed OAuth state validation, cancellation races, and callback-server cleanup after login UI errors.
 - Fixed Anthropic strict tools exceeding request-wide tool and union limits without relaxing required strict schemas.
+- Fixed Anthropic requests failing before they are sent, on every turn, when `strict: "prefer"` tools used up Claude's strict tool limits ahead of a `strict: "require"` tool. Required tools are budgeted first, then preferred tools in declaration order; the request fails only when the required tools alone exceed the limits.
 - Fixed canonical Cloudflare AI Gateway Opus 5.5 catalog defaults omitting positional system, tool and effort controls and five-minute/one-hour cache lifetimes, including pinned catalog hydration; explicit metadata, compatibility opt-outs and catalog entries with a non-canonical `baseUrl` remain unchanged.
 - Fixed Cloudflare AI Gateway GPT models on the `/openai` Responses route rewriting the cached prompt prefix after every mid-session system update or tool load. Models that accept mid-conversation developer messages and `additional_tools` at OpenAI now default to both on Cloudflare, including fetched and restored catalog overlays; explicit metadata and catalog entries with a non-canonical `baseUrl` remain unchanged.
 - Cloudflare AI Gateway `/openai` GPT-5.4 and GPT-5.5 entries no longer default `supportsAdditionalTools`, matching direct OpenAI, and GPT-6.1 Terra gets both positional defaults.
+- Fixed Anthropic OAuth requests reporting an outdated Claude Code version.
 
 ### Removed
 
-- Retired the fork's unreleased Anthropic stall timing hooks and lifecycle/Undici observation helper; generic opt-in cache tracing and retained investigation evidence remain.
+- Retired the fork's unreleased Anthropic stall timing hooks and lifecycle/Undici observation helper.
+- Removed the fork's temporary passive cache tracing: the `cacheTraceContext` request option and `CacheTraceContext` type, the `@earendil-works/pi-ai/utils/cache-trace` module, and the recorder hooks in the Anthropic, OpenAI Completions, OpenAI Responses and Codex adapters. `PI_CACHE_TRACE_DIR` and `PI_CACHE_TRACE_SESSION_ID` are no longer read. Requests, cache warming, usage accounting and prompt-cache options are unchanged.
+- Retired the fork's unreleased migration of legacy Kimi Coding Anthropic catalog entries during hydration and overlay merges; pi.dev serves those entries only to pi older than 1.2.1. `@earendil-works/pi-ai/api/kimi` now exports only `restoreKimiK3CacheWriteCost`.
 
 ## [1.5.1] - 2026-11-09
 

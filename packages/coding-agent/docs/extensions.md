@@ -613,6 +613,8 @@ pi.on("session_shutdown", async (event, ctx) => {
 
 Once quit begins, Pi persists `pi.appendEntry()` and `pi.sendMessage(..., { triggerTurn: false })` but rejects any message that would start a turn or steer the current one. The rejection is reported as an extension error, and nothing is appended.
 
+An ordinary quit aborts the active turn, waits at most 500 ms for it to settle, and runs `session_shutdown` handlers meanwhile. The turn's last events, such as `tool_result` and `agent_end`, can therefore reach an extension during or after its `session_shutdown` handler. A tool that ignores its abort signal and has not ended by then is left without a saved result.
+
 ### Agent Events
 
 #### before_agent_start

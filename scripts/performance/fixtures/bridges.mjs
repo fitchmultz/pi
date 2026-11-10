@@ -3,12 +3,9 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { copyJson, isJsonValue } from "/pi-performance-source/packages/chord/src/json.ts";
-import { enqueue, holdPublications } from "/pi-performance-source/packages/chord/src/publish.ts";
-import { isFrame } from "/pi-performance-source/packages/chord/src/wire.ts";
 import { renderToolSample } from "/pi-performance-source/packages/codemode/src/declarations.ts";
 import { CodemodeSandbox } from "/pi-performance-source/packages/codemode/src/runtime/host.ts";
 import { loadQuickJSWasm } from "/pi-performance-source/packages/codemode/src/wasm.ts";
-import { StdioTransport } from "/pi-performance-source/packages/mcp/src/transports/stdio.ts";
 import {
 	consumeSseStream,
 	StreamableHttpTransport,
@@ -16,7 +13,7 @@ import {
 import { witness } from "../proof.mjs";
 
 const root = process.env.PI_PERF_REPO;
-const mode = process.argv[2] ?? "stdio";
+const mode = process.argv[2] ?? "sse";
 const smoke = process.argv.includes("--smoke");
 function number(name, fallback) {
 	const value = Number(process.argv.find((arg) => arg.startsWith(`--${name}=`))?.split("=")[1] ?? fallback);
@@ -25,7 +22,6 @@ function number(name, fallback) {
 }
 const size = number("size", smoke ? 4096 : 1024 * 1024);
 const chunkSize = number("chunk", smoke ? 127 : 4096);
-const iterations = number("iterations", smoke ? 8 : 100000);
 const repeat = number("repeat", smoke ? 1 : 5);
 const instrument = process.argv.includes("--instrument");
 const sources = [
@@ -34,10 +30,7 @@ const sources = [
 	"packages/codemode/src/runtime/vm.ts",
 	"packages/codemode/src/runtime/prelude-source.ts",
 	"packages/codemode/src/declarations.ts",
-	"packages/chord/src/wire.ts",
-	"packages/chord/src/publish.ts",
 	"packages/chord/src/json.ts",
-	"packages/mcp/src/transports/stdio.ts",
 	"packages/mcp/src/transports/streamable-http.ts",
 ];
 const hashes = Object.fromEntries(
@@ -53,21 +46,8 @@ const chunks = (bytes) =>
 	Array.from({ length: Math.ceil(bytes.length / chunkSize) }, (_, i) =>
 		bytes.subarray(i * chunkSize, (i + 1) * chunkSize),
 	);
-const rpcBytes = Buffer.from(`${JSON.stringify({ jsonrpc: "2.0", id: 1, result: payload })}\n`);
 const sseBytes = Buffer.from(`id: item\r\ndata: ${payload}\r\n\r\n`);
-const framedChunks = chunks(rpcBytes);
 const sseChunks = chunks(sseBytes);
-const fixtures = [
-	{ t: "state", id: 1, ops: [["a", ["output"], "text"]] },
-	{ t: "call", id: 1, hold: 1, member: "append", args: { text: "text" } },
-	{ t: "result", id: 1, value: { done: true } },
-	{ t: "ping", n: 1 },
-	{ t: "state", id: 0, ops: [] },
-	{ t: "call", id: 1, hold: "1", member: "append", args: null },
-	{ t: "unknown" },
-	null,
-];
-const frameExpectations = [true, true, true, true, false, false, false, false];
 const tools = Array.from({ length: number("tools", smoke ? 2 : 200) }, (_, i) => ({
 	name: `mcp__example__tool_${i}`,
 	description: `Example tool ${i}`,
@@ -102,37 +82,6 @@ if (mode === "sandbox") {
 }
 async function work() {
 	switch (mode) {
-		case "stdio": {
-			const transport = new StdioTransport({ command: process.execPath });
-			let received = 0;
-			transport.onError((error) => {
-				throw error;
-			});
-			transport.onMessage((message) => {
-				received++;
-				assert.equal(message.result, payload);
-			});
-			let concatenatedBytes = 0;
-			const concat = Buffer.concat;
-			if (instrument)
-				Buffer.concat = (parts, total) => {
-					concatenatedBytes += total ?? parts.reduce((sum, part) => sum + part.length, 0);
-					return concat(parts, total);
-				};
-			try {
-				// TypeScript-private ingestion function: isolate actual framing cost from process startup and pipe coalescing.
-				// No production export or test-only seam is added.
-				for (const chunk of framedChunks) transport.handleStdout(chunk);
-				assert.equal(received, 1);
-			} finally {
-				Buffer.concat = concat;
-			}
-			return {
-				chunks: framedChunks.length,
-				wireBytes: rpcBytes.length,
-				...(instrument ? { concatenatedBytes } : {}),
-			};
-		}
 		case "sse": {
 			let at = 0;
 			let received = 0;
@@ -195,25 +144,6 @@ async function work() {
 			await transport.close();
 			return { pulledBytes, bodyCharacters: Math.min(size, 8192) };
 		}
-		case "frame": {
-			const check = isFrame;
-			for (let i = 0; i < fixtures.length; i++) assert.equal(check(fixtures[i]), frameExpectations[i]);
-			let accepted = 0;
-			for (let i = 0; i < iterations; i++) accepted += Number(check(fixtures[i % fixtures.length]));
-			assert.equal(accepted, Math.floor(iterations / 8) * 4 + Math.min(iterations % 8, 4));
-			return { iterations, accepted };
-		}
-		case "publish": {
-			let delivered = 0;
-			holdPublications(() => {
-				for (let i = 0; i < iterations; i++)
-					enqueue(() => {
-						assert.equal(delivered++, i);
-					});
-			});
-			assert.equal(delivered, iterations);
-			return { iterations, delivered };
-		}
 		case "metadata": {
 			let characters = 0;
 			for (const tool of tools) characters += renderToolSample(tool).length;
@@ -245,7 +175,6 @@ console.log(
 		node: process.version,
 		size,
 		chunkSize,
-		iterations,
 		repeat,
 		instrument,
 		sourceHashes: hashes,
@@ -261,14 +190,14 @@ try {
 		const after = process.memoryUsage();
 		const output = Object.fromEntries(
 			Object.entries(result).filter(
-				([key]) => !["concatenatedBytes", "byteLengthCharacters", "pulledBytes"].includes(key),
+				([key]) => !["byteLengthCharacters", "pulledBytes"].includes(key),
 			),
 		);
 		if (trial >= 0) {
 			if (mode === "json") assert.deepEqual(copiedJson, jsonFixture);
 			witness(
 				mode,
-				{ size, chunkSize, iterations, tools, jsonFixture, fixtures },
+				{ size, chunkSize, tools, jsonFixture },
 				mode === "json"
 					? { ...output, copied: copiedJson }
 					: mode === "metadata"

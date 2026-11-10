@@ -4,17 +4,18 @@
 
 ### Added
 
-- Added `stripSelectionMetadata()` for consumers that print rendered component lines or convert them to HTML outside a TUI. It preserves terminal styling.
+- Added `stripSelectionMetadata()` for components that render a `Text` or `Markdown` inside a fullscreen frame without retaining the instance. It preserves terminal styling.
 - Added OSC 8 `file://` links for absolute and `~/` paths in Markdown text and inline code, plus OSC 8 links for URLs in inline code, so wrapped paths stay clickable
 
 ### Changed
 
-- Fullscreen selection copies source fragments from Markdown and Text without display padding or artificial wraps. Complete Markdown spans retain their syntax; partial spans copy only the selected content. Rendered strings carry private zero-width OSC annotations, which the TUI removes before terminal output.
+- Fullscreen selection copies source fragments from Markdown and Text without display padding or artificial wraps. Complete Markdown spans retain their syntax; partial spans copy only the selected content. Lines rendered for a `TuiAltScreen` frame carry private zero-width OSC annotations, which it removes before terminal output.
 - Reuse unchanged editor layouts and stream long-token wrapping and grapheme scans without rebuilding intermediate arrays.
 - Reuse unchanged same-index content rows in unstyled Boxes after child changes, preserving native invalidation, mouse geometry and styled-background sampling.
 
 ### Fixed
 
+- Fixed `Text` and `Markdown` returning private selection annotations from `render()` to callers outside a fullscreen frame, such as tests, HTML export and `TuiMainScreen`. They now add annotations only while `TuiAltScreen` renders a frame, so other callers get plain lines without calling `stripSelectionMetadata()`.
 - Fixed fullscreen Kitty images disappearing after a terminal resize when the terminal clears cached image data during a screen erase.
 - Fixed inline math stripping dollar signs, braces and shell operators from quoted shell arguments.
 - Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
@@ -22,6 +23,7 @@
 - Fixed `start()` after `stop()` drawing nothing, and ignoring later `requestRender()` calls until a forced render, when a render was pending at `stop()` or requested while stopped, for example by the key handler that stopped the TUI.
 - Fixed `TuiMainScreen` drawing changed lines at the wrong rows and leaving stale lines when restarted with `stop()` and `start()` without a forced render. The first frame after the restart now clears and redraws the screen, as `requestRender(true)` does.
 - Fixed a fullscreen scrollbar drag staying active when it was released over an overlay opened during the drag, such as transcript search. Pointer motion without a pressed button kept scrolling the transcript. The drag now keeps every button and motion event until its release.
+- Fixed a fullscreen text-selection drag staying active when a component handled its release, such as an overlay opened during the drag. Its auto-scroll kept scrolling the transcript with no button held. The primary button's release now ends the drag whichever component handles it.
 
 ## [1.5.1] - 2026-11-09
 

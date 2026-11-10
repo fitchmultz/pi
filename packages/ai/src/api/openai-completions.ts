@@ -35,7 +35,6 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
-import { createCacheTrace } from "../utils/cache-trace.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
@@ -334,7 +333,6 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 		try {
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
 			const compat = getCompat(model);
-			const trace = createCacheTrace(model, options, undefined, () => compat);
 			const grammarToolInputProperties = createGrammarToolInputProperties(
 				getDeclaredTools(normalizedContext.messages),
 				compat.supportsOpenAIGrammarTools,
@@ -347,7 +345,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				apiKey,
 				options?.headers,
 				options?.identity,
-				trace?.wrapFetch(options?.fetch) ?? options?.fetch,
+				options?.fetch,
 				cacheSessionId,
 				compat,
 			);
@@ -551,7 +549,6 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 			};
 
 			for await (const chunk of openaiStream) {
-				trace?.terminal(chunk);
 				await options?.onProviderStreamEvent?.(chunk, model);
 				if (!chunk || typeof chunk !== "object") continue;
 
@@ -563,7 +560,6 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				}
 				if (chunk.usage) {
 					output.usage = parseChunkUsage(chunk.usage, model);
-					trace?.parsed(output.usage);
 				}
 
 				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
@@ -573,7 +569,6 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				// in choice.usage instead of the standard chunk.usage
 				if (!chunk.usage && (choice as any).usage) {
 					output.usage = parseChunkUsage((choice as any).usage, model);
-					trace?.parsed(output.usage);
 				}
 
 				if (choice.finish_reason) {

@@ -694,7 +694,6 @@ describe("cache warming", () => {
 			signal,
 			sessionId: "s",
 			transformHeaders,
-			cacheTraceContext: { purpose: "parent", sessionId: "s", windowId: "w", runtimeGeneration: "r" },
 		});
 		warmer.start(originalRequest, current, originalRequest);
 		await vi.advanceTimersByTimeAsync(270_000);
@@ -711,12 +710,6 @@ describe("cache warming", () => {
 			},
 		});
 		expect(calls[0].options?.signal).not.toBe(signal);
-		expect(calls[0].options?.cacheTraceContext).toEqual({
-			purpose: "warming",
-			sessionId: "s",
-			windowId: "w",
-			runtimeGeneration: "r",
-		});
 		expect(events[0]).toMatchObject({
 			type: "cache_warming_decision",
 			continuationProbability: 1,
@@ -738,7 +731,6 @@ describe("cache warming", () => {
 
 		await vi.advanceTimersByTimeAsync(270_000);
 		expect(calls).toHaveLength(2);
-		expect(calls[1].options?.cacheTraceContext).toEqual(calls[0].options?.cacheTraceContext);
 		warmer.cancel();
 	});
 
