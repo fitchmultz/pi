@@ -438,12 +438,15 @@ export function createReadToolDefinition(
 									// An offset past the end is answered with the end of the file: the last `limit` lines,
 									// which covered 285 of 293 measured retries. An error would also end a codemode script
 									// and lose its other calls.
-									startLine = Math.max(
-										0,
-										selection.totalFileLines - (usualRange && limit ? limit : PAST_END_LINES),
-									);
+									const tailLines = usualRange && limit !== undefined ? limit : PAST_END_LINES;
+									startLine = Math.max(0, selection.totalFileLines - tailLines);
 									lineLimit = undefined;
-									pastEndNote = `[Offset ${offset} is past the end: the ${source} has ${selection.totalFileLines} lines. Reading from line ${startLine + 1} instead.]\n\n`;
+									// A limit of 0 asks for no lines: the note alone.
+									const reading =
+										startLine < selection.totalFileLines
+											? ` Reading from line ${startLine + 1} instead.]\n\n`
+											: "]";
+									pastEndNote = `[Offset ${offset} is past the end: the ${source} has ${selection.totalFileLines} lines.${reading}`;
 									selection = await selectLines(ops, absolutePath, startLine, undefined, json, true, signal);
 									if (aborted) return;
 								}

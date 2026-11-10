@@ -67,10 +67,13 @@ function referenceRead(
 	const { usualRange } = call;
 	if (startLine >= allLines.length) {
 		// The last `limit` lines, or the last 100 without a usable limit, read without a limit.
-		const tailStart = Math.max(0, allLines.length - (usualRange && limit ? limit : 100));
+		const tailStart = Math.max(0, allLines.length - (usualRange && limit !== undefined ? limit : 100));
+		const note = `[Offset ${offset} is past the end: the file has ${allLines.length} lines.`;
+		// A limit of 0 asks for no lines.
+		if (tailStart === allLines.length) return { text: `${note}]`, details: undefined };
 		const tail = referenceRead(textContent, path, tailStart + 1, undefined, call);
 		return {
-			text: `[Offset ${offset} is past the end: the file has ${allLines.length} lines. Reading from line ${tailStart + 1} instead.]\n\n${tail.text}`,
+			text: `${note} Reading from line ${tailStart + 1} instead.]\n\n${tail.text}`,
 			details: tail.details,
 		};
 	}

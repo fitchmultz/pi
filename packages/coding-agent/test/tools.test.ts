@@ -204,6 +204,10 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(await readTool.execute("test-call-8", { path: longFile, offset: 251 }))).toBe(
 				`[Offset 251 is past the end: the file has 250 lines. Reading from line 151 instead.]\n\n${lines.slice(150).join("\n")}`,
 			);
+			// A limit of 0 is a limit: no lines.
+			expect(getTextOutput(await readTool.execute("test-call-8", { path: longFile, offset: 400, limit: 0 }))).toBe(
+				"[Offset 400 is past the end: the file has 250 lines.]",
+			);
 		});
 
 		it("should include truncation details when truncated", async () => {
