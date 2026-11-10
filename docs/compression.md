@@ -36,8 +36,6 @@ For the new Anthropic and public OpenAI paths:
 - No automatic retry is added when a server rejects compression. Resending a POST
   without knowing whether it was consumed can duplicate work. Existing configured
   provider retries remain unchanged.
-- Optional private cache tracing records the final logical JSON and the actual
-  compressed wire bytes separately, using fingerprints rather than prompt text.
 
 ## Support evidence
 
@@ -74,7 +72,7 @@ Audited 2026-10-19 against the fork's pinned SDKs, Anthropic 0.133.0 and OpenAI
 
 Offline tests exercise real SDK serialization, lossless round trips, endpoint
 exclusions, runtime fallback, cancellation, retries, federation token reuse,
-caller-owned headers, cache-trace fidelity, and a local HTTP receiver with gzip
+caller-owned headers, and a local HTTP receiver with gzip
 SSE responses. Delayed-compressor tests ensure cancellation settles before queued
 native work completes. A native Chromium Web `CompressionStream` smoke test also
 verified a lossless gzip round trip. No paid model calls are required.
@@ -82,7 +80,7 @@ verified a lossless gzip round trip. No paid model calls are required.
 ```sh
 ./test.sh -- node node_modules/vitest/dist/cli.js --run --root packages/ai \
   test/anthropic-request-compression.test.ts test/openai-request-compression.test.ts \
-  test/openai-codex-stream.test.ts test/cache-trace.test.ts
+  test/openai-codex-stream.test.ts
 npm run check
 ./test.sh
 ```

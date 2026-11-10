@@ -126,6 +126,7 @@
 ### Removed
 
 - Removed the `discover_tools` builtin, its `instructionGroupsExtension` export and the `pi.refreshTools()` extension method. Extensions keep optional tools out of the prompt with `exposure: "deferred"`, and `tool_search` loads them on demand. On resume, a tool that discovery hid before it was ever declared comes back like a newly registered tool.
+- Removed the fork's temporary passive cache tracing: `PI_CACHE_TRACE_DIR` and `PI_CACHE_TRACE_SESSION_ID` no longer record anything, SDK sessions no longer attach trace provenance to requests, and `scripts/cache-trace-report.mjs` and the cache-tracing guide are gone. Cache warming and cache statistics are unchanged.
 
 ## [1.5.1] - 2026-11-09
 

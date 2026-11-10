@@ -43,7 +43,6 @@ all-platform qualification.
 | Hidden model overrides: `models.json` can only add or patch catalog models, so superseded built-ins cannot otherwise be dropped from `/model` and `--list-models` | `core/{model-config,provider-composer}.ts` | `model-registry.test.ts` | [Models](packages/coding-agent/docs/models.md) |
 | Public model-reference resolution: extensions need native thinking-suffix and exact-ID selection without constructing a second model runtime | `index.ts` re-export of `core/model-resolver.ts` | `model-resolver.test.ts` through the public entrypoint | [SDK](packages/coding-agent/docs/sdk.md#resolve-a-model-reference-without-creating-a-runtime) |
 | Opt-in slow diagnostics: native synchronous handlers and footer frames need dispatch attribution | `core/extensions/{runner,wrapper}.ts`; `PI_EXTENSION_PERFORMANCE=1` | `extensions-performance.test.ts` | [Extensions](packages/coding-agent/docs/extensions.md#opt-in-performance-warnings) |
-| Temporary passive tracing: public hooks do not yet cover final serialization/consumed attempts | `packages/ai/src/utils/cache-trace.ts`, native adapter hooks, `core/cache-trace-context.ts`, `scripts/cache-trace-report.mjs` | `packages/ai/test/cache-trace.test.ts`, `sdk-stream-options.test.ts`, `scripts/cache-trace-report.test.mjs` | [Fidelity and retirement](packages/coding-agent/docs/cache-tracing.md) |
 | Cloudflare catalogs: canonical Claude IDs, qualified Opus 5.5 and Fable 5.2 positional controls/cache lifetimes, and direct-OpenAI positional defaults for `/openai` Responses models | `packages/ai/src/api/cloudflare.ts`, `packages/ai/catalog/providers/cloudflare-ai-gateway.ts`, `packages/ai/scripts/hydrate-model-catalog.ts` and `core/remote-catalog-provider.ts` | `packages/ai/test/{model-data-validation,cloudflare-openai-positional}.test.ts`, `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Providers](packages/coding-agent/docs/providers.md), [Cache lifetimes](packages/coding-agent/docs/models.md#prompt-cache-lifetimes) |
 | Path hyperlinks: prose paths and inline-code paths/URLs stay clickable after wrapping; terminals only regex-match one row and the source-transform seam cannot preserve literal codespan rendering | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` | [Terminal setup](packages/coding-agent/docs/terminal-setup.md#override-detected-capabilities) |
 | Source-aware fullscreen selection: highlighted copies retain Markdown and real line breaks without display padding or wraps; `/copy` stays unchanged | `packages/tui/src/{selection-source,selection-markers,utils,tui-alt-screen}.ts`, `packages/tui/src/components/{markdown,markdown-source,text}.ts` | `packages/tui/test/source-selection.test.ts` | [Copy part of a response](packages/coding-agent/docs/terminal-setup.md#copy-part-of-a-response) |
@@ -316,7 +315,7 @@ Client identity and attribution now follow pi-ai's native `ClientIdentity` and
 `withClientIdentity`, including the mutable wrapper's fork `getAvailability()` diagnostics.
 This is an upstream API migration, not retirement of a fork-only attribution engine.
 Headers returned by `before_provider_headers` retain object identity through custom-provider
-dispatch (required by Cursor); cache-trace provenance and prepared-retention warming remain.
+dispatch (required by Cursor); prepared-retention warming remains.
 Google adapters apply identity during client/header setup while sharing the existing stream engine.
 Upstream's unused SQLite replication scaffold is removed; Durable's IndexedDB storage is additive,
 not a replacement for the fork's memory/SQLite storage or scheduler semantics.
@@ -324,15 +323,15 @@ not a replacement for the fork's memory/SQLite storage or scheduler semantics.
 Streamed tool-call arguments now follow upstream's incremental `StreamingJsonParser` and
 `ToolCallArgumentsStream`. Providers keep scratch state off emitted content blocks. Final arguments
 still use the fork's span-based repair and existing fallback order, including native invalid `\u` repair. Anthropic requests use upstream message threads where supported;
-cache warming sets `disableContinuation` and retains the fork's prepared-auth timing and trace hooks. Anthropic and
+cache warming sets `disableContinuation` and retains the fork's prepared-auth timing. Anthropic and
 Bedrock Claude error-result images follow all tool results of the turn; error text and successful
 result images retain their native placement.
 These behaviors have offline parser/payload regression coverage, not a live provider qualification.
 `/share` supports an explicit gist or Radius destination; its default `auto` selection is unchanged.
 
 Anthropic native tool changes follow upstream's inline definitions and fixed initial tool list,
-including same-name redefinitions. The fork retains request-wide strict-schema budgets and passive
-cache tracing. Cross-model thinking removal and custom-overlay ownership follow upstream 1.3.0.
+including same-name redefinitions. The fork retains request-wide strict-schema budgets.
+Cross-model thinking removal and custom-overlay ownership follow upstream 1.3.0.
 The pure replay implementation is shared with target-aware output budgeting under `utils/`;
 the existing public API path remains available and entry-graph restrictions are unchanged.
 Catalog release validation follows upstream, with the fork's existing npm pack metadata
@@ -364,8 +363,7 @@ Cache investigation keeps persistent restart guidance in its existing `context_w
 owner, not the per-run `before_agent_start` hook. Forced text stays run-scoped and unpersisted. Child
 finalization recovery remains a conditional source risk: managed saved-session attempts create
 new contracts, and no reachable unchanged-contract reset was reproduced. Do not restore an old
-phase for a new contract or apply a speculative recovery patch. Passive tracing records unknown
-coverage explicitly; remove it when the investigation ends.
+phase for a new contract or apply a speculative recovery patch.
 
 ## Conventions
 
