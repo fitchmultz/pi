@@ -340,6 +340,44 @@ describe("AgentSessionRuntime characterization", () => {
 		await promptPromise;
 	});
 
+	it("saves the result of a tool that a shutdown handler ends during ordinary dispose", async () => {
+		// Such a tool ignores the abort itself; it ends when the handler stops the work it waits on. The
+		// handlers run while the aborted turn settles, so the result arrives before the session disconnects.
+		let toolStarted!: () => void;
+		let releaseTool!: () => void;
+		const toolStartedPromise = new Promise<void>((resolve) => {
+			toolStarted = resolve;
+		});
+		const { runtime, faux } = await createRuntimeForTest((pi: ExtensionAPI) => {
+			pi.on("session_shutdown", () => releaseTool());
+			pi.registerTool({
+				name: "held",
+				label: "Held",
+				description: "Runs until a shutdown handler releases it",
+				parameters: Type.Object({}),
+				execute: () =>
+					new Promise<AgentToolResult<unknown>>((resolve) => {
+						toolStarted();
+						releaseTool = () => resolve({ content: [{ type: "text", text: "released" }], details: {} });
+					}),
+			});
+		});
+		faux.setResponses([fauxAssistantMessage(fauxToolCall("held", {}), { stopReason: "toolUse" })]);
+		const promptPromise = runtime.session.prompt("run held tool").catch(() => {});
+		await toolStartedPromise;
+
+		await runtime.dispose();
+		const messages = runtime.session.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "message")
+			.map((entry) => entry.message);
+		expect(messages.find((message) => message.role === "toolResult")).toMatchObject({
+			toolName: "held",
+			content: [{ type: "text", text: "released" }],
+		});
+		await promptPromise;
+	});
+
 	it("keeps shutdown persistence but admits no new turn while finally exiting", async () => {
 		// A child completion published from a held shutdown hook used to start a turn here. Restart
 		// capture then failed with admitted work, and the launcher stopped unfinished children.
