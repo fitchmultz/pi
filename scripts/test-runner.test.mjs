@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -49,7 +49,8 @@ if (phase === ${JSON.stringify(failurePhase) ?? "undefined"}) process.exitCode =
 	};
 	return {
 		callerHome, auth,
-		run: (command, args) => spawnSync(command, args, { cwd: root, env, encoding: "utf8", timeout: 30000 }),
+		run: (command, args, extra = {}) =>
+			spawnSync(command, args, { cwd: root, env: { ...env, ...extra }, encoding: "utf8", timeout: 30000 }),
 		runNpm: () => {
 			try {
 				return { status: 0, stdout: execNpmSync(["test"], { cwd: root, env, encoding: "utf8", timeout: 30000 }), stderr: "" };
@@ -79,6 +80,20 @@ for (const entry of ["npm test", "./test.sh"]) {
 		assert.equal(readFileSync(f.auth, "utf8"), "caller credentials must not be touched");
 	});
 }
+
+test("keeps a caller-chosen temporary directory and replaces macOS's per-user default", (t) => {
+	const chosen = realpathSync(mkdtempSync(join(tmpdir(), "pi-test-runner-tmp-")));
+	t.after(() => rmSync(chosen, { recursive: true, force: true }));
+	const f = fixture(t);
+	const result = f.run("bash", ["./test.sh", "--", "node", "probe.mjs", "focused"], { TMPDIR: chosen });
+	assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+	assert.equal(f.observed()[0].home.startsWith(`${chosen}/pi-test.`), true, f.observed()[0].home);
+	if (process.platform !== "darwin") return;
+	const perUser = execFileSync("/usr/bin/getconf", ["DARWIN_USER_TEMP_DIR"], { encoding: "utf8" }).trim();
+	const defaulted = f.run("bash", ["./test.sh", "--", "node", "probe.mjs", "focused"], { TMPDIR: perUser });
+	assert.equal(defaulted.status, 0, `${defaulted.stdout}${defaulted.stderr}`);
+	assert.equal(f.observed()[1].home.startsWith("/tmp/pi-test."), true, f.observed()[1].home);
+});
 
 test("stops before workspace tests when script tests fail and returns their exit status", (t) => {
 	const f = fixture(t, "scripts");

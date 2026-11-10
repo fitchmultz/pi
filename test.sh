@@ -23,6 +23,11 @@ fi
 
 # Isolate user resources, credentials, temporary files, and tool configuration.
 temp_parent="${TMPDIR:-/tmp}"
+# macOS's per-user default is too deep for Unix socket fixtures (sun_path holds 104 bytes).
+# A directory the caller chose is kept.
+if [[ "$(uname -s)" == Darwin && "$temp_parent" == "$(/usr/bin/getconf DARWIN_USER_TEMP_DIR 2>/dev/null)" ]]; then
+	temp_parent=/tmp
+fi
 temp_parent="${temp_parent%/}"
 test_root="$(mktemp -d "$temp_parent/pi-test.XXXXXX")"
 git_askpass="$(type -P false)"

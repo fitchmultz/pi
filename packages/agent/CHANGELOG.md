@@ -10,6 +10,12 @@
 
 - Fixed `agentLoop()` and `agentLoopContinue()` streams never ending, and leaving an unhandled rejection, when the run throws, for example from `prepareRequest`. The stream now ends with an error assistant message (`aborted` after cancellation), `turn_end` and `agent_end`, and `result()` keeps the messages accepted before the failure.
 
+## [1.5.1] - 2026-11-09
+
+### Added
+
+- Added `disableContinuation` forwarding in `streamProxy()` so proxied requests can opt out of server-side continuation state such as Anthropic message threads ([#11545](https://github.com/earendil-works/pi/pull/11545))
+
 ## [1.5.0] - 2026-11-02
 
 ### Breaking Changes
