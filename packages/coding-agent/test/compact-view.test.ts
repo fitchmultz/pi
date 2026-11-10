@@ -16,12 +16,15 @@ import {
 } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import type { MessageRenderOptions } from "../src/core/extensions/types.ts";
+import type { EntryRenderer, MessageRenderer, MessageRenderOptions } from "../src/core/extensions/types.ts";
+import type { CustomMessage } from "../src/core/messages.ts";
+import type { CustomEntry } from "../src/core/session-manager.ts";
 import { createAllToolRenderers } from "../src/core/tools/renderers/index.ts";
 import { codemodeRenderers } from "../src/extensions/codemode/renderer.ts";
 import { ChatContainer } from "../src/modes/interactive/components/activity.ts";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.ts";
 import { BashExecutionComponent } from "../src/modes/interactive/components/bash-execution.ts";
+import { CustomEntryComponent } from "../src/modes/interactive/components/custom-entry.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import { ToolExecutionComponent, type ToolRenderers } from "../src/modes/interactive/components/tool-execution.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
@@ -614,7 +617,7 @@ describe("compact Activity and messages", () => {
 		},
 	);
 
-	test("custom messages receive independent density/expansion hints without truncating human notices", () => {
+	test("custom message renderers receive independent density/expansion hints and keep their own summary", () => {
 		const seen: MessageRenderOptions[] = [];
 		const message = {
 			role: "custom" as const,
@@ -638,22 +641,100 @@ describe("compact Activity and messages", () => {
 			undefined,
 			true,
 		);
-		expect(component.render(12)).toHaveLength(2);
-		click(component, 1);
+		expect(component.render(12).map(stripAnsi)).toEqual(["ordinary ..."]);
+		click(component, 0);
 		expect(stripAnsi(component.render(40).join("\n"))).toContain("full detail");
 		expect(seen.at(-1)).toMatchObject({ compactView: true, expanded: true, outputPad: 0 });
 		component.setCompactView(false);
 		expect(seen.at(-1)).toMatchObject({ compactView: false, expanded: true });
-		const important = new CustomMessageComponent(
-			message,
-			() => new Text("Needs attention\nquestion\nchoices", 0, 0),
-			undefined,
-			0,
-			[],
-			undefined,
-			undefined,
-			true,
-		);
-		expect(important.render(40)).toHaveLength(4);
+	});
+
+	// Renderers written without compact view in mind: Pi cuts the collapsed card, not the extension.
+	const detail = Array.from({ length: 12 }, (_, i) => `detail ${i}`).join("\n");
+	const notice: CustomMessage = {
+		role: "custom",
+		customType: "notice",
+		content: `first paragraph\n\n${detail.replaceAll("\n", "\n\n")}`,
+		display: true,
+		timestamp: 1,
+	};
+	const progress: CustomEntry = { type: "custom", customType: "progress", id: "e1", parentId: null, timestamp: "" };
+	const customMessage = (renderer: MessageRenderer | undefined) => (compactView: boolean) =>
+		new CustomMessageComponent(notice, renderer, undefined, 1, [], undefined, undefined, compactView);
+	const customEntry = (renderer: EntryRenderer) => (compactView: boolean) =>
+		new CustomEntryComponent(progress, renderer, 1, compactView);
+	const manyRows = () => {
+		const box = new Box(1, 1);
+		box.addChild(new Text(`Needs attention\n\n${detail}`, 0, 0));
+		return box;
+	};
+
+	test.each([
+		["message whose renderer ignores compactView", customMessage(manyRows), ["Needs attention", "detail 0"]],
+		["message without a renderer", customMessage(undefined), ["[notice]", "first paragraph"]],
+		["entry", customEntry(manyRows), ["Needs attention", "detail 0"]],
+	] as const)("%s takes two rows until clicked and its full rendering otherwise", (_name, create, preview) => {
+		const normal = create(false).render(40);
+		expect(normal.length).toBeGreaterThan(12);
+		const component = create(true);
+		const collapsed = () => compactRows(component, 40).map((line) => stripAnsi(line).trim());
+		expect(collapsed()).toEqual(preview);
+		for (const width of [1, 12]) compactRows(component, width);
+		click(component, 1);
+		expect(component.render(40)).toEqual(normal);
+		click(component, 0);
+		expect(collapsed()).toEqual(preview);
+		// `/compact-view` switches existing cards in place.
+		component.setCompactView(false);
+		expect(component.render(40)).toEqual(normal);
+		component.setCompactView(true);
+		expect(collapsed()).toEqual(preview);
+	});
+
+	test.each(["kitty", "iterm2"] as const)("collapsed custom cards show no %s image", (protocol) => {
+		setCapabilities({ images: protocol, trueColor: true, hyperlinks: false });
+		const withImage: CustomMessage = {
+			...notice,
+			content: [
+				{ type: "text", text: "caption" },
+				{ type: "image", data: png, mimeType: "image/png" },
+			],
+		};
+		const inline = () => new Image(png, "image/png", { fallbackColor: (text) => text }, { maxWidthCells: 30 });
+		for (const component of [
+			new CustomMessageComponent(withImage, undefined, undefined, 1, [], undefined, undefined, true),
+			customMessage(inline)(true),
+			customEntry(inline)(true),
+		]) {
+			for (const width of [1, 12, 40]) compactRows(component, width);
+			component.setExpanded(true);
+			expect(component.render(40).join("\n")).toContain(protocol === "kitty" ? "\x1b_G" : "\x1b]1337;File=");
+		}
+	});
+
+	test("inner controls of collapsed custom cards keep click priority", () => {
+		const events: TuiMouseEvent[] = [];
+		const withControl = () => {
+			const box = new Box(2, 1);
+			box.addChild(new Text("title", 0, 0));
+			box.addChild(new Spacer(1));
+			box.addChild(
+				new MouseRegion(new Text(`control\n${detail}`, 0, 0), (event) => {
+					events.push(event);
+					return { handled: true };
+				}),
+			);
+			return box;
+		};
+		for (const component of [customMessage(withControl)(true), customEntry(withControl)(true)]) {
+			events.length = 0;
+			compactRows(component, 40);
+			click(component, 1, 40, 3);
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({ x: 1, y: 0, height: 13 });
+			expect(stripAnsi(compactRows(component, 40).join("\n"))).not.toContain("detail 5");
+			click(component, 0, 40, 3);
+			expect(stripAnsi(component.render(40).join("\n"))).toContain("detail 5");
+		}
 	});
 });

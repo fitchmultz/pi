@@ -420,6 +420,92 @@ describe.each(Object.keys(BACKENDS))("%s backend", (name) => {
 		});
 	});
 
+	describe("show", () => {
+		const read: CodemodeTool = {
+			name: "read",
+			execute: async (args) => {
+				const { path } = args as { path: string };
+				if (path === "missing.md") throw new Error("ENOENT: no such file or directory");
+				// The first call settles last: output follows the order given, not the order of completion.
+				if (path === "a.md") await new Promise((resolve) => setTimeout(resolve, 20));
+				return `text of ${path}\nsecond line`;
+			},
+		};
+
+		it("prints every call under its label and keeps the calls after a failed one", async () => {
+			const sandbox = createSandbox([read, { name: "grep", execute: () => "b.md:1: match" }]);
+			const result = await sandbox.execute(`
+				const settled = await show(
+					tools.read({ path: "a.md" }),
+					tools.read({ path: "missing.md" }),
+					[tools.grep({ pattern: "match" }), tools.read({ path: "x".repeat(300) })],
+					Promise.resolve("no call"),
+				);
+				return settled.map((entry) => entry.status === "fulfilled" ? typeof entry.value : entry.reason.message);
+			`);
+			expect(result).toMatchObject({
+				ok: true,
+				value: ["string", "ENOENT: no such file or directory", "string", "string", "string"],
+			});
+			expect(result.output).toEqual([
+				{ type: "text", text: 'read {"path":"a.md"}\ntext of a.md\nsecond line' },
+				{ type: "text", text: 'read {"path":"missing.md"}\nFAILED: ENOENT: no such file or directory' },
+				{ type: "text", text: 'grep {"pattern":"match"}\nb.md:1: match' },
+				// A label keeps 200 characters of the arguments.
+				{ type: "text", text: `read {"path":"${"x".repeat(191)}...\ntext of ${"x".repeat(300)}\nsecond line` },
+				{ type: "text", text: "no call" },
+			]);
+			expect(result.calls.map((call) => [call.name, call.status])).toEqual([
+				["read", "ok"],
+				["read", "error"],
+				["grep", "ok"],
+				["read", "ok"],
+			]);
+		});
+
+		it("prints the long text of object results as it is, and shows their images", async () => {
+			const sandbox = createSandbox([
+				{ name: "bash", execute: () => ({ output: "one\ntwo\n", truncated: false, exit_code: 1 }) },
+				{
+					name: "search",
+					execute: () => ({
+						content: [
+							{ type: "text", text: "first\nhit" },
+							{ type: "image", data: PNG, mimeType: "image/png" },
+							{ type: "resource_link", uri: "file:///a" },
+						],
+						structuredContent: { hits: 1 },
+						isError: true,
+					}),
+				},
+				{
+					name: "photo",
+					execute: () => ({ type: "image", data: JPEG, mimeType: "image/jpeg", note: "Read image" }),
+				},
+				{ name: "broken", execute: () => ({ type: "image", data: "AAAA", mimeType: "image/png", note: "" }) },
+				{ name: "count", execute: () => ({ total: 3, names: ["a"] }) },
+			]);
+			const result = await sandbox.execute(
+				"await show(tools.bash({ command: 'ls' }), tools.search(), tools.photo(), tools.broken(), tools.count());",
+			);
+			expect(result.ok).toBe(true);
+			expect(result.output).toEqual([
+				{ type: "text", text: 'bash {"command":"ls"}\n{"truncated":false,"exit_code":1}\noutput:\none\ntwo\n' },
+				{ type: "text", text: 'search\nFAILED:\nfirst\nhit\n{"type":"resource_link","uri":"file:///a"}' },
+				{ type: "image", data: PNG, mimeType: "image/png" },
+				{ type: "text", text: "photo\nRead image" },
+				{ type: "image", data: JPEG, mimeType: "image/jpeg" },
+				{ type: "text", text: "broken" },
+				// An image that image() rejects does not end the script: the result after it is still printed.
+				{
+					type: "text",
+					text: "FAILED: invalid image output. The image data is not a PNG, JPEG, GIF, or WebP image",
+				},
+				{ type: "text", text: 'count\n{"total":3,"names":["a"]}' },
+			]);
+		});
+	});
+
 	describe("store and load", () => {
 		it("reads the snapshot and reports writes", async () => {
 			const sandbox = createSandbox();
@@ -573,6 +659,7 @@ describe.each(Object.keys(BACKENDS))("%s backend", (name) => {
 			expect(() => newSandbox({ globals: [{ name: "not-valid", execute }] })).toThrow(/Invalid global/);
 			expect(() => newSandbox({ globals: [{ name: "tools", execute }] })).toThrow(/Invalid global/);
 			expect(() => newSandbox({ globals: [{ name: "console", execute }] })).toThrow(/Invalid global/);
+			expect(() => newSandbox({ globals: [{ name: "show", execute }] })).toThrow(/Invalid global/);
 		});
 	});
 
