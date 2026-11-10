@@ -895,3 +895,36 @@ function mapStopReason(
 		}
 	}
 }
+
+/** Scales the cost of `usage` by the price multiplier of the service tier for this model. */
+export function applyServiceTierPricing(
+	usage: Usage,
+	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+	model: Pick<Model<Api>, "id">,
+): void {
+	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
+	if (multiplier === 1) return;
+
+	usage.cost.input *= multiplier;
+	usage.cost.output *= multiplier;
+	usage.cost.cacheRead *= multiplier;
+	usage.cost.cacheWrite *= multiplier;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+}
+
+function getServiceTierCostMultiplier(
+	model: Pick<Model<Api>, "id">,
+	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+): number {
+	switch (serviceTier) {
+		case "ultrafast":
+			return model.id === "gpt-6-astra" ? 6 : 1;
+		case "flex":
+			return 0.5;
+		case "priority":
+		case "fast":
+			return model.id === "gpt-5.5" ? 2.5 : 2;
+		default:
+			return 1;
+	}
+}
