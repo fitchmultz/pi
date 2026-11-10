@@ -2,7 +2,12 @@
 import assert from "node:assert/strict";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { MemoryStorage } from "/pi-performance-source/packages/durable/src/storage/memory.ts";
-import { type DocumentId, ROOT_CONVERSATION_ID, type Seq } from "/pi-performance-source/packages/durable/src/types.ts";
+import {
+	type DocumentId,
+	ROOT_CONVERSATION_ID,
+	type Seq,
+	type StorageWrite,
+} from "/pi-performance-source/packages/durable/src/types.ts";
 import { witness } from "../proof.mjs";
 
 const populations = (process.argv[2] ?? "32").split(",").map(Number);
@@ -12,40 +17,39 @@ assert(Number.isSafeInteger(reads) && reads > 0);
 for (const revisions of populations) {
 	const storage = new MemoryStorage();
 	try {
-		await storage.commit([{ type: "conversation", value: { id: ROOT_CONVERSATION_ID } }], context);
+		const commit = async (write: StorageWrite): Promise<Seq> => {
+			let stored: Seq | undefined;
+			const receive = (_index: number, seq: Seq) => {
+				stored = seq;
+			};
+			assert.deepEqual(await storage.commit([[write]], receive, context), { stored: 1 });
+			assert(stored !== undefined);
+			return stored;
+		};
+		await commit({ type: "conversation", value: { id: ROOT_CONVERSATION_ID } });
 		const id = await storage.mintId<DocumentId>();
-		await storage.commit(
-			[
-				{
-					type: "document.create",
-					record: {
-						id,
-						kind: "probe.history",
-						scope: { kind: "conversation", conversationId: ROOT_CONVERSATION_ID },
-						history: "rewindable",
-						fork: "asOf",
-					},
-					content: { kind: "base", version: 1, value: { count: 0 } },
-				},
-			],
-			context,
-		);
+		await commit({
+			type: "document.create",
+			record: {
+				id,
+				kind: "probe.history",
+				scope: { kind: "conversation", conversationId: ROOT_CONVERSATION_ID },
+				history: "rewindable",
+				fork: "asOf",
+			},
+			content: { kind: "base", version: 1, value: { count: 0 } },
+		});
 		let ancientAt: Seq | undefined;
 		let recentAt: Seq | undefined;
 		for (let count = 1; count <= revisions; count++) {
-			recentAt = await storage.commit(
-				[
-					{
-						type: "document.change",
-						id,
-						content:
-							count % 32 === 0
-								? { kind: "base", version: 1, value: { count } }
-								: { kind: "delta", version: 1, ops: [["s", ["count"], count]] },
-					},
-				],
-				context,
-			);
+			recentAt = await commit({
+				type: "document.change",
+				id,
+				content:
+					count % 32 === 0
+						? { kind: "base", version: 1, value: { count } }
+						: { kind: "delta", version: 1, ops: [["s", ["count"], count]] },
+			});
 			if (count === 5) ancientAt = recentAt;
 		}
 		assert(ancientAt !== undefined && recentAt !== undefined);

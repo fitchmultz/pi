@@ -44,6 +44,7 @@
 - Codemode keeps 6000 estimated tokens of script output by default instead of 10000. Longer output still links to the omitted and full output files; `max_output_tokens` raises the limit for one script.
 - Shortened the `read`, `codemode` and `background_command` prompt guidelines.
 - When a session's working directory no longer exists, for example after the project folder was renamed, interactive mode now offers `Continue`, `Fork`, or `Cancel` instead of only continuing. `Continue` runs the session in the current directory without storing the choice, as before; `Fork` copies it into the current directory as a new session with a new ID, like `--fork`, so the next resume no longer asks. This applies at startup (`--session`, `--resume`), to `/resume`, to `/import`, and to `ctx.switchSession()` from extensions ([#11060](https://github.com/earendil-works/pi/issues/11060))
+- A native working-session artifact that fails validation is now refused with the path of the first field that failed, for example `Invalid native working session at entries[12].message.content[0].type`, on `--working-session` restore, managed restart and SDK restore. The same artifacts are accepted and rejected as before. See [Native working sessions](docs/working-session.md#restore).
 
 ### Fixed
 
@@ -63,7 +64,7 @@
 - Fixed quitting an unready restarted worker rolling back to the previous worker instead of exiting, including when its shutdown handlers outlast the startup deadline.
 - Fixed messages sent while Pi quits, such as a child completion arriving during a shutdown hook, starting a new turn. A managed restart then failed its final capture and stopped unfinished children; quit now admits shutdown persistence but no new or steered turn.
 - Fixed non-strict session shutdowns waiting on unresponsive provider aborts, interactive startup prompts bypassing the working-session save gate or losing compact-view expansion on restore, and managed launcher `SIGINT`/`SIGHUP` forwarding when the worker runs outside the terminal process group.
-- Fixed newer fetched or cached legacy Kimi Coding catalogs reverting the native OpenAI protocol and tool/thinking compatibility after offline hydration.
+- Fixed Kimi K3.1 Pro and K3.1 Pro Highspeed cache writes costing $0 on Moonshot, Moonshot China and Kimi Coding, including when a newer pi.dev catalog replaces the built-in entry. They now cost the published five-minute rate ($2 and $4 per million tokens).
 - Fixed stale footer branches when a branch change is missed during Git watcher startup.
 - Fixed the footer showing the previous repository's branch after switching to a session in another directory while a branch lookup in a reftable repository was still running. Outside a repository, the wrong branch stayed until the next switch.
 - Fixed model refreshes rereading every provider's model catalog once per provider, which slowed startup and raised memory use, more so when an extension registered or overrode a provider. Each refresh now reads a provider's catalog a fixed number of times.
@@ -122,11 +123,16 @@
 - Fixed quitting right after `/mcp reconnect` leaving a stdio MCP server that ignores SIGTERM running. Ending a session now waits for MCP connections dropped by a reconnect, sign-out or required sign-in to finish closing, as it already did for current connections.
 - Fixed aborting or timing out a bash command on macOS sometimes leaving the next command of a list such as `long_step; next_step` running after the abort was reported, when the abort landed while the shell was starting that command. pi now kills the command's process group once more after the shell exits.
 - Fixed `/import` of a session whose working directory no longer exists leaving a copy in the session directory, and continuing it leaving a second copy with the same ID (`s.jsonl` and `s-1.jsonl`); the failed copy is now removed ([#11060](https://github.com/earendil-works/pi/issues/11060))
+- Fixed the fork's own changelog entries never appearing in Pi. On a fork installation, `/changelog` now lists them last, under "Fork changes", after upstream's releases, and the startup "What's New" shows them once after each update to another fork commit. Their relative links open the fork repository at the installed commit instead of missing upstream pages. Builds without a fork release are unchanged. See [Fork installation](docs/quickstart.md#fork-installation).
+- Fixed `CustomMessageComponent` taking the fork's `compactView`, `showImages` and `imageWidthCells` constructor arguments before upstream's `markdownTransformers`, `messageId` and `timestamp`. An extension that constructed the component with upstream's seven arguments turned on compact view and lost its transformers, message ID and timestamp. Upstream's arguments are in upstream's positions again; the fork's three follow them, as `compactView` does on the other message components.
+- Fixed the retained performance fixtures, which imported deleted files and called changed APIs, so the smoke command in the [performance record](../../docs/performance.md) stopped at its eleventh case. That command runs to the end again and a script test now runs it; cases whose measured code is deleted were removed. The record and its results file list only measurements for code the fork still carries, with the recorded numbers unchanged.
+- Fixed quitting while a tool runs dropping that tool's result from the saved session, which then showed `No result provided` for the call on resume. Quit now aborts the turn and waits up to 500 ms for it to settle while the shutdown handlers run. A tool that ignores cancellation still cannot hold up the handlers or the exit, and certified working-session exits still wait without a limit.
 - Fixed collapsed tool-output and bash previews returning private selection annotations from `render()` to callers outside a fullscreen frame after that frame had rendered them.
 
 ### Removed
 
 - Removed the `discover_tools` builtin, its `instructionGroupsExtension` export and the `pi.refreshTools()` extension method. Extensions keep optional tools out of the prompt with `exposure: "deferred"`, and `tool_search` loads them on demand. On resume, a tool that discovery hid before it was ever declared comes back like a newly registered tool.
+- Removed the fork's temporary passive cache tracing: `PI_CACHE_TRACE_DIR` and `PI_CACHE_TRACE_SESSION_ID` no longer record anything, SDK sessions no longer attach trace provenance to requests, and `scripts/cache-trace-report.mjs` and the cache-tracing guide are gone. Cache warming and cache statistics are unchanged.
 
 ## [1.5.1] - 2026-11-09
 

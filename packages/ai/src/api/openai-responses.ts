@@ -15,7 +15,6 @@ import type {
 	TranscriptContext,
 	Usage,
 } from "../types.ts";
-import { createCacheTrace } from "../utils/cache-trace.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
@@ -190,7 +189,6 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const trace = createCacheTrace(model, options, undefined, () => compat);
 			const grammarToolInputProperties = createGrammarToolInputProperties(
 				getDeclaredTools(normalizedContext.messages),
 				compat.supportsOpenAIGrammarTools,
@@ -201,7 +199,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				apiKey,
 				options?.headers,
 				options?.identity,
-				createRequestCompressionFetch("openai-responses", options?.fetch, trace),
+				createRequestCompressionFetch("openai-responses", options?.fetch),
 				cacheSessionId,
 			);
 			let params = buildParams(
@@ -233,7 +231,6 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			stream.push({ type: "start", partial: output });
 
 			await processResponsesStream(openaiStream, output, stream, model, {
-				cacheTrace: trace,
 				onProviderStreamEvent: options?.onProviderStreamEvent,
 				serviceTier: options?.serviceTier,
 				// Ultrafast pricing requires terminal confirmation, not just a requested tier.

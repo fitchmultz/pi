@@ -55,7 +55,7 @@ Unresolved settings load or write failures refuse acquisition even after their d
 
 ## Restore
 
-`pi --working-session /private/session/state.json` validates the artifact and matching journal before session, resource, model or extension-start construction. A different or newer journal is refused without repair or overwrite. Missing journals are materialized from the exact saved entries.
+`pi --working-session /private/session/state.json` validates the artifact and matching journal before session, resource, model or extension-start construction. A malformed artifact is refused with the path of the first field that failed, for example `Invalid native working session at entries[12].message.content[0].type`. A different or newer journal is refused without repair or overwrite. Missing journals are materialized from the exact saved entries.
 
 `DefaultResourceLoader` supports complete persistence. Custom SDK loaders need not implement `getWorkingSessionResources()` for ordinary session creation, prompting or reload. Complete capture and explicit restore require that method and a loader that honors `reload({ workingSession })` under the saved settings. Unsupported persistence fails clearly; Pi never substitutes an empty resource manifest.
 

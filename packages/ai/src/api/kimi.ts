@@ -1,80 +1,36 @@
-import type { AnyModel, OpenAICompletionsCompat, ThinkingLevelMap } from "../types.ts";
+import type { AnyModel } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
 
-// Default five-minute cache writes: https://platform.kimi.ai/docs/pricing/chat
-export const KIMI_K3_COST = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 } as const;
+const MOONSHOT_K3_FAMILY_IDS = ["kimi-k3", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"];
 
-// Kimi Chat Completions settings shared by Moonshot and Kimi Coding.
-export const KIMI_OPENAI_COMPAT: OpenAICompletionsCompat = {
-	supportsStore: false,
-	supportsDeveloperRole: false,
-	supportsReasoningEffort: false,
-	maxTokensField: "max_tokens",
-	supportsStrictMode: false,
-	thinkingFormat: "deepseek",
-};
-// K3-style models take reasoning_effort and need earlier reasoning sent back.
-export const KIMI_K3_OPENAI_COMPAT: OpenAICompletionsCompat = {
-	...KIMI_OPENAI_COMPAT,
-	requiresReasoningContentOnAssistantMessages: true,
-	thinkingFormat: "openai",
-	supportsReasoningEffort: true,
-};
-
-// Highspeed reports neither effort levels nor dynamic tool loading and rejects
-// tool-bearing system messages with a 400.
-export const KIMI_CODING_K3_STYLE_MODEL_IDS = new Set(["k3", "k3-256k", "kimi-for-coding"]);
-
-export function getKimiCodingMetadata(id: string, thinkingLevelMap?: ThinkingLevelMap) {
-	const isK3Style = KIMI_CODING_K3_STYLE_MODEL_IDS.has(id);
-	return {
-		api: "openai-completions" as const,
+// Canonical endpoints whose pi.dev catalog entries omit the Kimi K3 family's cache-write rate.
+const KIMI_K3_ENDPOINTS: Record<string, { ids: readonly string[]; baseUrl: string }> = {
+	"kimi-coding": {
+		ids: ["k3", "k3-256k", "k3.1-pro", "k3.1-pro-highspeed"],
 		baseUrl: "https://api.kimi.com/coding/v1",
-		compat: {
-			...(isK3Style ? KIMI_K3_OPENAI_COMPAT : KIMI_OPENAI_COMPAT),
-			supportsMidConvoSystemMessages: true,
-			...(isK3Style ? { supportsMidConvoToolAdditions: true } : {}),
-		},
-		// Kimi Code reports every model as always-thinking.
-		thinkingLevelMap: { ...thinkingLevelMap, off: null },
-	};
-}
-
-// Canonical OpenAI-compatible endpoints whose published catalogs omit Kimi K3's 5m cache-write rate.
-const KIMI_K3_CANONICAL_ENDPOINTS: Record<string, { ids: readonly string[]; baseUrl: string }> = {
-	"kimi-coding": { ids: ["k3", "k3-256k"], baseUrl: "https://api.kimi.com/coding/v1" },
-	moonshotai: { ids: ["kimi-k3"], baseUrl: "https://api.moonshot.ai/v1" },
-	"moonshotai-cn": { ids: ["kimi-k3"], baseUrl: "https://api.moonshot.cn/v1" },
+	},
+	moonshotai: { ids: MOONSHOT_K3_FAMILY_IDS, baseUrl: "https://api.moonshot.ai/v1" },
+	"moonshotai-cn": { ids: MOONSHOT_K3_FAMILY_IDS, baseUrl: "https://api.moonshot.cn/v1" },
 };
 
-/** Adapt canonical published entries that predate Kimi Coding's native protocol migration. */
-export function normalizeKimiCodingModel(model: AnyModel): AnyModel {
-	if (!isModelType(model, "chat")) {
+/**
+ * Restore the five-minute cache-write rate of a Kimi K3-family entry from a published catalog
+ * that lists it as zero. Kimi bills those writes at the model's input rate on both platforms
+ * (https://platform.kimi.ai/docs/pricing/chat, https://platform.kimi.com/docs/pricing/chat).
+ * Other models, custom endpoints and entries with a cache-write rate are returned unchanged.
+ */
+export function restoreKimiK3CacheWriteCost(model: AnyModel): AnyModel {
+	const endpoint = KIMI_K3_ENDPOINTS[model.provider];
+	if (
+		!endpoint ||
+		!isModelType(model, "chat") ||
+		model.api !== "openai-completions" ||
+		model.baseUrl !== endpoint.baseUrl ||
+		!endpoint.ids.includes(model.id) ||
+		// Published entries are unvalidated JSON; one without a cost is left alone.
+		model.cost?.cacheWrite !== 0
+	) {
 		return model;
 	}
-	const canonicalK3 = KIMI_K3_CANONICAL_ENDPOINTS[model.provider];
-	const missingK3CacheWrite = canonicalK3?.ids.includes(model.id) && model.cost?.cacheWrite === 0;
-	if (
-		model.provider === "kimi-coding" &&
-		model.api === "anthropic-messages" &&
-		model.baseUrl === "https://api.kimi.com/coding"
-	) {
-		return {
-			...model,
-			...getKimiCodingMetadata(model.id, model.thinkingLevelMap),
-			cost: missingK3CacheWrite ? { ...model.cost, cacheWrite: KIMI_K3_COST.cacheWrite } : model.cost,
-		};
-	}
-	if (
-		canonicalK3 &&
-		missingK3CacheWrite &&
-		model.api === "openai-completions" &&
-		model.baseUrl === canonicalK3.baseUrl
-	) {
-		return {
-			...model,
-			cost: { ...model.cost, cacheWrite: KIMI_K3_COST.cacheWrite },
-		};
-	}
-	return model;
+	return { ...model, cost: { ...model.cost, cacheWrite: model.cost.input } };
 }
