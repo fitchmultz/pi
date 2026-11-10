@@ -447,6 +447,31 @@ function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: str
 	return isSameProviderAndModel && isValidThoughtSignature(signature) ? signature : undefined;
 }
 
+// Google's documented `thoughtSignature` value for function calls the API did not generate, such
+// as a trace from another model. The Gemini API skips thought-signature validation for it.
+// See: https://aistudio.google.com/docs/thought-signatures?generate-content=true#faqs
+const SKIP_THOUGHT_SIGNATURE_VALIDATOR = "skip_thought_signature_validator";
+
+/**
+ * Put the skip value on the first function call of a model message whose function calls carry no
+ * thought signature.
+ *
+ * Gemini 3 and later reject a request (400) when the first function call of a step in the current
+ * turn has no signature. A call made by another model has none to replay, so a session that
+ * switches to Gemini in the middle of a turn would fail. Every such message gets the value, not
+ * only those of the current turn, so a message serializes the same way in every request and the
+ * cached prompt prefix stays valid after the turn ends.
+ *
+ * For the Gemini API only. Upstream removed the value from all Google APIs after Vertex AI
+ * rejected a request that carried it (upstream issue 4032); what Vertex accepts is unverified.
+ */
+function markUnsignedFunctionCalls(parts: Part[]): void {
+	const functionCalls = parts.filter((part) => part.functionCall !== undefined);
+	if (functionCalls.length > 0 && functionCalls.every((part) => part.thoughtSignature === undefined)) {
+		functionCalls[0].thoughtSignature = SKIP_THOUGHT_SIGNATURE_VALIDATOR;
+	}
+}
+
 /**
  * Models via Google APIs that require explicit tool call IDs in function calls/responses.
  */
@@ -565,6 +590,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			}
 
 			if (parts.length === 0) continue;
+			if (model.api === "google-generative-ai") markUnsignedFunctionCalls(parts);
 			contents.push({
 				role: "model",
 				parts,
