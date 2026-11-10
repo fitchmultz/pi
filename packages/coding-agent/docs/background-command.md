@@ -31,7 +31,9 @@ Jobs report `starting`, `running`, `succeeded`, `failed`, `cancelled`, `timed_ou
 
 ## Completion and lifetime
 
-Completion notices enter after the entire foreground tool batch, during idle or after resume. They include the job ID, status, exit code when available, command preview and `logFile`. Success omits output; other outcomes include up to 2KB/20 lines. Do independent work or end the turn while waiting.
+Completion notices enter after the entire foreground tool batch, during idle or after resume. They include the job ID, status, exit code when available, command preview and `logFile`. Success omits output; other outcomes include up to 2KB/20 lines.
+
+After starting a job, do not sleep in `bash` or poll its log. Do independent work, or end the turn when nothing else is left: the completion notice wakes the session, and ending the turn does not end the task. A steering message enters only after the current tool calls return, so a session that sleeps in `bash` cannot be steered until the sleep ends. To look at progress once, call `status` with the job ID.
 
 Persisted notices and terminal status results acknowledge jobs across reload/resume. One process at a time owns delivery for a shared session. After a delivery-owner crash, its filesystem lease normally expires in about 10 seconds before another process takes over.
 

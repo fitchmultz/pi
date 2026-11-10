@@ -45,6 +45,7 @@
 - Codemode keeps 6000 estimated tokens of script output by default instead of 10000. Longer output still links to the omitted and full output files; `max_output_tokens` raises the limit for one script.
 - Shortened the `read`, `codemode` and `background_command` prompt guidelines.
 - The system prompt's `docs` section names the pi package folder once instead of three times, and the `codemode` description no longer contains it. Continuing a session under a newer installed release therefore sends one changed prompt section and no longer declares `codemode` again. Scripts get the path of the codemode reference from the new `models.docs()`. See [Models](docs/codemode.md#models).
+- The `background_command` prompt guidelines now say what to do after starting a job: do not sleep or poll its log, end the turn when nothing else is left because the completion message wakes the session and ending the turn does not end the task, and call `status` with the job ID to look at progress once. See [Completion and lifetime](docs/background-command.md#completion-and-lifetime).
 - A native working-session artifact that fails validation is now refused with the path of the first field that failed, for example `Invalid native working session at entries[12].message.content[0].type`, on `--working-session` restore, managed restart and SDK restore. The same artifacts are accepted and rejected as before. See [Native working sessions](docs/working-session.md#restore).
 
 ### Fixed
