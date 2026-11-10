@@ -1693,6 +1693,8 @@ See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a co
 
 Persist extension data. Custom entries do NOT participate in LLM context. In interactive mode, they can also render inside the chat transcript when paired with `pi.registerEntryRenderer()`.
 
+Custom types that start with `pi.` belong to Pi, such as its [runtime record](session-format.md#runtime-record-piruntime). Choose another prefix.
+
 ```typescript
 pi.appendEntry("my-state", { count: 42 });
 pi.appendEntry("status-card", { title: "Indexed files", count: 17 });

@@ -33,12 +33,13 @@ function loadTree(entries: SessionEntry[], leafId: string) {
 	return runInContext(
 		template.replace(
 			"function renderTree()",
-			"return { buildTree, flattenTree, buildActivePathIds, getPath, findNewestLeaf }; function renderTree()",
+			"return { buildTree, flattenTree, filterNodes, buildActivePathIds, getPath, findNewestLeaf }; function renderTree()",
 		),
 		context,
 	) as {
 		buildTree(): SessionTreeNode[];
 		flattenTree(roots: SessionTreeNode[], activePathIds: Set<string>): FlatNode[];
+		filterNodes(rows: FlatNode[], leafId: string): FlatNode[];
 		buildActivePathIds(id: string): Set<string>;
 		getPath(id: string): SessionEntry[];
 		findNewestLeaf(id: string): string;
@@ -117,5 +118,36 @@ describe("HTML export tree", () => {
 		expect(view.getPath("active-leaf").map((entry) => entry.id)).toEqual(["root", "active", "active-leaf"]);
 		expect(view.findNewestLeaf("root")).toBe("latest-leaf");
 		expect(view.findNewestLeaf("active")).toBe("active-leaf");
+	});
+
+	it("hides a custom entry in the default view even when it is the current leaf", () => {
+		// A session that was only resumed ends in its `pi.runtime` record.
+		const entries: SessionEntry[] = [
+			message("question", null),
+			{
+				type: "custom",
+				id: "record",
+				parentId: "question",
+				timestamp: new Date(1).toISOString(),
+				customType: "pi.runtime",
+			},
+			{
+				type: "thinking_level_change",
+				id: "thinking",
+				parentId: "record",
+				timestamp: new Date(2).toISOString(),
+				thinkingLevel: "off",
+			},
+		];
+		const visible = (leafId: string) => {
+			const view = loadTree(entries, leafId);
+			return view
+				.filterNodes(view.flattenTree(view.buildTree(), view.buildActivePathIds(leafId)), leafId)
+				.map((row) => row.node.entry.id);
+		};
+
+		expect(visible("record")).toEqual(["question"]);
+		// A leaf of another hidden type keeps its place, so the reader sees where the session stands.
+		expect(visible("thinking")).toEqual(["question", "thinking"]);
 	});
 });

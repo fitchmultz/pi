@@ -12,6 +12,7 @@
 
 - Codemode results now link to an omitted-only output file as well as the full output, so recovering truncated text does not repeat the visible head and tail. Native guidance also directs agents to emit selected results as plain text and reuse instructions still in context.
 - Added `pi --build-info` to print the resolved runtime path, runtime versions, and existing immutable fork release receipt as JSON.
+- Added a `pi.runtime` custom entry to saved sessions at every start, resume, fork, new session and reload. It records the Pi build, each loaded package's version and git commit, other extensions' file hashes, and the context files' sizes and hashes for later analysis. It is never sent to the model, and the HTML export hides a custom entry that is the current leaf. See [Runtime record](docs/session-format.md#runtime-record-piruntime).
 - Added `ctx.managedHost` and `session_shutdown` `disposition` so extensions can keep owned work across managed restarts and stop it only on exit. See [Work that outlives a worker](docs/restart.md#work-that-outlives-a-worker).
 - Added complete native working-session save and restore through the SDK and `--working-session`, with private local control and completed-exit receipts. See [Native working sessions](docs/working-session.md).
 - Added `registerProviderAuthFallback()` for ephemeral provider-scoped authentication with native credential precedence, catalogs and transport. See [Provider authentication fallback](docs/custom-provider.md#supply-fallback-authentication-without-replacing-a-provider).
