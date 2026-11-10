@@ -311,7 +311,6 @@ it.each([
 			const publicModel = getBuiltinModel(provider, "claude-opus-5-5");
 			const old: Model<"anthropic-messages"> = {
 				...publicModel,
-				id: "claude-opus-5.5",
 				compat: { ...publicModel.compat },
 				headers: { ...publicModel.headers, "x-catalog-source": source },
 			};
@@ -334,7 +333,7 @@ it.each([
 			if (source === "restored-empty") old.promptCache = {};
 			if (source === "restored-short") old.promptCache = { short: 79 };
 			if (source === "custom-endpoint") old.baseUrl = "https://proxy.invalid/anthropic";
-			if (source === "unrelated-model") old.id = "claude-opus-4.6";
+			if (source === "unrelated-model") old.id = "claude-opus-4-6";
 			const generatedAt = getBuiltinModelDataGeneratedAt();
 			if (generatedAt === undefined) throw new Error("Bundled catalog has no generation timestamp");
 			const newer = generatedAt + 2000;
