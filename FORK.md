@@ -382,8 +382,11 @@ the rate as zero get it restored from their input rate during offline hydration 
 fetched/cached runtime merges. Custom endpoints and other providers are unchanged. Claude 5.5 pricing now follows
 models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
-Cache investigation keeps persistent restart guidance in its existing `context_with_system`
-owner, not the per-run `before_agent_start` hook. Forced text stays run-scoped and unpersisted. Child
+Restart guidance is a recorded `restart` prompt section, set in `before_agent_start`, so a copy of
+the session that runs without managed control keeps the leading system message and records the
+section's removal. Models without mid-conversation system messages still get the removal folded
+into the leading message. A `context_with_system` handler adds the guidance only to windows recorded
+before the section was saved. Forced text stays run-scoped and unpersisted. Child
 finalization recovery remains a conditional source risk: managed saved-session attempts create
 new contracts, and no reachable unchanged-contract reset was reproduced. Do not restore an old
 phase for a new contract or apply a speculative recovery patch.
