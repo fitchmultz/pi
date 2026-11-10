@@ -105,7 +105,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | A named brain's Radius status line shows the quoted name and the server ID, as `radiusStatusText` documents and its test expects. Upstream prints only the name, which is not unique, and its own test fails | `apps/p2/plugins/radius/server.ts` | `apps/p2/test/p2/radius.test.ts` |
 | A Radius v4 WebSocket channel opened while the brain's socket to Radius is congested must start paused once its loopback socket opens. `ws` ignores `pause()` while connecting, so upstream reads the service's output into the congested socket's buffer without bound | `apps/p2/plugins/radius/brain.ts` | `apps/p2/test/p2/radius.test.ts` |
 | Closing the plugin watcher is final: a build whose discovery finishes after `close()` must not watch linked plugin directories, whose persistent watches keep the process alive. Keep upstream's one `#closed` and check it before opening tree or individual-directory watches | `packages/chord/src/node/plugins/watcher.ts` | `packages/chord/test/node/plugins/watcher.test.ts` |
-| Legacy published Kimi Coding catalogs must not break offline builds or revert the native OpenAI protocol on fetched/cached overlays; preserve effort/tool constraints and K3 cache-write pricing | `packages/ai/src/api/kimi.ts`, `packages/ai/catalog/{families/kimi,providers/kimi-coding,providers/moonshotai}.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts` |
+| Kimi K3-family cache writes (K3, K3.1 Pro, K3.1 Pro Highspeed) must cost the published five-minute rate, which equals the input rate, on Moonshot, Moonshot China and Kimi Coding. Upstream's catalog and pi.dev's published entries price them at zero; the fork's catalog definitions carry the rate, and offline hydration and fetched/cached overlays restore it on entries at the canonical endpoints | `packages/ai/src/api/kimi.ts`, `packages/ai/catalog/{families/kimi,providers/kimi-coding,providers/moonshotai}.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/{model-data-validation,providers}.test.ts`, `remote-catalog-provider.test.ts` |
 | Git footers must catch branch changes missed while native watchers and polling baselines start, and must not publish a branch query that a cwd change superseded | `core/footer-data-provider.ts` | `footer-data-provider.test.ts` |
 | Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates. Shared policy lives in pi-ai; coding-agent retains prepared-request timing and its cycle ownership. Both hosts keep the shorter lifetime across refreshes. p2 observes native dispatch without retaining prepared credentials, schedules from that time, cancels refreshes that outlast the entry, and releases worker liveness when a retry cannot arrive before expiry | `packages/ai/src/{cache-warming,models,utils/identity}.ts`, `core/{cache-warmer,model-runtime,sdk}.ts`, `apps/p2/src/runtime/worker.ts`, `apps/p2/plugins/cache-warming/warmer.ts` | `cache-warmer.test.ts`, `packages/ai/test/identity.test.ts`, `apps/p2/test/p2/{cache-warming,harness-requests}.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
@@ -352,13 +352,13 @@ GPT-5.5 and older now follow upstream's top-level tool declarations after its re
 A parity test keeps both lists aligned with `catalog/families/openai.ts`. Explicit compatibility flags and whole cache metadata objects are preserved;
 catalog entries with a non-canonical `baseUrl` do not receive these defaults.
 
-Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3, including Kimi Coding's `k3-256k`, keeps
-the published $3/M five-minute cache-write rate across canonical Kimi Coding and
+Program status and prompt-length pricing tiers follow upstream 1.1.0. The Kimi K3 family (K3, including Kimi Coding's
+`k3-256k`, K3.1 Pro and K3.1 Pro Highspeed) keeps its published five-minute cache-write rate,
+which equals the input rate ($3/M, $2/M and $4/M), across canonical Kimi Coding and
 Moonshot OpenAI entries and Kimi Coding's implied estimate
-([pricing](https://platform.kimi.ai/docs/pricing/chat)). Kimi Coding's shared
-metadata helper also migrates canonical legacy Anthropic catalog entries and restores
-omitted K3 cache-write rates during offline hydration and fetched/cached runtime
-merges. Custom endpoints and other providers are unchanged. Claude 5.5 pricing now follows
+([pricing](https://platform.kimi.ai/docs/pricing/chat)). Published entries that list
+the rate as zero get it restored from their input rate during offline hydration and
+fetched/cached runtime merges. Custom endpoints and other providers are unchanged. Claude 5.5 pricing now follows
 models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`

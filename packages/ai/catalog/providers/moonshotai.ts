@@ -23,8 +23,9 @@ export function moonshotModels(ctx: ProviderContext, source: string, baseUrl: st
 			return {
 				...model,
 				reasoning: isKimiK3 || source.reasoning,
-				// Kimi K3 uses its published five-minute cache-write rate (https://platform.kimi.ai/docs/pricing/chat).
-				// models.dev lists the input rate as cache_write for the other K3-family models; they keep zero.
+				// kimi-k3 is pinned to the USD rates on https://platform.kimi.ai/docs/pricing/chat for both
+				// Moonshot providers. The other models use models.dev, whose cache_write for the K3
+				// family is the five-minute cache-write rate published there.
 				cost:
 					model.id === "kimi-k3"
 						? { ...KIMI_K3_COST }
@@ -32,7 +33,7 @@ export function moonshotModels(ctx: ProviderContext, source: string, baseUrl: st
 								input: source.cost.input || 0,
 								output: source.cost.output || 0,
 								cacheRead: source.cost.cacheRead || 0,
-								cacheWrite: isKimiK3 ? 0 : source.cost.cacheWrite || 0,
+								cacheWrite: source.cost.cacheWrite || 0,
 							},
 				compat: { ...(isKimiK3 ? KIMI_K3_OPENAI_COMPAT : KIMI_OPENAI_COMPAT) },
 			};
