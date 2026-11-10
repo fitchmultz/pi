@@ -16,6 +16,7 @@ import {
 import type { ToolResultMessage, Usage } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { getPackageDir } from "../../src/config.ts";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import type { CustomEntry } from "../../src/core/session-manager.ts";
 import {
@@ -25,7 +26,6 @@ import {
 import { readCodemodeStore } from "../../src/extensions/codemode/execute.ts";
 import { createCodemodeExtension } from "../../src/extensions/codemode/index.ts";
 import {
-	CODEMODE_DOCS_PATH,
 	CODEMODE_STORE_ENTRY_TYPE,
 	type CodemodeToolDetails,
 	createCodemodeTool,
@@ -988,7 +988,9 @@ describe("codemode models", () => {
 		const codemode = harness.session.agent.state.tools.find((tool) => tool.name === "codemode");
 		// The description names the models globals and points to the docs for the API.
 		expect(codemode?.description).toContain("`models`: classifiers and image generation");
-		expect(codemode?.description).toContain(CODEMODE_DOCS_PATH);
+		expect(codemode?.description).toContain("docs/codemode.md");
+		// The package folder differs per installed release; naming it would redeclare the tool after an update.
+		expect(codemode?.description).not.toContain(getPackageDir());
 		expect(codemode?.description).toContain("256 KiB");
 		expect(codemode?.description).toContain("1 MiB per session branch");
 		expect(codemode?.description).toContain("store(key, undefined)");
@@ -997,6 +999,15 @@ describe("codemode models", () => {
 		harnesses.push(overridden);
 		const plain = overridden.session.agent.state.tools.find((tool) => tool.name === "codemode");
 		expect(plain?.description).not.toContain("`models`");
+	});
+
+	it("gives scripts the path of the codemode reference, for prompts without a docs section", async () => {
+		const { harness } = await setup();
+		const result = await run(harness, "return await models.docs();");
+		expect(result.isError).toBe(false);
+		const path = resultText(result);
+		expect(path.replaceAll("\\", "/")).toMatch(/\/docs\/codemode\.md$/);
+		expect(readFileSync(path, "utf8")).toMatch(/^# Codemode$/m);
 	});
 
 	it("lists models and classifies with catalog auth, ignoring script-supplied fields", async () => {

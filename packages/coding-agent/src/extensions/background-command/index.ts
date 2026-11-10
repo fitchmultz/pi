@@ -14,6 +14,7 @@ import {
 	backgroundCommandDirectory,
 	backgroundCommandFinished,
 	backgroundCommandOutputTail,
+	cancelBackgroundCommand,
 	listBackgroundCommands,
 	summarizeBackgroundCommand,
 } from "./jobs.ts";
@@ -34,7 +35,15 @@ interface Monitor {
 	timer: NodeJS.Timeout;
 }
 
-export function createBackgroundCommandExtension(): ExtensionFactory {
+export interface BackgroundCommandExtensionOptions {
+	/**
+	 * The host keeps a run open until `AgentSession.getBackgroundWork()` is empty, so a print or JSON
+	 * run does not end before a job's completion. The tool then omits its one-shot guidance.
+	 */
+	hostWaits?: boolean;
+}
+
+export function createBackgroundCommandExtension(options: BackgroundCommandExtensionOptions = {}): ExtensionFactory {
 	return (pi) => {
 		let monitor: Monitor | undefined;
 		let release: (() => void) | undefined;
@@ -214,7 +223,7 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 					continue: event.continue || (!wakeSuppressed && !!ctx.model),
 				};
 		}
-		pi.registerTool(createBackgroundCommandTool(pi, start));
+		pi.registerTool(createBackgroundCommandTool(pi, start, options));
 		pi.registerMessageRenderer<BackgroundCommandNoticeDetails>(
 			BACKGROUND_COMMAND_NOTICE,
 			(message, options, theme) => {
@@ -255,6 +264,23 @@ export function createBackgroundCommandExtension(): ExtensionFactory {
 		pi.on("turn_end", boundary);
 		pi.on("agent_before_settle", boundary);
 		pi.on("agent_settled", () => pending.clear());
+		pi.on("background_work", (_event, ctx) => {
+			// A stopped monitor sends no notice, and another process that holds the lease sends them
+			// to its own copy of the session. Without a lease of its own, the monitor takes a free one
+			// on its next pass.
+			if (!monitor || !root || (!release && lockfile.checkSync(root, { realpath: false }))) return;
+			const directory = root;
+			receipts(ctx.sessionManager.getEntries());
+			return {
+				work: listBackgroundCommands(directory, seen).map((job) => ({
+					id: job.id,
+					description: summarizeBackgroundCommand(job).commandPreview.replace(/\s+/g, " "),
+					cancel: async () => {
+						await cancelBackgroundCommand(directory, job.id);
+					},
+				})),
+			};
+		});
 		pi.on("working_session_save", (event) => {
 			saving = true;
 			event.signal.addEventListener(

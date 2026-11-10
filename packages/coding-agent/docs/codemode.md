@@ -157,6 +157,8 @@ interface ModelInfo {
 }
 
 declare const models: {
+  /** Absolute path of this reference (`docs/codemode.md` in the pi package folder). */
+  docs(): Promise<string>;
   /** Every known model of a type, optionally for one provider. */
   getModelsOfType(type: ModelType, provider?: string): Promise<ModelInfo[]>;
   /** Models of a type whose provider has working credentials. */
@@ -173,6 +175,8 @@ declare const models: {
 `classify()` and `generateImages()` use only the `provider` and `id` of `model`, so `{ provider, id }` works as well. They do not throw on provider errors: check `stopReason` and `errorMessage`. At most four such calls run at once per script; more calls wait for a free slot, so `Promise.all()` over many items is fine. Their usage is added to the `codemode` tool result and counts toward the session cost.
 
 Model IDs differ between providers, for example `typesafe/jev-latest` and `openrouter/typesafe/jev-1.13`. Use `models.getAvailableOfType(type)` to find the IDs that work with the current credentials.
+
+The `codemode` description tells the model to read this reference before it uses `models`, and names it as `docs/codemode.md`, never by its absolute path. The pi package folder differs per installed release, and a changed description declares the tool again. The system prompt's `docs` section names the package folder. Where that section is absent, for example with a custom system prompt, `models.docs()` returns the path.
 
 ### Classify
 

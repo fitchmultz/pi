@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { Component, KeyId } from "@earendil-works/pi-tui";
 import { type Theme, theme } from "../../modes/interactive/theme/theme.ts";
+import type { BackgroundWork, BackgroundWorkEvent, BackgroundWorkEventResult } from "../background-work.ts";
 import type { CacheWarmingAction } from "../cache-warmer.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
@@ -187,6 +188,7 @@ interface BeforeAgentStartCombinedResult {
 type RunnerEmitEvent = Exclude<
 	ExtensionEvent,
 	| ToolCallEvent
+	| BackgroundWorkEvent
 	| ProjectTrustEvent
 	| ToolResultEvent
 	| UserBashEvent
@@ -1066,6 +1068,37 @@ export class ExtensionRunner {
 			}
 		}
 		return blockers;
+	}
+
+	/**
+	 * The work each extension reports. A handler that throws is reported and contributes nothing.
+	 * Handlers run outside the working-session gate: asking must not invalidate a save or count as activity.
+	 */
+	async emitBackgroundWork(): Promise<BackgroundWork[]> {
+		const event: BackgroundWorkEvent = { type: "background_work" };
+		const work: BackgroundWork[] = [];
+		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, event.type)) {
+			for (const handler of handlers) {
+				try {
+					const result = (await invokeHandler(
+						ext,
+						handler,
+						event,
+						this.scopeContext(this.createContext(), ext.path),
+						(error) => this.emitError(error),
+					)) as BackgroundWorkEventResult | undefined;
+					if (result) work.push(...result.work);
+				} catch (err) {
+					this.emitError({
+						extensionPath: ext.path,
+						event: event.type,
+						error: err instanceof Error ? err.message : String(err),
+						stack: err instanceof Error ? err.stack : undefined,
+					});
+				}
+			}
+		}
+		return work;
 	}
 
 	async emitShutdownStrict(event: SessionShutdownEvent): Promise<void> {

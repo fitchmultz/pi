@@ -1,4 +1,7 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, test } from "vitest";
+import { getPackageDir } from "../src/config.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
@@ -110,16 +113,23 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain(expected);
 		});
 
-		test("instructs models to resolve pi docs and examples under absolute base paths", () => {
+		test("names the package folder once and resolves pi docs and examples under it", () => {
 			const prompt = buildSystemPrompt({
 				contextFiles: [],
 				skills: [],
-				cwd: process.cwd(),
+				cwd: "/workspace",
 			});
+			const packageDir = getPackageDir();
 
+			// The folder differs per installed release, so every mention is sent again after an update.
+			expect(prompt.split(packageDir)).toHaveLength(2);
+			expect(prompt).toContain(`- Pi package folder: ${packageDir}\n`);
 			expect(prompt).toContain(
-				"- When reading pi docs or examples, resolve docs/... under Additional docs and examples/... under Examples, not the current working directory",
+				"- Resolve README.md (main documentation), docs/... and examples/... (extensions, custom tools, SDK) under the Pi package folder, not the current working directory",
 			);
+			for (const path of ["README.md", "docs/codemode.md", "examples/extensions"]) {
+				expect(existsSync(join(packageDir, path))).toBe(true);
+			}
 			expect(prompt).toContain("environment variables (docs/environment-variables.md), MCP servers (docs/mcp.md)");
 			expect(prompt).toContain(
 				"Before implementing harness changes, read the documentation sections and examples that cover the APIs and behavior you will change, including the references those sections depend on. Read full documents only when the change spans their scope.",

@@ -64,6 +64,7 @@ import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { processImage } from "../utils/image-process.ts";
 import { normalizeToolResultImages } from "../utils/tool-result-images.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import type { BackgroundWork } from "./background-work.ts";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 import { generateBugReportSummary } from "./bug-report.ts";
 import type { CacheWarmer, CacheWarmingStatus } from "./cache-warmer.ts";
@@ -1268,17 +1269,24 @@ export class AgentSession {
 
 	private async _cancelBackgroundRuns(reason: string): Promise<void> {
 		if (this._backgroundRuns.size === 0) return;
-		const runs = [...this._backgroundRuns.values()];
-		this._abortBackgroundRuns(reason);
+		await this._stopBackgroundRuns([...this._backgroundRuns.values()], reason);
+		while (this._backgroundDelivery) await this._backgroundDelivery;
+	}
+
+	/** Abort `runs` and wait until their work has ended. The flush then drops each without a commit or a message. */
+	private async _stopBackgroundRuns(runs: BackgroundToolRun[], reason: string): Promise<void> {
+		this._abortBackgroundRuns(reason, runs);
 		await Promise.all(runs.map((run) => run.settled));
 		// Usage already known is still owed to the session; nothing is committed or delivered. A save
 		// hold parks the write instead of being invalidated, and its release runs the same accounting.
 		this._flushBackgroundRuns();
-		while (this._backgroundDelivery) await this._backgroundDelivery;
 	}
 
-	private _abortBackgroundRuns(reason: string): void {
-		for (const run of this._backgroundRuns.values()) run.controller.abort(new Error(reason));
+	private _abortBackgroundRuns(
+		reason: string,
+		runs: Iterable<BackgroundToolRun> = this._backgroundRuns.values(),
+	): void {
+		for (const run of runs) run.controller.abort(new Error(reason));
 	}
 
 	private _flushBackgroundRuns(): void {
@@ -3285,6 +3293,25 @@ export class AgentSession {
 			return;
 		}
 		await this._getIdleWaitPromise();
+	}
+
+	/**
+	 * This session's background tool runs plus the work extensions report. `waitForIdle()` waits for none of it.
+	 * A session that is idle, is not settling and has no background work stays idle until new input.
+	 * Asking changes nothing: no save is invalidated, nothing is written and no work is touched.
+	 */
+	async getBackgroundWork(): Promise<BackgroundWork[]> {
+		const reported = await this._extensionRunner.emitBackgroundWork();
+		// The runs are read after the extensions answered, in the step that returns, so a run a
+		// completion started meanwhile cannot have added one that the list misses.
+		const runs = [...this._backgroundRuns.values()].map(
+			(run): BackgroundWork => ({
+				id: run.runId,
+				description: `${run.customType} run ${run.state.status === "running" ? "is active" : "is awaiting delivery"}`,
+				cancel: () => this._stopBackgroundRuns([run], "Background run cancelled"),
+			}),
+		);
+		return [...runs, ...reported];
 	}
 
 	// =========================================================================

@@ -31,13 +31,19 @@ Jobs report `starting`, `running`, `succeeded`, `failed`, `cancelled`, `timed_ou
 
 ## Completion and lifetime
 
-Completion notices enter after the entire foreground tool batch, during idle or after resume. They include the job ID, status, exit code when available, command preview and `logFile`. Success omits output; other outcomes include up to 2KB/20 lines. Do independent work or end the turn while waiting.
+Completion notices enter after the entire foreground tool batch, during idle or after resume. They include the job ID, status, exit code when available, command preview and `logFile`. Success omits output; other outcomes include up to 2KB/20 lines.
+
+After starting a job, do not sleep in `bash` or poll its log. Do independent work, or end the turn when nothing else is left: the completion notice wakes the session, and ending the turn does not end the task. A steering message enters only after the current tool calls return, so a session that sleeps in `bash` cannot be steered until the sleep ends. To look at progress once, call `status` with the job ID.
 
 Persisted notices and terminal status results acknowledge jobs across reload/resume. One process at a time owns delivery for a shared session. After a delivery-owner crash, its filesystem lease normally expires in about 10 seconds before another process takes over.
 
 Cancelling the agent leaves jobs running and records completions without waking the model. New user input clears wake suppression. Cancelling the job stops its shell process tree. `waitForIdle()` does not wait for detached jobs. Session shutdown releases the completion monitor; a disposed SDK context is cleaned up on its next idle tick without stopping jobs.
 
-Print/JSON invocations can exit before completion. Use `bash` when the same invocation must wait for and report the result. Otherwise report the job as pending with its ID and log path, and resume the saved session later. An in-memory session retains job files but has no conversation to resume automatically.
+An SDK host can wait for them: `session.getBackgroundWork()` lists every job whose completion notice this process still owes the session. A job is listed from its start, while it runs and after it finishes, until its notice is in the session entries. A job whose final status the model read with `status` is not listed, because no notice follows. Each item's `cancel()` requests cancellation like the tool's `cancel` action; the cancelled job stays listed until its notice records the outcome. The list is empty when this process sends no notices: after session shutdown or a monitoring failure, and while another process owns delivery for the shared session. See [Background work](sdk.md#background-work) for the host loop.
+
+Print/JSON invocations can exit before completion. Use `bash` when the same invocation must wait for and report the result. Otherwise report the job as pending with its ID and log path, and resume the saved session later. An in-memory session retains job files but has no conversation to resume automatically. The tool says so in a guideline and in each `start` result of a print or JSON invocation.
+
+A host that keeps each run open until `getBackgroundWork()` is empty creates the extension with `createBackgroundCommandExtension({ hostWaits: true })`. The tool then has neither that guideline nor that `start` guidance, since the run does not end before the job's completion. The option changes no behavior: the host does the waiting.
 
 ## Storage and execution policy
 
