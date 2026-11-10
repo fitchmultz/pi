@@ -17,9 +17,20 @@ afterAll(() => {
 	for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 });
 }, 60_000);
 
-// One process writes ten ticks 20 ms apart, for longer than the grace after exit, and tells the shell through the
-// `ready` pipe that it runs. A shell loop that starts a `sleep` per tick left gaps longer than the grace on slow runners.
-const TICK_WRITER = `${JSON.stringify(process.execPath)} -e 'require("fs").writeFileSync("ready","\\n");let i=0;const t=setInterval(()=>{process.stdout.write("tick"+ ++i+"\\n");if(i===10)clearInterval(t)},20)'`;
+/**
+ * A shell command part that starts one Node process running `script`. The process first tells the shell, through the
+ * `ready` pipe, that it runs: the shell then exits, and what the script writes arrives after the exit without the
+ * process's start counting as silence.
+ */
+function descendantWriter(script: string): string {
+	return `${JSON.stringify(process.execPath)} -e 'require("fs").writeFileSync("ready","\\n");${script}'`;
+}
+
+// Ten ticks 20 ms apart, for longer than the grace after exit. A shell loop that starts a `sleep` per tick left gaps
+// longer than the grace on slow runners.
+const TICK_WRITER = descendantWriter(
+	'let i=0;const t=setInterval(()=>{process.stdout.write("tick"+ ++i+"\\n");if(i===10)clearInterval(t)},20)',
+);
 
 function environment(): { env: RemoteExecutionEnv; connection: Connection } {
 	const cwd = mkdtempSync(join(tmpdir(), "pi-env-remote-"));
@@ -272,13 +283,16 @@ describe("RemoteExecutionEnv", () => {
 		async () => {
 			const { env } = environment();
 			// After the shell exits, a descendant writes more than the 4 MiB of unsent output at which the daemon's reader
-			// waits, then keeps writing a dot at a time while it waits.
+			// waits, then a dot every 5 ms for 1.5 seconds: longer than the stall below, on a runner of any speed.
 			const size = 4.5 * 1024 * 1024;
-			const dots = 300_000;
+			const dots = 300;
+			const writer = descendantWriter(
+				`process.stdout.write(Buffer.alloc(${size},"0123456789abcdef\\n"));let n=0;const t=setInterval(()=>{process.stdout.write(".");if(++n===${dots}){clearInterval(t);process.stdout.write("END")}},5)`,
+			);
 			const stall = new Int32Array(new SharedArrayBuffer(4));
 			let output = "";
 			const result = await env.exec(
-				`(yes 0123456789abcdef | head -c ${size}; i=0; while [ $i -lt ${dots} ]; do printf .; i=$((i+1)); done; printf END) & exit 0`,
+				`mkfifo ready; ${writer} & read _ < ready; exit 0`,
 				{
 					onOutput: (text: string) => {
 						// Blocking the event loop for a second, far longer than the grace, backs up the link behind it.
