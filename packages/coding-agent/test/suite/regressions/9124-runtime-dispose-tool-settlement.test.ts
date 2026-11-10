@@ -38,7 +38,7 @@ describe("regression #9124: runtime disposal during tool execution", () => {
 		};
 	}
 
-	it("persists the aborted tool turn before strict shutdown disconnects the session", async () => {
+	it.each([false, true])("persists the aborted tool turn before disconnecting; strict=%s", async (strict) => {
 		let markToolStarted!: () => void;
 		const toolStarted = new Promise<void>((resolve) => {
 			markToolStarted = resolve;
@@ -57,8 +57,8 @@ describe("regression #9124: runtime disposal during tool execution", () => {
 				}),
 		};
 		const { harness, runtime } = await createRuntime(tool);
-		// The fork joins tools for certified exits; ordinary quit remains nonblocking.
-		runtime.setFinalization(async () => {}, { strictShutdown: true });
+		// Certified working-session exits wait for the turn without a limit; an ordinary quit waits a bounded time.
+		if (strict) runtime.setFinalization(async () => {}, { strictShutdown: true });
 		harness.setResponses([fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" })]);
 
 		const prompt = runtime.session.prompt("run tool");

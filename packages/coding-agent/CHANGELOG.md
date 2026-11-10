@@ -122,6 +122,7 @@
 - Fixed quitting right after `/mcp reconnect` leaving a stdio MCP server that ignores SIGTERM running. Ending a session now waits for MCP connections dropped by a reconnect, sign-out or required sign-in to finish closing, as it already did for current connections.
 - Fixed aborting or timing out a bash command on macOS sometimes leaving the next command of a list such as `long_step; next_step` running after the abort was reported, when the abort landed while the shell was starting that command. pi now kills the command's process group once more after the shell exits.
 - Fixed `/import` of a session whose working directory no longer exists leaving a copy in the session directory, and continuing it leaving a second copy with the same ID (`s.jsonl` and `s-1.jsonl`); the failed copy is now removed ([#11060](https://github.com/earendil-works/pi/issues/11060))
+- Fixed quitting while a tool runs dropping that tool's result from the saved session, which then showed `No result provided` for the call on resume. Quit now aborts the turn and waits up to 500 ms for it to settle while the shutdown handlers run. A tool that ignores cancellation still cannot hold up the handlers or the exit, and certified working-session exits still wait without a limit.
 
 ### Removed
 

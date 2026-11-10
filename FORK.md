@@ -55,10 +55,14 @@ Complete working state also depends on the queue/admission APIs in
 
 ### Retained correctness deltas
 
-Ordinary quit does not wait for tools that ignore cancellation. Strict shutdown for certified
-working-session exits waits for `session.abort()` before disconnecting persistence. This retains
-the fork's nonblocking quit behavior rather than upstream's unconditional wait from #9124;
-an ordinary quit can leave an interrupted tool call without its final result.
+Ordinary quit aborts the active turn and waits at most 500 ms for it to settle
+(`QUIT_TURN_SETTLE_MS` in `core/agent-session-runtime.ts`), running the shutdown handlers meanwhile.
+A tool that honors cancellation, or that ends when a shutdown handler stops its work, has its result
+saved. A tool that ignores cancellation delays neither the handlers nor the exit past that bound,
+and its call stays without a result. Strict shutdown for certified working-session exits waits for
+`session.abort()` without a limit before it runs the handlers. Upstream waits without a limit on
+every quit (#9124), so one unresponsive tool blocks it. Tests:
+`suite/regressions/9124-runtime-dispose-tool-settlement.test.ts`, `suite/agent-session-runtime.test.ts`.
 
 These fixes remain until upstream supplies equivalent behavior, not merely closes a report.
 Native working-session restoration omits removed models from the saved cycling list while retaining the selected model, remaining order and thinking levels. A missing selected model still fails (`core/sdk.ts`, `test/suite/working-session-models.test.ts`).
@@ -154,7 +158,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Repeated context-usage reads must reuse the last scalar without rescanning archived ancestry; native leaf identity and effective model limits preserve compaction, edits, branches and reload/restore behavior | `core/agent-session.ts` | `suite/agent-session-context-usage.test.ts` |
 | Session hot paths incrementally retain active ancestry, compaction-aware raw context entries and model/thinking settings; projected messages and returned arrays remain fresh. Entry-list and leaf identity invalidate reuse on reload or navigation. The latest name stays indexed; branch-summary admission stays linear, file forks reuse a private exclusive descriptor, and custom-flat listings reject unrelated cwd headers before reading bodies | `core/session-manager.ts`, `core/compaction/branch-summarization.ts` | `session-manager/*.test.ts`, `session-context-edit.test.ts`, `branch-summarization.test.ts`, `file-safety.test.ts` |
 | Empty-draft boundary previews use the live manager and compute projection/LLM fields only when read; pending-queue readers never project history. Each handler retains its own preview for freshness. Canonical context still refreshes after every boundary because public Agent state allows in-place mutation; committed drafts refresh before entry notifications. Mutable nonempty drafts still need eager validation. The undocumented `emitBoundary` preview builder remains synchronous | `core/extensions/runner.ts`, `core/agent-session.ts` | `extensions-runner.test.ts`, `suite/agent-session-boundaries.test.ts` |
-| Interactive transcript rebuilds place what the session has not saved instead of re-creating it from history: the streaming answer, live tool rows (partial output, timer, and parallel results that are saved only when the round ends) and a running `!` command. A live row leaves `pendingTools` when its result message is saved, not at `tool_execution_end`. A saved call with neither a live row nor a saved result, such as one left by an ordinary quit, shows the `No result provided` error the model receives; upstream re-creates and re-registers it as pending | `modes/interactive/interactive-mode.ts` | `suite/regressions/{transcript-rows,4167-thinking-toggle-pending-tool-render}.test.ts` |
+| Interactive transcript rebuilds place what the session has not saved instead of re-creating it from history: the streaming answer, live tool rows (partial output, timer, and parallel results that are saved only when the round ends) and a running `!` command. A live row leaves `pendingTools` when its result message is saved, not at `tool_execution_end`. A saved call with neither a live row nor a saved result, such as one left by quitting during a tool that ignores cancellation, shows the `No result provided` error the model receives; upstream re-creates and re-registers it as pending | `modes/interactive/interactive-mode.ts` | `suite/regressions/{transcript-rows,4167-thinking-toggle-pending-tool-render}.test.ts` |
 | A reconnected terminal panel whose terminal is missing from the new listing (closed while the panel was away, or ended with its host) shows none when no other runs. Upstream keeps showing it: its last screen, a close button and input that reach nothing, and no New terminal button. Showing none also hides the closed terminal's scrollbar, which upstream leaves on the empty panel when it was scrolled back | `apps/p2/plugins/terminals/Terminal.tsx` | `apps/p2/test/p2/terminal-reconnect.test.ts` |
 
 ### Internal state ownership
