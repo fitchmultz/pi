@@ -899,12 +899,16 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: 0,
 			};
-			const send = (body: ThreadedParams) =>
-				retryProviderRequest(() => client.beta.messages.create(body, requestOptions).asResponse(), {
+			// Thinking blocks in the body of the request that was answered, for the journal.
+			let thinkingBlocksSent = 0;
+			const send = (body: ThreadedParams) => {
+				thinkingBlocksSent = countThinkingBlocks(body.messages);
+				return retryProviderRequest(() => client.beta.messages.create(body, requestOptions).asResponse(), {
 					maxRetries: options?.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					signal: options?.signal,
 				});
+			};
 			let disablePreferredStrictTools = hasExceededStrictToolLimits(options?.sessionId);
 			let response: Response;
 			let params: MessageCreateParamsStreaming;
@@ -1195,6 +1199,17 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							reason: transformation.reason ?? undefined,
 						})),
 					},
+				});
+			}
+			// How much earlier reasoning the request carried and how much of it the API dropped. A
+			// measurement, recorded with every reply to a request that carried or lost any.
+			const thinkingBlocksDropped =
+				inputTransformations?.filter((transformation) => transformation.type === "thinking_dropped").length ?? 0;
+			if (thinkingBlocksSent > 0 || thinkingBlocksDropped > 0) {
+				appendAssistantMessageDiagnostic(output, {
+					type: "anthropic_thinking_blocks",
+					timestamp: Date.now(),
+					details: { sent: thinkingBlocksSent, dropped: thinkingBlocksDropped },
 				});
 			}
 
@@ -2012,6 +2027,18 @@ function convertTools(
 			...(cacheControl && index === tools.length - 1 ? { cache_control: cacheControl } : {}),
 		};
 	});
+}
+
+/** Number of reasoning blocks in the messages of a request body. */
+function countThinkingBlocks(messages: MessageParam[]): number {
+	let count = 0;
+	for (const message of messages) {
+		if (typeof message.content === "string") continue;
+		for (const block of message.content) {
+			if (block.type === "thinking" || block.type === "redacted_thinking") count++;
+		}
+	}
+	return count;
 }
 
 /** The summary block to send first: the one on the leading system message, if this model wrote it. */

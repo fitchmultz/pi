@@ -1,3 +1,4 @@
+import { type AssistantMessage, fauxAssistantMessage } from "@earendil-works/pi-ai";
 import {
 	Container,
 	Editor,
@@ -9,8 +10,9 @@ import {
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import { redactJsonValue, redactUrl } from "../src/core/bug-report.ts";
+import { collectBugReportDiagnostics, redactJsonValue, redactUrl } from "../src/core/bug-report.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { reportBug } from "../src/modes/interactive/bug-report.ts";
 import { ExtensionEditorComponent } from "../src/modes/interactive/components/extension-editor.ts";
 import { ExtensionSelectorComponent } from "../src/modes/interactive/components/extension-selector.ts";
@@ -83,6 +85,24 @@ describe("bug report prompt", () => {
 		} finally {
 			setKeybindings(previousKeybindings);
 		}
+	});
+});
+
+describe("bug report diagnostics", () => {
+	it("lists turns with a problem, not turns that only carry thinking block counts", () => {
+		const manager = SessionManager.inMemory();
+		const reply = (diagnostics: AssistantMessage["diagnostics"]): AssistantMessage => ({
+			...fauxAssistantMessage("ok"),
+			diagnostics,
+		});
+		const counts = { type: "anthropic_thinking_blocks", timestamp: 1, details: { sent: 2, dropped: 2 } };
+		const dropped = { type: "anthropic_input_transformations", timestamp: 1, details: { transformations: [] } };
+		manager.appendMessage(reply([counts]));
+		const withProblem = manager.appendMessage(reply([dropped, counts]));
+
+		const { assistant } = collectBugReportDiagnostics(manager);
+
+		expect(assistant).toMatchObject([{ entryId: withProblem, diagnostics: [dropped] }]);
 	});
 });
 

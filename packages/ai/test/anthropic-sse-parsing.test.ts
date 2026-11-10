@@ -515,6 +515,8 @@ describe("Anthropic raw SSE parsing", () => {
 					],
 				},
 			},
+			// The request carried no reasoning block of its own; the count is the API's.
+			{ type: "anthropic_thinking_blocks", timestamp: expect.any(Number), details: { sent: 0, dropped: 1 } },
 		]);
 	});
 	it("repairs malformed SSE JSON and malformed streamed tool JSON", async () => {

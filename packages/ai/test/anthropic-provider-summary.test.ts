@@ -267,7 +267,7 @@ describe("Anthropic provider summary block", () => {
 			}) as typeof base;
 
 		await stream(model, base, h.options).result();
-		await stream(model, contextFor(model.provider, model.id), h.options).result();
+		const reply = await stream(model, contextFor(model.provider, model.id), h.options).result();
 		await stream(model, contextFor(model.provider, "claude-other"), h.options).result();
 
 		const [withoutBlock, withBlock, otherModel] = h.requests;
@@ -292,6 +292,10 @@ describe("Anthropic provider summary block", () => {
 		expect(withBlock.body.system).toEqual(withoutBlock.body.system);
 		expect(withBlock.body.tools).toEqual(withoutBlock.body.tools);
 		expect(withBlock.betas).toContain(COMPACTION_BETA);
+		// The journal records how many reasoning blocks the request carried and how many the API dropped.
+		expect(reply.diagnostics).toEqual([
+			{ type: "anthropic_thinking_blocks", timestamp: expect.any(Number), details: { sent: 2, dropped: 0 } },
+		]);
 
 		// A block another model wrote is not sent: the request is the one without a block.
 		expect(otherModel.body.messages).toEqual(withoutBlock.body.messages);
