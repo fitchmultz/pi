@@ -261,6 +261,13 @@ export { DefaultPackageManager } from "./core/package-manager.ts";
 export type { ProviderAuthFallback } from "./core/provider-composer.ts";
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
+export {
+	RUNTIME_RECORD_ENTRY,
+	type RuntimeRecordContextFile,
+	type RuntimeRecordData,
+	type RuntimeRecordExtension,
+	type RuntimeRecordPackage,
+} from "./core/runtime-record.ts";
 // SDK for programmatic usage
 export {
 	AgentSessionRuntime,

@@ -1,5 +1,7 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
+import { selectionRunMarker, stripSelectionMetadata } from "../src/selection-markers.ts";
+import { SelectionSource, SourceText } from "../src/selection-source.ts";
 import { visibleWidth, wrapTextWithAnsi } from "../src/utils.ts";
 
 describe("wrapTextWithAnsi", () => {
@@ -99,6 +101,37 @@ describe("wrapTextWithAnsi", () => {
 				"\x1b[41;9mstrike\x1b[29m",
 				"\x1b[9;41mme\x1b[0m",
 			]);
+		});
+	});
+
+	// After a wrap at a space the next row has no text yet. The codes that continue on it are not a row of their own.
+	describe("wrap at a space after a line that fills the width", () => {
+		it("does not emit a row that holds only the active style before a long word", () => {
+			assert.deepStrictEqual(wrapTextWithAnsi("\x1b[31mabcdefghij klmnopqrstuvwxyz\x1b[39m", 10), [
+				"\x1b[31mabcdefghij",
+				"\x1b[31mklmnopqrst",
+				"\x1b[31muvwxyz\x1b[39m",
+			]);
+		});
+
+		it("does not emit a row that holds only the active style at the end of a line", () => {
+			assert.deepStrictEqual(wrapTextWithAnsi("\x1b[31mabcdefghij \nend\x1b[39m", 10), [
+				"\x1b[31mabcdefghij",
+				"\x1b[31mend\x1b[39m",
+			]);
+		});
+
+		it("does not emit a row that holds only a selection marker, and keeps the source offsets", () => {
+			const text = "abcdefghij klmnopqrstuvwxyz\n0123456789 \nend";
+			const source = new SelectionSource(text);
+			const wrapped = wrapTextWithAnsi(source.annotate(text, new SourceText(text)), 10);
+
+			const rows = ["abcdefghij", "klmnopqrst", "uvwxyz", "0123456789", "end"];
+			assert.deepStrictEqual(wrapped.map(stripSelectionMetadata), rows);
+			assert.deepStrictEqual(
+				wrapped.map((line) => line.slice(0, line.indexOf("\x07") + 1)),
+				rows.map((row) => selectionRunMarker({ kind: "identity", id: source.id, offset: text.indexOf(row) })),
+			);
 		});
 	});
 

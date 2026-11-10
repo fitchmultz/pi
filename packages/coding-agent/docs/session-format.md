@@ -175,6 +175,44 @@ Use `customType` to identify your extension's entries on reload. Interactive mod
 
 Pi stores [virtual model](virtual-models.md) router state as custom entries with `customType` `pi.virtual-model-state` and `data` `{ provider, modelId, state }`.
 
+Custom types that start with `pi.` belong to Pi.
+
+#### Runtime record (`pi.runtime`)
+
+Pi appends one custom entry with `customType` `pi.runtime` each time it starts a saved session, immediately before the `session_start` event. It says which build of Pi, which packages, which extensions and which context files that start ran with. Like every custom entry, it is not part of LLM context and has no effect on the conversation.
+
+```json
+{"type":"custom","id":"16cb296d","parentId":"4606f246","timestamp":"2026-11-10T15:53:47.218Z","customType":"pi.runtime","data":{"version":1,"trigger":"startup","process":{"pid":62571,"mode":"tui","launcherPid":62560},"build":{"package":{"name":"@earendil-works/pi-coding-agent","version":"1.5.2","path":"/opt/pi/node_modules/@earendil-works/pi-coding-agent"},"runtime":{"node":"24.22.2","platform":"darwin","arch":"arm64"},"fork":null},"packages":[{"source":"git:github.com/user/repo","scope":"user","path":"/home/user/.pi/agent/git/github.com/user/repo","version":"1.2.3","commit":"b3e1f25d1fc94ac8e39e79de454fe98c5cab72b0"}],"extensions":[{"path":"/home/user/.pi/agent/extensions/notes.ts","source":"auto","scope":"user","sha256":"9f86d081..."},{"path":"builtin:mcp","source":"builtin","scope":"temporary"}],"contextFiles":[{"path":"/home/user/.pi/agent/AGENTS.md","bytes":14963,"sha256":"42f92518..."}]}}
+```
+
+When it is written:
+
+- Every start writes a complete record, also when nothing changed since the previous one. `trigger` is the `session_start` reason: `startup`, `new`, `resume`, `fork` or `reload`.
+- Sessions without a file (`--no-session`, `SessionManager.inMemory()`) get no record.
+- A new session keeps its record in memory until its first message creates the file, so a session that ends unused leaves no file. A resumed or reloaded session gets its record written at once.
+- A fork or clone copies the records of the path it copies, then gets its own with `trigger` `fork`.
+- A session restored from a [working session](working-session.md), which every [managed restart](restart.md) is, keeps its startup record in memory until its first agent run. A journal newer than the saved state is refused, so the record must not be what makes it newer if the start is rolled back or tried again. The record then precedes that run's messages and carries that run's time. A restored session that never runs the agent gets no record.
+
+A record does not count as activity: the session selector's order, message count, preview and name ignore it. It does change the file's modification time, which `pi -c` uses to find the most recent session.
+
+`data` fields:
+
+| Field | Content |
+| --- | --- |
+| `version` | Format version of the record. Currently `1` |
+| `trigger` | Reason of the `session_start` event that follows |
+| `process.pid` | Process ID of the Pi process |
+| `process.mode` | Run mode, as extensions see it in `ctx.mode`: `tui`, `print`, `json` or `rpc` |
+| `process.launcherPid` | Process ID of the [managed launcher](restart.md) that owns this process. Absent without one. `pi restart` and `/restart` replace the process and keep the launcher, so a record with the same `launcherPid` as the one before it and another `pid` marks a restart |
+| `build` | What `pi --build-info` prints: `package` (`name`, `version`, `path`), `runtime` (`node`, `platform`, `arch`) and `fork`, the fork installer's receipt with the built `commit`, or `null` for other installs |
+| `packages` | Every package that supplied a loaded extension, skill, prompt template or theme: `source` as configured, `scope` (`user`, `project` or `temporary`), `path` of the installed package, `version` from its `package.json` if it has one, and `commit` if `path` is the root of a git checkout. A configured package with all of its resources disabled is not listed |
+| `extensions` | Every loaded extension that no package supplied: `path` of the entry file, `source` (`auto` for extension directories, `local` for settings entries, `cli` for `-e`, `builtin`, `inline`), `scope`, and `sha256` of the entry file. Built-in and inline extensions have a name instead of a file and no hash. Packages given with `-e` appear here |
+| `contextFiles` | Every [context file](configuration.md#context-files) loaded for the system prompt: `path`, `bytes` (UTF-8 length) and `sha256` of the loaded text |
+
+Package versions, commits and file hashes are read from disk when the record is written. `/new`, `/resume` and `/fork` in the same directory keep extension code that the process already imported, so a package updated on disk since the process started is recorded with its new version while its old code still runs until `/reload` or a restart. The record holds no settings values, environment variables, credentials or prompt text.
+
+The package exports the custom type as `RUNTIME_RECORD_ENTRY` and the `data` type as `RuntimeRecordData`.
+
 ### CustomMessageEntry
 
 Extension-injected messages that DO participate in LLM context.

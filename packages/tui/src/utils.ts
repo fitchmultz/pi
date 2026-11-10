@@ -1027,6 +1027,9 @@ function wrapSingleLine(line: string, width: number): string[] {
 			continue;
 		}
 
+		// A line starts with the active codes once it gets its first token.
+		if (!currentLine) currentLine = tracker.getActiveCodes();
+
 		// Check if adding this token would exceed width
 		const totalNeeded = currentVisibleLength + tokenVisibleLength;
 
@@ -1045,8 +1048,9 @@ function wrapSingleLine(line: string, width: number): string[] {
 			}
 			wrapped.push(lineToWrap);
 			if (isWhitespace) {
-				// Don't start new line with whitespace
-				currentLine = tracker.getActiveCodes();
+				// Don't start the new line with whitespace. Leave it empty: a line that holds only the active codes
+				// would become a blank row when a long token or the end of the input line follows.
+				currentLine = "";
 				currentVisibleLength = 0;
 				continue;
 			}
