@@ -2244,12 +2244,13 @@ export class AgentSession {
 	/**
 	 * Whether the tool may be active, which declares it to the model. MCP tools the allowlist keeps
 	 * without matching them are only for codemode and tool_search: they may be declared only when
-	 * tool_search can load them (non-`direct` exposure and tool_search registered). This also applies
-	 * to tools restored from the transcript or set by extensions.
+	 * tool_search can load them (`codemode` or `deferred` exposure and tool_search registered). This
+	 * also applies to tools restored from the transcript, activated by a reload or set by extensions.
 	 */
 	private _isActivatable(name: string): boolean {
 		if (!this._allowedTools || this._allowedTools(name) || !isMcpToolName(name)) return true;
-		return this._getToolExposure(name) !== "direct" && this._toolRegistry.has("tool_search");
+		const exposure = this._getToolExposure(name);
+		return (exposure === "codemode" || exposure === "deferred") && this._toolRegistry.has("tool_search");
 	}
 
 	/**

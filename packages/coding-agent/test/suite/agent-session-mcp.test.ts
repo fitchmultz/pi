@@ -255,6 +255,68 @@ describe("AgentSession MCP integration", () => {
 		expect(harness.session.getActiveToolNames()).toEqual(["codemode"]);
 	});
 
+	// `docs/cli.md`: an MCP tool that no `--tools` entry names or matches is never declared directly.
+	describe("MCP tools that --tools does not name", () => {
+		const allowedToolNames = ["read", "tool_search"];
+
+		/** Two turns, then back to the first one, as /tree does. */
+		async function navigateToFirstTurn(harness: Harness) {
+			harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+			await harness.session.prompt("first");
+			await harness.session.prompt("second");
+			const firstAssistant = harness.sessionManager
+				.getBranch()
+				.find((entry) => entry.type === "message" && entry.message.role === "assistant");
+			if (!firstAssistant) throw new Error("No assistant entry");
+			await harness.session.navigateTree(firstAssistant.id);
+		}
+
+		it("does not declare tools the toolExposure setting makes model-only after tree navigation", async () => {
+			const { harness } = await setup("codemode", undefined, {
+				allowedToolNames,
+				resources: true,
+				settings: { toolExposure: { mcp__docs__search: "model-only", read_mcp_resource: "model-only" } },
+			});
+			await vi.waitFor(() =>
+				expect(harness.session.getAllTools().map((tool) => tool.name)).toContain("read_mcp_resource"),
+			);
+			expect(harness.session.getActiveToolNames()).toEqual(allowedToolNames);
+
+			await navigateToFirstTurn(harness);
+			expect(harness.session.getActiveToolNames()).toEqual(allowedToolNames);
+			// The server's other tools are still what tool_search loads.
+			harness.session.setActiveToolsByName([...allowedToolNames, "mcp__docs__fail", "mcp__docs__search"]);
+			expect(harness.session.getActiveToolNames()).toEqual([...allowedToolNames, "mcp__docs__fail"]);
+		});
+
+		it("does not declare a tool an extension registers as model-only after tree navigation or /reload", async () => {
+			const harness = await createHarness({
+				initialActiveToolNames: allowedToolNames,
+				allowedToolNames,
+				extensionFactories: [
+					(pi) =>
+						pi.registerTool({
+							name: "mcp__docs__ask",
+							label: "Ask",
+							description: "Ask the docs owner.",
+							exposure: "model-only",
+							parameters: Type.Object({}),
+							execute: async () => ({ content: [{ type: "text", text: "asked" }], details: {} }),
+						}),
+					createToolSearchExtension(),
+				],
+			});
+			harnesses.push(harness);
+			await harness.session.bindExtensions({});
+			expect(harness.session.getActiveToolNames()).toEqual(allowedToolNames);
+
+			await navigateToFirstTurn(harness);
+			expect(harness.session.getActiveToolNames()).toEqual(allowedToolNames);
+			await harness.session.reload();
+			expect(harness.session.getActiveToolNames()).toEqual(allowedToolNames);
+		});
+	});
+
 	it("removes MCP tools with --no-tools", async () => {
 		// The first prompt waits for servers with direct tools, so their tools would be registered by then.
 		const { harness, servers } = await setup("direct", undefined, { allowedToolNames: [], waitForTools: false });

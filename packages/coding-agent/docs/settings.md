@@ -97,14 +97,14 @@ Keys are tool names or patterns where `*` matches any characters. An exact name 
 The tool then behaves like a tool that registered with that exposure:
 
 - A `codemode` or `deferred` tool is declared only when a selection names it: `defaultTools` (`"+macuse"` or a plain name), `--tools`, the SDK `tools` option, or an extension's `pi.setActiveTools()`. The default selection names `read`, `bash`, `edit` and `write`, so also remove a built-in default tool from it: `"defaultTools": ["-edit"]`.
-- `--tools` with plain names and `--exclude-tools` still remove the tools they exclude; MCP tools follow [their own rule](mcp.md#control-tool-exposure). A `--tools` pattern that matches a `codemode` or `deferred` tool keeps it registered without declaring it.
+- `--tools` with plain names and `--exclude-tools` still remove the tools they exclude. An MCP tool that no `--tools` entry names or matches is never declared directly, whatever its exposure; only `tool_search`, if listed, can load it, and it loads only tools with `codemode` or `deferred` exposure (see [Tools](cli.md#mcp-tools)). A `--tools` pattern that matches a `codemode` or `deferred` tool keeps it registered without declaring it.
 - A resumed session keeps the tools its journal recorded as declared, also when the setting now defers them.
 - An entry wins over the exposure an MCP server entry in `mcp.json` gives the tool.
 - A tool that its extension registered as `hidden` stays hidden.
 
 `codemode` and `deferred` tools need the `codemode` or `tool_search` tool to be active. Pi does not activate them for this setting. When neither is active and the setting leaves a registered tool unreachable, Pi warns once per session start and once per `/reload`: after the extensions handled `session_start`, or when the first such tool registers later, as MCP tools do once their server connects. Once Pi has found `codemode` or `tool_search` active, it does not warn when that tool is turned off later in the session.
 
-`/reload` applies a changed setting to the running session. Tools that are declared stay declared, except tools set to `hidden`. A tool whose entry was removed or changed to `direct` or `model-only` is declared as in a new session.
+`/reload` applies a changed setting to the running session. Tools that are declared stay declared, except tools set to `hidden` and MCP tools that `--tools` does not name once `tool_search` can no longer load them. A tool whose entry was removed or changed to `direct` or `model-only` is declared as in a new session.
 
 ## Sessions and context
 

@@ -11,6 +11,7 @@ import { type CreateAgentSessionOptions, createAgentSession, type InlineExtensio
 import { SessionManager } from "../src/core/session-manager.ts";
 import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 import { openWorkingSession, parseWorkingSession } from "../src/core/working-session.ts";
+import { createToolSearchExtension } from "../src/extensions/tool-search/index.ts";
 
 type ToolOptions = Pick<CreateAgentSessionOptions, "tools" | "excludeTools">;
 
@@ -51,12 +52,16 @@ describe("toolExposure setting through the SDK", () => {
 	const exposureOf = (session: AgentSession) =>
 		session.getAllTools().find((tool) => tool.name === "lookup_weather")?.exposure;
 
-	async function createSession(settingsManager: SettingsManager, options: ToolOptions = {}) {
+	async function createSession(
+		settingsManager: SettingsManager,
+		options: ToolOptions = {},
+		extensionFactories: InlineExtension[] = [weatherExtension],
+	) {
 		const resourceLoader = new DefaultResourceLoader({
 			cwd: tempDir,
 			agentDir,
 			settingsManager,
-			extensionFactories: [weatherExtension],
+			extensionFactories,
 		});
 		await resourceLoader.reload();
 		const { session } = await createAgentSession({
@@ -72,8 +77,8 @@ describe("toolExposure setting through the SDK", () => {
 		return session;
 	}
 
-	const createFileSession = (options?: ToolOptions) =>
-		createSession(SettingsManager.create(tempDir, agentDir), options);
+	const createFileSession = (options?: ToolOptions, extensionFactories?: InlineExtension[]) =>
+		createSession(SettingsManager.create(tempDir, agentDir), options, extensionFactories);
 	const createMemorySession = (settings: Settings, options?: ToolOptions) =>
 		createSession(SettingsManager.inMemory(settings), options);
 
@@ -171,6 +176,42 @@ describe("toolExposure setting through the SDK", () => {
 			writeGlobal({});
 			await session.reload();
 			expect(session.getActiveToolNames()).toEqual(["read", "bash", "write", "lookup_weather", "edit"]);
+		});
+
+		// `docs/cli.md`: an MCP tool that no `--tools` entry names or matches is never declared directly.
+		it("does not declare an MCP tool that the tools option does not name", async () => {
+			const registersDocsSearch: InlineExtension = (pi) => {
+				pi.registerTool({
+					name: "mcp__docs__search",
+					label: "Search",
+					description: "Search the docs",
+					parameters: Type.Object({ query: Type.String() }),
+					execute: async () => ({ content: [{ type: "text", text: "hit" }], details: {} }),
+				});
+			};
+			const tools = ["read", "tool_search"];
+			writeGlobal({ toolExposure: { mcp__docs__search: "hidden" } });
+			const session = await createFileSession({ tools }, [registersDocsSearch, createToolSearchExtension()]);
+			expect(session.getActiveToolNames()).toEqual(tools);
+
+			for (const exposure of ["model-only", "direct"] as const) {
+				writeGlobal({ toolExposure: { mcp__docs__search: exposure } });
+				await session.reload();
+				expect(session.getActiveToolNames()).toEqual(tools);
+			}
+
+			// tool_search loads a deferred tool, and a reload keeps it declared.
+			writeGlobal({ toolExposure: { mcp__docs__search: "deferred" } });
+			await session.reload();
+			expect(session.getActiveToolNames()).toEqual(tools);
+			session.setActiveToolsByName([...tools, "mcp__docs__search"]);
+			await session.reload();
+			expect(session.getActiveToolNames()).toEqual([...tools, "mcp__docs__search"]);
+
+			// A loaded tool that tool_search can no longer load is not declared any more.
+			writeGlobal({ toolExposure: { mcp__docs__search: "model-only" } });
+			await session.reload();
+			expect(session.getActiveToolNames()).toEqual(tools);
 		});
 
 		it("keeps a tool off that was turned off during the session", async () => {
