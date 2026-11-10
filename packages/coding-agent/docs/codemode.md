@@ -55,7 +55,7 @@ Calls a script makes share one nested-call queue with other scripts. A tool that
 | `exit()` | End the script successfully. |
 | `store(key, value)` / `load(key)` | Keep small JSON values across `codemode` calls. See [Store values](#store-values). |
 | `ALL_TOOLS` | Every callable tool as `{ name, description }`, including tools the description does not list. |
-| `searchTools(query, { limit?, namespace? })` | Rank callable tools by relevance (BM25, default limit 8). Resolves to `{ name, description }[]`. |
+| `searchTools(query, { limit?, namespace? })` | Rank callable tools by relevance (BM25, default limit 8). A `+word` in the query keeps only tools whose name or namespace name contains the word. Resolves to `{ name, description }[]`. |
 | `describeTool(name)` | Resolves to a tool's description and TypeScript declaration, or `undefined`. |
 | `describeNamespace(name)` | Resolves to `{ name, description?, instructions?, tools }` for a namespace such as an MCP server, or `undefined`. |
 | `models` | List and run non-LLM models. See [Models](#models). |
