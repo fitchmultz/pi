@@ -2252,8 +2252,13 @@ export class AgentSession {
 		return this._getToolExposure(name) !== "direct" && this._toolRegistry.has("tool_search");
 	}
 
+	/**
+	 * The exposure in effect: the `toolExposure` setting's, else the one the tool registered with.
+	 * A tool registered `hidden` stays hidden, since that is how an extension withdraws a tool.
+	 */
 	private _getToolExposure(name: string): ToolExposure {
-		return this._toolDefinitions.get(name)?.definition.exposure ?? "direct";
+		const registered = this._toolDefinitions.get(name)?.definition.exposure ?? "direct";
+		return registered === "hidden" ? registered : (this.settingsManager.getToolExposure(name) ?? registered);
 	}
 
 	/**
@@ -4143,6 +4148,7 @@ export class AgentSession {
 		await this._recordRuntime(this._sessionStartEvent.reason);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		this._extensionRunner.reportUnhandledMcpServers();
+		this._extensionRunner.reportUnreachableTools();
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
 	}
 
@@ -4590,6 +4596,12 @@ export class AgentSession {
 					)
 				: [];
 		const previousDefaultTools = new Set(getDefaultTools());
+		// Whether a new session declares the tool unasked. Built-in tools follow `defaultTools`.
+		const isDeclaredByDefault = (name: string) =>
+			this._baseToolDefinitions.has(name)
+				? getDefaultTools().includes(name) && this._getToolExposure(name) !== "hidden"
+				: this._isActivatedOnRegistration(name);
+		const previouslyUndeclared = [...this._toolRegistry.keys()].filter((name) => !isDeclaredByDefault(name));
 		await this.settingsManager.reload();
 		this.syncQueueModesFromSettings();
 		resetApiProviders();
@@ -4597,10 +4609,13 @@ export class AgentSession {
 		// Activate tools newly added to defaultTools. Removed ones stay active, and tools disabled
 		// during the session stay disabled unless the setting newly adds them.
 		const addedDefaultTools = getDefaultTools().filter((name) => !previousDefaultTools.has(name));
+		// Activate tools the reloaded `toolExposure` setting newly declares by default. Left inactive,
+		// a tool that tool_search and scripts could reach before would be unreachable.
+		const newlyDeclaredByDefault = previouslyUndeclared.filter(isDeclaredByDefault);
 		// Tools the new extensions register later, such as MCP tools, are pending until then.
 		for (const name of this.getActiveToolNames()) this._pendingToolNames.add(name);
 		this._buildRuntime({
-			activeToolNames: [...this.getActiveToolNames(), ...addedDefaultTools],
+			activeToolNames: [...this.getActiveToolNames(), ...addedDefaultTools, ...newlyDeclaredByDefault],
 			flagValues: previousFlagValues,
 			includeAllExtensionTools: true,
 		});
@@ -4616,6 +4631,7 @@ export class AgentSession {
 			await this._recordRuntime("reload");
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
 			this._extensionRunner.reportUnhandledMcpServers();
+			this._extensionRunner.reportUnreachableTools();
 			await this.extendResourcesFromExtensions("reload");
 		}
 	}

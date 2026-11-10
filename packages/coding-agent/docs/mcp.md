@@ -223,6 +223,8 @@ Pi activates `codemode` when a server with `codemode` exposure connects. It acti
 }
 ```
 
+The [`toolExposure` setting](settings.md#tool-exposure) in `settings.json` uses the same rule with the registered names (`mcp__<server>__<tool>`), and its entry wins over the exposure the server entry gives a tool. It also accepts `model-only` and distinguishes `codemode` (listed in the codemode description) from `deferred` (not listed). A tool the server entry hides stays hidden. Automatic activation of `codemode` and `tool_search`, the first-prompt wait, the `mcp_servers` section, `pi mcp list` and `/mcp` follow the server entry.
+
 `pi mcp list` marks tools whose exposure differs from their server. The Tools view in `/mcp` also shows the effective exposure.
 
 Tools with `codemode` or `deferred` exposure can be reached through either indirect mechanism: codemode scripts can call them, and `tool_search` can load them. Codemode calls do not depend on the active tool set, so they remain available after `/tree`, resume, and fork. Tools loaded by `tool_search` are recorded in the transcript and remain declared on that branch.

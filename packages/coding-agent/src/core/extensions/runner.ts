@@ -20,6 +20,7 @@ import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ScopedModel } from "../model-resolver.ts";
 import type { SessionManager } from "../session-manager.ts";
+import { getToolExposureSetting } from "../settings-manager.ts";
 import {
 	type BuildSystemPromptOptions,
 	buildSystemPrompt,
@@ -878,6 +879,32 @@ export class ExtensionRunner {
 				error: `MCP server "${server.name}" is registered, but no loaded extension connects MCP servers; another extension may have replaced the built-in MCP support`,
 			});
 		}
+	}
+
+	/**
+	 * Warn when the `toolExposure` setting makes tools reachable only from the codemode or
+	 * tool_search tool and neither is active, as the MCP extension warns for its tools.
+	 */
+	reportUnreachableTools(): void {
+		const { toolExposure } = this.runtime.getSettings();
+		if (toolExposure === undefined) return;
+		const tools = this.runtime.getAllTools();
+		const active = new Set(this.runtime.getActiveTools());
+		// Only a tool of these names that declares `reachesTools` reaches other tools.
+		const reaches = (name: string) =>
+			active.has(name) && tools.some((tool) => tool.name === name && tool.reachesTools !== undefined);
+		if (reaches("codemode") || reaches("tool_search")) return;
+		const unreachable = tools.some(
+			(tool) =>
+				(tool.exposure === "codemode" || tool.exposure === "deferred") &&
+				!active.has(tool.name) &&
+				getToolExposureSetting(toolExposure, tool.name) === tool.exposure,
+		);
+		if (!unreachable) return;
+		this.uiContext.notify(
+			"Tools that the toolExposure setting makes codemode or deferred are only reachable from the codemode or tool_search tool, but neither is active; they cannot be called.",
+			"warning",
+		);
 	}
 
 	hasHandlers(eventType: string): boolean {

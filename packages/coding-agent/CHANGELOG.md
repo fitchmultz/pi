@@ -12,6 +12,7 @@
 ### Added
 
 - Codemode results now link to an omitted-only output file as well as the full output, so recovering truncated text does not repeat the visible head and tail. Native guidance also directs agents to emit selected results as plain text and reuse instructions still in context.
+- Added the `toolExposure` setting, which replaces the exposure a tool registered with by tool name or `*` pattern. A rarely needed `direct` tool set to `deferred` is no longer declared in every request and stays reachable: `tool_search` loads it and codemode scripts call it. Pi warns when the setting leaves tools reachable only through `codemode` or `tool_search` and neither is active. See [Tool exposure](docs/settings.md#tool-exposure).
 - Added `pi --build-info` to print the resolved runtime path, runtime versions, and existing immutable fork release receipt as JSON.
 - Added a `pi.runtime` custom entry to saved sessions at every start, resume, fork, new session and reload. It records the Pi build, each loaded package's version and git commit, other extensions' file hashes, and the context files' sizes and hashes for later analysis. It is never sent to the model, and the HTML export hides a custom entry that is the current leaf. See [Runtime record](docs/session-format.md#runtime-record-piruntime).
 - Added `ctx.managedHost` and `session_shutdown` `disposition` so extensions can keep owned work across managed restarts and stop it only on exit. See [Work that outlives a worker](docs/restart.md#work-that-outlives-a-worker).

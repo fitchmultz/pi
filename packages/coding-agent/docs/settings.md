@@ -48,6 +48,7 @@ See [Choose a Model](models.md) for model selection and thinking controls.
 | Setting | Type | Default | Description |
 |---|---|---|---|
 | `defaultTools` | `string[]` | `read`, `bash`, `edit`, `write` | Tools enabled at startup. Plain names replace the defaults; `+name` adds a tool and `-name` removes one. An empty array disables all built-in tools but not extension or SDK tools. |
+| `toolExposure` | object | unset | How the model reaches individual tools, replacing the exposure each tool registered with. See [Tool exposure](#tool-exposure). |
 | `codemode.mode` | `"on"` \| `"only"` | `"on"` | How the `codemode` tool presents tools while it is active. `on`: declared tools get a note on calling them from scripts appended to their description, and `codemode` lists only tools that are not declared. `only`: `codemode` lists every tool scripts can call, and active built-in and extension tools are hidden from the model, so it reaches them through `codemode`. |
 | `codemode.inlineBudget` | number | `3000` | Estimated tokens (characters / 4) the `codemode` tool's description may spend on tool declarations. Tools that do not fit are left out and found with `searchTools()`. `0` lists only namespaces. |
 
@@ -68,6 +69,42 @@ This replaces `bash` with `powershell` and enables `grep`: `["-bash", "+powershe
 `/reload` enables tools newly added to `defaultTools`. It does not disable tools removed from it or re-enable unchanged tools you turned off. `--tools` with plain names, `--no-tools`, and `--no-builtin-tools` override `defaultTools`, also on reload.
 
 CLI tool options override this setting for one invocation. `--tools` with only `+name` and `-name` entries changes the resolved `defaultTools` selection instead, for example `pi --tools +codemode`. On `/reload`, these entries apply to the reloaded setting too, so a tool removed with `-name` stays removed. See [Command Line](cli.md#tools).
+
+### Tool exposure
+
+Every tool registers with an [exposure](extensions.md#tool-exposure): how the model reaches it. `toolExposure` replaces it for the tools you name. Use it for a tool that a session rarely needs but must still reach. Turning a `direct` tool off makes it unreachable; with `deferred` it costs no request tokens until it is needed:
+
+```json
+{
+  "defaultTools": ["+tool_search"],
+  "toolExposure": {
+    "macuse": "deferred",
+    "mcp__docs__*": "codemode"
+  }
+}
+```
+
+Keys are tool names or patterns where `*` matches any characters. An exact name wins over patterns; among patterns, the first match wins. Project entries replace user entries with the same key, and project patterns match before user patterns. A tool without an entry keeps its registered exposure.
+
+| Value | Behavior |
+|---|---|
+| `direct` | Declared to the model while active, and callable from [`codemode`](cli.md#tools) scripts while active. |
+| `model-only` | Declared to the model while active, never callable from scripts. |
+| `codemode` | Not declared. Scripts call it, and the `codemode` tool lists it. `tool_search` can load it. |
+| `deferred` | Not declared. `tool_search` finds and loads it; from then on it is declared with its prompt snippet and guidelines. Scripts call it without loading it. |
+| `hidden` | Unreachable. |
+
+The tool then behaves like a tool that registered with that exposure:
+
+- A `codemode` or `deferred` tool is declared only when a selection names it: `defaultTools` (`"+macuse"` or a plain name), `--tools`, the SDK `tools` option, or an extension's `pi.setActiveTools()`. The default selection names `read`, `bash`, `edit` and `write`, so also remove a built-in default tool from it: `"defaultTools": ["-edit"]`.
+- `--tools` with plain names and `--exclude-tools` still remove the tools they exclude; MCP tools follow [their own rule](mcp.md#control-tool-exposure). A `--tools` pattern that matches a `codemode` or `deferred` tool keeps it registered without declaring it.
+- A resumed session keeps the tools its journal recorded as declared, also when the setting now defers them.
+- An entry wins over the exposure an MCP server entry in `mcp.json` gives the tool.
+- A tool that its extension registered as `hidden` stays hidden.
+
+`codemode` and `deferred` tools need the `codemode` or `tool_search` tool to be active. Pi does not activate them for this setting. It warns at startup and after `/reload` when neither is active and the setting leaves a tool unreachable.
+
+`/reload` applies a changed setting to the running session. Tools that are declared stay declared, except tools set to `hidden`. A tool whose entry was removed or changed to `direct` or `model-only` is declared as in a new session.
 
 ## Sessions and context
 
