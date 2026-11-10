@@ -64,6 +64,10 @@ export class OutputAccumulator {
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
 	}
 
+	/**
+	 * Returns nothing while the output is kept in memory. Once it goes to the temp file, returns a
+	 * promise that settles when this chunk has been written and rejects if the write fails.
+	 */
 	append(data: Buffer): Promise<void> | undefined {
 		if (this.finished) {
 			throw new Error("Cannot append to a finished output accumulator");
