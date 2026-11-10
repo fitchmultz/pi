@@ -130,16 +130,16 @@ export interface BedrockOptions extends StreamOptions {
  * state, kept off the block so it never reaches partial messages. A stop or the end of the stream closes it.
  */
 type OpenBlock =
-	| { readonly type: "text"; readonly block: TextContent; readonly contentIndex: number }
+	| { readonly kind: "text"; readonly block: TextContent; readonly contentIndex: number }
 	| {
-			readonly type: "thinking";
+			readonly kind: "thinking";
 			readonly block: ThinkingContent;
 			readonly contentIndex: number;
 			/** Encrypted reasoning deltas, joined into `thinkingSignature` when the block ends. */
 			redactedChunks?: Uint8Array[];
 	  }
 	| {
-			readonly type: "toolCall";
+			readonly kind: "toolCall";
 			readonly block: ToolCall;
 			readonly contentIndex: number;
 			readonly arguments: ToolCallArgumentsStream;
@@ -646,7 +646,7 @@ function handleContentBlockStart(
 		output.content.push(block);
 		const contentIndex = output.content.length - 1;
 		openBlocks.set(event.contentBlockIndex!, {
-			type: "toolCall",
+			kind: "toolCall",
 			block,
 			contentIndex,
 			arguments: new ToolCallArgumentsStream(),
@@ -670,15 +670,15 @@ function handleContentBlockDelta(
 		if (!open) {
 			const block: TextContent = { type: "text", text: "" };
 			output.content.push(block);
-			open = { type: "text", block, contentIndex: output.content.length - 1 };
+			open = { kind: "text", block, contentIndex: output.content.length - 1 };
 			openBlocks.set(contentBlockIndex, open);
 			stream.push({ type: "text_start", contentIndex: open.contentIndex, partial: output });
 		}
-		if (open.type === "text") {
+		if (open.kind === "text") {
 			open.block.text += delta.text;
 			stream.push({ type: "text_delta", contentIndex: open.contentIndex, delta: delta.text, partial: output });
 		}
-	} else if (delta?.toolUse && open?.type === "toolCall") {
+	} else if (delta?.toolUse && open?.kind === "toolCall") {
 		open.block.arguments = open.arguments.append(delta.toolUse.input || "");
 		stream.push({
 			type: "toolcall_delta",
@@ -690,12 +690,12 @@ function handleContentBlockDelta(
 		if (!open) {
 			const block: ThinkingContent = { type: "thinking", thinking: "", thinkingSignature: "" };
 			output.content.push(block);
-			open = { type: "thinking", block, contentIndex: output.content.length - 1 };
+			open = { kind: "thinking", block, contentIndex: output.content.length - 1 };
 			openBlocks.set(contentBlockIndex, open);
 			stream.push({ type: "thinking_start", contentIndex: open.contentIndex, partial: output });
 		}
 
-		if (open.type === "thinking") {
+		if (open.kind === "thinking") {
 			const { block } = open;
 			const thinkingIndex = open.contentIndex;
 			if (delta.reasoningContent.text) {
@@ -739,13 +739,13 @@ function handleContentBlockDelta(
  * block: `Uint8Array` is not JSON and serializes to an index-keyed object roughly ten times the size of the base64
  * payload.
  */
-function flushRedactedContent(open: Extract<OpenBlock, { type: "thinking" }>): void {
+function flushRedactedContent(open: Extract<OpenBlock, { kind: "thinking" }>): void {
 	if (open.redactedChunks) open.block.thinkingSignature = bytesToBase64(open.redactedChunks);
 }
 
 /** Ends the stream state of blocks a stream settled without stopping. */
 function flushOpenBlocks(openBlocks: OpenBlocks): void {
-	for (const open of openBlocks.values()) if (open.type === "thinking") flushRedactedContent(open);
+	for (const open of openBlocks.values()) if (open.kind === "thinking") flushRedactedContent(open);
 	openBlocks.clear();
 }
 
@@ -779,7 +779,7 @@ function handleContentBlockStop(
 	openBlocks.delete(event.contentBlockIndex!);
 	const index = open.contentIndex;
 
-	switch (open.type) {
+	switch (open.kind) {
 		case "text":
 			stream.push({ type: "text_end", contentIndex: index, content: open.block.text, partial: output });
 			break;

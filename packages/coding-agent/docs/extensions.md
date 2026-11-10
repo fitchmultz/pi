@@ -406,6 +406,7 @@ Other operations change the current session without replacing the runtime:
 | Extension dialog or custom screen waits for the user | `ui_prompt_start`, `ui_prompt_end` |
 | Idle prompt-cache refresh | `cache_warming_decision` |
 | Extension registers or removes an MCP server after startup | `mcp_servers_change` |
+| SDK host calls `session.getBackgroundWork()` | `background_work` |
 
 <a id="events-and-concurrency"></a>
 <a id="work-with-events"></a>
@@ -422,6 +423,7 @@ Handlers run in extension load order, then registration order. Some events notif
 | Gate | A handled input, blocked tool call, cancelled session operation, or handled `user_bash` command stops that operation's normal fallback path. |
 | Actionable boundary | Each `turn_end` or `agent_before_settle` handler sees the entries and continuation decision proposed so far. |
 | Last override | The last `cache_warming_decision` handler that returns an action wins. |
+| Collection | The `work` of every `background_work` handler is returned together. |
 
 Notification handlers should not perform slow work on a streaming event. Transform handlers should preserve fields they do not intentionally own, and gate handlers should fail closed when their safety decision cannot be made.
 
@@ -614,6 +616,28 @@ pi.on("session_shutdown", async (event, ctx) => {
 Once quit begins, Pi persists `pi.appendEntry()` and `pi.sendMessage(..., { triggerTurn: false })` but rejects any message that would start a turn or steer the current one. The rejection is reported as an extension error, and nothing is appended.
 
 An ordinary quit aborts the active turn, waits at most 500 ms for it to settle, and runs `session_shutdown` handlers meanwhile. The turn's last events, such as `tool_result` and `agent_end`, can therefore reach an extension during or after its `session_shutdown` handler. A tool that ignores its abort signal and has not ended by then is left without a saved result.
+
+#### background_work
+
+Fired when an SDK host calls `session.getBackgroundWork()`. Return the unfinished work this extension owns for this session: work that will send the session a message when it ends, for example through `pi.sendMessage(..., { triggerTurn: true })`.
+
+```typescript
+pi.on("background_work", (event, ctx) => {
+  return {
+    work: [...watchers.values()].map((watcher) => ({
+      id: watcher.id,                    // the extension's own ID for the work
+      description: watcher.description,  // what is running, in one line
+      cancel: async () => watcher.stop(), // resolves when requested; the work may still be stopping
+    })),
+  };
+});
+```
+
+A host uses the list to keep a run open until the session can no longer wake on its own; see [Background work](sdk.md#background-work). Report an item from the moment the work starts until its message is in the session. Stop reporting work whose message will not come, or the host waits for it without end.
+
+The handler is a question, not an action: answer from state the extension already holds, and change nothing. It can run at any time, including while the agent is streaming and during a working-session save. A handler that throws is reported as an extension error and contributes nothing; the work of the other handlers is still returned.
+
+Background tool runs started with `ctx.runInBackground()` need no handler: the session lists them itself.
 
 ### Agent Events
 
@@ -2433,6 +2457,8 @@ The `create*ToolDefinition()` factories, such as `createReadToolDefinition()`, r
 
 `GrepOperations` only covers the directory check: grep always runs the local `rg`. To search a remote system, override grep's `execute()` instead, as the [Gondolin example](../examples/extensions/gondolin/index.ts) does.
 
+When `read`, `grep`, `ls` or `find` does not find its path, the error gets one more line: the nearest existing parent directory and up to 12 of its entries closest to the missing name. With custom operations, `ls` looks these up through `LsOperations.exists` and `readdir`. `find` names the parent alone, because `FindOperations` has no directory listing. `read` and `grep` keep the error of their custom operations unchanged.
+
 For `user_bash`, extensions can reuse Pi's local shell backend via `createLocalBashOperations()` (or `createLocalPowerShellOperations()`) instead of reimplementing local process spawning, shell resolution, and process-tree termination.
 
 The `bash` and `powershell` tools also support a spawn hook to adjust the command, cwd, or env before execution:
@@ -2826,6 +2852,8 @@ execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 The run's `ctx.executeTool()` calls keep the calling tool's context, origin assistant message, and nested call record, so `tool_call` and `tool_result` events still carry the launching `parentToolCallId`, and their handlers see the run's `ctx.signal`. When the work finishes, the session delivers one custom message of type `customType` whose `content` is `Background run <run id> completed.` or `failed.` followed by the result content, and whose `details` is a `BackgroundToolMessageDetails`: `runId` (also the tool call ID), `isError`, `nestedCalls` (the bounded record of the run's calls), and `resultDetails` (the tool's own details). Register a message renderer for `customType` to present it; image blocks in the content are drawn below the rendered message like a tool result's images. The session sends it only after the receipt is persisted, as a steering message, so the model sees it without another prompt; when the session is idle that starts a turn. Images are normalized like a tool result's and stay in the message content, after the line naming the temp file each was saved to. Nested and model usage of the run is added to the session cost once, when the message is delivered.
 
 `signal` aborts when the session is aborted, disposed, reloaded, or navigated to another branch. The run is not durable: it ends with the process. A working-session save reports a live run as a blocker and keeps it running; the run's `commit()`, usage, and message wait for the save to finish. Work that must survive pi belongs in a durable job framework such as the `background_command` tool, not in a tool run.
+
+`session.getBackgroundWork()` lists each run from its start until the run that its message started has ended; see [Background work](sdk.md#background-work).
 
 ## MCP Servers
 

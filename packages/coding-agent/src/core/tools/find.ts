@@ -5,6 +5,7 @@ import path from "path";
 import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import { localMissingPathLookup, withMissingPathHint } from "./missing-path.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { findRenderers } from "./renderers/find.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -116,7 +117,11 @@ export function createFindToolDefinition(
 						// If custom operations provide glob(), use that instead of fd.
 						if (customOps?.glob) {
 							if (!(await ops.exists(searchPath))) {
-								settle(() => reject(new Error(`Path not found: ${searchPath}`)));
+								// FindOperations cannot list a directory, so the hint names the parent alone.
+								const message = await withMissingPathHint(`Path not found: ${searchPath}`, searchPath, {
+									exists: (absolutePath) => ops.exists(absolutePath),
+								});
+								settle(() => reject(new Error(message)));
 								return;
 							}
 							if (signal?.aborted) {
@@ -296,7 +301,9 @@ export function createFindToolDefinition(
 							}
 							if (code !== 0 && resultCount === 0) {
 								const errorMsg = stderr.trim() || `fd exited with code ${code}`;
-								settle(() => reject(new Error(errorMsg)));
+								void withMissingPathHint(errorMsg, searchPath, localMissingPathLookup).then((message) =>
+									settle(() => reject(new Error(message))),
+								);
 								return;
 							}
 							if (resultCount === 0) {

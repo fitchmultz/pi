@@ -91,7 +91,7 @@ describe("Bm25Ranker", () => {
 	])("matches Unicode queries against %s", (description, query) => {
 		const localized = createToolSearchDocument(tool("localized", description));
 		expect(new Bm25Ranker().rank(query, [...documents, localized], 8)).toEqual([
-			{ name: "localized", score: expect.any(Number) },
+			{ name: "localized", score: expect.any(Number), strong: true },
 		]);
 	});
 
@@ -190,8 +190,96 @@ describe("Bm25Ranker", () => {
 			description: "Kubernetes cluster tools",
 		});
 		expect(new Bm25Ranker().rank("kubernetes", [document], 8)).toEqual([
-			{ name: "mcp__x__run", score: expect.any(Number) },
+			{ name: "mcp__x__run", score: expect.any(Number), strong: false },
 		]);
+	});
+
+	describe("good matches", () => {
+		const datadog = { name: "mcp__datadog", instructions: "Load a skill before you list issues or query." };
+		const documents = [
+			tool("mcp__tracker__list_issues", "List the issues of a project."),
+			tool("mcp__tracker__save_issue", "Create or update an issue."),
+			tool("mcp__datadog__get_metric", "Query metrics. Set start and end to choose the command interval."),
+		].map((entry) => createToolSearchDocument(entry, entry.name.startsWith("mcp__datadog__") ? datadog : undefined));
+		const ranker = new Bm25Ranker();
+		const strong = (query: string) =>
+			ranker
+				.rank(query, documents, 8)
+				.filter((match) => match.strong)
+				.map((match) => match.name);
+		const all = (query: string) => ranker.rank(query, documents, 8).map((match) => match.name);
+
+		it("needs more than half of the query's terms in the tool, one of them in a name", () => {
+			expect(strong("tracker issues list")).toEqual(["mcp__tracker__list_issues", "mcp__tracker__save_issue"]);
+			// Two of four terms is not more than half.
+			expect(strong("tracker issue comment thread")).toEqual([]);
+			// Server instructions are shared by every tool of the server and do not count.
+			expect(all("load skill metric")).toEqual(["mcp__datadog__get_metric"]);
+			expect(strong("load skill metric")).toEqual([]);
+		});
+
+		it("needs every term when none is in a name", () => {
+			expect(strong("start end interval")).toEqual(["mcp__datadog__get_metric"]);
+			// Three of four terms, only in the description: a long description mentions many words.
+			expect(all("background_command start command interval")).toEqual(["mcp__datadog__get_metric"]);
+			expect(strong("background_command start command interval")).toEqual([]);
+		});
+
+		it("takes a tool named in the query as a good match, whatever the other words", () => {
+			for (const query of [
+				"+save_issue attach a screenshot to it",
+				'"save_issue" attach a screenshot to it',
+				"Save_Issue attach a screenshot to it",
+			]) {
+				expect(strong(query)).toEqual(["mcp__tracker__save_issue"]);
+			}
+			// A plain word is a search term, not a name.
+			expect(strong("metric attach a screenshot to it")).toEqual([]);
+		});
+
+		it("takes only the named tools when the query is nothing but names", () => {
+			// `list_issues` has three of the four terms of the first query, in its name.
+			for (const query of [
+				"mcp__tracker__save_issue",
+				"tracker__save_issue",
+				"save issue",
+				// A `__` separator written as models write it.
+				"tracker_save_issue",
+				"tracker save issue",
+			]) {
+				expect(strong(query)).toEqual(["mcp__tracker__save_issue"]);
+			}
+			expect(strong("save_issue get_metric").sort()).toEqual([
+				"mcp__datadog__get_metric",
+				"mcp__tracker__save_issue",
+			]);
+		});
+
+		it("ranks good matches first", () => {
+			// `get_metric` matches four terms, two of them through its server's instructions; `list_issues` three.
+			expect(all("tracker list issues query start")).toEqual([
+				"mcp__tracker__list_issues",
+				"mcp__datadog__get_metric",
+				"mcp__tracker__save_issue",
+			]);
+			expect(strong("tracker list issues query start")).toEqual(["mcp__tracker__list_issues"]);
+		});
+
+		it("keeps only tools whose name or namespace name has every +word", () => {
+			// Without the plus, the word is a search term like any other: `get_metric` has `query`.
+			expect(all("tracker query").sort()).toEqual([
+				"mcp__datadog__get_metric",
+				"mcp__tracker__list_issues",
+				"mcp__tracker__save_issue",
+			]);
+			expect(all("+tracker query").sort()).toEqual(["mcp__tracker__list_issues", "mcp__tracker__save_issue"]);
+			expect(all("+tracker +save query")).toEqual(["mcp__tracker__save_issue"]);
+			// The namespace name counts, the namespace instructions do not.
+			expect(all("+datadog query")).toEqual(["mcp__datadog__get_metric"]);
+			expect(all("+skill query")).toEqual([]);
+			// A word in another script is a requirement too: no name has it.
+			expect(all("+文档 query")).toEqual([]);
+		});
 	});
 });
 

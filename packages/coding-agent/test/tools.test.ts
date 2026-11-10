@@ -129,7 +129,9 @@ describe("Coding Agent Tools", () => {
 
 			expect(output).toContain("Line 1:");
 			// Should show byte limit message
-			expect(output).toMatch(/\[Showing lines 1-\d+ of 500 \(.* limit\)\. Use offset=\d+ to continue\.\]/);
+			expect(output).toMatch(
+				/\[Showing lines 1-\d+ of 500 \(.* limit\)\. \d+ lines remain: to read them all, call read at offsets \d+ and \d+ in one response\. For a part, use offset=\d+ and a limit\.\]/,
+			);
 		});
 
 		it("should handle offset parameter", async () => {
@@ -158,7 +160,9 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 1");
 			expect(output).toContain("Line 10");
 			expect(output).not.toContain("Line 11");
-			expect(output).toContain("[90 more lines in file. Use offset=11 to continue.]");
+			expect(output).toContain(
+				"[90 more lines in file: to read them all, call read at offset 11 with no limit. For a part, use offset=11 and a limit.]",
+			);
 		});
 
 		it("should handle offset + limit together", async () => {
@@ -177,15 +181,32 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 41");
 			expect(output).toContain("Line 60");
 			expect(output).not.toContain("Line 61");
-			expect(output).toContain("[40 more lines in file. Use offset=61 to continue.]");
+			expect(output).toContain(
+				"[40 more lines in file: to read them all, call read at offset 61 with no limit. For a part, use offset=61 and a limit.]",
+			);
 		});
 
-		it("should show error when offset is beyond file length", async () => {
-			const testFile = join(testDir, "short.txt");
-			writeFileSync(testFile, "Line 1\nLine 2\nLine 3");
-
-			await expect(readTool.execute("test-call-8", { path: testFile, offset: 100 })).rejects.toThrow(
-				/Offset 100 is beyond end of file \(3 lines total\)/,
+		it("answers an offset past the end with the last lines and the line count", async () => {
+			const shortFile = join(testDir, "short.txt");
+			writeFileSync(shortFile, "Line 1\nLine 2\nLine 3");
+			// Fewer lines than the default: the whole file.
+			expect(getTextOutput(await readTool.execute("test-call-8", { path: shortFile, offset: 100 }))).toBe(
+				"[Offset 100 is past the end: the file has 3 lines. Reading from line 1 instead.]\n\nLine 1\nLine 2\nLine 3",
+			);
+			const longFile = join(testDir, "long.txt");
+			const lines = Array.from({ length: 250 }, (_, i) => `Line ${i + 1}`);
+			writeFileSync(longFile, lines.join("\n"));
+			// With a limit: the last `limit` lines.
+			expect(getTextOutput(await readTool.execute("test-call-8", { path: longFile, offset: 400, limit: 3 }))).toBe(
+				"[Offset 400 is past the end: the file has 250 lines. Reading from line 248 instead.]\n\nLine 248\nLine 249\nLine 250",
+			);
+			// Without a limit: the last 100 lines.
+			expect(getTextOutput(await readTool.execute("test-call-8", { path: longFile, offset: 251 }))).toBe(
+				`[Offset 251 is past the end: the file has 250 lines. Reading from line 151 instead.]\n\n${lines.slice(150).join("\n")}`,
+			);
+			// A limit of 0 is a limit: no lines.
+			expect(getTextOutput(await readTool.execute("test-call-8", { path: longFile, offset: 400, limit: 0 }))).toBe(
+				"[Offset 400 is past the end: the file has 250 lines.]",
 			);
 		});
 
@@ -268,7 +289,9 @@ describe("Coding Agent Tools", () => {
 			pending.resolve(Buffer.from("after\n"));
 			await rejected;
 			const result = await tool.execute("read-after-abort", { path: "remote.txt", limit: 1 });
-			expect(getTextOutput(result)).toBe("after\n\n[1 more lines in file. Use offset=2 to continue.]");
+			expect(getTextOutput(result)).toBe(
+				"after\n\n[1 more lines in file: to read them all, call read at offset 2 with no limit. For a part, use offset=2 and a limit.]",
+			);
 		});
 
 		it("should detect image MIME type from file magic (not extension)", async () => {

@@ -39,10 +39,19 @@ import {
 	withoutInitialSystemMessage,
 } from "../utils/transcript.ts";
 import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
-import type { GoogleOptions } from "./google-generative-ai.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
+
+/** Request options both Google adapters accept. */
+export interface GoogleOptions extends StreamOptions {
+	toolChoice?: "auto" | "none" | "any";
+	thinking?: {
+		enabled: boolean;
+		budgetTokens?: number; // -1 for dynamic, 0 to disable
+		level?: GoogleApiThinkingLevel;
+	};
+}
 
 // Counter for generating unique tool call IDs
 let toolCallCounter = 0;

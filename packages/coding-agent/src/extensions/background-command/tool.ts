@@ -44,6 +44,7 @@ type Details =
 export function createBackgroundCommandTool(
 	pi: ExtensionAPI,
 	storage: (ctx: ExtensionContext) => string,
+	{ hostWaits = false }: { hostWaits?: boolean } = {},
 ): ToolDefinition<typeof schema, Details> {
 	return {
 		name: "background_command",
@@ -55,7 +56,9 @@ export function createBackgroundCommandTool(
 			"Use background_command for long builds, tests and watches instead of &.",
 			"After starting a job, do not sleep or poll its log. If nothing else is left, end the turn: the completion message wakes this session, and ending the turn does not end the task.",
 			"To look at progress once, call background_command status with the job id.",
-			"Print-mode runs can exit before a job finishes; use bash when that run needs the result.",
+			...(hostWaits
+				? []
+				: ["Print-mode runs can exit before a job finishes; use bash when that run needs the result."]),
 		],
 		parameters: schema,
 		constrainedSampling: { type: "json_schema", strict: "prefer" },
@@ -146,7 +149,7 @@ export function createBackgroundCommandTool(
 					...job,
 					outputTail: backgroundCommandOutputTail(job),
 					...(params.action === "cancel" && !backgroundCommandFinished(job) ? { cancelRequested: true } : {}),
-					...(params.action === "start" && (ctx.mode === "print" || ctx.mode === "json")
+					...(params.action === "start" && !hostWaits && (ctx.mode === "print" || ctx.mode === "json")
 						? {
 								guidance:
 									"This is a one-shot print/JSON invocation. It will not wait automatically for this job after the agent ends. Report a still-running job as pending, with its ID and logFile; do not promise a later reply from this invocation. Do not rerun this command to wait for it. For future commands, use bash when this invocation must wait for a result. A saved session can be resumed later; an unsaved session has only its job files.",
