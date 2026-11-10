@@ -15,7 +15,6 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
-import { SELECTION_METADATA } from "../../tui/src/selection-markers.ts";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { MessageRenderOptions } from "../src/core/extensions/types.ts";
 import { createAllToolRenderers } from "../src/core/tools/renderers/index.ts";
@@ -47,7 +46,7 @@ function compactRows(component: Component, width: number): string[] {
 		expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		expect(line).not.toMatch(/\x1b(?:_G|\]1337;File=)/);
 	}
-	return lines.map((line) => line.replace(SELECTION_METADATA, ""));
+	return lines;
 }
 
 function click(component: Component, y: number, width = 40, x = 2): void {
@@ -174,7 +173,7 @@ describe("compact tool cards", () => {
 		const result = { content: [{ type: "text", text: output }], isError: false };
 		const ordinary = new ToolExecutionComponent("generic", "id", args, {}, undefined, ui, process.cwd());
 		ordinary.updateResult(result);
-		const normal = ordinary.render(40).map((line) => line.replace(SELECTION_METADATA, ""));
+		const normal = ordinary.render(40);
 		const component = new ToolExecutionComponent(
 			"generic",
 			"id",
@@ -187,10 +186,10 @@ describe("compact tool cards", () => {
 		component.updateResult(result);
 		compactRows(component, 40);
 		component.setExpanded(true);
-		expect(component.render(40).map((line) => line.replace(SELECTION_METADATA, ""))).toEqual(normal);
+		expect(component.render(40)).toEqual(normal);
 		component.setExpanded(false);
 		component.setCompactView(false);
-		expect(component.render(40).map((line) => line.replace(SELECTION_METADATA, ""))).toEqual(normal);
+		expect(component.render(40)).toEqual(normal);
 	});
 
 	test.each(["kitty", "iterm2"] as const)("%s image protocols are complete only when expanded", (protocol) => {
@@ -621,6 +620,9 @@ describe("compact Activity and messages", () => {
 			},
 			undefined,
 			0,
+			[],
+			undefined,
+			undefined,
 			true,
 		);
 		expect(component.render(12)).toHaveLength(2);
@@ -634,6 +636,9 @@ describe("compact Activity and messages", () => {
 			() => new Text("Needs attention\nquestion\nchoices", 0, 0),
 			undefined,
 			0,
+			[],
+			undefined,
+			undefined,
 			true,
 		);
 		expect(important.render(40)).toHaveLength(4);

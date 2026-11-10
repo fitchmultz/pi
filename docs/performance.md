@@ -1,8 +1,10 @@
 # Performance results and reproduction
 
-The fork removes repeated work from native file tools, TUI rendering, model metadata, provider stream handling, Chord/MCP transport, sessions, Durable, Env, background jobs, evals and packaging. The recorded fixtures show large reductions on those paths. A matched rerun confirmed the branch-preparation, current-directory listing and long-token wrap/preview gains. AI tool validation (+33%), transform (+5.4%) and prose preview (+6.1%) were slower in all four matched pairs, with overlapping ranges and no isolated source attribution. One deliberate trade-off is slower: the native Bash tool and executor now keep the spill-file write queue at 64 KiB instead of letting it grow to 6.9-10.1 MiB, and writing 64 MiB of command output took about 28% longer. Startup and Biome showed no clear change.
+The fork removes repeated work from native edits, image resizing, TUI rendering, model metadata, provider stream handling, MCP SSE transport, sessions, Durable, Env, background jobs, evals and packaging. The recorded fixtures show large reductions on those paths. A matched rerun confirmed the branch-preparation, current-directory listing and long-token wrap/preview gains. AI tool validation (+33%), transform (+5.4%) and prose preview (+6.1%) were slower in all four matched pairs, with overlapping ranges and no isolated source attribution. One deliberate trade-off is slower: the native Bash tool and executor now keep the spill-file write queue at 64 KiB instead of letting it grow to 6.9-10.1 MiB, and writing 64 MiB of command output took about 28% longer. Startup and Biome showed no clear change.
 
 These are source-owner measurements of two measured source trees on one workstation, not of the final runtime: later prompt-cache, model-catalog and upstream v1.2.0 integration changes were not timed. They do not show that every CLI invocation, provider, device or downstream adapter becomes faster. Functional tests remain the authority for behavior, safety, cancellation and mutation isolation.
+
+This page lists gains only for code the fork still carries and production still calls. On 2026-11-10 the results for code that is now upstream's, deleted or uncalled were removed here and from [`performance-results.json`](performance-results.json); [Removed results](#removed-results) names them. The remaining numbers are the recorded ones. None was re-timed.
 
 ## Turn-end context reads (2026-10-14)
 
@@ -37,7 +39,7 @@ These results are separate from the older measurements below. Setup and source-r
 - Baseline: `c329e624e73ba2086bd3ce15e091d667879dca9c`. Both measured trees were uncommitted, so file maps in [`performance-results.json`](performance-results.json) identify them.
 - First comparison: the candidate tree before the prompt-cache accounting change. `candidate.measuredSourceMap` records 123 frozen file hashes, including changed files and the shared lock/catalog inputs. Native edit/read/grep, image and TUI primitive candidates ran in per-domain trees that held only that domain's changes; their owner files are byte-identical in the later trees, but those rows were not re-timed after integration. Exact-edit and diff rows ran on the first edit revision; the final follow-up changed only fuzzy offset mapping, which exact-match workloads never reach, and the fuzzy row was re-timed on it.
 - Matched qualification: the first-comparison candidate plus the prompt-cache accounting change (`core/cache-stats.ts`, `settings-selector.ts` and `interactive-mode.ts`). The first comparison's tools, sessions and background fixtures load those modules only through the package index at import time, outside timed regions; no timed operation calls them. `qualification.roots` lists every file in the runner's source scope that differs from the baseline in each root.
-- Not measured: changes after the qualified tree, including the Cloudflare prompt-cache capability and lifetime defaults, native cache-warmer retention/authentication/pricing repairs, the refreshed model catalog and the nine-commit upstream merge through `d6370b72d0a478a31741a6c44ae7ecdcbd01d0fd` (v1.2.0 and follow-up Chord/Env fixes). Upstream release notes describe separate upstream measurements; none is attributed to this performance effort. Both comparisons used `package-lock.json` SHA-256 `762b0da32d2418f5f474f661587bbdd3bc823a99abcb42840957422b68cb391f` and the hydrated model catalog with manifest SHA-256 `15ddb5a96461d83a3b43d702987c1bc40864ad6622b1c9cbe92621847cbd29fe`.
+- Not measured: changes after the qualified tree, including the Cloudflare prompt-cache capability and lifetime defaults, native cache-warmer retention/authentication/pricing repairs, the refreshed model catalog and the nine-commit upstream merge through `d6370b72d0a478a31741a6c44ae7ecdcbd01d0fd` (v1.2.0 and follow-up Chord/Env fixes). Later upstream syncs also adapted owners of the remaining rows without re-timing them: edits now run through Durable's shared `edit-diff.ts`, and image resizing compares PNG with the requested-quality JPEG before it tries fallback qualities. Upstream release notes describe separate upstream measurements; none is attributed to this performance effort. Both comparisons used `package-lock.json` SHA-256 `762b0da32d2418f5f474f661587bbdd3bc823a99abcb42840957422b68cb391f` and the hydrated model catalog with manifest SHA-256 `15ddb5a96461d83a3b43d702987c1bc40864ad6622b1c9cbe92621847cbd29fe`.
 - Host: Node 24.21.0, npm 11.19.0, macOS (Darwin 27.0.0) arm64, Apple M5 Pro (Mac17,9), 18 logical CPUs, 64 GiB.
 - First-comparison runs were serial, task-owned, fresh Node processes with a warm filesystem on a shared workstation that was not idle. One-minute load at process start: 9-25 for baselines; 32-35 for the first integrated batch (AI, TUI, Chord/MCP, sessions, catalog, Codex, and the ls/resource/job-listing/spill controls); 10-15 for every other candidate. The final fuzzy-edit, build, pack and Nix pack runs have no recorded load. No sample was discarded.
 - Fixtures: the first comparison used the original research fixtures listed by content hash in `scripts/performance/provenance.json`, before their adaptation into this runner. The matched qualification used the retained runner itself; `qualification.runner` records the SHA-256 of all 31 runner files and names the seven that received the qualification selectors and fixture-only smoke repairs before timing. Re-run both roots with the retained runner rather than comparing new numbers with these.
@@ -51,26 +53,18 @@ First comparison. Values are median (minimum-maximum) milliseconds unless noted;
 | Native tools | Exact edit, 32 targets in 7.2 MB | 7/7 | 1,191 (1,187-1,301) | 149 (146-160) | -87% | Isolated |
 | | Edit with display diff and unified patch | 7/7 | 1,317 (1,253-1,508) | 191 (187-221) | -86% | Isolated |
 | | Fuzzy edit, 32 targets | 7/7 | 4,168 (4,052-4,873) | 715 (297-1,242) | -83% | Isolated |
-| | Read head of a 32 MiB file | 7/7 | 36.2 (34.9-65.2) | 18.4 (17.0-20.8) | -49% | Isolated |
-| | Grep with context | 7/7 | 28.9 (28.1-34.3) | 22.8 (21.1-32.4) | -21% | Isolated |
 | Images | PNG resize, 1600x1000 to 800x500 | 7/7 | 125 (112-156) | 81.8 (66.6-99.5) | -35% | Isolated |
-| AI | Streaming JSON, 65,536 characters | 7/7 | 389 (364-413) | 295 (242-377) | -24% | High load |
-| | Model overlay read, 10,000 models | 7/7 | 212 (198-222) | 1.80 (1.61-2.53) | -99.2% | High load |
+| AI | Model overlay read, 10,000 models | 7/7 | 212 (198-222) | 1.80 (1.61-2.53) | -99.2% | High load |
 | | Codex, 50,000 heartbeats per request, two cached requests | 7/7 | 1,874 (1,799-2,262) | 266 (123-364) | -86% | High load |
 | TUI (ms/op) | 16 KB editor re-render, unchanged | 5/5 | 1.26 (1.25-1.32) | 0.0222 (0.0205-0.0246) | -98% | Isolated, alternating trials |
 | | 50 KB plain wrap | 5/5 | 3.45 (3.33-3.52) | 1.03 (0.994-1.04) | -70% | Isolated, alternating trials |
 | | Hidden tree filter, 1,000 x 1,000 | 5/5 | 43.7 (38.1-48.7) | 2.45 (2.19-5.99) | -94% | High load |
-| | Streaming syntax highlight | 5/5 | 5.07 (4.96-5.68) | 0.244 (0.139-1.25) | -95% | High load |
-| Chord/MCP | Frame validation, 100,000 inputs | 7/7 | 1,018 (926-1,105) | 15.5 (12.6-32.3) | -98% | High load |
-| | Publication FIFO, 100,000 callbacks | 7/7 | 1,169 (651-9,761) | 2.65 (1.83-5.56) | -99.8% | High load |
-| | MCP stdio, 8 MiB in 4 KiB chunks | 7/7 | 954 (909-1,151) | 5.14 (4.87-5.44) | -99.5% | High load |
-| | MCP SSE, 8 MiB in 4 KiB chunks | 7/7 | 3,839 (2,152-6,210) | 8.14 (7.17-16.7) | -99.8% | High load |
+| MCP | MCP SSE, 8 MiB in 4 KiB chunks | 7/7 | 3,839 (2,152-6,210) | 8.14 (7.17-16.7) | -99.8% | High load |
 | Sessions | Branch preparation, 100,000 entries | 1/1 | 1,184 | 15.2 | -99% | p50, high load; matched |
 | | Session name x100, 100,000 entries | 1/1 | 52.2 | 0.005 | -99.99% | p50, high load |
 | | Fork, write and reload, 10,000 entries | 1/1 | 647 | 22.0 | -97% | p50, high load |
 | | Current-cwd listing, 30 sessions x 10,000 entries | 1/1 | 245 | 73.5 | -70% | p50, high load; matched |
-| Durable | 10,000 retained contexts, 600 s retention | 3/3 | 8.07 (7.91-8.41) | 0.271 (0.265-0.621) | -97% | p50 |
-| | Memory history, 65,536 revisions, recent read (µs) | 3/3 | 640 (606-680) | 0.668 (0.517-0.767) | -99.9% | Per-process averages |
+| Durable | Memory history, 65,536 revisions, recent read (µs) | 3/3 | 640 (606-680) | 0.668 (0.517-0.767) | -99.9% | Per-process averages |
 | | 16 MiB unterminated line | 3/3 | 256 (244-257) | 12.3 (8.66-13.1) | -95% | p50 |
 | Env | In-memory client, 16 MiB partial line | 7/7 | 266 (251-280) | 4.86 (2.76-8.69) | -98% | |
 | | Release daemon, 16 MiB partial line | 15/15 | 250 (239-258) | 33.6 (30.8-41.7) | -87% | 3 processes x 5 |
@@ -78,12 +72,11 @@ First comparison. Values are median (minimum-maximum) milliseconds unless noted;
 | | Rust frame ingestion, 1,000 x 512 KiB | 3/3 | 44.2 (43.9-44.4) | 20.2 (19.8-22.2) | -54% | |
 | Background | Acknowledged-job monitor, 1,000 jobs | 9/9 | 46.5 (44.5-48.7) | 1.00 (0.873-1.22) | -98% | |
 | Evals | Offline eval CLI including startup, 1,000 pairs | 3/3 | 911 (890-1,028) | 387 (321-555) | -58% | |
-| Telemetry | Reference adapter, 1,000 retained-array updates | 3/3 | 5.10 (4.84-7.98) | 0.597 (0.554-0.620) | -88% | Opt-in adapter only |
 | Build/pack | Clean ten-package build, serial to two-child queue | 3/3 | 6,118 (6,103-8,797) | 4,585 (4,404-7,275) | -25% | Candidate build harness |
 | | Ten-package pack | 1/1 | 3,705 | 1,787 | -52% | Final source, one pair |
 | | Exact eight-package Nix pack | 3/3 | 3,352 (3,031-4,560) | 2,285 (1,593-2,314) | -32% | Final source |
 
-The paired build used the candidate queue harness; one clean build with the final build script took 4,660 ms and produced byte-identical dist trees. The first three pack pairs (median 4,227 to 2,045 ms) predate the shared-helper extraction, so the final pack source has one pair. Pack archives, names and manifests matched exactly. The Nix row covers the install-phase pack subset, not a Nix derivation build.
+The paired build used the candidate queue harness; one clean build with the final build script took 4,660 ms and produced byte-identical dist trees. The first three pack pairs (median 4,227 to 2,045 ms) predate the shared-helper extraction, so the final pack source has one pair. Pack archives, names and manifests matched exactly. The Nix row covers the install-phase pack subset, not a Nix derivation build. The build, pack and Nix rows were measured with ten workspace packages and eight Nix archives; the workspace now builds and packs eleven packages, and `nix/package.nix` packs ten archives.
 
 ### Matched qualification
 
@@ -108,14 +101,13 @@ The Bash rows are the measured cost of bounding memory. With a normal file sink,
 
 Biome ran each root's `scripts/biome-check.mjs` wrapper without `--write` over one shared payload: a clean detached checkout of the baseline commit. The fixture hashed the payload's 1,967-file Git inventory, including `biome.json` and its Grit plugin, before and after every run; it never changed. The locked Biome packages are identical in both roots. The fallback row forces the unsupported-platform branch, which checks one file at a time through Biome's Node WASM bindings. The witness is the wrapper's exit status, not its diagnostics. The slowest baseline fallback process (61.7 s) started at load 34.1.
 
-The controls below are the 30 first-comparison increases selected for the rerun, plus the gains measured by the same cases. The first-comparison column repeats the earlier unmatched result; its fixtures, loads and process layout differ, so compare absolute values only within the matched columns. Session values are per-process medians over 15 runs at 100,000 entries, 5 runs for listings and 7 runs for working-state copies.
+The controls below are 29 of the 30 first-comparison increases selected for the rerun, plus the gains measured by the same cases. The thirtieth, AI frame reduction, timed an API the fork has since deleted. The first-comparison column repeats the earlier unmatched result; its fixtures, loads and process layout differ, so compare absolute values only within the matched columns. Session values are per-process medians over 15 runs at 100,000 entries, 5 runs for listings and 7 runs for working-state copies.
 
 | Control | First comparison | Matched baseline | Matched final | Time | Slower pairs | Result |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | AI transform (ms/op) | 0.440 to 0.670 (+52%) | 0.479 (0.456-0.491) | 0.504 (0.479-0.580) | +5.4% | 4/4 | No clear change |
 | AI token estimate (ms/op) | 0.385 to 0.635 (+65%) | 0.435 (0.364-0.500) | 0.435 (0.382-0.572) | +0.1% | 3/4 | No clear change |
 | AI tool validation (ms/op) | 0.0408 to 0.0577 (+41%) | 0.0420 (0.0333-0.0573) | 0.0560 (0.0432-0.0642) | +33% | 4/4 | No clear change |
-| AI frame reduction (ms/op) | 0.0832 to 0.157 (+88%) | 0.136 (0.121-0.170) | 0.0903 (0.0713-0.125) | -34% | 0/4 | No clear change |
 | Shared EventStream queue, 100,000 events | 10.6 to 14.4 (+36%) | 11.1 (10.3-11.8) | 11.1 (10.5-11.7) | +0.7% | 3/4 | No clear change |
 | Codex 3,000-message cached pair | 15.4 to 17.2 (+12%) | 16.0 (15.7-16.2) | 15.6 (15.0-16.0) | -2.5% | 0/4 | No clear change |
 | Codex 1,000 heartbeats | 3.56 to 3.90 (+9.5%) | 3.60 (3.45-3.66) | 3.61 (3.47-4.18) | +0.1% | 2/4 | No clear change |
@@ -150,15 +142,15 @@ The controls below are the 30 first-comparison increases selected for the rerun,
 | Release daemon list files, 10,000 files | 9.21 to 11.4 (+24%) | 15.3 (13.9-16.5) | 14.1 (11.5-19.5) | -7.8% | 1/4 | No clear change |
 | Release daemon list directory, 10,000 files | 61.9 to 55.8 (-9.9%) | 117 (90.7-137) | 81.9 (61.3-133) | -30% | 0/4 | No clear change |
 
-Matched CPU time showed no clear change either: AI transform +5.3%, token estimate +3.5%, tool validation +29% (3/4 pairs slower), frame reduction -8.4%, EventStream queue -1.6%, Codex cached pair +1.8% and 1,000 heartbeats +0.7%. Three controls were slower in all four pairs but stayed within overlapping ranges: AI tool validation (+33%), AI transform (+5.4%) and prose preview (+6.1%). Four were faster in all four pairs, also within overlapping ranges: AI frame reduction (-34%), the Codex cached pair (-2.5%), compaction preparation (-35%) and the daemon directory listing (-30%). The daemon binary read (+41%) and write (+34%) ran at load 23-28 and did not move consistently. Watch the three consistently slower controls in later runs.
+Matched CPU time showed no clear change either: AI transform +5.3%, token estimate +3.5%, tool validation +29% (3/4 pairs slower), EventStream queue -1.6%, Codex cached pair +1.8% and 1,000 heartbeats +0.7%. Three controls were slower in all four pairs but stayed within overlapping ranges: AI tool validation (+33%), AI transform (+5.4%) and prose preview (+6.1%). Three were faster in all four pairs, also within overlapping ranges: the Codex cached pair (-2.5%), compaction preparation (-35%) and the daemon directory listing (-30%). The daemon binary read (+41%) and write (+34%) ran at load 23-28 and did not move consistently. Watch the three consistently slower controls in later runs.
 
 Before timing, three functional smoke runs failed and were kept. The 20-entry branch smoke found nothing to compact under the full retention budget (baseline, exit 1). The boundary witness differed because the faux provider's token estimates include generated paths (final root). The `ls` check required a details object that the baseline omits for an untruncated listing (baseline, exit 1). Each repair changed only the fixture: a smoke-only compaction budget, a boundary witness without `durationMs` and the faux `input` and `totalTokens` fields (raw usage is still logged), and optional `ls` details. A last smoke run of the 11 remaining cases passed all 22 attempts. `qualification.smokeAttempts` lists every attempt.
 
 ### Unmatched and unchanged observations
 
-These first-comparison increases have no matched rerun and so establish neither a regression nor a gain: context usage at 10,000 entries (new leaf +29%, same leaf +14%; one p50 each under high load); retained-context p50 with zero retention at 0 and 1,000 contexts (+75% and +19%, ranges overlapping) and with 600 s retention at 0 contexts (+8.7%); current history reads at 8,192 revisions (+15%); Env tail reads (+4.6%); the 256 KiB short-line control (+5.5%); and the release daemon at 1 MiB and 4 MiB: text read +44% / +52%, binary read +91% / +82%, write +72% / +126%, file listing +33% / +26%, and the 1 MiB long line +12%. At 16 MiB the matched rerun found no clear change for the same read, write and listing operations.
+These first-comparison increases have no matched rerun and so establish neither a regression nor a gain: context usage at 10,000 entries (new leaf +29%, same leaf +14%; one p50 each under high load); current history reads at 8,192 revisions (+15%); Env tail reads (+4.6%); the 256 KiB short-line control (+5.5%); and the release daemon at 1 MiB and 4 MiB: text read +44% / +52%, binary read +91% / +82%, write +72% / +126%, file listing +33% / +26%, and the 1 MiB long line +12%. At 16 MiB the matched rerun found no clear change for the same read, write and listing operations.
 
-Unchanged within overlapping ranges: PNG-to-JPEG fallback 301 to 289 ms, JSON read selection 7.12 to 6.80, faux agent 6.15 to 6.15, Codemode sandbox 52.0 to 53.4, compiled schema 9.41 to 9.64, split summaries 201 to 204, 16 KB typing 1.44 to 1.40 ms/op, Unicode typing 0.842 to 0.795 ms/op, eval CLI with 100 pairs 103 to 101, and 10,000 contexts with zero retention 0.285 to 0.298 (p50).
+Unchanged within overlapping ranges: PNG-to-JPEG fallback 301 to 289 ms, JSON read selection 7.12 to 6.80, faux agent 6.15 to 6.15, Codemode sandbox 52.0 to 53.4, split summaries 201 to 204, 16 KB typing 1.44 to 1.40 ms/op, Unicode typing 0.842 to 0.795 ms/op, and eval CLI with 100 pairs 103 to 101.
 
 ### Work and memory counts
 
@@ -167,16 +159,33 @@ These are deterministic counts from the first comparison, not latency claims.
 - Background monitor: steady-state job/state reads 2,000 to 0 for 1,000 acknowledged jobs; receipt entries unchanged.
 - Env client, 50,000-name listing run: `Buffer.from` calls 19,973,128 to 350,000; request histogram unchanged.
 - Rust: frame ingestion allocations 5,000 to 4,000 (1,049,238,000 to 524,950,000 bytes); scanner allocations 2,000,090 to 9.
-- MCP HTTP 503: bytes pulled to build the bounded error 8,388,608 to 12,288; the first 8,192 characters are unchanged.
-- SQLite, 30 document deltas: SQL calls 210 to 150 and string-binding bytes 1,431 to 771; task replacements 150 to 120 calls. WAL growth is unchanged, and no-op writes still issue zero SQL calls.
-- Trade-offs: queued JSON frames use more transient heap (median 56,270,736 to 136,608,504 bytes) while CPU falls from 418 to 213 ms per operation. The two-child build raises median sampled RSS by 1.65% and the highest observed peak by 23%; no memory reduction is claimed.
+- SQLite, 30 task replacements: SQL calls 150 to 120. WAL growth is unchanged, and no-op writes still issue zero SQL calls.
+- Trade-off: the two-child build raises median sampled RSS by 1.65% and the highest observed peak by 23%; no memory reduction is claimed.
 
 ### Behavior witnesses
 
-- Native reads, grep and edits: every printed result hash and length matches; diff rows also match display, unified patch and first changed line. Images match bytes, MIME type and dimensions.
-- Chord/MCP: frame truth table, FIFO order, exact stdio result, SSE payload/id and the HTTP 503 prefix are asserted. Eval CLI journal bytes and hashes match. Pack and Nix archives match exactly.
-- Weaker first-comparison witnesses: the original TUI checksum is cumulative rendered length, so exact rows rest on owner and differential tests. AI, sessions, daemon, report and telemetry rows rely on fixture assertions without a full output hash.
+- Native edits and the JSON read selection: every printed result hash and length matches; diff rows also match display, unified patch and first changed line. Images match bytes, MIME type and dimensions.
+- MCP: the SSE payload and id are asserted. Eval CLI journal bytes and hashes match. Pack and Nix archives match exactly.
+- Weaker first-comparison witnesses: the original TUI checksum is cumulative rendered length, so exact rows rest on owner and differential tests. AI, sessions, daemon and report rows rely on fixture assertions without a full output hash.
 - Matched qualification: every case emits semantic output witnesses. Bash checks the exact spill bytes and hash plus display, truncation and structured output. Startup checks only a successful `get_state`, and Biome only the wrapper's exit status. The session list witness excludes activity-clock ordering, which owner tests cover. The AI queue witness is an aggregate, not a FIFO-order proof. The spill control is the synchronous `OutputAccumulator` push path, not the Bash tool. The faux provider reports zero cache usage, so no run here supports a prompt-cache hit claim.
+
+### Removed results
+
+On 2026-11-10 these results were removed from this page and from `performance-results.json`. The fork no longer carries the code they measured, or production never calls it.
+
+| Removed result | Reason |
+| --- | --- |
+| Read head, middle page and 10-line page of a 32 MiB file | Upstream's streaming `read` replaced the fork's whole-file range scan ([2026-11-05 record](upstream-sync-2026-11-05.md#performance)) |
+| Grep with context | `grep` is upstream's code |
+| Streaming JSON, 65,536 characters | Timed `parseStreamingJson`, a public export that no production path calls |
+| Streamed assistant update and streaming syntax highlight | Upstream's Markdown block reuse replaced the fork's. The fork keeps a skip for blocks a stream has not changed, measured separately: 2.0-2.7 ms per update with upstream's code and 0.73-0.78 ms with the skip ([v1.5.0 record](upstream-sync-1.5.0.md)) |
+| Chord frame validation, compiled frame schema and publication FIFO; AI frame reduction and queued frames | The measured APIs are deleted |
+| MCP stdio framing and the bounded HTTP 503 error | Upstream's shared implementations replaced the fork's |
+| Durable retained contexts | The scheduler's retention code is upstream's |
+| Telemetry reference adapter | Upstream's rewritten adapter replaced the fork's change |
+| SQLite document-delta SQL calls and string-binding bytes | Upstream's batched commit replaced the fork's record reuse; both trees make 150 calls ([2026-11-05 record](upstream-sync-2026-11-05.md#performance)) |
+
+The runner lost the cases whose code is deleted: `frames` and `queued-frames` in `ai.mjs`, and the `frame`, `publish` and `stdio` modes of `bridges.mjs`. Cases for code that upstream now owns still run as controls: text reads, grep, the HTTP error, context retention and telemetry. The `parse` case still times `parseStreamingJson`.
 
 ## Setup and commands
 
@@ -224,13 +233,13 @@ The native source resolver from **the selected root** resolves workspace imports
 | `env-scan` / `env-scan.rs` | 1,000,000 `é😀\n` lines, 64 KiB chunks ×5; 512 KiB incoming frames ×1,000 control | Actual selected decode/scan/frame modules; fresh scratch crate. Build/setup outside printed scanner intervals. Counting allocator overhead included; no uninstrumented throughput claim |
 | `background` / `background.mjs` | 1,000 acknowledged terminal jobs, receipts in groups of 20; 9 boundary scans, 2 warmups | Real extension/faux foreground run holds delivery lease. Separate untimed job/state read count; durable receipt count/IDs checked. No jobs launched |
 | `bash` / `bash.mjs` | Actual Bash tool/executor with deterministic drain-respecting Node producer: 64 MiB, 64 KiB tiles; normal sink and 20 ms delayed fs `_write`/`_writev` sink. Smoke uses 128 KiB | One operation/process, no warmup. `publicReturnMs` runs from just before the native call to its public return; `persistedCompletionMs` ends at the spill stream's `close` event. Both exclude payload generation, hashing, import and process startup, and include the real producer plus per-write queue/memory instrumentation. Compare throughput by persisted completion: the baseline executor can return before its spill file is complete. Stream close is not an `fsync` or crash-durability guarantee. Checks final spill bytes/hash and displayed/structured output; also reports bytes and stream state at public return. The 20 ms sink is a backpressure control, not a throughput comparison. Default private file creation/high-water mark are untouched |
-| `qualification` / existing fixtures | `ai-common-controls`: transform/estimate/validate/frames only. `history-current-65536`: `--current-only`, 1,000 current reads at 65,536 revisions. `ls-10000` (500-entry limit), `resources-250` (skill reload) and `background-1000` (listing completed jobs) ×7 runs; `spill-64mib` ×3. `startup-bundled`: `dist/bundle/cli.js`. `env-daemon-controls-16777216`: 16 MiB text/binary reads and write, 10,000-file listings, without the long-line and scan operations | Same clocks as the parent fixtures; `ls`/resource/listing/spill runs time one operation each with GC, setup and witness outside. The full `history` and `env-daemon-*` defaults are unchanged |
+| `qualification` / existing fixtures | `ai-common-controls`: transform/estimate/validate only. `history-current-65536`: `--current-only`, 1,000 current reads at 65,536 revisions. `ls-10000` (500-entry limit), `resources-250` (skill reload) and `background-1000` (listing completed jobs) ×7 runs; `spill-64mib` ×3. `startup-bundled`: `dist/bundle/cli.js`. `env-daemon-controls-16777216`: 16 MiB text/binary reads and write, 10,000-file listings, without the long-line and scan operations | Same clocks as the parent fixtures; `ls`/resource/listing/spill runs time one operation each with GC, setup and witness outside. The full `history` and `env-daemon-*` defaults are unchanged |
 | `evals` / report/persistence | 100/1,000/10,000 pairs and 0/1/10 MiB sessions ×7. Persistence: 100/1,000 paired arms, 3 fresh CLI samples +1 warmup | Report setup/hash/validation excluded. CLI includes process startup and actual persistence; local missing-report arms and expected blocked-pair exit 1. No Docker/model calls |
 | `telemetry` / `telemetry.mjs` | 10,000 spans; 10 snapshots; one retained 10,000-element array with 20/1,000 scalar updates | No explicit warmup; original callback/assertion overhead included. Opt-in in-memory reference adapter, not normal CLI instrumentation |
 
 ## Build, pack, Rust, startup and matched qualification
 
-These expensive groups are opt-in and require an exclusive task-owned CPU lane; unrelated host activity must still be recorded. Build runs remove only generated `packages/*/dist` for the ten runtime packages; use disposable isolated roots. Prebuild offline before pack/startup. Model hydration must be identical across compared roots and completed before timing.
+These expensive groups are opt-in and require an exclusive task-owned CPU lane; unrelated host activity must still be recorded. Build runs remove only generated `packages/*/dist` for the public workspace packages; use disposable isolated roots. Prebuild offline before pack/startup. Model hydration must be identical across compared roots and completed before timing.
 
 ```sh
 node scripts/performance/run.mjs --repo "$AFTER" --groups build --repeat 3 --out "$RESULTS/build"
@@ -260,7 +269,7 @@ node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --groups en
 - Isolated startup uses the real built CLI's RPC `get_state`, 2 fresh-process warmups and 9 samples per fixture process. Each sample starts when `spawn` returns and stops at the matching successful `get_state` response. CLI profile helper remains available as a public command; CPU profiles must use PID-unique names so launcher/worker cannot overwrite one another. Do not interpret post-ready background work as startup. Portable isolation intentionally does not load personal extensions/settings; configured-startup measurements require separately sanitized receipts and exact external extension revisions.
 - The retained startup command adds a network-denial preload and fully isolated HOME/cwd. This differs from historical scratch startup runs: collect both roots with this command rather than transplanting their old numbers. Fixture hashes and timing boundaries must match any published comparison.
 - Biome runs each selected root's production wrapper without `--write`, over the fixed `--artifact-repo` scan cwd; paired runs require this option. Native dependency resolution remains owned by the selected wrapper. Before timing, the fixture records the fixed payload's complete Git inventory/content hashes plus explicit Biome config/Grit hashes; it checks identity again after the scan. Input witnesses reject changed payloads across roots/repeats. Use a clean disposable Git payload with no ignored files in configured scan paths; the recorded run used a clean detached checkout of the baseline commit. Forced unsupported-platform fallback uses a local preload, not Android device qualification. Full scan includes startup; inventory/hashing is outside that operation interval. Separate static initialization/load evidence from wall-time gain; native wrapper/direct baseline ranges can overlap.
-- `nix-pack.mjs` reproduces exactly eight named tarballs through the selected root's `pack-nix-packages.mjs`; a baseline predating that driver runs the exact former public install-phase npm recipe. The final driver derives its own root, so set `--artifact-repo` to the after root. Archives/names must match. This qualifies local packaging only, not an actual Nix derivation or all Nix platforms. The fleet consumer now uses the public artifact API; the obsolete shim is retired rather than duplicated here.
+- `nix-pack.mjs` reproduces the ten named tarballs of `nix/package.nix` through the selected root's `pack-nix-packages.mjs`; a baseline predating that driver runs the exact former public install-phase npm recipe. The final driver derives its own root, so set `--artifact-repo` to the after root. Archives/names must match. This qualifies local packaging only, not an actual Nix derivation or all Nix platforms. The fleet consumer now uses the public artifact API; the obsolete shim is retired rather than duplicated here.
 
 ## Evidence and interpretation
 

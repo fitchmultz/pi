@@ -2,12 +2,13 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`4ea8837927564c592b1d184c956ab7d28c88119b` (2026-11-10), two commits after official v1.5.1.
+`6273031b012ab3c017cdbf593a62b7e6792186a8` (2026-11-10), four commits after official v1.5.2.
 It is upstream plus the features below. Everything else follows upstream behavior and APIs.
 
 Each integration record documents its baseline, conflict decisions and verification, newest first:
 
-- [2026-11-10](docs/upstream-sync-2026-11-10.md), the current baseline, including official v1.5.1
+- [v1.5.2](docs/upstream-sync-1.5.2.md), the current baseline, including official v1.5.2
+- [2026-11-10](docs/upstream-sync-2026-11-10.md), including official v1.5.1
 - [2026-11-09](docs/upstream-sync-2026-11-09.md)
 - [2026-11-07](docs/upstream-sync-2026-11-07.md)
 - [2026-11-05](docs/upstream-sync-2026-11-05.md)
@@ -44,10 +45,9 @@ all-platform qualification.
 | Hidden model overrides: `models.json` can only add or patch catalog models, so superseded built-ins cannot otherwise be dropped from `/model` and `--list-models` | `core/{model-config,provider-composer}.ts` | `model-registry.test.ts` | [Models](packages/coding-agent/docs/models.md) |
 | Public model-reference resolution: extensions need native thinking-suffix and exact-ID selection without constructing a second model runtime | `index.ts` re-export of `core/model-resolver.ts` | `model-resolver.test.ts` through the public entrypoint | [SDK](packages/coding-agent/docs/sdk.md#resolve-a-model-reference-without-creating-a-runtime) |
 | Opt-in slow diagnostics: native synchronous handlers and footer frames need dispatch attribution | `core/extensions/{runner,wrapper}.ts`; `PI_EXTENSION_PERFORMANCE=1` | `extensions-performance.test.ts` | [Extensions](packages/coding-agent/docs/extensions.md#opt-in-performance-warnings) |
-| Temporary passive tracing: public hooks do not yet cover final serialization/consumed attempts | `packages/ai/src/utils/cache-trace.ts`, native adapter hooks, `core/cache-trace-context.ts`, `scripts/cache-trace-report.mjs` | `packages/ai/test/cache-trace.test.ts`, `sdk-stream-options.test.ts`, `scripts/cache-trace-report.test.mjs` | [Fidelity and retirement](packages/coding-agent/docs/cache-tracing.md) |
 | Cloudflare catalogs: canonical Claude IDs, qualified Opus 5.5 and Fable 5.2 positional controls/cache lifetimes, and direct-OpenAI positional defaults for `/openai` Responses models | `packages/ai/src/api/cloudflare.ts`, `packages/ai/catalog/providers/cloudflare-ai-gateway.ts`, `packages/ai/scripts/hydrate-model-catalog.ts` and `core/remote-catalog-provider.ts` | `packages/ai/test/{model-data-validation,cloudflare-openai-positional}.test.ts`, `remote-catalog-provider.test.ts`, `model-runtime-cloudflare-compat.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Providers](packages/coding-agent/docs/providers.md), [Cache lifetimes](packages/coding-agent/docs/models.md#prompt-cache-lifetimes) |
 | Path hyperlinks: prose paths and inline-code paths/URLs stay clickable after wrapping; terminals only regex-match one row and the source-transform seam cannot preserve literal codespan rendering | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` | [Terminal setup](packages/coding-agent/docs/terminal-setup.md#override-detected-capabilities) |
-| Source-aware fullscreen selection: highlighted copies retain Markdown and real line breaks without display padding or wraps; `/copy` stays unchanged | `packages/tui/src/{selection-source,selection-markers,utils,tui-alt-screen}.ts`, `packages/tui/src/components/{markdown,markdown-source,text}.ts` | `packages/tui/test/source-selection.test.ts` | [Copy part of a response](packages/coding-agent/docs/terminal-setup.md#copy-part-of-a-response) |
+| Source-aware fullscreen selection: highlighted copies retain Markdown and real line breaks without display padding or wraps; `/copy` stays unchanged. `Text` and `Markdown` attach the private source annotations only while `TuiAltScreen` renders a frame; `render()` returns plain lines to every other caller | `packages/tui/src/{selection-source,selection-markers,utils,tui-alt-screen}.ts`, `packages/tui/src/components/{markdown,markdown-source,text}.ts` | `packages/tui/test/source-selection.test.ts` | [Copy part of a response](packages/coding-agent/docs/terminal-setup.md#copy-part-of-a-response) |
 | Awaitable MCP cleanup: every `McpClient.close()` caller joins one transport cleanup, including calls from close listeners. Pending requests still fail immediately, and the native runtime needs no separate close memo | `packages/mcp/src/client.ts`, `extensions/mcp/runtime.ts` | `packages/mcp/test/streamable-http.test.ts` | [MCP usage](packages/mcp/README.md#usage) |
 
 Complete working state also depends on the queue/admission APIs in
@@ -56,10 +56,14 @@ Complete working state also depends on the queue/admission APIs in
 
 ### Retained correctness deltas
 
-Ordinary quit does not wait for tools that ignore cancellation. Strict shutdown for certified
-working-session exits waits for `session.abort()` before disconnecting persistence. This retains
-the fork's nonblocking quit behavior rather than upstream's unconditional wait from #9124;
-an ordinary quit can leave an interrupted tool call without its final result.
+Ordinary quit aborts the active turn and waits at most 500 ms for it to settle
+(`QUIT_TURN_SETTLE_MS` in `core/agent-session-runtime.ts`), running the shutdown handlers meanwhile.
+A tool that honors cancellation, or that ends when a shutdown handler stops its work, has its result
+saved. A tool that ignores cancellation delays neither the handlers nor the exit past that bound,
+and its call stays without a result. Strict shutdown for certified working-session exits waits for
+`session.abort()` without a limit before it runs the handlers. Upstream waits without a limit on
+every quit (#9124), so one unresponsive tool blocks it. Tests:
+`suite/regressions/9124-runtime-dispose-tool-settlement.test.ts`, `suite/agent-session-runtime.test.ts`.
 
 These fixes remain until upstream supplies equivalent behavior, not merely closes a report.
 Native working-session restoration omits removed models from the saved cycling list while retaining the selected model, remaining order and thinking levels. A missing selected model still fails (`core/sdk.ts`, `test/suite/working-session-models.test.ts`).
@@ -84,7 +88,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | --- | --- | --- |
 | A local read cancelled during file setup must leave Pi running instead of emitting an unhandled native stream `AbortError` | `core/tools/read.ts` | `read-streaming.test.ts` |
 | Render requests cannot outlive their callbacks across stop/start; stopping drops the owed frame and starting requests a new one. A main-screen stop moves the cursor below the frame, so the first frame after a restart redraws the screen instead of diffing against it | `packages/tui/src/{tui,tui-main-screen}.ts` | `packages/tui/test/tui-render.test.ts` |
-| A fullscreen scrollbar thumb drag keeps every button and motion event until its release, including over an overlay opened during the drag, such as transcript search. Upstream lets the overlay take the release, so the drag stays active and pointer motion without a pressed button keeps scrolling the transcript | `packages/tui/src/tui-alt-screen.ts` | `packages/tui/test/tui-alt-screen.test.ts` |
+| A fullscreen scrollbar thumb drag keeps every button and motion event until its release, including over an overlay opened during the drag, such as transcript search. Upstream lets the overlay take the release, so the drag stays active and pointer motion without a pressed button keeps scrolling the transcript. A text-selection drag ends on the primary button's release even when a component under the pointer, such as an overlay opened during the drag, handles that release. Upstream leaves the drag active, and its auto-scroll keeps scrolling the transcript with no button held | `packages/tui/src/tui-alt-screen.ts` | `packages/tui/test/tui-alt-screen.test.ts` |
 | MCP initialization rejects a connection closed while its final notification is sent; closed stays final and close listeners run once | `packages/mcp/src/client.ts` | `packages/mcp/test/client.test.ts` |
 | A pending tools refresh must not overwrite a disconnected MCP server's error output | `extensions/mcp/runtime.ts` | `mcp-extension.test.ts` |
 | Session shutdown waits for MCP transports already closing after reconnect or sign-in changes, so quitting does not leave old stdio servers running. Calls on clients detached after session expiry remain independent | `extensions/mcp/runtime.ts` | `mcp-extension.test.ts` |
@@ -95,6 +99,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | A signal while the p2 server entry starts must close the server once started, so its exit hooks run. Upstream handles signals only after the start: Ctrl+C or a supervisor's SIGTERM during the start kills it without them, and on macOS the next start then refuses the data directory over the lock socket file left behind | `apps/p2/src/hosts/server.ts` | `apps/p2/test/p2/server-start.test.ts` |
 | A p2 TUI worker swap adopts only a live new worker and activates it at the terminal's current size. A swap writes nothing to a terminal lent to the external editor, and closing waits until the editor gives it back, so the launcher's end-of-run message and prompt follow it. A `/reload` that joins a running version check still swaps, and closing during a bundle download starts no worker. Upstream adopts a new worker that failed after `ready`: the screen goes blank, the old worker is terminated and no failure is reported | `apps/p2/src/hosts/tui-client.ts` | `apps/p2/test/p2/tui-launcher.test.ts` |
 | A worker whose `ready` crosses its stop must stay `stopping` in `workers.state`; upstream shows it `running` again until it exits, which the rollout step and the app kit's `exportData` read | `packages/chord/src/node/workers/workers.ts` | `packages/chord/test/node/workers/workers.test.ts` |
+| The Chord start-timer test ("a slow load after connecting is not killed") advances its fake clock only once the worker's `started` arrived (the `principal` hook), then stops the worker and requires that nothing failed. Upstream's advances the clock right after the fork, before the worker can connect: the 60 s start timer kills the worker in every run, and the test passes while the kill's exit is told after its assertion, also with the timer never cleared. Test-only: the fork does not change the start timer | `packages/chord/test/node/workers/workers.test.ts` | The same test |
 | A keyed `at(key)` pin whose load waits behind a commit that writes the key must read the committed document. Upstream marks a pinned key known only from its own load, which then finds the document in memory and returns, so the consumer goes live reading `not_ready` and every watch of the key rejects until all of the key's pins end | `packages/chord/src/documents/keyed-slot.ts` | `packages/chord/test/documents/keyed-slot.test.ts` |
 | A persisted Chord job run blocked at its load stays uncounted when a reload drops its job while the run still waits for a live attempt (its loading activation failed). Upstream blocks it again, so `host.activity.jobs` falls below zero and the job's concurrency limit later admits one run too many | `packages/chord/src/jobs/records.ts` | `packages/chord/test/jobs/persisted.test.ts` |
 | A Chord job result keeps the version and fingerprint of the code that returned it. Upstream treats it as the run's own version: a run that newer code ran after a reload (a persisted `rerun`, a start committed after its attempt's seal) has its result mapped through `accepts` twice, and older code after a rollback finishes it with a result it cannot read. `finish` maps it once from that version; code that cannot take it blocks the run `version`. Records are record version 2 (`chord.job-run.2`) and store the producer only when it differs from the run's, so other records' JSON payloads stay byte-identical. Version 1 records still load, but a result that newer code returned before the fix reads as the run's own: nothing stored tells it apart. Earlier builds ignore the producer and drop it when they write the record again | `packages/chord/src/jobs/{definition,run,stored,records,job,persisted}.ts` | `packages/chord/test/jobs/{persisted,records}.test.ts` |
@@ -104,10 +109,11 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | A named brain's Radius status line shows the quoted name and the server ID, as `radiusStatusText` documents and its test expects. Upstream prints only the name, which is not unique, and its own test fails | `apps/p2/plugins/radius/server.ts` | `apps/p2/test/p2/radius.test.ts` |
 | A Radius v4 WebSocket channel opened while the brain's socket to Radius is congested must start paused once its loopback socket opens. `ws` ignores `pause()` while connecting, so upstream reads the service's output into the congested socket's buffer without bound | `apps/p2/plugins/radius/brain.ts` | `apps/p2/test/p2/radius.test.ts` |
 | Closing the plugin watcher is final: a build whose discovery finishes after `close()` must not watch linked plugin directories, whose persistent watches keep the process alive. Keep upstream's one `#closed` and check it before opening tree or individual-directory watches | `packages/chord/src/node/plugins/watcher.ts` | `packages/chord/test/node/plugins/watcher.test.ts` |
-| Legacy published Kimi Coding catalogs must not break offline builds or revert the native OpenAI protocol on fetched/cached overlays; preserve effort/tool constraints and K3 cache-write pricing | `packages/ai/src/api/kimi.ts`, `packages/ai/catalog/{families/kimi,providers/kimi-coding,providers/moonshotai}.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/model-data-validation.test.ts`, `remote-catalog-provider.test.ts` |
+| Kimi K3-family cache writes (K3, K3.1 Pro, K3.1 Pro Highspeed) must cost the published five-minute rate, which equals the input rate, on Moonshot, Moonshot China and Kimi Coding. Upstream's catalog and pi.dev's published entries price them at zero; the fork's catalog definitions carry the rate, and offline hydration and fetched/cached overlays restore it on entries at the canonical endpoints | `packages/ai/src/api/kimi.ts`, `packages/ai/catalog/{families/kimi,providers/kimi-coding,providers/moonshotai}.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `core/remote-catalog-provider.ts` | `packages/ai/test/{model-data-validation,providers}.test.ts`, `remote-catalog-provider.test.ts` |
 | Git footers must catch branch changes missed while native watchers and polling baselines start, and must not publish a branch query that a cwd change superseded | `core/footer-data-provider.ts` | `footer-data-provider.test.ts` |
 | Cache warming must schedule prepared native retention and estimate one-hour writes and prompt-length price tiers without claiming provider-wrapper rates. Shared policy lives in pi-ai; coding-agent retains prepared-request timing and its cycle ownership. Both hosts keep the shorter lifetime across refreshes. p2 observes native dispatch without retaining prepared credentials, schedules from that time, cancels refreshes that outlast the entry, and releases worker liveness when a retry cannot arrive before expiry | `packages/ai/src/{cache-warming,models,utils/identity}.ts`, `core/{cache-warmer,model-runtime,sdk}.ts`, `apps/p2/src/runtime/worker.ts`, `apps/p2/plugins/cache-warming/warmer.ts` | `cache-warmer.test.ts`, `packages/ai/test/identity.test.ts`, `apps/p2/test/p2/{cache-warming,harness-requests}.test.ts` |
 | Standalone extension dependencies need runtime package manifests for public entrypoints and transitive imports | `scripts/build-binaries.sh`, `packages/coding-agent/package.json` (`build:binary`) | `compiled-extension-packages.test.ts` (built Bun CLI) |
+| `npm run check` must give the same result where Biome has no native binary (Termux) as where it has one. Biome turns on its React and test-runner rules for a file from the nearest `package.json`; upstream's WebAssembly path loads none, so it skips those rules, reports their suppressions as unused and fails the check. The fork loads the project's manifests and runs Biome's project scan | `scripts/biome-check.mjs` | `scripts/biome-check.test.mjs` |
 | Oversized public Durable input/write admissions must not fail the Session; host commits can opt into assembled-batch checks including document revisions. Queued input entry-size refusal settles only that input and preserves answers, tool work and valid siblings. SQLite checks exact rows with confirmed rollback, not an aggregate queue cap; post-effect compactions and real commit failures keep their fatal-storage semantics. Upstream's group commit fails the Session on any refused batch, so the check runs before a commit joins the writer's group, once every admitted write is published; the Session's storage cache and gated storage forward it | `packages/durable/src/{storage/sqlite/storage,session/session,session/cached-storage,session/keys,session/transaction,harness/harness,harness/inbox,harness/submissions,harness/compaction}.ts` | `packages/durable/test-workers/{input-admission,commit-admission,storage}.test.ts`, `packages/durable/test/harness-storage-failure.test.ts` |
 | Cancelling a shell on macOS must not wake waiting ancestors into later steps; freeze its process group before killing it | `packages/durable/src/env/node.ts`, `packages/env/daemon/src/sys/unix.rs` | `background-command.test.ts`, `suite/background-command-guards.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
 | Cancelling a shell on macOS must also stop the step the shell was starting at that moment. A macOS group kill skips a process that is still being forked, and upstream kills the group only once; after a killed command's process exits, kill its group once more | `core/tools/bash.ts`, `utils/shell.ts`, `packages/durable/src/env/node.ts`, `packages/env/daemon/src/{exec,sys/unix,sys/windows}.rs` | `bash-abort-process-group.test.ts`, shared `packages/durable/src/testing/env-conformance.ts` |
@@ -155,7 +161,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Repeated context-usage reads must reuse the last scalar without rescanning archived ancestry; native leaf identity and effective model limits preserve compaction, edits, branches and reload/restore behavior | `core/agent-session.ts` | `suite/agent-session-context-usage.test.ts` |
 | Session hot paths incrementally retain active ancestry, compaction-aware raw context entries and model/thinking settings; projected messages and returned arrays remain fresh. Entry-list and leaf identity invalidate reuse on reload or navigation. The latest name stays indexed; branch-summary admission stays linear, file forks reuse a private exclusive descriptor, and custom-flat listings reject unrelated cwd headers before reading bodies | `core/session-manager.ts`, `core/compaction/branch-summarization.ts` | `session-manager/*.test.ts`, `session-context-edit.test.ts`, `branch-summarization.test.ts`, `file-safety.test.ts` |
 | Empty-draft boundary previews use the live manager and compute projection/LLM fields only when read; pending-queue readers never project history. Each handler retains its own preview for freshness. Canonical context still refreshes after every boundary because public Agent state allows in-place mutation; committed drafts refresh before entry notifications. Mutable nonempty drafts still need eager validation. The undocumented `emitBoundary` preview builder remains synchronous | `core/extensions/runner.ts`, `core/agent-session.ts` | `extensions-runner.test.ts`, `suite/agent-session-boundaries.test.ts` |
-| Interactive transcript rebuilds place what the session has not saved instead of re-creating it from history: the streaming answer, live tool rows (partial output, timer, and parallel results that are saved only when the round ends) and a running `!` command. A live row leaves `pendingTools` when its result message is saved, not at `tool_execution_end`. A saved call with neither a live row nor a saved result, such as one left by an ordinary quit, shows the `No result provided` error the model receives; upstream re-creates and re-registers it as pending | `modes/interactive/interactive-mode.ts` | `suite/regressions/{transcript-rows,4167-thinking-toggle-pending-tool-render}.test.ts` |
+| Interactive transcript rebuilds place what the session has not saved instead of re-creating it from history: the streaming answer, live tool rows (partial output, timer, and parallel results that are saved only when the round ends) and a running `!` command. A live row leaves `pendingTools` when its result message is saved, not at `tool_execution_end`. A saved call with neither a live row nor a saved result, such as one left by quitting during a tool that ignores cancellation, shows the `No result provided` error the model receives; upstream re-creates and re-registers it as pending | `modes/interactive/interactive-mode.ts` | `suite/regressions/{transcript-rows,4167-thinking-toggle-pending-tool-render}.test.ts` |
 | A reconnected terminal panel whose terminal is missing from the new listing (closed while the panel was away, or ended with its host) shows none when no other runs. Upstream keeps showing it: its last screen, a close button and input that reach nothing, and no New terminal button. Showing none also hides the closed terminal's scrollbar, which upstream leaves on the empty panel when it was scrolled back | `apps/p2/plugins/terminals/Terminal.tsx` | `apps/p2/test/p2/terminal-reconnect.test.ts` |
 
 ### Internal state ownership
@@ -209,7 +215,7 @@ Workloads, measurements and limits are in [Performance reproduction](docs/perfor
 | Retained work reduction | Owner | Primary tests |
 | --- | --- | --- |
 | Scan each decoded journal chunk once and join complete lines only at record boundaries when opening sessions | `packages/coding-agent/src/core/session-manager.ts` | `packages/coding-agent/test/session-manager/file-operations.test.ts`; [synthetic opening measurements](docs/performance/session-open-2026-10-24.md) |
-| Resolve `--session` and `--fork` ID prefixes, cross-project IDs and misses without parsing non-matching journals past their headers; matching sessions are still read in full because activity time orders ambiguous matches. Full `list()`/`listAll()` listings are unchanged and uncached. Upstream still builds complete metadata for every saved session | `core/session-manager.ts` (`listProjectSessions`, `listAllSessions`), `main.ts` | `session-arg-resolution.test.ts` |
+| Resolve `--session` and `--fork` ID prefixes, cross-project IDs and misses without parsing non-matching journals past their headers; matching sessions are still read in full because activity time orders ambiguous matches. Full `list()`/`listAll()` listings read journal lines directly and split them on `\n` exactly as opening a session does: a record containing a stray carriage return counts, and carriage returns alone do not separate records. Listings stay uncached and re-read every journal. Upstream reads listings through `readline` and still builds complete metadata for every saved session | `core/session-manager.ts` (`readSessionLines`, `listProjectSessions`, `listAllSessions`), `main.ts` | `session-arg-resolution.test.ts`, `session-manager/file-operations.test.ts` |
 | Lossless upload compression on qualified Anthropic Messages and public OpenAI Responses endpoints; existing Codex zstd stays canonical-endpoint-only. See [support boundaries and measurement](docs/compression.md) | `packages/ai/src/utils/request-compression.ts`, `packages/ai/src/api/{anthropic-messages,openai-responses,openai-codex-responses}.ts` | `packages/ai/test/{anthropic-request-compression,openai-request-compression,openai-codex-stream}.test.ts` |
 | Normalize tool declarations once per comparison, index model overlays per read, repair JSON by spans, and drain Codex events without repeated array shifts | `packages/agent/src/agent-loop.ts`, `packages/ai/src/{utils/transcript,utils/json-parse,models,api/openai-codex-responses}.ts` | `packages/agent/test/agent.test.ts`, `packages/ai/test/{system-message-replay,json-parse,model-types,openai-codex-websocket-queue}.test.ts` |
 | Stream long-token wrapping, use native grapheme endpoints, reuse only the current editor layout after comparing text, width and paste membership, and reuse unchanged same-index rows in unstyled Boxes after child changes | `packages/tui/src/{utils,components/editor,components/input,components/box}.ts` | `packages/tui/test/{wrap-ansi,editor,input,layout,mouse-components}.test.ts` |
@@ -267,9 +273,8 @@ The generated schemas are under `packages/coding-agent/schemas/` and use upstrea
 
 Package production uses the maintained `scripts/package-artifacts.mjs` and local consumer helpers,
 including npm 12's expected-package-keyed pack metadata. Selected workspaces pack in one npm process;
-Nix retains its ten raw named archives. Upstream's derivation has no source override for pi-schema,
-which its install lock lists without an integrity hash, so its Nix build fails to evaluate; the fork
-packs pi-schema and overrides it. Pinned fleet automation has migrated to the artifact API,
+Nix retains its ten raw named archives: the eight that upstream's derivation packs, plus chord and
+durable, which the fork's coding-agent depends on. Each has a source override. Pinned fleet automation has migrated to the artifact API,
 and the obsolete `scripts/coding-agent-consumer.mjs` shim has been removed.
 Retained offline comparison fixtures are documented in [Performance reproduction](docs/performance.md).
 
@@ -317,7 +322,7 @@ Client identity and attribution now follow pi-ai's native `ClientIdentity` and
 `withClientIdentity`, including the mutable wrapper's fork `getAvailability()` diagnostics.
 This is an upstream API migration, not retirement of a fork-only attribution engine.
 Headers returned by `before_provider_headers` retain object identity through custom-provider
-dispatch (required by Cursor); cache-trace provenance and prepared-retention warming remain.
+dispatch (required by Cursor); prepared-retention warming remains.
 Google adapters apply identity during client/header setup while sharing the existing stream engine.
 Upstream's unused SQLite replication scaffold is removed; Durable's IndexedDB storage is additive,
 not a replacement for the fork's memory/SQLite storage or scheduler semantics.
@@ -325,15 +330,15 @@ not a replacement for the fork's memory/SQLite storage or scheduler semantics.
 Streamed tool-call arguments now follow upstream's incremental `StreamingJsonParser` and
 `ToolCallArgumentsStream`. Providers keep scratch state off emitted content blocks. Final arguments
 still use the fork's span-based repair and existing fallback order, including native invalid `\u` repair. Anthropic requests use upstream message threads where supported;
-cache warming sets `disableContinuation` and retains the fork's prepared-auth timing and trace hooks. Anthropic and
+cache warming sets `disableContinuation` and retains the fork's prepared-auth timing. Anthropic and
 Bedrock Claude error-result images follow all tool results of the turn; error text and successful
 result images retain their native placement.
 These behaviors have offline parser/payload regression coverage, not a live provider qualification.
 `/share` supports an explicit gist or Radius destination; its default `auto` selection is unchanged.
 
 Anthropic native tool changes follow upstream's inline definitions and fixed initial tool list,
-including same-name redefinitions. The fork retains request-wide strict-schema budgets and passive
-cache tracing. Cross-model thinking removal and custom-overlay ownership follow upstream 1.3.0.
+including same-name redefinitions. The fork retains request-wide strict-schema budgets.
+Cross-model thinking removal and custom-overlay ownership follow upstream 1.3.0.
 The pure replay implementation is shared with target-aware output budgeting under `utils/`;
 the existing public API path remains available and entry-graph restrictions are unchanged.
 Catalog release validation follows upstream, with the fork's existing npm pack metadata
@@ -352,21 +357,20 @@ GPT-5.5 and older now follow upstream's top-level tool declarations after its re
 A parity test keeps both lists aligned with `catalog/families/openai.ts`. Explicit compatibility flags and whole cache metadata objects are preserved;
 catalog entries with a non-canonical `baseUrl` do not receive these defaults.
 
-Program status and prompt-length pricing tiers follow upstream 1.1.0. Kimi K3, including Kimi Coding's `k3-256k`, keeps
-the published $3/M five-minute cache-write rate across canonical Kimi Coding and
+Program status and prompt-length pricing tiers follow upstream 1.1.0. The Kimi K3 family (K3, including Kimi Coding's
+`k3-256k`, K3.1 Pro and K3.1 Pro Highspeed) keeps its published five-minute cache-write rate,
+which equals the input rate ($3/M, $2/M and $4/M), across canonical Kimi Coding and
 Moonshot OpenAI entries and Kimi Coding's implied estimate
-([pricing](https://platform.kimi.ai/docs/pricing/chat)). Kimi Coding's shared
-metadata helper also migrates canonical legacy Anthropic catalog entries and restores
-omitted K3 cache-write rates during offline hydration and fetched/cached runtime
-merges. Custom endpoints and other providers are unchanged. Claude 5.5 pricing now follows
+([pricing](https://platform.kimi.ai/docs/pricing/chat)). Published entries that list
+the rate as zero get it restored from their input rate during offline hydration and
+fetched/cached runtime merges. Custom endpoints and other providers are unchanged. Claude 5.5 pricing now follows
 models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
 Cache investigation keeps persistent restart guidance in its existing `context_with_system`
 owner, not the per-run `before_agent_start` hook. Forced text stays run-scoped and unpersisted. Child
 finalization recovery remains a conditional source risk: managed saved-session attempts create
 new contracts, and no reachable unchanged-contract reset was reproduced. Do not restore an old
-phase for a new contract or apply a speculative recovery patch. Passive tracing records unknown
-coverage explicitly; remove it when the investigation ends.
+phase for a new contract or apply a speculative recovery patch.
 
 ## Conventions
 

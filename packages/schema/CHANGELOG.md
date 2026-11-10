@@ -6,6 +6,8 @@
 
 - Fixed `coerce` and `parse` converting an optional `null` inside an `anyOf`/`oneOf` branch into a value (`"null"` for a string) instead of dropping it. A union that accepts the value as it is keeps its nulls.
 
+## [1.5.2] - 2026-11-10
+
 ## [1.5.1] - 2026-11-09
 
 ### Added

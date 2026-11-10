@@ -67,7 +67,7 @@ for (const limit of [4718592, 50000])
 add("ai", "ai-common", "ai.mjs", [
 	smoke ? "--smoke" : "--iterations=3",
 	`--samples=${samples}`,
-	"--cases=parse,repair,tools,transform,estimate,validate,frames,queued-frames,agent",
+	"--cases=parse,repair,tools,transform,estimate,validate,agent",
 ]);
 add("ai", "ai-queue-control", "ai.mjs", [
 	smoke ? "--smoke" : "--iterations=1",
@@ -106,28 +106,20 @@ add("tui", "tui-highlight", "tui.ts", ["stream"], {
 	REAL_HIGHLIGHT: "1",
 });
 add("tui", "mermaid-65536", "tui.ts", ["mermaid"], { N: smoke ? "2" : "40", SIZE: smoke ? "80" : "65536" });
-for (const mode of ["stdio", "sse"])
-	for (const size of smoke ? [4096] : [1048576, 8388608]) {
-		add("bridges", `${mode}-${size}`, "bridges.mjs", [
-			mode,
-			`--size=${size}`,
-			`--repeat=${samples}`,
-			...(smoke ? ["--smoke"] : []),
-		]);
-	}
-for (const mode of ["frame", "publish", "metadata", "sandbox", "json", "http-error"]) {
+for (const size of smoke ? [4096] : [1048576, 8388608])
+	add("bridges", `sse-${size}`, "bridges.mjs", [
+		"sse",
+		`--size=${size}`,
+		`--repeat=${samples}`,
+		...(smoke ? ["--smoke"] : []),
+	]);
+for (const mode of ["metadata", "sandbox", "json", "http-error"]) {
 	add("bridges", `bridge-${mode}`, "bridges.mjs", [
 		mode,
 		`--repeat=${samples}`,
 		...(smoke ? ["--smoke"] : mode === "http-error" ? ["--size=8388608"] : []),
 	]);
 }
-add("bridges", "publish-10000", "bridges.mjs", [
-	"publish",
-	`--iterations=${smoke ? 8 : 10000}`,
-	`--repeat=${samples}`,
-	...(smoke ? ["--smoke"] : []),
-]);
 for (const count of smoke ? [20] : [10000, 100000])
 	for (const mode of ["projection", "name", "branch", "boundary", "context"]) {
 		add("sessions", `sessions-${mode}-${count}`, "sessions.mts", [mode, ...(smoke ? ["--smoke"] : [])], {
@@ -203,7 +195,7 @@ add("biome", "biome-fallback", "biome.mjs", ["fallback"]);
 add("qualification", "ai-common-controls", "ai.mjs", [
 	smoke ? "--smoke" : "--iterations=3",
 	`--samples=${samples}`,
-	"--cases=transform,estimate,validate,frames",
+	"--cases=transform,estimate,validate",
 ]);
 add("qualification", "history-current-65536", "durable-history.ts", [
 	smoke ? "32" : "65536",

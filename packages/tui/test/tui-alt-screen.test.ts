@@ -2052,6 +2052,74 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("ends a selection drag released over an overlay that handles the release", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			const initialTop = tui.viewportTop;
+			terminal.sendInput("\x1b[<0;1;3M");
+			terminal.sendInput("\x1b[<32;1;1M");
+			await new Promise((resolve) => setTimeout(resolve, 130));
+			assert.ok(tui.viewportTop < initialTop);
+
+			// An overlay opens while the drag is held at the top edge, and its component handles the release.
+			const overlayEvents: string[] = [];
+			tui.showOverlay(
+				{
+					render: () => ["dialog"],
+					invalidate: () => {},
+					handleMouse: (event: TuiMouseEvent) => {
+						overlayEvents.push(event.type);
+						return { handled: true };
+					},
+				},
+				{ anchor: "top-left", width: 10 },
+			);
+			await terminal.waitForRender();
+			terminal.sendInput("\x1b[<0;1;1m");
+			assert.deepStrictEqual(overlayEvents, ["release"]);
+			const releasedTop = tui.viewportTop;
+
+			// With no button held, auto-scroll must not keep moving the transcript.
+			await new Promise((resolve) => setTimeout(resolve, 130));
+			assert.strictEqual(tui.viewportTop, releasedTop);
+			// The drag is over, so the selection is a completed one, which focus loss keeps.
+			terminal.sendInput("\x1b[O");
+			assert.strictEqual(tui.hasActiveSelection(), true);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("keeps a selection drag going when another button is released during it", async () => {
+		const terminal = new VirtualTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal);
+		tui.addChild(new Text(Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0));
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			terminal.sendInput("\x1b[<0;1;3M");
+			terminal.sendInput("\x1b[<32;1;1M");
+			await new Promise((resolve) => setTimeout(resolve, 130));
+
+			// The right button's release is not the release of the button that holds the drag.
+			terminal.sendInput("\x1b[<2;1;1m");
+			const topAfterOtherRelease = tui.viewportTop;
+			await new Promise((resolve) => setTimeout(resolve, 130));
+			assert.ok(tui.viewportTop < topAfterOtherRelease);
+
+			terminal.sendInput("\x1b[<0;1;1m");
+			const releasedTop = tui.viewportTop;
+			await new Promise((resolve) => setTimeout(resolve, 130));
+			assert.strictEqual(tui.viewportTop, releasedTop);
+		} finally {
+			tui.stop();
+		}
+	});
+
 	it("snaps mouse selection to CJK, emoji, and combining grapheme boundaries", async () => {
 		const terminal = new RecordingTerminal(20, 2);
 		const tui = new TuiAltScreen(terminal);

@@ -3,8 +3,8 @@
 // for a new hold, holders `failed { waiting }`) until `retry` or a rollout, a running worker's lost link recovered from
 // once a minute, idle stops and `busy`, `stop` and its suspension (a `ready` crossing it shows no `running`), the
 // per-address queue, `close`, the rollout step, stale lock files cleared, nothing kept of 1,000 addresses, and the worker
-// base (an edit after its build runs in no worker; a start waits for the build; a broken entry fails every start; close
-// keeps the files until its workers exited).
+// base (an edit after its build runs in no worker; forks without source maps; a start waits for the build; a broken
+// entry fails every start; close keeps the files until its workers exited).
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -92,6 +92,26 @@ describe('the worker base (decision "Workers start from the base code the server
 		expect(existsSync(forkedFrom)).toBe(true);
 		await workers.close(context);
 		expect(existsSync(forkedFrom)).toBe(false);
+		await rm(dir, { recursive: true, force: true });
+	});
+
+	it("forks without --enable-source-maps: Node parses no map of the base, whose maps lie beside its files", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "chord-workers-maps-"));
+		await writeFile(
+			join(dir, "entry.ts"),
+			[
+				`import ${JSON.stringify(ENTRY)};`,
+				'process.stdout.write(["maps", process.sourceMapsEnabled, process.argv[1]].join(" ") + "\\n");',
+			].join("\n"),
+		);
+		const { server, workers, output } = await fleet({ entry: join(dir, "entry.ts") });
+		const notes = await server.get(Notes, { id: "S1" }, context);
+		const line = output.find((each) => each.startsWith("session|S1 maps "));
+		const [, , enabled, forkedFrom] = line!.split(" ");
+		expect(enabled).toBe("false");
+		expect(existsSync(`${forkedFrom}.map`)).toBe(true);
+		notes.release();
+		await workers.close(context);
 		await rm(dir, { recursive: true, force: true });
 	});
 
@@ -257,18 +277,27 @@ describe("failures stay until retry or a rollout (R2)", () => {
 	});
 
 	it("the start timer covers only the start: a slow load after connecting is not killed (Q4)", async () => {
-		const { server, workers, behaviours } = await fleet();
+		// The app's `principal` hook runs once `started` arrived: the clock moves only after the worker connected, however
+		// long its process took to boot.
+		const started = Promise.withResolvers<void>();
+		const { server, workers, behaviours, errors } = await fleet({
+			principal: () => {
+				started.resolve();
+				return { kind: "worker", id: "S1" };
+			},
+		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		try {
 			behaviours.set("S1", { hang: true });
 			const notes = server.hold(Notes, { id: "S1" }, context);
-			await vi.waitFor(() => expect(stateOf(workers.state.value, "S1")?.status).toBe("starting"), {
-				timeout: 5_000,
-			});
-			await new Promise((resolve) => setImmediate(resolve));
+			await started.promise;
 			await vi.advanceTimersByTimeAsync(120_000);
 			expect(stateOf(workers.state.value, "S1")?.status).toBe("starting");
 			expect(notes.state.value.kind).toBe("loading");
+			// A start timer that fired kills the worker, and the kill's exit is told later: the stop waits for the exit,
+			// which fails the address (`worker_failed`) when the timer killed it.
+			await workers.stop(Session({ id: "S1" }), context);
+			expect(errors).toEqual([]);
 			notes.release();
 		} finally {
 			vi.useRealTimers();

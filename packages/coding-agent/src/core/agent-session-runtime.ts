@@ -75,6 +75,30 @@ type RuntimeParts = Pick<
 type RuntimeState = { kind: "live" | "tornDown"; parts: RuntimeParts };
 
 /**
+ * How long an ordinary quit waits for the turn it interrupts to settle, so that a tool that ignores
+ * cancellation cannot hold the exit. The slowest built-in tool settles about 100 ms after its abort (a
+ * killed shell whose output pipe a surviving child still holds, `EXIT_STDIO_GRACE_MS`); the others take
+ * a few milliseconds. The whole exit has to fit into the 1000 ms after which `RpcClient.stop()` kills
+ * the process.
+ */
+const QUIT_TURN_SETTLE_MS = 500;
+
+/** Wait for `work`, but no longer than `ms`. Work still running by then finishes on its own. */
+async function settleWithin(work: Promise<void>, ms: number): Promise<void> {
+	let timer: NodeJS.Timeout | undefined;
+	try {
+		await Promise.race([
+			work,
+			new Promise<void>((resolve) => {
+				timer = setTimeout(resolve, ms);
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
  * Owns the current AgentSession plus its cwd-bound services.
  *
  * Session replacement methods tear down the current runtime first, then create
@@ -433,9 +457,12 @@ export class AgentSessionRuntime {
 	}
 
 	/**
-	 * Dispose the session for process exit. Also waits for credential writes in progress: an OAuth
-	 * refresh may already have spent the old single-use refresh token, so exiting before the new one
-	 * is saved would lose the login (#11692). `disposition` is read when the quit event is built; see
+	 * Dispose the session for process exit. The active turn is aborted first, so that the results of
+	 * the tools it interrupts are saved before the session disconnects (#9124). Strict shutdown waits
+	 * for the turn without a limit; an ordinary quit waits at most {@link QUIT_TURN_SETTLE_MS} and runs
+	 * the shutdown handlers meanwhile. Also waits for credential writes in progress: an OAuth refresh
+	 * may already have spent the old single-use refresh token, so exiting before the new one is saved
+	 * would lose the login (#11692). `disposition` is read when the quit event is built; see
 	 * {@link SessionShutdownEvent.disposition}. A torn-down session still runs finalization and
 	 * settles credential writes, without repeating shutdown.
 	 */
@@ -455,7 +482,10 @@ export class AgentSessionRuntime {
 					await session.abort();
 					await session.extensionRunner.emitShutdownStrict(event);
 				} else {
-					await emitSessionShutdownEvent(session.extensionRunner, event);
+					// The handlers run while the turn settles: a tool that ignores cancellation must not
+					// delay them, and one that ends when a handler stops its work still gets its result saved.
+					const turnSettled = settleWithin(session.abort(), QUIT_TURN_SETTLE_MS);
+					await Promise.all([emitSessionShutdownEvent(session.extensionRunner, event), turnSettled]);
 				}
 			}
 			await this.finalization?.(session);

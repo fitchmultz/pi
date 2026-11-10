@@ -273,10 +273,26 @@ describe("builtin providers", () => {
 		}
 	});
 
+	it("prices Kimi K3.1 cache writes at the published five-minute rate", () => {
+		// https://platform.kimi.ai/docs/pricing/chat: 5m writes cost $2.00 and $4.00 per million tokens.
+		const models = builtinModels();
+		expect(models.getModel("moonshotai", "kimi-k3.1-pro")?.cost.cacheWrite).toBe(2);
+		expect(models.getModel("moonshotai", "kimi-k3.1-pro-highspeed")?.cost.cacheWrite).toBe(4);
+		// https://platform.kimi.com/docs/pricing/chat lists the China rates in CNY, which models.dev
+		// converts: 5min writes cost the input rate there too.
+		for (const modelId of ["kimi-k3.1-pro", "kimi-k3.1-pro-highspeed"]) {
+			const cost = models.getModel("moonshotai-cn", modelId)?.cost;
+			expect(cost?.cacheWrite, modelId).toBeGreaterThan(0);
+			expect(cost?.cacheWrite, modelId).toBe(cost?.input);
+		}
+	});
+
 	it("uses API-equivalent implied pricing for Kimi Coding subscription models", () => {
 		const models = builtinModels();
 		const expectedCosts = {
 			k3: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 },
+			"k3.1-pro": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2 },
+			"k3.1-pro-highspeed": { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 4 },
 			"kimi-for-coding-highspeed": { input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 },
 		};
 

@@ -38,7 +38,6 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
-import { createCacheTrace } from "../utils/cache-trace.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { withCauseDetail } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -113,7 +112,7 @@ function getCacheControl(
 }
 
 // Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.280";
+const claudeCodeVersion = "2.1.322";
 
 // Claude Code 2.x tool names (canonical casing)
 // Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
@@ -844,10 +843,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 
 		try {
 			let client: Anthropic;
-			const trace = createCacheTrace(model, options, undefined, () => ({
-				...model.compat,
-				...getAnthropicCompat(model),
-			}));
 			let isOAuth: boolean;
 			let usageModel = model;
 			let inputTransformations: BetaInputTransformation[] | undefined;
@@ -861,8 +856,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			if (options?.client) {
 				client = options.client;
 				isOAuth = false;
-				trace?.gap("injected_client_wire_unobserved");
-				trace?.gap("logical_capture_incomplete");
 			} else {
 				const apiKey = options?.apiKey;
 				const federation = getAnthropicFederation(model, apiKey, options?.headers, options?.env);
@@ -881,7 +874,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					model,
 					apiKey,
 					options?.headers,
-					federation ? options?.fetch : createRequestCompressionFetch("anthropic-messages", options?.fetch, trace),
+					federation ? options?.fetch : createRequestCompressionFetch("anthropic-messages", options?.fetch),
 					copilotDynamicHeaders,
 					cacheSessionId,
 					federation,
@@ -891,7 +884,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				// Keep the federation owner's shared credential cache and original fetch identity.
 				if (federation)
 					client = client.withOptions({
-						fetch: createRequestCompressionFetch("anthropic-messages", options?.fetch, trace),
+						fetch: createRequestCompressionFetch("anthropic-messages", options?.fetch),
 					});
 				isOAuth = created.isOAuthToken;
 			}
@@ -901,17 +894,11 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				maxRetries: 0,
 			};
 			const send = (body: ThreadedParams) =>
-				retryProviderRequest(
-					() => {
-						if (options?.client) trace?.attempt("sse");
-						return client.beta.messages.create(body, requestOptions).asResponse();
-					},
-					{
-						maxRetries: options?.maxRetries,
-						maxRetryDelayMs: options?.maxRetryDelayMs,
-						signal: options?.signal,
-					},
-				);
+				retryProviderRequest(() => client.beta.messages.create(body, requestOptions).asResponse(), {
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				});
 			let disablePreferredStrictTools = hasExceededStrictToolLimits(options?.sessionId);
 			let response: Response;
 			let params: MessageCreateParamsStreaming;
@@ -925,7 +912,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				});
 				if (built.providerThinkingLevel) output.providerThinkingLevel = built.providerThinkingLevel;
 				params = built.params;
-				trace?.payloadPass();
 				const nextParams = await options?.onPayload?.(params, model);
 				if (nextParams !== undefined) {
 					params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
@@ -970,7 +956,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			const openBlocks = new Map<number, OpenBlock>();
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
-				trace?.terminal(event);
 				await options?.onProviderStreamEvent?.(event, model);
 				if (event.type === "message_start") {
 					output.responseId = event.message.id;
@@ -996,7 +981,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(usageModel, output.usage);
-					trace?.parsed(output.usage);
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "fallback") {
 						if (output.content.length > 0) {
@@ -1162,7 +1146,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							event.usage as typeof event.usage & OpenRouterUsageAccounting,
 						);
 					}
-					trace?.parsed(output.usage, Boolean(event.usage));
 				}
 			}
 

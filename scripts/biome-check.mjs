@@ -5,7 +5,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { matchesGlob, posix } from "node:path";
+import { basename, matchesGlob, resolve } from "node:path";
 
 const write = process.argv.includes("--write");
 
@@ -27,27 +27,28 @@ const { MemoryFileSystem, main, Workspace } = createRequire(import.meta.url)("@b
 // A negated pattern also excludes everything below a matching directory.
 const configuration = JSON.parse(readFileSync("biome.json", "utf8"));
 const patterns = configuration.files?.includes ?? ["**"];
-const files = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+const projectFiles = execFileSync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
 	encoding: "utf8",
 })
 	.split("\0")
-	.filter(Boolean)
-	.filter((path) => {
-		let included = false;
-		for (const pattern of patterns) {
-			if (pattern.startsWith("!")) {
-				const glob = pattern.replace(/^!+/, "");
-				if (matchesGlob(path, glob) || matchesGlob(path, `${glob}/**`)) included = false;
-			} else if (matchesGlob(path, pattern)) {
-				included = true;
-			}
+	.filter(Boolean);
+const files = projectFiles.filter((path) => {
+	let included = false;
+	for (const pattern of patterns) {
+		if (pattern.startsWith("!")) {
+			const glob = pattern.replace(/^!+/, "");
+			if (matchesGlob(path, glob) || matchesGlob(path, `${glob}/**`)) included = false;
+		} else if (matchesGlob(path, pattern)) {
+			included = true;
 		}
-		return included;
-	});
+	}
+	return included;
+});
 
-// The WASM workspace cannot read the disk. GritQL plugins referenced by
-// biome.json must be preloaded into its in-memory file system, keyed by the
-// configured path relative to the project ("./a.grit" becomes "a.grit").
+// The WASM workspace cannot read the disk. What it needs from the project is
+// preloaded into its in-memory file system by absolute path, as the CLI
+// addresses files: the GritQL plugins referenced by biome.json, then the
+// package manifests.
 main();
 const fileSystem = new MemoryFileSystem();
 const plugins = new Set([
@@ -55,11 +56,20 @@ const plugins = new Set([
 	...(configuration.overrides ?? []).flatMap((override) => override.plugins ?? []),
 ]);
 for (const plugin of plugins) {
-	fileSystem.insert(posix.normalize(plugin), readFileSync(plugin));
+	fileSystem.insert(resolve(plugin), readFileSync(plugin));
+}
+// Biome enables a rule domain (React, test runners) for a file when the
+// nearest package.json declares a matching dependency. The CLI finds those
+// manifests by scanning the project on disk; the same scan runs below over
+// the in-memory copies. Biome looks a file's manifest up along the ancestors
+// of its path, so checked files are opened by absolute path too.
+for (const path of projectFiles) {
+	if (basename(path) === "package.json") fileSystem.insert(resolve(path), readFileSync(path));
 }
 const workspace = Workspace.withFileSystem(fileSystem);
 const { projectKey } = workspace.openProject({ path: process.cwd(), openUninitialized: true });
-workspace.updateSettings({ projectKey, configuration, workspaceDirectory: "./" });
+workspace.updateSettings({ projectKey, configuration, workspaceDirectory: process.cwd() });
+workspace.scanProject({ projectKey, scanKind: "knownFiles", force: false, verbose: false, watch: false });
 
 function withFile(path, content, run) {
 	workspace.openFile({ projectKey, path, content: { type: "fromClient", content, version: 0 } });
@@ -82,7 +92,8 @@ function supported(path) {
 let failures = 0;
 let checked = 0;
 try {
-	for (const path of files) {
+	for (const file of files) {
+		const path = resolve(file);
 		if (!supported(path)) continue;
 		const original = readFileSync(path, "utf8");
 		const fixed = write
@@ -117,16 +128,16 @@ try {
 			// Biome's WASM build reports its version as 0.0.0. Keep the real
 			// schema URL for editors, but ignore only this spurious mismatch.
 			if (
-				path === "biome.json" &&
+				file === "biome.json" &&
 				diagnostic.category === "deserialize" &&
 				diagnostic.description === "The configuration schema version does not match the CLI version 0.0.0"
 			)
 				continue;
-			console.error(`${path}: ${diagnostic.severity} ${diagnostic.category ?? ""}: ${diagnostic.description}`);
+			console.error(`${file}: ${diagnostic.severity} ${diagnostic.category ?? ""}: ${diagnostic.description}`);
 			failures++;
 		}
 		if (!write && formatted !== original) {
-			console.error(`${path}: formatting differs (run with --write)`);
+			console.error(`${file}: formatting differs (run with --write)`);
 			failures++;
 		}
 		checked++;

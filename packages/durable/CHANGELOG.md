@@ -21,6 +21,8 @@
 - SQLite refuses oversized input and write admissions without failing the Session. An already queued input whose encoded entry cannot fit settles `unanswered` with `input_too_large`, preserving the current answer and allowing valid queued inputs to continue. Actual commit and uncertain storage failures remain fatal.
 - Fixed a native `NodeExecutionEnv.watch` that falls back to polling while it starts, because the system is out of watches or file descriptors, scanning twice per poll interval and keeping a poll timer for one interval after `stop()`.
 
+## [1.5.2] - 2026-11-10
+
 ## [1.5.1] - 2026-11-09
 
 ### Added

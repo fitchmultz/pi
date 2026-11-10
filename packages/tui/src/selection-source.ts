@@ -102,6 +102,28 @@ export class SourceText {
 	}
 }
 
+// Set only while a renderer that reads selection sources renders its components.
+let readerRendering = false;
+
+/**
+ * Run a render whose Text and Markdown lines carry selection sources. Only for a renderer that reads the sources and
+ * removes their markers before output. Every other caller of render() gets lines without private markers.
+ */
+export function renderForSelectionReader<T>(render: () => T): T {
+	const outer = readerRendering;
+	readerRendering = true;
+	try {
+		return render();
+	} finally {
+		readerRendering = outer;
+	}
+}
+
+/** Whether the current render is for a selection reader, so components attach sources to their lines. */
+export function isRenderingForSelectionReader(): boolean {
+	return readerRendering;
+}
+
 let nextSourceId = 0;
 const sourceRecords = new Map<number, WeakRef<SelectionSource>>();
 const sourceCleanup = new FinalizationRegistry<number>((id) => sourceRecords.delete(id));
