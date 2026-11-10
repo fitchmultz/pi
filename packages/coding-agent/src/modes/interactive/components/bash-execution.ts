@@ -27,7 +27,9 @@ export class BashExecutionComponent extends Container {
 	private fullOutputPath?: string;
 	private expanded = false;
 	private compactView: boolean;
-	private compactPreview?: { width: number; lines: string[]; components: Text[] };
+	// The collapsed compact card. `lines` follow the lines its Texts return, so they change with them: between a
+	// fullscreen frame and other callers, as well as for a new width.
+	private compactPreview?: { width: number; components: Text[]; sources: string[][]; lines: string[] };
 	private contentContainer: Container;
 	/** `dim` marks `!!` commands, whose output is excluded from the model context. */
 	private readonly colorKey: "dim" | "bashMode";
@@ -98,7 +100,17 @@ export class BashExecutionComponent extends Container {
 
 	override render(width: number): string[] {
 		if (!this.compactView || this.expanded) return super.render(width);
-		if (this.compactPreview?.width === width) return this.compactPreview.lines;
+		const preview = this.compactPreview?.width === width ? this.compactPreview : this.createCompactPreview(width);
+		this.compactPreview = preview;
+		const sources = preview.components.map((component) => component.render(width));
+		if (sources.some((lines, index) => lines !== preview.sources[index])) {
+			preview.sources = sources;
+			preview.lines = sources.flat();
+		}
+		return preview.lines;
+	}
+
+	private createCompactPreview(width: number): NonNullable<BashExecutionComponent["compactPreview"]> {
 		const command = theme.fg(this.colorKey, theme.bold(`$ ${this.command.replace(/\s+/g, " ")}`));
 		const status =
 			this.status === "running"
@@ -113,9 +125,7 @@ export class BashExecutionComponent extends Container {
 		const components = (detail ? [command, detail] : [command]).map(
 			(line) => new Text(truncateToWidth(line, Math.max(1, width - this.outputPad * 2)), this.outputPad, 0),
 		);
-		const lines = components.flatMap((component) => component.render(width));
-		this.compactPreview = { width, lines, components };
-		return lines;
+		return { width, components, sources: [], lines: [] };
 	}
 
 	setOutputPad(outputPad: number): void {

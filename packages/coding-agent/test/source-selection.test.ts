@@ -97,13 +97,17 @@ describe("source selection in native renderers", () => {
 		const shell = new BashExecutionComponent("printf", tui);
 		shell.appendOutput("shell\toutput");
 		shell.setComplete(0, false);
+		const compactShell = new BashExecutionComponent("printf", tui, false, 1, true);
+		compactShell.appendOutput("small\toutput");
+		compactShell.setComplete(0, false);
 		tui.addChild(preview);
 		tui.addChild(shell);
+		tui.addChild(compactShell);
 		tui.start();
 		try {
 			await terminal.waitForRender();
 			expect(preview.render(40)).toEqual([`tool   output${" ".repeat(27)}`]);
-			for (const line of shell.render(40)) expect(line).not.toContain("\x1b]pi:");
+			for (const line of [...shell.render(40), ...compactShell.render(40)]) expect(line).not.toContain("\x1b]pi:");
 			tui.requestRender();
 			await terminal.waitForRender();
 			const copy = (first: string) => {
@@ -117,6 +121,7 @@ describe("source selection in native renderers", () => {
 			};
 			expect(copy("tool")).toBe("tool\toutput");
 			expect(copy("shell")).toBe("shell\toutput");
+			expect(copy("small")).toBe("small\toutput");
 		} finally {
 			tui.stop();
 		}
