@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { getDocsPath, getExamplesPath, getReadmePath } from "@earendil-works/pi-coding-agent";
+import { getPackageDir } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { buildSystemPrompt } from "../../coding-agent/src/core/system-prompt.ts";
 import {
@@ -85,9 +85,8 @@ describe("documentation variant", () => {
 		expect(stripped).not.toContain("<docs>");
 		expect(stripped).not.toContain("Pi documentation");
 		expect(stripped).not.toContain("docs/models.md");
-		expect(stripped).not.toContain(getReadmePath());
-		expect(stripped).not.toContain(getDocsPath());
-		expect(stripped).not.toContain(getExamplesPath());
+		expect(prompt).toContain(getPackageDir());
+		expect(stripped).not.toContain(getPackageDir());
 	});
 
 	it("verifies the prompt that was sent", () => {

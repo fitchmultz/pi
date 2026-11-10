@@ -884,6 +884,7 @@ function createModelGlobals(
 		return result;
 	};
 	const implementations: Record<string, CodemodeTool["execute"]> = {
+		"models.docs": () => CODEMODE_DOCS_PATH,
 		"models.getModelsOfType": (args) => {
 			const [type, provider] = args as unknown[];
 			return models.getModelsOfType(toModelType(type), toProvider(provider)).map(toModelInfo);

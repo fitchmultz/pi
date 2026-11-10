@@ -53,7 +53,9 @@ export function createBackgroundCommandTool(
 			"Start a detached shell command, inspect status/output, or cancel it. Jobs and raw logs survive Pi exit/restart. Automatic completion reports status and logFile, with no output on success and up to 2KB/20 lines otherwise. Delivered after the foreground tool batch or when this session is idle or resumed. Explicit status includes up to 16KB/100 lines; read logFile for full output.",
 		promptSnippet: "Run long commands without blocking; receive completion automatically, including after restart",
 		promptGuidelines: [
-			"Use background_command for long builds, tests and watches instead of & or polling; completion resumes the session, so keep working or end the turn.",
+			"Use background_command for long builds, tests and watches instead of &.",
+			"After starting a job, do not sleep or poll its log. If nothing else is left, end the turn: the completion message wakes this session, and ending the turn does not end the task.",
+			"To look at progress once, call background_command status with the job id.",
 			...(hostWaits
 				? []
 				: ["Print-mode runs can exit before a job finishes; use bash when that run needs the result."]),
