@@ -4271,7 +4271,6 @@ export class InteractiveMode {
 				break;
 			}
 			case "compactionSummary": {
-				this.chatContainer.addChild(new Spacer(1));
 				const component = new CompactionSummaryMessageComponent(
 					message,
 					this.getMarkdownThemeWithSettings(),
@@ -4279,13 +4278,13 @@ export class InteractiveMode {
 					this.getMarkdownTransformers(),
 					options?.messageId,
 					options?.timestamp,
+					!!this.compactView,
 				);
 				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
 				break;
 			}
 			case "branchSummary": {
-				this.chatContainer.addChild(new Spacer(1));
 				const component = new BranchSummaryMessageComponent(
 					message,
 					this.getMarkdownThemeWithSettings(),
@@ -4293,6 +4292,7 @@ export class InteractiveMode {
 					this.getMarkdownTransformers(),
 					options?.messageId,
 					options?.timestamp,
+					!!this.compactView,
 				);
 				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
@@ -5045,7 +5045,9 @@ export class InteractiveMode {
 					child instanceof BashExecutionComponent ||
 					child instanceof AssistantMessageComponent ||
 					child instanceof CustomMessageComponent ||
-					child instanceof CustomEntryComponent
+					child instanceof CustomEntryComponent ||
+					child instanceof CompactionSummaryMessageComponent ||
+					child instanceof BranchSummaryMessageComponent
 				)
 					child.setCompactView(!!compactView);
 			}
