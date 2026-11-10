@@ -125,31 +125,36 @@ describe("Anthropic strict tool schemas", () => {
 					},
 				},
 			).result();
-			if (strict === "require") {
-				expect(payload).toBeUndefined();
-				expect(result.errorMessage).toContain("exceeds Anthropic's strict tool limits");
-			} else {
-				expect(payload?.tools?.[0]).toMatchObject({ name: initial.name, strict: true });
-				expect(payload?.tools?.[0].input_schema.properties).toHaveProperty("value");
-				expect(payload?.tools).toHaveLength(2);
-				const definitions = payload?.messages.flatMap((message) =>
+			expect(result.errorMessage).toBe("payload captured");
+			expect(payload?.tools?.[0]).toMatchObject({ name: initial.name, strict: true });
+			expect(payload?.tools?.[0].input_schema.properties).toHaveProperty("value");
+			expect(payload?.tools).toHaveLength(2);
+			const definitions =
+				payload?.messages.flatMap((message) =>
 					typeof message.content === "string"
 						? []
 						: message.content.flatMap((block) =>
 								block.type === "tool_addition" && block.tool?.definition ? [block.tool.definition] : [],
 							),
-				);
-				expect(definitions?.filter((tool) => tool.strict)).toHaveLength(limit - 1);
-				expect(definitions?.at(-1)).toMatchObject({ name: initial.name });
-				expect(definitions?.at(-1)?.strict).toBeUndefined();
-				expect(definitions?.at(-1)?.input_schema.properties).toHaveProperty("replacement");
-			}
+				) ?? [];
+			expect(definitions).toHaveLength(limit);
+			expect(definitions.at(-1)).toMatchObject({ name: initial.name });
+			expect(definitions.at(-1)?.input_schema.properties).toHaveProperty("replacement");
+			// One definition is over the budget. A preferred redefinition is itself sent non-strict; a required one
+			// stays strict and the last preferred tool before it gives way.
+			const relaxed = strict === "prefer" ? limit - 1 : limit - 2;
+			expect(definitions.map((definition) => definition.strict === true)).toEqual(
+				definitions.map((_, index) => index !== relaxed),
+			);
 		},
 	);
 
-	it.each(["prefer", "require"] as const)(
-		"budgets strict unions without silently relaxing %s tools",
-		async (strict) => {
+	it.each([
+		{ strict: "prefer", relaxed: 16 },
+		{ strict: "require", relaxed: 15 },
+	] as const)(
+		"sends tool_$relaxed non-strict when the last of 17 strict union tools is a $strict tool",
+		async ({ strict, relaxed }) => {
 			const tools = Array.from({ length: 17 }, (_, index) => ({
 				...createStrictTool(Type.Object({ value: Type.Optional(Type.String()) })),
 				name: `tool_${index}`,
@@ -170,15 +175,39 @@ describe("Anthropic strict tool schemas", () => {
 					},
 				},
 			).result();
-			if (strict === "require") {
-				expect(payload).toBeUndefined();
-				expect(result.errorMessage).toContain("exceeds Anthropic's strict tool limits");
-			} else {
-				expect(payload?.tools?.filter((tool) => tool.strict)).toHaveLength(16);
-				expect(payload?.tools?.[16].strict).toBeUndefined();
-			}
+			expect(result.errorMessage).toBe("payload captured");
+			expect(payload?.tools?.map((tool) => tool.strict === true)).toEqual(
+				tools.map((_, index) => index !== relaxed),
+			);
 		},
 	);
+
+	it.each([
+		{ limit: "20 strict tools", count: 21, optional: false },
+		{ limit: "16 union parameters", count: 17, optional: true },
+	])("fails before sending when the required tools alone exceed $limit", async ({ count, optional }) => {
+		const value = optional ? Type.Optional(Type.String()) : Type.String();
+		const tools = Array.from({ length: count }, (_, index) => ({
+			...createTool(Type.Object({ value }), { type: "json_schema", strict: "require" }),
+			name: `tool_${index}`,
+		}));
+		let payload: AnthropicToolPayload | undefined;
+		const result = await streamAnthropic(
+			createModel(),
+			normalizeContext({ messages: [{ role: "user", content: "test", timestamp: 0 }], tools }),
+			{
+				apiKey: "test-key",
+				onPayload: (value) => {
+					payload = value as AnthropicToolPayload;
+					throw new PayloadCaptured();
+				},
+			},
+		).result();
+		expect(payload).toBeUndefined();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain(`Tool "tool_${count - 1}" requires strict sampling`);
+	});
+
 	it("only sends the full input schema for strict JSON-schema tools", async () => {
 		const legacyParameters = Type.Object(
 			{ value: Type.String() },
