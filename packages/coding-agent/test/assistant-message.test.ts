@@ -204,11 +204,29 @@ describe("AssistantMessageComponent", () => {
 		expect(collapsed).toContain("second reasoning");
 
 		component.setHiddenThinkingLabel("Reasoning hidden");
+		// A run collapsed by a click keeps its label in compact view: the label is where a click expands it again.
 		component.setCompactView(true);
+		const clickRow = (text: string) => {
+			const rows = component.render(width);
+			const y = rows.findIndex((line) => stripAnsi(line).includes(text));
+			expect(y).toBeGreaterThanOrEqual(0);
+			return component.handleMouse({ ...event, y, screenY: y, height: rows.length });
+		};
 		const compact = stripAnsi(component.render(width).join("\n"));
-		expect(compact).not.toContain("Reasoning hidden");
+		expect(compact).toContain("Reasoning hidden");
+		expect(compact).not.toContain("first reasoning");
 		expect(compact).toContain("second reasoning");
 		expect(compact).toContain("later paragraph");
+		expect(clickRow("Reasoning hidden")?.handled).toBe(true);
+		expect(stripAnsi(component.render(width).join("\n"))).toContain("first reasoning");
+
+		// With an empty label a collapsed run has no row to click, so a click leaves the run open.
+		component.setHiddenThinkingLabel("");
+		expect(clickRow("first reasoning")?.handled).not.toBe(true);
+		expect(stripAnsi(component.render(width).join("\n"))).toContain("first reasoning");
+
+		component.setHiddenThinkingLabel("Reasoning hidden");
+		expect(clickRow("first reasoning")?.handled).toBe(true);
 		component.setCompactView(false);
 		expect(stripAnsi(component.render(width).join("\n"))).toContain("Reasoning hidden");
 		component.setHideThinkingBlock(false);
