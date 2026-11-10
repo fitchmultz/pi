@@ -71,6 +71,7 @@ import {
 import {
 	getJsonSchemaToolParameters,
 	prefersJsonSchemaStrictSampling,
+	requiresJsonSchemaStrictSampling,
 	resolveJsonSchemaStrictSampling,
 } from "./constrained-sampling.ts";
 import {
@@ -80,9 +81,11 @@ import {
 	clampReasoning,
 } from "./simple-options.ts";
 import {
+	admitStrictTool,
 	hasExceededStrictToolLimits,
 	isStrictToolLimitErrorMessage,
 	markStrictToolLimitsExceeded,
+	startStrictToolBudget,
 } from "./strict-tool-limits.ts";
 import { splitErrorToolResultImages, transformMessages } from "./transform-messages.ts";
 
@@ -259,7 +262,6 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 		let responseRequestId: string | undefined;
 
 		try {
-			const supportsStrictMode = model.compat?.supportsStrictMode ?? false;
 			const client = new BedrockRuntimeClient(config);
 			let observedRawResponse = false;
 			if (options.onResponse) {
@@ -281,7 +283,7 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 				const tools = convertToolConfig(
 					getCurrentTools(normalizedContext.messages),
 					options.toolChoice,
-					supportsStrictMode,
+					model,
 					disablePreferredStrictTools,
 				);
 				let commandInput = {
@@ -1189,25 +1191,32 @@ function convertMessages(
 function convertToolConfig(
 	tools: Tool[] | undefined,
 	toolChoice: BedrockOptions["toolChoice"],
-	supportsStrictMode: boolean,
+	model: Model<"bedrock-converse-stream">,
 	disablePreferredStrictTools: boolean,
 ): { toolConfig: ToolConfiguration | undefined; hasPreferredStrictTools: boolean } {
 	if (!tools?.length || toolChoice === "none") return { toolConfig: undefined, hasPreferredStrictTools: false };
 
+	const supportsStrictMode = model.compat?.supportsStrictMode ?? false;
+	const resolveStrict = (tool: Tool): boolean | undefined =>
+		disablePreferredStrictTools && prefersJsonSchemaStrictSampling(tool)
+			? undefined
+			: resolveJsonSchemaStrictSampling(tool, supportsStrictMode);
+	// Only Claude has known request-wide strict tool limits. Other models get every strict tool they support.
+	const strictBudget = isAnthropicClaudeModel(model)
+		? startStrictToolBudget(
+				tools.filter((tool) => requiresJsonSchemaStrictSampling(tool) && resolveStrict(tool) === true),
+			)
+		: undefined;
 	let hasPreferredStrictTools = false;
 	const bedrockTools: BedrockTool[] = tools.map((tool) => {
-		const preferred = prefersJsonSchemaStrictSampling(tool);
-		const strict =
-			disablePreferredStrictTools && preferred
-				? undefined
-				: resolveJsonSchemaStrictSampling(tool, supportsStrictMode);
-		if (strict === true && preferred) hasPreferredStrictTools = true;
+		const strict = resolveStrict(tool) === true && (!strictBudget || admitStrictTool(strictBudget, tool));
+		if (strict && prefersJsonSchemaStrictSampling(tool)) hasPreferredStrictTools = true;
 		return {
 			toolSpec: {
 				name: tool.name,
 				description: tool.description,
 				inputSchema: { json: getJsonSchemaToolParameters(tool, strict) as unknown as DocumentType },
-				...(strict === true ? { strict: true } : {}),
+				...(strict ? { strict: true } : {}),
 			},
 		};
 	});
