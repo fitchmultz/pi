@@ -466,6 +466,22 @@ export default function(pi) {
 		expect(f.isFullscreen()).toBe(false);
 		expect(existsSync(socketPath)).toBe(false);
 		expect(existsSync(`${socketPath}.guard`)).toBe(false);
+		// The journal records both workers' starts: one launcher, two processes, the replacement's
+		// record ahead of the continuation it ran.
+		const entries: Array<{ customType?: string; data?: { process: object }; message?: { role: string } }> =
+			readFileSync(first.sessionFile, "utf8")
+				.split("\n")
+				.filter(Boolean)
+				.map((line) => JSON.parse(line));
+		const records = entries.filter((entry) => entry.customType === "pi.runtime");
+		expect(records.map((entry) => entry.data?.process)).toEqual([
+			{ pid: first.pid, mode: "tui", launcherPid: first.owner },
+			{ pid: second.pid, mode: "tui", launcherPid: first.owner },
+		]);
+		const continuation = entries.findIndex(
+			(entry) => entry.message?.role === "user" && JSON.stringify(entry).includes("Continue after nested workers"),
+		);
+		expect(entries.indexOf(records[1]!)).toBe(continuation - 1);
 	}, 60_000);
 
 	it.each([false, true])(

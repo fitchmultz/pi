@@ -141,8 +141,13 @@ jobs:
 
       - name: Restart, background_command, bash abort and bash timeout tests
         working-directory: packages/coding-agent
-        # Avoid CPU/I/O contention between the large-journal and launcher subprocess tests.
-        run: ../../test.sh -- node ../../node_modules/vitest/dist/cli.js --run --no-file-parallelism restart background-command bash-abort-process-group 11613-bash-timeout-after-shell-exit
+        # Vitest takes 3 minutes here on a usual runner and took 9 on the slowest one seen. The limit is
+        # three times that, rounded up, so a test process that hangs fails the job instead of holding it.
+        timeout-minutes: 30
+        # Avoid CPU/I/O contention between the large-journal and launcher subprocess tests. The verbose
+        # reporter prints each test and its duration when it ends; the default dot reporter prints
+        # nothing until the run ends, which leaves no trace of where a hung or slow run stopped.
+        run: ../../test.sh -- node ../../node_modules/vitest/dist/cli.js --run --no-file-parallelism --reporter=verbose --reporter=github-actions restart background-command bash-abort-process-group 11613-bash-timeout-after-shell-exit
 
       - name: Case-insensitive workspace build and release liveness
         run: ./test.sh -- node --test scripts/workspace-build.test.mjs scripts/fork-release-liveness.test.mjs

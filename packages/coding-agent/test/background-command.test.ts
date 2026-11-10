@@ -1,9 +1,10 @@
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	backgroundCommandFinished,
@@ -16,15 +17,15 @@ import {
 import { getShellEnv } from "../src/utils/shell.ts";
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
+/** Polls until `condition` holds. Only the test's timeout limits the wait, so a slow machine cannot fail it early. */
 async function until(condition: () => boolean) {
-	for (let i = 0; i < 240; i++) {
-		if (condition()) return;
-		await delay(25);
-	}
-	throw new Error("Timed out waiting for background worker");
+	while (!condition()) await delay(25);
 }
 
-describe("detached background commands", () => {
+// Every test here starts a detached worker process from TypeScript source, one of them through a
+// launcher process. The slowest takes 0.4 s on an idle machine and 23 s on one starved enough to
+// reproduce the CI timeouts. The limit is three times that, rounded up to a minute.
+describe("detached background commands", { timeout: 120_000 }, () => {
 	let root: string;
 	let jobs: string;
 	beforeEach(() => {
@@ -72,7 +73,12 @@ describe("detached background commands", () => {
 				: `printf 'before stop\\n'; printf '%s\\n' "$$" > ${quote(childPids)}; "$BASH" -c ${quote(nested)}; printf 'should not run\\n'; printf 'outer\\n' >> ${quote(continued)}`,
 			kind === "timeout" ? { timeout: windows ? 0.5 : 2 } : {},
 		);
-		await until(() => existsSync(windows ? childPids : ready));
+		// Starting the children takes 0.07 s on an idle machine and up to 7 s on a starved one, where the
+		// job's timeout can end it first. The children it did start must still be gone.
+		await until(
+			() =>
+				existsSync(windows ? childPids : ready) || backgroundCommandFinished(readBackgroundCommand(jobs, job.id)),
+		);
 		if (kind === "cancel") await cancelBackgroundCommand(jobs, job.id);
 		await until(() => backgroundCommandFinished(readBackgroundCommand(jobs, job.id)));
 		const done = readBackgroundCommand(jobs, job.id);
@@ -80,7 +86,7 @@ describe("detached background commands", () => {
 		expect(backgroundCommandOutputTail(done)).toContain("before stop");
 		const pids = readFileSync(childPids, "utf8").trim().split("\n").map(Number);
 		if (!windows) {
-			expect(pids).toHaveLength(children + 2);
+			if (existsSync(ready)) expect(pids).toHaveLength(children + 2);
 			pids.push(job.pid!);
 		}
 		await until(() =>
@@ -132,11 +138,12 @@ describe("detached background commands", () => {
 		const command = `printf 'once\\n' >> ${quote(join(root, "count"))}; while [ ! -f ${quote(join(root, "release"))} ]; do sleep 0.02; done; printf 'survived\\n'`;
 		const fixture = fileURLToPath(new URL("./fixtures/background-command-launch.ts", import.meta.url));
 		const resolver = fileURLToPath(new URL("../src/experimental/source-resolver.ts", import.meta.url));
-		const id = execFileSync(process.execPath, ["--import", resolver, fixture, jobs, root, command], {
-			env: { ...process.env, PI_PACKAGE_DIR: root },
-			encoding: "utf8",
-			timeout: 10000,
-		}).trim();
+		const launcher = await promisify(execFile)(
+			process.execPath,
+			["--import", resolver, fixture, jobs, root, command],
+			{ env: { ...process.env, PI_PACKAGE_DIR: root } },
+		);
+		const id = launcher.stdout.trim();
 		const job = readBackgroundCommand(jobs, id);
 		expect(job.status).toBe("running");
 		writeFileSync(join(root, "release"), "go");
