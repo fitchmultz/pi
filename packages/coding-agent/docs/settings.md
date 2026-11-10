@@ -30,6 +30,8 @@ Cache notices estimate uncached overlap as `min(previous prompt tokens, current 
 
 Extra cache cost is an estimate against hypothetical full cache hits, using recorded non-read costs and the current request's read rate when available, otherwise the last observed read rate on the uninterrupted same-model ancestry. Prior read rates are labeled approximate and may not match a later speed or pricing tier. If neither is available, current catalog pricing is explicitly identified as a fallback, not a historical tariff. Missing read prices are reported as unknown; any priced subtotal excludes those requests. These estimates are not provider invoices or a savings forecast.
 
+The provider recovery notice, `Anthropic dropped N thinking blocks ...`, appears when Anthropic reports more dropped thinking blocks than in any earlier response since the last compaction; Claude continues without that reasoning. The notice names a cause only when Anthropic reports it for every dropped block: the prompt before the blocks changed, or another model wrote them. Anthropic always drops the thinking blocks that a compaction or an extension's context rollover kept; that drop is expected and not announced.
+
 See [Choose a Model](models.md) for model selection and thinking controls.
 
 ## Interaction
