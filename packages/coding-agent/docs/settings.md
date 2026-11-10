@@ -145,7 +145,7 @@ In an open group, a card that is not expanded takes at most two rows. Pi cuts th
 
 Pi skips blank rows, shortens each row to the terminal width, and shows `[image]` in place of an inline image. A shell command card shows the command and its status with the last output line.
 
-Enabling on collapses existing groups and cards; enabling hybrid opens groups but keeps cards compact. Disabling it restores normal presentation without expanding everything. Visible thinking separates groups; hidden thinking does not. Input dialogs, the working indicator, warnings, and errors stay outside groups. Presentation changes do not alter model context or saved results; `/compact` remains the context-compaction command.
+Enabling on collapses existing groups and cards; enabling hybrid opens groups but keeps cards compact. Disabling it restores normal presentation without expanding everything. Visible thinking separates groups; thinking hidden by `hideThinkingBlock` takes no rows and does not. A thinking block collapsed with a click keeps its label, and a click on the label expands the block again. Input dialogs, the working indicator, warnings, and errors stay outside groups. Presentation changes do not alter model context or saved results; `/compact` remains the context-compaction command.
 
 ## Network and retries
 
