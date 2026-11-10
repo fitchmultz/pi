@@ -8,6 +8,7 @@ import { readJsonFileSync } from "../utils/streaming-file.ts";
 import { parseArgs } from "./args.ts";
 import {
 	type CompletedWorkingSession,
+	isRestartSession,
 	MANAGED_CLI_ENV,
 	MANAGED_PROTOCOL_ENV,
 	MANAGED_PROTOCOL_VERSION,
@@ -230,18 +231,7 @@ export async function superviseCli(
 				) {
 					try {
 						const session = value.session;
-						if (
-							!session ||
-							typeof session !== "object" ||
-							!("sessionFile" in session) ||
-							typeof session.sessionFile !== "string" ||
-							!("sessionId" in session) ||
-							typeof session.sessionId !== "string" ||
-							!session.sessionId ||
-							!("workingSession" in session) ||
-							typeof session.workingSession !== "string"
-						)
-							return;
+						if (!isRestartSession(session)) return;
 						assertPrivateFilePath(session.workingSession);
 						if (!statSync(session.workingSession).isFile()) return;
 						attempt.restart = {
