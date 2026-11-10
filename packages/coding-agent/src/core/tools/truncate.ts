@@ -11,6 +11,11 @@
 export const DEFAULT_MAX_LINES = 2000;
 export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
 export const GREP_MAX_LINE_LENGTH = 500; // Max chars per grep match line
+/**
+ * Text a tool hands to programmatic callers such as codemode scripts in `structuredContent`. It is not cut like the
+ * model-facing output: the caller decides how much of it reaches the model.
+ */
+export const STRUCTURED_MAX_BYTES = 1024 * 1024;
 
 export interface TruncationResult {
 	/** The truncated content */

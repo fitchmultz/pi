@@ -12,6 +12,7 @@
 ### Added
 
 - Codemode results now link to an omitted-only output file as well as the full output, so recovering truncated text does not repeat the visible head and tail. Native guidance also directs agents to emit selected results as plain text and reuse instructions still in context.
+- Added `show()` to `codemode` scripts: `await show(tools.read({ path }), tools.grep({ pattern }))` prints each result under a label of its call and prints a failed call's error in its place, so one missing path no longer ends a script of look-ups before the others run. See [Show several results](docs/codemode.md#show-several-results).
 - Added `pi --build-info` to print the resolved runtime path, runtime versions, and existing immutable fork release receipt as JSON.
 - Added a `pi.runtime` custom entry to saved sessions at every start, resume, fork, new session and reload. It records the Pi build, each loaded package's version and git commit, other extensions' file hashes, and the context files' sizes and hashes for later analysis. It is never sent to the model, and the HTML export hides a custom entry that is the current leaf. See [Runtime record](docs/session-format.md#runtime-record-piruntime).
 - Added `ctx.managedHost` and `session_shutdown` `disposition` so extensions can keep owned work across managed restarts and stop it only on exit. See [Work that outlives a worker](docs/restart.md#work-that-outlives-a-worker).
@@ -31,6 +32,7 @@
 
 ### Changed
 
+- `read` in a `codemode` script now resolves to all the text from `offset` to the end of a file longer than 2000 lines or 50KB, up to 1 MiB, when the call has no `limit`, so `JSON.parse(await tools.read({ path }))` no longer fails at the continuation notice. Where the script prints that text unchanged, the model still sees the page and notice of a direct `read`. Direct `read` calls are unchanged. See [Read files](docs/codemode.md#read-files).
 - Scoped harness documentation guidance to the affected APIs and behavior, and clarified that independent tool calls can be batched directly or through codemode while dependent calls and shared-state mutations stay ordered.
 - Consolidated duplicated compaction, resource-ignore and sleep helpers: re-exported `calculateContextTokens` and `ContextUsageEstimate` from `@earendil-works/pi-ai`, derived compaction and branch-summary token defaults from `SETTINGS_DEFAULTS`, composed checkpoint summary prompts from a shared builder, extracted `.gitignore`/`.ignore`/`.fdignore` rule loading into `core/resource-ignore.ts`, and replaced the duplicate `utils/sleep.ts` wrapper with `timers/promises`.
 - Published settings, models, keybindings, and theme schemas using upstream's shared runtime definitions; the fork settings schema retains boolean and `"hybrid"` compact activity preferences.

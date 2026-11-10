@@ -705,6 +705,80 @@ describe("codemode options and store", () => {
 		expect(result.content.at(-1)).toEqual({ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" });
 	});
 
+	it("prints each look-up of show() under its call and keeps the look-ups after a missing path", async () => {
+		const harness = await createHarness({
+			initialActiveToolNames: ["codemode", "read", "grep"],
+			extensionFactories: [createCodemodeExtension()],
+		});
+		harnesses.push(harness);
+		writeFileSync(join(harness.tempDir, "alpha.md"), "# Alpha\nfirst");
+		writeFileSync(join(harness.tempDir, "pixel.png"), Buffer.from(TINY_PNG_BASE64, "base64"));
+		const result = await run(
+			harness,
+			`const settled = await show(
+				tools.read({ path: "alpha.md" }),
+				tools.read({ path: "beta.md" }),
+				tools.grep({ pattern: "Alpha", path: "alpha.md" }),
+				tools.read({ path: "pixel.png" }),
+			);
+			return settled.map((entry) => entry.status).join(" ");`,
+		);
+		// A failed look-up is part of the output, not a failed script.
+		expect(result.isError).toBe(false);
+		const items = checkSavedImages(resultText(result)).split(/^==> text \d\/5 <==\n/m);
+		expect(items).toEqual([
+			"",
+			'read {"path":"alpha.md"}\n# Alpha\nfirst\n',
+			expect.stringMatching(/^read \{"path":"beta\.md"\}\nFAILED: ENOENT: no such file or directory[^\n]*beta\.md/),
+			'grep {"pattern":"Alpha","path":"alpha.md"}\nalpha.md:1: # Alpha\n',
+			'read {"path":"pixel.png"}\nRead image file [image/png]\n<saved>\n<image>\n',
+			"fulfilled rejected fulfilled fulfilled",
+		]);
+		expect((result.details as unknown as CodemodeToolDetails).calls.map((call) => call.status)).toEqual([
+			"ok",
+			"error",
+			"ok",
+			"ok",
+		]);
+	});
+
+	it("resolves a cut read to all of its text and shows the model the page where the script prints it", async () => {
+		const harness = await createHarness({
+			initialActiveToolNames: ["codemode", "read"],
+			extensionFactories: [createCodemodeExtension()],
+		});
+		harnesses.push(harness);
+		const rows = Array.from({ length: 3000 }, (_, id) => id);
+		// 3002 lines: a direct read shows 2000 of them.
+		writeFileSync(join(harness.tempDir, "rows.json"), JSON.stringify(rows, null, 1));
+		const page = `${["[", ...rows.slice(0, 1999).map((id) => ` ${id},`)].join("\n")}\n\n[Showing lines 1-2000 of 3002. Use offset=2001 to continue.]`;
+
+		const parsed = await run(
+			harness,
+			'const all = await tools.read({ path: "rows.json" });\nreturn [JSON.parse(all).length, all.split("\\n").slice(-2)];',
+		);
+		expect(resultText(parsed)).toBe('[3000,[" 2999","]"]]');
+
+		// Printed unchanged, the text is the page a direct read shows, so the model can continue from its notice.
+		const read = 'await tools.read({ path: "rows.json" })';
+		expect(resultText(await run(harness, `text(${read});`))).toBe(page);
+		expect(resultText(await run(harness, `await show(tools.read({ path: "rows.json" }));`))).toBe(
+			`read {"path":"rows.json"}\n${page}`,
+		);
+		expect(resultText(await run(harness, `return { file: ${read} };`))).toBe(JSON.stringify({ file: page }));
+		// A read with a limit resolves to its page.
+		expect(
+			resultText(await run(harness, 'return (await tools.read({ path: "rows.json", limit: 2 })).split("\\n");')),
+		).toBe(
+			JSON.stringify([
+				"[",
+				" 0,",
+				"",
+				"[3000 more lines in file: to read them all, call read at offsets 3 and 2003 with no limit in one response. For a part, use offset=3 and a limit.]",
+			]),
+		);
+	});
+
 	it("persists store() writes as custom entries for later calls", async () => {
 		const harness = await setup();
 		expect(resultText(await run(harness, increment))).toBe("1");

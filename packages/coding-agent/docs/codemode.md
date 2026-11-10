@@ -52,6 +52,7 @@ Calls a script makes share one nested-call queue with other scripts. A tool that
 | `image(value)` | Add an image to the output: a base64 `data:` URL, an `{ image_url }` object, or an image block `{ type: "image", data, mimeType }` such as those returned by MCP tools and `models.generateImages()`. Remote URLs are not supported. PNG, JPEG, GIF, and WebP are accepted. Each image is also saved to a temp file, and the result names the path before the image. |
 | `console.log(...)` | Add a line to the `<console_output>` block after the other output. Arguments are joined with spaces; `info`, `warn`, `error`, and `debug` do the same. |
 | `return value` | A top-level `return` adds the value like `text()`. |
+| `show(...calls)` | Print the result of each tool call under a label of the call, and print a failed call's error in its place. See [Show several results](#show-several-results). |
 | `exit()` | End the script successfully. |
 | `store(key, value)` / `load(key)` | Keep small JSON values across `codemode` calls. See [Store values](#store-values). |
 | `ALL_TOOLS` | Every callable tool as `{ name, description }`, including tools the description does not list. |
@@ -68,21 +69,61 @@ What a call resolves to depends on the tool:
 
 - Tools with an output schema resolve to a structured value. `bash` resolves to `{ output, truncated, full_output_path?, exit_code, wall_time_seconds }`, also for non-zero exit codes. Its `output` is not limited to the 2000 lines or 50KB the model sees: it holds up to 1 MiB, and longer output keeps its first and last 512 KiB around an omission marker, with `truncated` set and the full output in `full_output_path`.
 - MCP tools resolve to their `CallToolResult`, including `isError` and `structuredContent`.
-- `read` resolves to the text the model would see: at most 2000 lines or 50KB of the file, then a notice that gives the next offset and, when at most five pages remain, the offsets of all of them. An offset past the end does not reject: the text is a note with the line count, then the last lines of the file. For an image it resolves to an image block `{ type: "image", data, mimeType, note }` that `image()` shows. `data` is the base64 image the model would see and `note` the text that goes with it, such as resize hints.
+- `read` resolves to the file's text, or to an image block for an image. See [Read files](#read-files).
 - Other tools, such as `edit` and `write`, resolve to their text output.
 
-A call that fails, is blocked, or gets invalid arguments rejects with an `Error` that carries the tool's error text. Use `Promise.allSettled()` to keep the results of the calls that succeed.
+A call that fails, is blocked, or gets invalid arguments rejects with an `Error` that carries the tool's error text. An uncaught rejection ends the script: the calls after it do not run. Use `show()` or `Promise.allSettled()` to keep the results of the calls that succeed.
 
-Select the fields needed for the current decision before calling `text()`. For long text, print a label and the text separately. Wrapping file contents or logs in JSON escapes their newlines, which makes the saved output harder to page. Handle rejected calls explicitly instead of printing whole settled-result envelopes.
+### Show several results
+
+`await show(...calls)` takes tool calls, or arrays of them, and prints one text item per call, in the order given:
 
 ```js
-const results = await Promise.allSettled(paths.map((path) => tools.read({ path })));
-for (let i = 0; i < results.length; i++) {
-	text(paths[i]);
-	const result = results[i];
-	text(result.status === "fulfilled" ? result.value : String(result.reason));
-}
+const settled = await show(
+	tools.read({ path: "docs/setup.md" }),
+	tools.read({ path: "docs/missing.md" }),
+	tools.grep({ pattern: "retry", path: "src" }),
+);
 ```
+
+```
+==> text 1/3 <==
+read {"path":"docs/setup.md"}
+# Setup
+...
+==> text 2/3 <==
+read {"path":"docs/missing.md"}
+FAILED: ENOENT: no such file or directory, access '/project/docs/missing.md'
+Nearest existing parent: /project/docs. Its entries: setup.md, usage.md.
+==> text 3/3 <==
+grep {"pattern":"retry","path":"src"}
+src/retry.ts:12: export function retry(
+```
+
+- The label is the tool's name and the call's arguments as JSON, cut after 200 characters.
+- A failed call prints `FAILED:` and its error text. `show()` does not throw for it, and the other calls are not affected.
+- A string result is printed as it is. An image block is shown with `image()` after its `note`. An MCP result prints its content blocks, after a `FAILED:` line when `isError` is set. Any other object prints as one line of JSON, except that each string field with a line break, such as the `output` of `bash`, follows under its name as it is.
+- `show()` resolves to the `Promise.allSettled()` results of the calls, so the script can still branch on them: `settled[1].status === "rejected"`.
+
+The calls are already running when `show()` receives them, so they run concurrently. Use it for look-ups. Make calls that must run in order, and calls that change state, one after the other with `await`.
+
+To print something else, select the fields needed for the current decision before calling `text()`. For long text, print a label and the text separately. Wrapping file contents or logs in JSON escapes their newlines, which makes the saved output harder to page.
+
+### Read files
+
+What `tools.read()` resolves to:
+
+| Read | Value |
+|---|---|
+| A text file within 2000 lines and 50KB | The file's text. |
+| A longer file, without `limit` | All the text from `offset` (default: the first line) to the end, when that is at most 1 MiB. `JSON.parse(await tools.read({ path }))` gets the whole file. |
+| Any file, with `limit` | The text the model would see: the lines, then, when more remain, a notice that gives the next offset and, when at most five pages remain, the offsets of all of them. |
+| More than 1 MiB from `offset` to the end | The text the model would see: the first 2000 lines or 50KB, then the notice. Read the rest by `offset`, or use `bash`. |
+| An `offset` past the end | It does not reject: a note with the line count, then the last lines of the file. |
+| A `json` selection | The formatted selection, by the same rules: all of it up to 1 MiB without `limit`. |
+| An image | An image block `{ type: "image", data, mimeType, note }` that `image()` shows. `data` is the base64 image the model would see and `note` the text that goes with it, such as resize hints. |
+
+Where a script prints the whole text of a longer file unchanged, with `text()`, `show()`, `return`, or inside JSON, the model sees the text of a direct `read` instead: the first 2000 lines or 50KB and the notice with the offsets to continue from. Text the script selects or changes is printed as it is.
 
 Reuse instructions and reference documents whose full text remains in context. After a change or compaction, read the missing material again. Full output remains available for inspection; these practices do not change tool limits or hide errors.
 

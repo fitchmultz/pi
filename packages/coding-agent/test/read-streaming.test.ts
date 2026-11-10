@@ -225,6 +225,58 @@ describe("read tool streaming", () => {
 		expect(JSON.stringify(streamed.details)).toBe(JSON.stringify(expected.details));
 	});
 
+	it("resolves a cut read without a limit to all of its text for programmatic callers", async () => {
+		const long = lines(3000, (i) => `line ${i} €`);
+		const oneLine = JSON.stringify({ blob: "x".repeat(60 * 1024) });
+		const cases: [name: string, text: string, input: { offset?: number; limit?: number }, all: string | undefined][] =
+			[
+				["cut at the line cap", long, {}, long],
+				["cut, from an offset", long, { offset: 501 }, long.split("\n").slice(500).join("\n")],
+				["one line over the byte cap", oneLine, {}, oneLine],
+				// These resolve to the model-facing text: the page and its notice.
+				["cut, with a limit", long, { limit: 2500 }, undefined],
+				["over 1 MiB", lines(11000, () => "z".repeat(99)), {}, undefined],
+				["past the end", long, { offset: 4000 }, undefined],
+				["not cut", "alpha\nbeta\n", {}, undefined],
+			];
+		for (const [name, text, input, all] of cases) {
+			const bytes = Buffer.from(text, "utf-8");
+			const withoutStream: ReadOperations = { readFile: async () => bytes, access: async () => {} };
+			for (const ops of [streamingOps(bytes, 5), streamingOps(bytes, 4096), withoutStream]) {
+				const tool = createReadToolDefinition(process.cwd(), { operations: ops });
+				const result = await tool.execute(
+					"call",
+					{ path: FILE_PATH, ...input },
+					undefined,
+					undefined,
+					undefined as never,
+				);
+				const page = result.content[0].type === "text" ? result.content[0].text : "";
+				// The model-facing text does not change.
+				expect(page, name).toBe(referenceRead(text, FILE_PATH, input.offset, input.limit).text);
+				expect(result.structuredContent, name).toBe(all ?? page);
+			}
+		}
+
+		// A JSON selection is formatted first: all of the formatted text parses.
+		const rows = Array.from({ length: 3000 }, (_, id) => ({ id, name: `row ${id}` }));
+		const jsonOps: ReadOperations = {
+			readFile: async () => Buffer.from(JSON.stringify({ rows })),
+			access: async () => {},
+		};
+		const selected = await createReadToolDefinition(process.cwd(), { operations: jsonOps }).execute(
+			"call",
+			{ path: FILE_PATH, json: { path: "/rows" } },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(selected.content[0].type === "text" ? selected.content[0].text : "").toContain(
+			"[Showing JSON selection lines",
+		);
+		expect(JSON.parse(selected.structuredContent as string)).toEqual(rows);
+	});
+
 	it("names offsets whose reads return the rest of the file without gaps or overlap", async () => {
 		const path = join(tempDir, "paged.txt");
 		// The pages end at the byte cap, at the line cap and at the end of the file.

@@ -1,6 +1,6 @@
 /**
  * The `codemode` tool: the model writes JavaScript that calls other tools. Scripts use `tools`,
- * `ALL_TOOLS`, `text()`, `image()`, `exit()`, `store()`/`load()`, `console.*`, and `return <value>`,
+ * `ALL_TOOLS`, `text()`, `image()`, `show()`, `exit()`, `store()`/`load()`, `console.*`, and `return <value>`,
  * may start with a `// @options:` line, and reach the model catalog, classifiers, and image models
  * through `models.*`. Results start with a "Script completed" or "Script failed" header.
  *
@@ -11,7 +11,8 @@
  *
  * Nested results are handed to the script as follows:
  * - A tool that declares `outputSchema` resolves to its `structuredContent`, also for error
- *   results that carry one.
+ *   results that carry one. Where that is a string other than the text content (a cut `read`
+ *   resolves to all of its text) and the script prints it unchanged, the model sees the text content.
  * - Any other tool resolves to its text content as one string.
  * - A failed, blocked, or invalid call rejects with an Error carrying the tool's error text.
  *
@@ -120,8 +121,8 @@ export interface CodemodeToolDetails {
 export const codemodeToolSystemPromptContribution = {
 	snippet: "Run JavaScript that calls other tools",
 	guidelines: [
-		"Batch independent calls in one response using tools declared for direct calls, or use codemode (Promise.allSettled). Use codemode to chain calls, loop, or filter large output. Keep dependent calls and shared-state mutations ordered.",
-		"Emit only what the next decision needs: print long text with text(value), not whole allSettled receipts or JSON-wrapped files and logs.",
+		"Batch independent calls in one response using tools declared for direct calls, or use codemode (show). Use codemode to chain calls, loop, or filter large output. Keep dependent calls and shared-state mutations ordered.",
+		"Emit only what the next decision needs: print look-ups with show(...calls) and other long text with text(value), not whole allSettled receipts or JSON-wrapped files and logs.",
 	],
 } as const;
 
@@ -138,6 +139,7 @@ function describeGlobals(models: boolean): string {
 	const lines = [
 		"Globals:",
 		"- `text(value)`, `image(dataUrlOrImageBlock)`, `console.log(...)`, and top-level `return` add output; `exit()` ends the script. With several text items, each starts with a `==> text N/M <==` line, and `console` lines follow the other output in one `<console_output>` block. `image()` also saves the image to a temp file and the result names its path.",
+		"- Print look-ups with `await show(tools.read({ path }), tools.grep({ pattern }))`, not `text(await ...)` or `Promise.all`, which stop at the first failed call. It prints each result under its call, a failed call as `FAILED:` and its error, and returns the `Promise.allSettled` results. The calls run concurrently: keep ordered and state-changing calls out of it.",
 		"- `store(key, value)` and `load(key)` keep small JSON values across codemode calls. A value may use at most 256 KiB of JSON; keys and values together may use at most 1 MiB per session branch. Keep large data in variables or files, and delete keys with `store(key, undefined)`.",
 		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
 	];
