@@ -115,7 +115,10 @@ export async function resizeImageInProcess(
 			targetHeight = opts.maxHeight;
 		}
 
-		function tryEncodings(width: number, height: number, jpegQualities: number[]): EncodedCandidate | null {
+		// Tried in order when neither the PNG nor the JPEG at the requested quality fits.
+		const fallbackQualities = [85, 70, 55, 40].filter((quality) => quality !== opts.jpegQuality);
+
+		function tryEncodings(width: number, height: number): EncodedCandidate | null {
 			const resized = photon!.resize(image!, width, height, photon!.SamplingFilter.Lanczos3);
 
 			try {
@@ -123,7 +126,7 @@ export async function resizeImageInProcess(
 				const jpeg = encodeCandidate(resized.get_bytes_jpeg(opts.jpegQuality), "image/jpeg");
 				const preferred = png.encodedSize <= jpeg.encodedSize ? png : jpeg;
 				if (preferred.encodedSize < opts.maxBytes) return preferred;
-				for (const quality of jpegQualities.slice(1)) {
+				for (const quality of fallbackQualities) {
 					const fallback = encodeCandidate(resized.get_bytes_jpeg(quality), "image/jpeg");
 					if (fallback.encodedSize < opts.maxBytes) return fallback;
 				}
@@ -133,12 +136,11 @@ export async function resizeImageInProcess(
 			}
 		}
 
-		const qualitySteps = Array.from(new Set([opts.jpegQuality, 85, 70, 55, 40]));
 		let currentWidth = targetWidth;
 		let currentHeight = targetHeight;
 
 		while (true) {
-			const candidate = tryEncodings(currentWidth, currentHeight, qualitySteps);
+			const candidate = tryEncodings(currentWidth, currentHeight);
 			if (candidate) {
 				return {
 					data: candidate.data,
