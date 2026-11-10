@@ -461,9 +461,6 @@ const SKIP_THOUGHT_SIGNATURE_VALIDATOR = "skip_thought_signature_validator";
  * switches to Gemini in the middle of a turn would fail. Every such message gets the value, not
  * only those of the current turn, so a message serializes the same way in every request and the
  * cached prompt prefix stays valid after the turn ends.
- *
- * For the Gemini API only. Upstream removed the value from all Google APIs after Vertex AI
- * rejected a request that carried it (upstream issue 4032); what Vertex accepts is unverified.
  */
 function markUnsignedFunctionCalls(parts: Part[]): void {
 	const functionCalls = parts.filter((part) => part.functionCall !== undefined);
@@ -511,6 +508,14 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 	};
 
 	const transformedMessages = transformMessages(conversation, model, normalizeToolCallId);
+
+	// Only routes proven by real calls send the skip value: provider `google`, except Gemini before 3 and Deep Research.
+	const geminiMajorVersion = getGeminiMajorVersion(model.id);
+	const sendsSkipValue =
+		model.api === "google-generative-ai" &&
+		model.provider === "google" &&
+		(geminiMajorVersion === undefined || geminiMajorVersion >= 3) &&
+		!model.id.startsWith("deep-research-");
 
 	for (const msg of transformedMessages) {
 		if (msg.role === "user") {
@@ -590,7 +595,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			}
 
 			if (parts.length === 0) continue;
-			if (model.api === "google-generative-ai") markUnsignedFunctionCalls(parts);
+			if (sendsSkipValue) markUnsignedFunctionCalls(parts);
 			contents.push({
 				role: "model",
 				parts,

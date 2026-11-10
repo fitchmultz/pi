@@ -109,9 +109,9 @@ describe("google-shared convertMessages — Gemini 3 unsigned tool calls", () =>
 	});
 
 	// The Gemini API rejects the request (400) when the first call of a step in the current turn has
-	// no signature. The value must not depend on the model ID: Gemini 4 and Gemma 4 need or accept it.
-	it.each(["gemini-4-carbon", "gemma-4-31b-it"])(
-		"puts the skip value on the first call of another model's message for %s on the Gemini API",
+	// no signature. Real calls on provider `google` show which models need or accept the value.
+	it.each(["gemini-3-flash-preview", "gemini-4-carbon", "gemini-pro-latest", "gemma-4-31b-it"])(
+		"puts the skip value on the first call of another model's message for google/%s",
 		(id) => {
 			const model = makeGemini3Model("google-generative-ai", "google", id);
 			const contents = convertMessages(model, normalizeContext(makeContext(OTHER_MODEL)));
@@ -135,8 +135,14 @@ describe("google-shared convertMessages — Gemini 3 unsigned tool calls", () =>
 		expect(previous.slice(0, current.length)).toEqual(current);
 	});
 
-	it("does not add the skip value for unsigned Vertex tool calls", () => {
-		const model = makeGemini3Model("google-vertex", "google-vertex");
+	// No real call proved the value on these routes, so they send what upstream sends: no value.
+	it.each([
+		makeGemini3Model("google-vertex", "google-vertex"),
+		makeGemini3Model("google-generative-ai", "opencode", "gemini-4-carbon"),
+		makeGemini3Model("google-generative-ai", "opencode-go", "gemini-4-argon"),
+		makeGemini3Model("google-generative-ai", "google", "gemini-2.5-flash"),
+		makeGemini3Model("google-generative-ai", "google", "deep-research-preview-04-2026"),
+	])("does not add the skip value for $provider/$id", (model) => {
 		const contents = convertMessages(model, normalizeContext(makeContext(OTHER_MODEL)));
 
 		expect(functionCallSignatures(contents)).toEqual([undefined, undefined]);
