@@ -124,10 +124,13 @@
 - Fixed the fork's own changelog entries never appearing in Pi. On a fork installation, `/changelog` now lists them last, under "Fork changes", after upstream's releases, and the startup "What's New" shows them once after each update to another fork commit. Their relative links open the fork repository at the installed commit instead of missing upstream pages. Builds without a fork release are unchanged. See [Fork installation](docs/quickstart.md#fork-installation).
 - Fixed `CustomMessageComponent` taking the fork's `compactView`, `showImages` and `imageWidthCells` constructor arguments before upstream's `markdownTransformers`, `messageId` and `timestamp`. An extension that constructed the component with upstream's seven arguments turned on compact view and lost its transformers, message ID and timestamp. Upstream's arguments are in upstream's positions again; the fork's three follow them, as `compactView` does on the other message components.
 - Fixed the retained performance fixtures, which imported deleted files and called changed APIs, so the smoke command in the [performance record](../../docs/performance.md) stopped at its eleventh case. That command runs to the end again and a script test now runs it; cases whose measured code is deleted were removed. The record and its results file list only measurements for code the fork still carries, with the recorded numbers unchanged.
+- Fixed quitting while a tool runs dropping that tool's result from the saved session, which then showed `No result provided` for the call on resume. Quit now aborts the turn and waits up to 500 ms for it to settle while the shutdown handlers run. A tool that ignores cancellation still cannot hold up the handlers or the exit, and certified working-session exits still wait without a limit.
+- Fixed collapsed tool-output and bash previews returning private selection annotations from `render()` to callers outside a fullscreen frame after that frame had rendered them.
 
 ### Removed
 
 - Removed the `discover_tools` builtin, its `instructionGroupsExtension` export and the `pi.refreshTools()` extension method. Extensions keep optional tools out of the prompt with `exposure: "deferred"`, and `tool_search` loads them on demand. On resume, a tool that discovery hid before it was ever declared comes back like a newly registered tool.
+- Removed the fork's temporary passive cache tracing: `PI_CACHE_TRACE_DIR` and `PI_CACHE_TRACE_SESSION_ID` no longer record anything, SDK sessions no longer attach trace provenance to requests, and `scripts/cache-trace-report.mjs` and the cache-tracing guide are gone. Cache warming and cache statistics are unchanged.
 
 ## [1.5.2] - 2026-11-10
 

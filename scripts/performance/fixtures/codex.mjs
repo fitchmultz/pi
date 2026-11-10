@@ -9,7 +9,6 @@ import { normalizeContext } from "/pi-performance-source/packages/ai/src/utils/t
 import { witness } from "../proof.mjs";
 
 // Exercises actual native conversion, immutable baselines, continuation comparison and socket queues. No real transport.
-delete process.env.PI_CACHE_TRACE_DIR;
 const smoke = process.argv.includes("--smoke");
 const option = (name, fallback) =>
 	Number(process.argv.find((arg) => arg.startsWith(`--${name}=`))?.split("=")[1] ?? fallback);

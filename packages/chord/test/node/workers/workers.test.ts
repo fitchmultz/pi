@@ -277,18 +277,27 @@ describe("failures stay until retry or a rollout (R2)", () => {
 	});
 
 	it("the start timer covers only the start: a slow load after connecting is not killed (Q4)", async () => {
-		const { server, workers, behaviours } = await fleet();
+		// The app's `principal` hook runs once `started` arrived: the clock moves only after the worker connected, however
+		// long its process took to boot.
+		const started = Promise.withResolvers<void>();
+		const { server, workers, behaviours, errors } = await fleet({
+			principal: () => {
+				started.resolve();
+				return { kind: "worker", id: "S1" };
+			},
+		});
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
 		try {
 			behaviours.set("S1", { hang: true });
 			const notes = server.hold(Notes, { id: "S1" }, context);
-			await vi.waitFor(() => expect(stateOf(workers.state.value, "S1")?.status).toBe("starting"), {
-				timeout: 5_000,
-			});
-			await new Promise((resolve) => setImmediate(resolve));
+			await started.promise;
 			await vi.advanceTimersByTimeAsync(120_000);
 			expect(stateOf(workers.state.value, "S1")?.status).toBe("starting");
 			expect(notes.state.value.kind).toBe("loading");
+			// A start timer that fired kills the worker, and the kill's exit is told later: the stop waits for the exit,
+			// which fails the address (`worker_failed`) when the timer killed it.
+			await workers.stop(Session({ id: "S1" }), context);
+			expect(errors).toEqual([]);
 			notes.release();
 		} finally {
 			vi.useRealTimers();

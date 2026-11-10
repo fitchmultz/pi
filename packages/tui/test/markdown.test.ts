@@ -9,7 +9,6 @@ import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
 import { Lexer } from "marked";
 import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
-import { SELECTION_METADATA } from "../src/selection-markers.ts";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
 import type { Component, TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
@@ -30,7 +29,7 @@ function getCell(terminal: VirtualTerminal, row: number, col: number) {
 }
 
 function stripAnsi(line: string): string {
-	return line.replace(SELECTION_METADATA, "").replace(/\x1b\[[0-9;]*m/g, "");
+	return line.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
 describe("Markdown component", () => {
@@ -706,7 +705,7 @@ describe("Markdown component", () => {
 
 			const width = 20;
 			const lines = markdown.render(width);
-			const joinedOutput = lines.map((line) => line.replace(SELECTION_METADATA, "")).join("\n");
+			const joinedOutput = lines.join("\n");
 			assert.ok(joinedOutput.includes("\x1b[33m"), "Inline code should be styled (yellow)");
 
 			const plainLines = lines.map((line) => stripAnsi(line).trimEnd());
@@ -1406,7 +1405,7 @@ Inline \(A_{sf}\)`,
 			);
 
 			const lines = markdown.render(80);
-			const joinedOutput = lines.map((line) => line.replace(SELECTION_METADATA, "")).join("\n");
+			const joinedOutput = lines.join("\n");
 
 			// Should contain the inline code block
 			assert.ok(joinedOutput.includes("inline code"));
@@ -1433,7 +1432,7 @@ Inline \(A_{sf}\)`,
 			);
 
 			const lines = markdown.render(80);
-			const joinedOutput = lines.map((line) => line.replace(SELECTION_METADATA, "")).join("\n");
+			const joinedOutput = lines.join("\n");
 
 			// Should contain bold text
 			assert.ok(joinedOutput.includes("bold text"));
@@ -1953,7 +1952,7 @@ bar`,
 			const markdown = new Markdown("### Why `sourceInfo` should not be optional", 0, 0, defaultMarkdownTheme);
 
 			const lines = markdown.render(80);
-			const joinedOutput = lines.map((line) => line.replace(SELECTION_METADATA, "")).join("\n");
+			const joinedOutput = lines.join("\n");
 
 			// The heading theme is bold+cyan. After the yellow inline code, the heading
 			// styling (bold+cyan) must be restored so subsequent text is styled correctly.
@@ -1982,7 +1981,7 @@ bar`,
 			const markdown = new Markdown("# Title with `code` inside", 0, 0, defaultMarkdownTheme);
 
 			const lines = markdown.render(80);
-			const joinedOutput = lines.map((line) => line.replace(SELECTION_METADATA, "")).join("\n");
+			const joinedOutput = lines.join("\n");
 
 			const afterCodeIndex = joinedOutput.indexOf("inside");
 			assert.ok(afterCodeIndex > 0, "Should contain text after inline code");
@@ -2022,7 +2021,7 @@ bar`,
 			const markdown = new Markdown("## Heading with **bold** and more", 0, 0, defaultMarkdownTheme);
 
 			const lines = markdown.render(80);
-			const joinedOutput = lines.map((line) => line.replace(SELECTION_METADATA, "")).join("\n");
+			const joinedOutput = lines.join("\n");
 
 			const afterBoldIndex = joinedOutput.indexOf("and more");
 			assert.ok(afterBoldIndex > 0, "Should contain text after bold");
@@ -2038,7 +2037,7 @@ bar`,
 			const markdown = new Markdown("Use ~~strikethrough~~ here", 0, 0, defaultMarkdownTheme);
 
 			const lines = markdown.render(80);
-			const joinedOutput = lines.map((line) => line.replace(SELECTION_METADATA, "")).join("\n");
+			const joinedOutput = lines.join("\n");
 			const joinedPlain = lines.map((line) => stripAnsi(line)).join(" ");
 
 			assert.ok(joinedOutput.includes("\x1b[9m"), "Should apply strikethrough styling");
@@ -2050,7 +2049,7 @@ bar`,
 			const markdown = new Markdown("Use ~strikethrough~ literally", 0, 0, defaultMarkdownTheme);
 
 			const lines = markdown.render(80);
-			const joinedOutput = lines.map((line) => line.replace(SELECTION_METADATA, "")).join("\n");
+			const joinedOutput = lines.join("\n");
 			const joinedPlain = lines.map((line) => stripAnsi(line)).join(" ");
 
 			assert.ok(joinedPlain.includes("~strikethrough~"), "Single-tilde delimiters should remain visible");
@@ -2065,15 +2064,12 @@ bar`,
 				bgColor: (text) => `\x1b[44m${text}\x1b[49m`,
 			});
 
-			assert.deepStrictEqual(
-				markdown.render(11).map((line) => line.replace(SELECTION_METADATA, "")),
-				[
-					"\x1b[44m aaaa \x1b[1mbold\x1b[22m \x1b[49m",
-					"\x1b[44m next \x1b[9mstrk\x1b[29m \x1b[49m",
-					"\x1b[44m more      \x1b[49m",
-					"\x1b[44m words     \x1b[49m",
-				],
-			);
+			assert.deepStrictEqual(markdown.render(11), [
+				"\x1b[44m aaaa \x1b[1mbold\x1b[22m \x1b[49m",
+				"\x1b[44m next \x1b[9mstrk\x1b[29m \x1b[49m",
+				"\x1b[44m more      \x1b[49m",
+				"\x1b[44m words     \x1b[49m",
+			]);
 		});
 	});
 

@@ -516,3 +516,60 @@ describe("source-aware fullscreen selection", () => {
 		}
 	});
 });
+
+describe("selection sources outside the fullscreen renderer", () => {
+	// Extensions, the HTML export and the CLI call render() like this: no TUI renders the component.
+	it("returns lines without private markers from render()", () => {
+		const text = new Text("plain \x1b[32mgreen\x1b[0m", 1, 0);
+		const markdown = new Markdown("Use **bold** text.", 0, 0, defaultMarkdownTheme);
+		const box = new Box(1, 0);
+		box.addChild(new Markdown(response, 1, 0, defaultMarkdownTheme));
+		box.addChild(new Text("Earlier output\n".repeat(3), 1, 1));
+		assert.deepEqual(text.render(14), [" plain \x1b[32mgreen\x1b[0m  "]);
+		assert.deepEqual(markdown.render(20), ["Use \x1b[1mbold\x1b[22m text.      "]);
+		for (const line of box.render(40)) assert.ok(!line.includes("\x1b]pi:"), JSON.stringify(line));
+	});
+
+	it("keeps the displayed frame source-aware after render() for another caller", async () => {
+		const terminal = new VirtualTerminal(60, 10);
+		let copied: string | undefined;
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied = text;
+				return true;
+			},
+		});
+		const markdown = new Markdown("Before. **Use Balanced as the default.** After.", 0, 0, defaultMarkdownTheme);
+		const text = new Text("tool\toutput", 0, 0);
+		tui.addChild(markdown);
+		tui.addChild(text);
+		tui.start();
+		setFlagsFromString("--expose-gc");
+		const gc = runInNewContext("gc") as () => void;
+		// Select in the displayed frame after a caller outside it, such as an extension measuring the component,
+		// rendered the same components. The frame's sources must outlive that render.
+		const copy = async (first: string, last: string) => {
+			await terminal.waitForRender();
+			assert.deepEqual(markdown.render(60), [
+				`Before. \x1b[1mUse Balanced as the default.\x1b[22m After.${" ".repeat(17)}`,
+			]);
+			assert.deepEqual(text.render(60), [`tool   output${" ".repeat(47)}`]);
+			await new Promise((resolve) => setImmediate(resolve));
+			gc();
+			const lines = terminal.getViewport();
+			const row = lines.findIndex((line) => line.includes(first));
+			const start = lines[row].indexOf(first);
+			const end = lines[row].indexOf(last) + last.length - 1;
+			terminal.sendInput(`\x1b[<0;${start + 1};${row + 1}M`);
+			terminal.sendInput(`\x1b[<32;${end + 1};${row + 1}M`);
+			terminal.sendInput(`\x1b[<0;${end + 1};${row + 1}m`);
+			return copied;
+		};
+		try {
+			assert.equal(await copy("Use", "default."), "**Use Balanced as the default.**");
+			assert.equal(await copy("tool", "output"), "tool\toutput");
+		} finally {
+			tui.stop();
+		}
+	});
+});

@@ -18,7 +18,7 @@ import {
 	type ScrollbarGeometry,
 } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
-import { copySelectionSource, type SelectionColumns } from "./selection-source.ts";
+import { copySelectionSource, renderForSelectionReader, type SelectionColumns } from "./selection-source.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	deleteAllKittyImages,
@@ -435,7 +435,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.terminal.write(`${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`);
 		} else {
 			const width = Math.max(1, this.terminal.columns);
-			const documentLines = this.resolveFakeCursors(this.render(width)).map((line) =>
+			// Render like a frame, so components reuse their cached lines; applyLineResets removes the markers.
+			const documentLines = this.resolveFakeCursors(renderForSelectionReader(() => this.render(width))).map((line) =>
 				line.replace(OSC133_ZONE_PREFIX, ""),
 			);
 			this.lastDocument = this.applyLineResets(documentLines.map((line) => line.replaceAll(CURSOR_MARKER, ""))).map(
@@ -1711,6 +1712,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override doRender(): void {
+		// Selection reads the sources of the rendered lines (getActiveSelectionText); applyLineResets removes their
+		// markers before output.
+		renderForSelectionReader(() => this.renderFrame());
+	}
+
+	private renderFrame(): void {
 		if (this.stopped || !this.altScreenActive) return;
 		const width = Math.max(1, this.terminal.columns);
 		const height = Math.max(1, this.terminal.rows);
