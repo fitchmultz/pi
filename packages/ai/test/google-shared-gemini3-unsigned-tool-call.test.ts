@@ -114,13 +114,15 @@ describe("google-shared convertMessages — Gemini 3 unsigned tool calls", () =>
 
 	// The Gemini API rejects the request (400) when the first call of a step in the current turn has
 	// no signature. Real calls on provider `google`, through a gateway route to that API, show which
-	// models need or accept the value. A provider under another ID reaches the same API by its host.
+	// models need or accept the value. A provider under another ID reaches the same API by its host,
+	// also with an empty base URL: the client then sends to the SDK default, which is that host.
 	it.each([
 		makeGemini3Model("google-generative-ai", "google", "gemini-3-flash-preview", GEMINI_API_URL),
 		makeGemini3Model("google-generative-ai", "google", "gemini-4-carbon", GATEWAY_URL),
 		makeGemini3Model("google-generative-ai", "google", "gemini-pro-latest", GATEWAY_URL),
 		makeGemini3Model("google-generative-ai", "google", "gemma-4-31b-it", GATEWAY_URL),
 		makeGemini3Model("google-generative-ai", "my-gemini", "gemini-4-carbon", GEMINI_API_URL),
+		makeGemini3Model("google-generative-ai", "my-gemini", "gemini-4-carbon", ""),
 	])("puts the skip value on the first call of another model's message for $provider/$id at $baseUrl", (model) => {
 		const contents = convertMessages(model, normalizeContext(makeContext(OTHER_MODEL)));
 
@@ -164,7 +166,7 @@ describe("google-shared convertMessages — Gemini 3 unsigned tool calls", () =>
 			"gemini-4-carbon",
 			"https://proxy.example.com/generativelanguage.googleapis.com/v1beta",
 		),
-		makeGemini3Model("google-generative-ai", "my-gemini", "gemini-4-carbon", ""),
+		makeGemini3Model("google-generative-ai", "my-gemini", "gemini-4-carbon", "not a URL"),
 		makeGemini3Model("google-generative-ai", "google", "gemini-2.5-flash", GEMINI_API_URL),
 		makeGemini3Model("google-generative-ai", "google", "deep-research-preview-04-2026", GEMINI_API_URL),
 	])("does not add the skip value for $provider/$id at $baseUrl", (model) => {
