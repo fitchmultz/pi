@@ -44,6 +44,7 @@
 - `--session` and `--fork` lookups by partial, cross-project or missing ID now stop parsing each non-matching session after its header instead of reading every saved transcript in full. Matching sessions are still read in full, and matching, ordering, prompts and exit codes are unchanged ([#251](https://github.com/fitchmultz/pi/issues/251)).
 - Codemode keeps 6000 estimated tokens of script output by default instead of 10000. Longer output still links to the omitted and full output files; `max_output_tokens` raises the limit for one script.
 - Shortened the `read`, `codemode` and `background_command` prompt guidelines.
+- The system prompt's `docs` section names the pi package folder once instead of three times, and the `codemode` description no longer contains it. Continuing a session under a newer installed release therefore sends one changed prompt section and no longer declares `codemode` again. Scripts get the path of the codemode reference from the new `models.docs()`. See [Models](docs/codemode.md#models).
 - A native working-session artifact that fails validation is now refused with the path of the first field that failed, for example `Invalid native working session at entries[12].message.content[0].type`, on `--working-session` restore, managed restart and SDK restore. The same artifacts are accepted and rejected as before. See [Native working sessions](docs/working-session.md#restore).
 
 ### Fixed

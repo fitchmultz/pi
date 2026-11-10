@@ -125,7 +125,11 @@ export const codemodeToolSystemPromptContribution = {
 	],
 } as const;
 
-/** The reference for scripts: globals, tool results, `store()`, the `models` API, and limits. */
+/**
+ * The reference for scripts: globals, tool results, `store()`, the `models` API, and limits.
+ * The path differs per installed release, so the tool description never contains it: a changed
+ * description redeclares the tool. Scripts get it from `models.docs()`, and errors name it.
+ */
 export const CODEMODE_DOCS_PATH = join(getDocsPath(), "codemode.md");
 
 const DESCRIPTION_INTRO = `Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, file system, network, or timers.
@@ -142,7 +146,11 @@ function describeGlobals(models: boolean): string {
 		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
 	];
 	if (models) {
-		lines.push(`- \`models\`: classifiers and image generation. Read ${CODEMODE_DOCS_PATH} first.`);
+		// "docs/codemode.md" resolves through the system prompt's docs section. `models.docs()` covers
+		// prompts without that section, such as a custom system prompt.
+		lines.push(
+			"- `models`: classifiers and image generation. Read Pi's docs/codemode.md first; `await models.docs()` returns its absolute path.",
+		);
 	}
 	return lines.join("\n");
 }
