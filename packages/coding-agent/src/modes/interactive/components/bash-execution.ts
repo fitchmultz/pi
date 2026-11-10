@@ -200,19 +200,20 @@ export class BashExecutionComponent extends Container {
 				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
 				const styledInput = `\n${styledOutput}`;
 				const output = new Text(styledInput, this.outputPad, 0);
-				let cachedWidth: number | undefined;
-				let cachedLines: string[] | undefined;
+				// The preview follows the Text's own lines, so it changes whenever they do.
+				let cachedSource: string[] | undefined;
+				let cachedLines: string[] = [];
 				this.contentContainer.addChild({
 					render: (width: number) => {
-						if (cachedLines === undefined || cachedWidth !== width) {
-							cachedLines = output.render(width).slice(-PREVIEW_LINES);
-							cachedWidth = width;
+						const lines = output.render(width);
+						if (lines !== cachedSource) {
+							cachedSource = lines;
+							cachedLines = lines.slice(-PREVIEW_LINES);
 						}
-						return cachedLines ?? [];
+						return cachedLines;
 					},
 					invalidate: () => {
-						cachedWidth = undefined;
-						cachedLines = undefined;
+						cachedSource = undefined;
 					},
 				});
 			}

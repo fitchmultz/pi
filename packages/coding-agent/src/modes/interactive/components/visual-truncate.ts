@@ -40,13 +40,14 @@ export interface VisualLinePreviewOptions {
 /**
  * Collapsed tool output limited to a number of visual lines, like bash output. Limiting logical
  * lines instead lets a single long line (such as minified JSON) wrap across the whole screen.
- * Caches its lines per width, since it renders on every frame for every result in the transcript.
+ * Caches its lines, since it renders on every frame for every result in the transcript. The cache follows the
+ * Text's own lines, so it changes whenever they do: for a new width, and between a fullscreen frame and other callers.
  */
 export class VisualLinePreview implements Component {
 	private options: VisualLinePreviewOptions;
 	private readonly text: Text;
-	private cachedWidth: number | undefined;
-	private cachedLines: string[] | undefined;
+	private cachedSource: string[] | undefined;
+	private cachedLines: string[] = [];
 
 	constructor(options: VisualLinePreviewOptions) {
 		this.options = options;
@@ -54,9 +55,9 @@ export class VisualLinePreview implements Component {
 	}
 
 	render(width: number): string[] {
-		if (this.cachedLines === undefined || this.cachedWidth !== width) {
+		const allLines = this.text.render(width);
+		if (allLines !== this.cachedSource) {
 			const { maxVisualLines, keep, formatHint } = this.options;
-			const allLines = this.text.render(width);
 			const skippedCount = Math.max(0, allLines.length - maxVisualLines);
 			const lines =
 				skippedCount > 0
@@ -70,14 +71,13 @@ export class VisualLinePreview implements Component {
 			} else {
 				this.cachedLines = lines;
 			}
-			this.cachedWidth = width;
+			this.cachedSource = allLines;
 		}
 		return this.cachedLines;
 	}
 
 	invalidate(): void {
 		this.text.invalidate();
-		this.cachedWidth = undefined;
-		this.cachedLines = undefined;
+		this.cachedSource = undefined;
 	}
 }
