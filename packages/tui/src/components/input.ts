@@ -419,7 +419,7 @@ export class Input implements Component, Focusable {
 
 		if (this.value.length === 0 && this.placeholder) {
 			const placeholder = truncateToWidth(this.placeholder, availableWidth, "");
-			const atCursor = segmenter.segment(placeholder)[Symbol.iterator]().next().value?.segment ?? " ";
+			const atCursor = segmenter.segment(placeholder).containing(0)?.segment ?? " ";
 			const afterCursor = placeholder.slice(atCursor.length);
 			const marker = this.focused ? CURSOR_MARKER : "";
 			const cursorChar = renderFakeCursor(this.placeholderStyle(atCursor));
@@ -469,7 +469,7 @@ export class Input implements Component, Focusable {
 
 		// Build line with fake cursor
 		// Insert cursor character at cursor position
-		const cursorGrapheme = segmenter.segment(visibleText.slice(cursorDisplay))[Symbol.iterator]().next().value;
+		const cursorGrapheme = segmenter.segment(visibleText.slice(cursorDisplay)).containing(0);
 
 		const beforeCursor = visibleText.slice(0, cursorDisplay);
 		const atCursor = cursorGrapheme?.segment ?? " "; // Character at cursor, or space if at end
