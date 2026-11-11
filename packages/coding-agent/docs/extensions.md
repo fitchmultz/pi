@@ -859,7 +859,7 @@ pi.on("context", async (event, ctx) => {
 });
 ```
 
-`event.messages` holds the conversation without system messages. The prompt and tool declarations belong to Pi and are not part of this hook: when the handler returns a changed list, Pi replays the current prompt sections and tool declarations into one leading system message ahead of the returned messages. Filtering, windowing, or slicing from a compaction summary therefore cannot drop the prompt or the tools. An unchanged list keeps mid-conversation system messages in place, so models that accept them retain their cached prefix. System messages a handler adds are kept after Pi's head. To change the prompt or the tool set durably, use [`before_agent_start`](#before_agent_start) or `pi.setActiveTools()`; to edit system messages for one request, use [`context_with_system`](#context_with_system).
+`event.messages` holds the conversation without system messages. The prompt and tool declarations belong to Pi and are not part of this hook: when the handler returns a changed list, Pi replays the current prompt sections and tool declarations into one leading system message ahead of the returned messages. Filtering, windowing, or slicing from a compaction summary therefore cannot drop the prompt or the tools. An unchanged list keeps mid-conversation system messages in place, so models that accept them retain their cached prefix. A changed list also replaces a [provider summary block](compaction.md#provider-summary-block) with its summary text for that request. System messages a handler adds are kept after Pi's head. To change the prompt or the tool set durably, use [`before_agent_start`](#before_agent_start) or `pi.setActiveTools()`; to edit system messages for one request, use [`context_with_system`](#context_with_system).
 
 #### context_with_system
 
@@ -876,7 +876,7 @@ pi.on("context_with_system", async (event, ctx) => {
 });
 ```
 
-Rules: keep a system message at index 0 (providers read the prompt and initial tool declarations there; Pi reports an error if a handler drops it). After a compaction, a second system message can follow it directly: it carries the tools that changed since the session's first request (see [CompactionEntry](session-format.md#compactionentry)). Keep both, in this order. Removing a system message removes the tool declarations and section patches it carries. Check your output with `getCurrentSystemPrompt()` and `getCurrentTools()` from `@earendil-works/pi-ai`. Handlers run in extension load order; a `systemPrompt` forced from `before_agent_start` is still projected onto the request afterwards.
+Rules: keep a system message at index 0 (providers read the prompt and initial tool declarations there; Pi reports an error if a handler drops it). After a compaction, a second system message can follow it directly: it carries the tools that changed since the session's first request (see [CompactionEntry](session-format.md#compactionentry)). Keep both, in this order. When the message at index 0 carries `providerSummary`, leave every message before the `compactionSummary` message as it is (see [Provider summary block](compaction.md#provider-summary-block)). Removing a system message removes the tool declarations and section patches it carries. Check your output with `getCurrentSystemPrompt()` and `getCurrentTools()` from `@earendil-works/pi-ai`. Handlers run in extension load order; a `systemPrompt` forced from `before_agent_start` is still projected onto the request afterwards.
 
 #### before_provider_headers
 
