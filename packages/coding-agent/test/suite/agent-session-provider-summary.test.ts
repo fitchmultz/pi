@@ -247,6 +247,66 @@ describe("AgentSession provider summary block", () => {
 		});
 	});
 
+	it("asks for a block on top of a compaction that stored a tool update, and keeps its leading system message", async () => {
+		const harness = await createHarness({
+			tools: [lookup, ring],
+			initialActiveToolNames: ["lookup"],
+			settings: { compaction: { enabled: false } },
+			// The compaction at turn 2 asks for no block: it stores the tool loaded before it as a tool update.
+			extensionFactories: [compactAtTurns([2], {}), compactAtTurns([4], { providerSummary: {} })],
+		});
+		harnesses.push(harness);
+		const requests = useSummaryModel(harness);
+		harness.setResponses([
+			fauxAssistantMessage("first"),
+			callLookup("b"),
+			callLookup("c"),
+			callLookup("d"),
+			blockReply(harness),
+			fauxAssistantMessage("done"),
+		]);
+
+		await harness.session.prompt("one");
+		harness.session.setActiveToolsByName(["lookup", "ring"]);
+		await harness.session.prompt("two");
+
+		const [, , , fourth, summary, fifth] = requests;
+		// The request that produced the kept turn starts with the first tool list and the tool update.
+		expect(describeMessages(fourth.messages)).toEqual([
+			"system +lookup",
+			"system +ring",
+			expect.stringContaining("summary before turn 2"),
+			'assistant: lookup({"key":"b"})',
+			"toolResult: value of b",
+			'assistant: lookup({"key":"c"})',
+			"toolResult: value of c",
+		]);
+		expect(summary.options).toMatchObject({ providerSummary: {} });
+		expect(summary.messages).toEqual(fourth.messages);
+
+		const [plain, withBlock] = getCompactions(harness);
+		expect(plain.toolUpdate?.toolsAdded?.map((tool) => tool.name)).toEqual(["ring"]);
+		// The kept turn was written under this leading system message: same prompt, same first tool list.
+		expect(withBlock.systemMessage).toEqual(plain.systemMessage);
+		expect(withBlock.systemMessage?.toolsAdded?.map((tool) => tool.name)).toEqual(["lookup"]);
+		expect(withBlock).not.toHaveProperty("toolUpdate");
+		expect(withBlock.providerSummary?.block).toEqual(block);
+		expect(withBlock.providerSummary?.toolsAdded?.map((tool) => tool.name)).toEqual(["ring"]);
+
+		expect(describeMessages(fifth.messages)).toEqual([
+			"system+block +lookup",
+			"system +ring",
+			'assistant: lookup({"key":"d"})',
+			"toolResult: value of d",
+			expect.stringContaining("summary before turn 4"),
+		]);
+		expect(fifth.messages[0]).toEqual({
+			...fourth.messages[0],
+			providerSummary: { ...writer(harness), block, timestamp: new Date(withBlock.timestamp).getTime() },
+		});
+		expect(getCurrentTools(fifth.messages).map((tool) => tool.name)).toEqual(["lookup", "ring"]);
+	});
+
 	it("chains a second block on the first and keeps the first leading system message", async () => {
 		const harness = await createHarness({
 			tools: [lookup],
