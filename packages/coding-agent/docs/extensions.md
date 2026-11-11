@@ -1616,7 +1616,7 @@ Handlers run in extension load order, then registration order within each extens
 
 Register a custom tool callable by the LLM. See [Custom Tools](#custom-tools) for full details.
 
-`pi.registerTool()` works both during extension load and after startup. You can call it inside `session_start`, command handlers, or other event handlers. New tools are refreshed immediately in the same session, so they appear in `pi.getAllTools()` without `/reload`. Registering a tool activates it unless it sets `defaultActive: false` or an [exposure](#tool-exposure) other than `direct` or `model-only`.
+`pi.registerTool()` works both during extension load and after startup. You can call it inside `session_start`, command handlers, or other event handlers. New tools are refreshed immediately in the same session, so they appear in `pi.getAllTools()` without `/reload`. Registering a tool activates it unless it sets `defaultActive: false` or an [exposure](#tool-exposure) other than `direct` or `model-only`, or the user removed it with a `-name` entry in `--tools` or the [`defaultTools` setting](settings.md#tools).
 
 Use `pi.setActiveTools()` to enable or disable tools (including dynamically added tools) at runtime.
 
@@ -2816,7 +2816,7 @@ When `search_tools` adds a match, the model receives the complete updated tool l
 
 `namespace: { name, aliases, description, instructions }` groups related tools, as MCP servers do. Codemode tools list a namespace under one heading with its `description`. `instructions` holds longer usage guidance; it is not listed, and codemode scripts read it with `describeNamespace(name)`. `aliases` are other names scripts may look the namespace up by, for example the server name `docs` for `mcp__docs`; a name and the same name as a script identifier (`my-docs`, `my_docs`) match alike.
 
-Registering a `direct` or `model-only` tool activates it unless it sets `defaultActive: false`; the other exposures are not activated on registration. The active set (`pi.getActiveTools()`, `pi.setActiveTools()`) is the set of tools declared to the model, except active tools whose declarations `prepareLoadout` hides. `pi.getAllTools()` reports each tool's `exposure`, `namespace`, `annotations`, and `reachesTools`.
+Registering a `direct` or `model-only` tool activates it unless it sets `defaultActive: false` or the user removed it with a `-name` entry in `--tools` or the `defaultTools` setting; the other exposures are not activated on registration. The active set (`pi.getActiveTools()`, `pi.setActiveTools()`) is the set of tools declared to the model, except active tools whose declarations `prepareLoadout` hides. `pi.getAllTools()` reports each tool's `exposure`, `namespace`, `annotations`, and `reachesTools`.
 
 The exposure a tool registers with is its default. The user's [`toolExposure` setting](settings.md#tool-exposure) replaces it by tool name or pattern, and the tool then behaves as if it had registered with the setting's exposure. A tool registered as `hidden` stays hidden. `pi.getAllTools()` reports the exposure in effect, so an extension that adds prompt text for its tool, or activates `tool_search` for it, should read the exposure and `pi.getActiveTools()` there instead of assuming what it registered.
 

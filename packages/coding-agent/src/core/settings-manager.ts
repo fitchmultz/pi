@@ -1538,6 +1538,17 @@ export class SettingsManager {
 		return resolveDefaultTools(Array.isArray(tools) ? tools.filter((tool) => typeof tool === "string") : []);
 	}
 
+	/**
+	 * The `+name` and `-name` entries of the merged `defaultTools` setting, in the order they apply.
+	 * `getDefaultTools()` applies them to the tools the setting names. They also apply to tools that
+	 * are active without being named, such as tools an extension registers active.
+	 */
+	getDefaultToolModifiers(): string[] {
+		const tools = this.settings.defaultTools;
+		// Settings files are not validated; another shape has no entries.
+		return Array.isArray(tools) ? tools.filter(isToolModifier) : [];
+	}
+
 	/** The exposure the `toolExposure` setting gives a tool, or undefined when no entry gives it one. */
 	getToolExposure(toolName: string): ToolExposure | undefined {
 		return getToolExposureSetting(this.settings.toolExposure, toolName);

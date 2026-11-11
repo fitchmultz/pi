@@ -168,6 +168,7 @@ See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent
 | Anthropic thinking-drop notices must announce only drops beyond the highest earlier report in the current context window or, before its first report, beyond the thinking blocks its compaction kept. Upstream compares with the previous response only, so the notice repeats after every compaction and every restarted message thread, where nothing unexpected was dropped. The notice names a cause, the earlier prompt changed or another model wrote the blocks, only when Anthropic reports that reason for every dropped block | `modes/interactive/interactive-mode.ts` | `interactive-mode-assistant-diagnostics.test.ts` |
 | Piped input needs separators; whitespace-only input must not start a turn | `cli/initial-message.ts`, `main.ts` | `initial-message.test.ts` |
 | Reload must preserve deselected default-active tools while adopting newly configured defaults, including saved `--tools +name/-name` modifiers | `core/agent-session.ts` | `default-tools-setting.test.ts` |
+| A `-name` entry in the `defaultTools` setting or in `--tools` must disable a tool that an extension or the SDK registers active, such as `background_command` or a `direct` MCP tool, whenever the tool registers: at startup, later in the session, on resume, after `/tree` and on reload. Upstream applies the entries only to the names of the resolved selection, the default built-in tools and the tools it names, so an entry for another tool is dropped and registering the tool activates it. A resumed session keeps a tool its transcript recorded, and `--no-builtin-tools` and a plain `--tools` list override the setting's `-name` entries with the rest of the setting | `core/{agent-session,settings-manager}.ts` | `default-tools-setting.test.ts`, `tool-exposure-setting.test.ts` |
 | Custom UI must dispose components completed during factory initialization and capture drafts at mount rather than factory entry. Native inline-dialog draft restoration remains observable through public `setEditorText()` and is retained, not replaced by stack visibility/focus ownership | `modes/interactive/interactive-mode.ts` | `interactive-mode-status.test.ts`, `suite/working-session-dialogs.test.ts` |
 | Extension cancellation must remain observable through run setup, post-run recovery and pre-settlement, without replacing the active loop's signal or exposing an idle signal; upstream's `agent_settled.aborted` is captured before clearing that signal | `core/{agent-session,extensions/types}.ts` | `suite/background-command-session.test.ts`, `suite/agent-session-boundaries.test.ts` |
 | A prompt whose input hooks or auth check overlap another prompt's run start must queue into that run by its `streamingBehavior` or be rejected, not start a second run that drops the prompt and releases the first run's activity while it streams | `core/agent-session.ts` | `suite/agent-session-prompt.test.ts` |
@@ -383,8 +384,11 @@ the rate as zero get it restored from their input rate during offline hydration 
 fetched/cached runtime merges. Custom endpoints and other providers are unchanged. Claude 5.5 pricing now follows
 models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
 
-Cache investigation keeps persistent restart guidance in its existing `context_with_system`
-owner, not the per-run `before_agent_start` hook. Forced text stays run-scoped and unpersisted. Child
+Restart guidance is a recorded `restart` prompt section, set in `before_agent_start`, so a copy of
+the session that runs without managed control keeps the leading system message and records the
+section's removal. Models without mid-conversation system messages still get the removal folded
+into the leading message. A `context_with_system` handler adds the guidance only to windows recorded
+before the section was saved. Forced text stays run-scoped and unpersisted. Child
 finalization recovery remains a conditional source risk: managed saved-session attempts create
 new contracts, and no reachable unchanged-contract reset was reproduced. Do not restore an old
 phase for a new contract or apply a speculative recovery patch.
