@@ -2088,7 +2088,7 @@ export class AgentSession {
 			this._cacheWarmer.onWarmed = undefined;
 			this._cacheWarmer.cancel();
 		}
-		cleanupSessionResources(this.sessionId);
+		cleanupSessionResources(this.sessionManager.getCacheSessionId());
 	}
 
 	// =========================================================================

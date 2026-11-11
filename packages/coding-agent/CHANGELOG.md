@@ -60,6 +60,7 @@
 ### Fixed
 
 - Fixed cancelling a local file read during setup crashing Pi with an uncaught `AbortError`.
+- Fixed a forked session (`/fork`, `/clone`, `--fork`) reading none of the copied conversation from the OpenAI prompt cache on its first request. A fork now sends providers the session id its conversation was cached under, recorded as `cacheSessionId` in its header. See [SessionHeader](docs/session-format.md#sessionheader).
 - Fixed managed restart and native working-session restoration failing when an inactive model in the saved cycling list was removed. Missing cycling entries are omitted; a missing selected model still fails rather than silently switching providers.
 - Fixed failed session replacements sending lifecycle events to extensions already shut down. Recovery and exit now leave the disposed session alone; failures after the new session is created keep that session current. See [Session storage](docs/sdk.md#session-storage).
 - Fixed cache notices treating known account and thinking-level changes as unexplained misses. Subsequent same-account misses remain visible, and observed cache-read prices do not carry across account changes.

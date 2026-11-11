@@ -48,6 +48,12 @@ export interface SessionHeader {
 	timestamp: string;
 	cwd: string;
 	parentSession?: string;
+	/**
+	 * Session id sent to providers when it differs from `id`. A session that starts with a copy of
+	 * another session's conversation carries the id that conversation was sent under, so its
+	 * requests reach the provider prompt cache that already holds the copied part.
+	 */
+	cacheSessionId?: string;
 }
 
 export interface NewSessionOptions {
@@ -1400,6 +1406,11 @@ export class SessionManager {
 		return this.sessionId;
 	}
 
+	/** The session id sent to providers: a fork's `cacheSessionId`, otherwise the session's own id. */
+	getCacheSessionId(): string {
+		return this.getHeader()?.cacheSessionId ?? this.sessionId;
+	}
+
 	getSessionFile(): string | undefined {
 		return this.sessionFile;
 	}
@@ -1922,6 +1933,7 @@ export class SessionManager {
 	createBranchedSession(leafId: string): string | undefined {
 		this.beforeMutation?.();
 		const previousSessionFile = this.sessionFile;
+		const cacheSessionId = this.getCacheSessionId();
 		const path = this.getBranch(leafId);
 		if (path.length === 0) {
 			throw new Error(`Entry ${leafId} not found`);
@@ -1970,6 +1982,7 @@ export class SessionManager {
 			timestamp,
 			cwd: this.cwd,
 			parentSession: this.persist ? previousSessionFile : undefined,
+			cacheSessionId,
 		};
 
 		// Collect labels for entries in the path
@@ -2180,6 +2193,7 @@ export class SessionManager {
 			timestamp,
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
+			cacheSessionId: sourceHeader.cacheSessionId ?? sourceHeader.id,
 		};
 		const forkEntries: FileEntry[] = [newHeader, ...sourceEntries.filter((entry) => entry.type !== "session")];
 		const fd = openSync(newSessionFile, "wx", 0o600);
