@@ -155,6 +155,7 @@ interface CompactionEntry<T = unknown> {
   usage?: Usage;       // LLM usage that generated the summary
   fromHook?: boolean;  // true if provided by extension (legacy field name)
   details?: T;         // implementation-specific data
+  providerSummary?: CompactionProviderSummary; // see "Provider summary block"
 }
 
 // Default compaction uses this for details (from compaction.ts):
@@ -328,10 +329,102 @@ pi.on("session_before_compact", async (event, ctx) => {
       tokensBefore: preparation.tokensBefore,
       // usage: summaryResponse.usage, // Optional; included in session totals
       details: { /* custom data */ },
+      // providerSummary: { instructions: "..." }, // Optional; see "Provider summary block"
     }
   };
 });
 ```
+
+#### Provider summary block
+
+Claude models with preserved thinking accept a reasoning block only while everything before it is unchanged. A compaction replaces the older messages, so the model drops the reasoning in the kept messages as well. The Anthropic API can write a signed summary block that stands in place of the older messages and keeps that reasoning valid. An extension asks Pi for such a block by adding `providerSummary` to the compaction it returns:
+
+```typescript
+return {
+  compaction: {
+    summary: "Your summary...",
+    firstKeptEntryId: preparation.firstKeptEntryId,
+    tokensBefore: preparation.tokensBefore,
+    providerSummary: {
+      // Optional. Replaces the API's own summarization prompt.
+      instructions: "State the task in one sentence. Do not name a next step.",
+    },
+  },
+};
+```
+
+Without `providerSummary`, nothing changes. With it, Pi does this before it stores the compaction entry:
+
+1. Pi sends one request to the session's current model, with the session's credentials and route. The request holds exactly the messages before `firstKeptEntryId`, built the way Pi built the request that the first kept message answered, plus `instructions`. The model answers with the block instead of a reply. The compaction waits for this request, at most 30 seconds. Unless the kept entries reach back across an earlier compaction, the request repeats one that Pi already sent, so the API reads it from the prompt cache while that cache entry lives.
+2. Pi stores the entry. `summary`, `firstKeptEntryId`, `tokensBefore` and `details` are stored as returned. `providerSummary` on the entry holds the block and the record of the request. The request's usage is added to the entry's `usage`, so session totals include it.
+3. From then on, a request to that same provider, API and model starts with the block. The kept entries follow unchanged, including system messages among them. `summary` follows the kept entries. Entries after the compaction follow `summary`.
+
+```
+Entry with a block, request to the model that made it:
+
+  ┌────────┬───────┬─────┬──────┬─────┬──────┬─────────┬──────────────┐
+  │ system │ block │ ass │ tool │ ass │ tool │ summary │ new messages │
+  └────────┴───────┴─────┴──────┴─────┴──────┴─────────┴──────────────┘
+       ↑               └─────────┬────────┘
+   unchanged          entries from firstKeptEntryId
+```
+
+The leading system message is the one that led the context before the compaction, stored unchanged. Every compaction keeps its tool list (see [How It Works](#how-it-works)). An entry with a block also keeps its prompt, where an entry without a block stores the prompt as it is at the compaction: a changed prompt or tool list also invalidates the kept reasoning. The summarized messages can have changed the tools and the prompt:
+
+- **Tools.** The block restores the tools that the summarized messages added and removed, for the model that made it. Pi stores the same changes on the entry (`providerSummary.toolsAdded`, `providerSummary.toolsRemoved`) and puts them in a system message directly after the leading one. That message tells Pi's own tool state and every other model which tools exist. It is not sent to the model that made the block, so no tool definition is sent twice. The entry has no `toolUpdate`: tool changes among the kept entries stay where they are.
+- **Prompt sections.** The block does not restore them. Pi states the changed sections again in a system message before the next model request, after the kept entries.
+
+In messages, the context of such an entry is:
+
+```
+[system message + providerSummary] [system message: summarized tool changes] [kept entries] [compactionSummary] [later entries]
+```
+
+`providerSummary` on the leading system message is `{ provider, api, model, block, timestamp }`. `timestamp` is the time of the compaction, in milliseconds. The kept replies reported their usage before that time, for the conversation the block replaced. Token estimates therefore do not take the usage of a kept reply as the size of this context: until the first reply after the compaction they count the messages by size.
+
+Only the model that made a block can read it, and only below the leading system message it was made under. In these requests the block's summary text takes its place, as a user message before the first kept message (`Summary of the earlier conversation:` and the text), and the kept reasoning is not kept valid:
+
+- a request to another provider, API or model, for example after a model switch
+- a request whose conversation a `context` handler changed
+- a request with a system prompt that a `before_agent_start` handler replaced
+
+The first kept message must be an assistant message, and it must not have failed or been aborted. The block request is then the request that this message answered, sent again with `instructions`. With any other start Pi stores the compaction without a block (`reason: "cut"`): a user message, a custom message or a tool result as first kept message, no kept message at all (`firstKeptEntryId` is the compaction's own ID or an entry without a message, or `null` in a `turn_end` draft), no leading system message, or no message before the first kept one (the kept entries start where those of an earlier block started; a block written from a block alone does not keep the reasoning).
+
+Pi never cancels the compaction and never runs its own summarizer because of `providerSummary`. In each of these cases it stores the entry without a block, and the compaction behaves as without the opt-in:
+
+| `providerSummary.reason` on the entry | Cause |
+|---|---|
+| `overflow` | The compaction's `reason` is `"overflow"`. The context does not fit the model, so the request would fail too. No request is sent. |
+| `model` | No implementation for the session's model, or the session uses a virtual model. No request is sent. Implemented for `anthropic-messages` models with managed effort on routes that take system messages and tool changes inside the conversation (`compat.supportsMidConvoEffort`, `supportsMidConvoSystemMessages`, `supportsMidConvoToolChanges`); `supportsProviderSummary(model)` from `@earendil-works/pi-ai` tells. In the built-in catalog these are Claude models of the `anthropic` and `cloudflare-ai-gateway` providers. |
+| `prompt` | A `before_agent_start` handler replaced the system prompt of this run. The block could not be sent later. No request is sent. |
+| `cut` | The kept entries do not start with a completed assistant message (see above). No request is sent. |
+| `aborted` | The user cancelled (Esc) while the request ran. Esc at that point stops only the request; the compaction is stored. |
+| `timeout` | The request took longer than 30 seconds. |
+| `error: <message>` | The request failed, for example `prompt is too long` when the messages do not fit the model. |
+| `stop: <stop reason>` | The API answered without a block, for example `stop: refusal` when it rejects the `instructions`, or `stop: max_tokens`. `stop: compaction` means that the API failed to write the summary and returned a block without content. |
+
+```typescript
+interface CompactionProviderSummary {
+  provider: string;    // provider, API and model of the request
+  api: string;
+  model: string;
+  block?: JsonObject;  // the signed block as returned; absent when none was made
+  reason?: string;     // why there is no block; absent when block is present
+  toolsAdded?: Tool[];            // with a block: tools the summarized messages added
+  toolsRemoved?: ToolReference[]; // with a block: tools the summarized messages removed
+  seconds: number;     // duration of the request; 0 when none was sent
+  usage?: Usage;       // usage of the request; also included in the entry's usage
+}
+```
+
+A compaction entry in a `turn_end` result accepts the same `providerSummary` field (see [turn_end](extensions.md#turn_start--turn_end)).
+
+The session file records whether a block was made and whether it kept the reasoning:
+
+- The compaction entry: `providerSummary` as above, on every compaction that asked for a block.
+- Each assistant message from an Anthropic Messages model whose request carried reasoning blocks: a diagnostic `{ type: "anthropic_thinking_blocks", details: { sent, dropped } }` in `message.diagnostics`. `sent` counts the reasoning blocks in the request body, `dropped` the ones the API reported as dropped. After a compaction, `dropped: 0` with `sent` above 0 on the next reply means the kept reasoning stayed valid. In interactive mode, the [thinking-drop notice](settings.md#model-and-thinking) announces kept reasoning that Anthropic drops after a compaction with a block. On the direct Anthropic route Pi sends message threads when the context has no block: such a request body holds only the new messages, so the diagnostic is absent on most replies and appears on the first request after a compaction, which is sent in full.
+
+In a `context_with_system` handler, leave every message before the `compactionSummary` message as it is when the first message carries `providerSummary`. Do not change the leading system message, do not put a message between it and the kept entries, and do not change, remove or reorder the kept messages. Each of these makes the model drop the kept reasoning again; the request stays valid and nothing a handler adds is lost. State for the model belongs after the `compactionSummary` message.
 
 #### Converting Messages to Text
 

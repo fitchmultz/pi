@@ -147,7 +147,7 @@ interface AssistantMessage {
 
 Cache notices also label known thinking-level changes. They compare native `providerThinkingLevel` values when both exist, otherwise recorded `thinkingLevel` values. These labels identify expected boundaries, not proven causes. A later miss with unchanged metadata remains a cache-miss estimate. Session statistics retain all reported usage and costs.
 
-An `anthropic_input_transformations` diagnostic lists the thinking blocks that Anthropic dropped from the request. [Settings](settings.md#model-and-thinking) describes when the transcript announces them.
+An `anthropic_input_transformations` diagnostic lists the thinking blocks that Anthropic dropped from the request. [Settings](settings.md#model-and-thinking) describes when the transcript announces them. An `anthropic_thinking_blocks` diagnostic counts them: `details.sent` is the number of thinking blocks in the request body and `details.dropped` the number Anthropic dropped. It is present when either is above 0 and is a measurement, not a sign of a failed turn.
 
 `"pending"` is used for a partial assistant message while it streams. The completed message in `message_end` has a terminal stop reason, and Pi does not persist `"pending"` assistant messages in session JSONL.
 

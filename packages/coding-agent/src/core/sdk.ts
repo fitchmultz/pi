@@ -555,7 +555,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// the current transcript still extends the request's prefix. Agent state may
 			// shallow-copy the messages array or refresh the model object without changing
 			// the provider request, so top-level object identity is not a valid cache key.
-			if (options?.sessionId === cacheSessionId) {
+			// A summary block request repeats an earlier request of the session; it replaces nothing.
+			if (options?.sessionId === cacheSessionId && !options.providerSummary) {
 				const isCurrent = cacheContextIsCurrent(model);
 				cacheWarmer.cancel();
 				return modelRuntime.streamSimple(model, context, requestOptions, (preparedModel, preparedOptions) => {

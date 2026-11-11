@@ -4575,7 +4575,9 @@ export class InteractiveMode {
 	 *   a full request gets one, so a restarted thread repeats the report of several responses ago.
 	 * - Expected, until the window has a report: the thinking blocks the compaction kept. Anthropic
 	 *   drops them because the summary replaced the history they were written for. Kept blocks that
-	 *   are not sent as thinking lower the real count, so a report replaces this one.
+	 *   are not sent as thinking lower the real count, so a report replaces this one. A compaction
+	 *   with a provider summary block expects none: the block stands for that history, so Anthropic
+	 *   keeps the kept blocks.
 	 */
 	private static countKnownThinkingDrops(branch: SessionEntry[]): number {
 		let reported = 0;
@@ -4586,6 +4588,7 @@ export class InteractiveMode {
 			}
 			if (entry.type !== "compaction") continue;
 			if (reported > 0) return reported;
+			if (entry.providerSummary?.block) return 0;
 
 			// A compaction that kept nothing names itself as the first kept entry.
 			const firstKept = branch.findIndex((kept) => kept.id === entry.firstKeptEntryId);

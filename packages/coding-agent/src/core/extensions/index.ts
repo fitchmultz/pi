@@ -81,6 +81,7 @@ export type {
 	ExtensionAPI,
 	ExtensionCommandContext,
 	ExtensionCommandContextActions,
+	ExtensionCompactionResult,
 	ExtensionContext,
 	ExtensionContextActions,
 	// Errors

@@ -128,6 +128,35 @@ describe.each([
 		expect(buildBaseOptions(model, context).maxTokens).toBe(4_755);
 	});
 
+	it("ignores the usage of a reply that a summary block kept from the conversation it replaced", () => {
+		const context = normalizeContext({
+			messages: [
+				{
+					role: "system",
+					content: "system",
+					providerSummary: {
+						provider: "openai",
+						api: "openai-responses",
+						model: "test-model",
+						block: { type: "compaction", content: "summary" },
+						timestamp: 200,
+					},
+					timestamp: 50,
+				},
+				createAssistant(100, 9_500),
+				{ role: "user", content: "x".repeat(4_000), timestamp: 200 },
+			],
+		});
+
+		expect(estimateContextTokens(context, target)).toEqual({
+			tokens: 1_147,
+			usageTokens: 0,
+			trailingTokens: 1_147,
+			lastUsageIndex: null,
+		});
+		expect(buildBaseOptions(model, context).maxTokens).toBe(4_757);
+	});
+
 	it("uses assistant usage again after a response to the inserted context", () => {
 		const context = normalizeContext({
 			messages: [

@@ -105,7 +105,14 @@ function getLastAssistantUsageInfo(
 				usageInfo = { usage: assistant.usage, index: i };
 			}
 		}
-		latestPrefixTimestamp = Math.max(latestPrefixTimestamp, message.timestamp);
+		// A summary block replaced the conversation before the kept replies when it was written,
+		// so it counts as a prefix message of that time although its message is older.
+		const blockTimestamp = message.role === "system" ? message.providerSummary?.timestamp : undefined;
+		latestPrefixTimestamp = Math.max(
+			latestPrefixTimestamp,
+			message.timestamp,
+			blockTimestamp ?? Number.NEGATIVE_INFINITY,
+		);
 	}
 
 	return usageInfo;

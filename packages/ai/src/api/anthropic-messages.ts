@@ -1,6 +1,7 @@
 import Anthropic, { type ClientOptions } from "@anthropic-ai/sdk";
 import type {
 	BetaInputTransformation,
+	BetaIterationsUsage,
 	BetaRequestToolAdditionBlock,
 	BetaRequestToolRemovalBlock,
 	BetaStopReason,
@@ -20,12 +21,14 @@ import {
 	ANTHROPIC_WORKSPACE_ID_ENV,
 } from "../env-api-keys.ts";
 import { calculateCost } from "../models.ts";
+import { wroteProviderSummary } from "../provider-summary.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
 	AssistantMessage,
 	CacheRetention,
 	ImageContent,
+	JsonObject,
 	Message,
 	Model,
 	ProviderEnv,
@@ -39,6 +42,7 @@ import type {
 	Tool,
 	ToolCall,
 	ToolResultMessage,
+	Usage,
 } from "../types.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { withCauseDetail } from "../utils/error-body.ts";
@@ -220,6 +224,7 @@ const MID_CONVERSATION_OUTPUT_CONFIG_BETA = "mid-conversation-output-config-2026
 const THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01";
 const INLINE_TOOLS_BETA = "inline-tools-2026-09-15";
 const MESSAGE_THREADS_BETA = "message-threads-2026-08-12";
+const COMPACTION_BETA = "compact-2026-09-04";
 
 /**
  * Stable deferred tool declared whenever native tool changes are in use. Anthropic adds
@@ -859,6 +864,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 		? context
 		: resolveTranscript(context, compat.supportsMidConvoSystemMessages);
 	const currentTools = getCurrentTools(normalizedContext.messages);
+	const summaryBlock = getSummaryBlock(model, normalizedContext.messages);
 
 	(async () => {
 		const output = createPendingAssistantMessage(model.api as Api, model);
@@ -915,12 +921,16 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: 0,
 			};
-			const send = (body: ThreadedParams) =>
-				retryProviderRequest(() => client.beta.messages.create(body, requestOptions).asResponse(), {
+			// Thinking blocks in the body of the request that was answered, for the journal.
+			let thinkingBlocksSent = 0;
+			const send = (body: ThreadedParams) => {
+				thinkingBlocksSent = countThinkingBlocks(body.messages);
+				return retryProviderRequest(() => client.beta.messages.create(body, requestOptions).asResponse(), {
 					maxRetries: options?.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					signal: options?.signal,
 				});
+			};
 			let disablePreferredStrictTools = hasExceededStrictToolLimits(options?.sessionId);
 			let response: Response;
 			let params: MessageCreateParamsStreaming;
@@ -931,6 +941,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				const built = buildParams(model, normalizedContext, isOAuth, options, {
 					disablePreferredStrictTools,
 					messageThreads: threadSessionId !== undefined,
+					summaryBlock,
 				});
 				if (built.providerThinkingLevel) output.providerThinkingLevel = built.providerThinkingLevel;
 				params = built.params;
@@ -938,8 +949,12 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				if (nextParams !== undefined) {
 					params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
 				}
+				// Anthropic rejects `thread` on a summary request and on a request that carries a summary block.
 				const prepared =
-					threadSessionId !== undefined && options?.disableContinuation !== true
+					threadSessionId !== undefined &&
+					options?.disableContinuation !== true &&
+					summaryBlock === undefined &&
+					options?.providerSummary === undefined
 						? prepareThreadRequest(model, threadSessionId, params)
 						: undefined;
 				try {
@@ -999,6 +1014,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.usage.cacheRead = event.message.usage.cache_read_input_tokens || 0;
 					output.usage.cacheWrite = event.message.usage.cache_creation_input_tokens || 0;
 					output.usage.cacheWrite1h = event.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0;
+					if (options?.providerSummary) readSummaryUsage(output.usage, event.message.usage.iterations);
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
@@ -1007,6 +1023,21 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					if (event.content_block.type === "fallback") {
 						if (output.content.length > 0) {
 							throw new Error("Anthropic performed an unsupported mid-output model fallback");
+						}
+						continue;
+					}
+					if (event.content_block.type === "compaction") {
+						// The block arrives whole in this event. It is stored as returned and sent back unchanged.
+						// Null content marks a summary that Anthropic failed to write. The API reads such a block
+						// as nothing, so it is not a summary block.
+						if (event.content_block.content !== null) {
+							output.providerSummary = {
+								provider: model.provider,
+								api: model.api,
+								model: model.id,
+								// Parsed wire JSON; the SDK's interface only lacks the index signature.
+								block: event.content_block as unknown as JsonObject,
+							};
 						}
 						continue;
 					}
@@ -1155,6 +1186,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						if (thinkingTokens != null) {
 							output.usage.reasoning = thinkingTokens;
 						}
+						if (options?.providerSummary) readSummaryUsage(output.usage, event.usage.iterations);
 					}
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
@@ -1193,6 +1225,17 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							reason: transformation.reason ?? undefined,
 						})),
 					},
+				});
+			}
+			// How much earlier reasoning the request carried and how much of it the API dropped. A
+			// measurement, recorded with every reply to a request that carried or lost any.
+			const thinkingBlocksDropped =
+				inputTransformations?.filter((transformation) => transformation.type === "thinking_dropped").length ?? 0;
+			if (thinkingBlocksSent > 0 || thinkingBlocksDropped > 0) {
+				appendAssistantMessageDiagnostic(output, {
+					type: "anthropic_thinking_blocks",
+					timestamp: Date.now(),
+					details: { sent: thinkingBlocksSent, dropped: thinkingBlocksDropped },
 				});
 			}
 
@@ -1395,13 +1438,15 @@ interface BetaFeatureFlags {
 	nativeToolChanges: boolean;
 	/** The session uses message threads. */
 	messageThreads: boolean;
+	/** The request asks for a summary block or carries one. */
+	summary: boolean;
 }
 
 function getBetaFeatures(
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
 	options: AnthropicOptions | undefined,
-	{ isOAuthToken, nativeToolChanges, messageThreads }: BetaFeatureFlags,
+	{ isOAuthToken, nativeToolChanges, messageThreads, summary }: BetaFeatureFlags,
 ): NonNullable<MessageCreateParamsStreaming["betas"]> {
 	let configuredFeatures: string | null | undefined;
 	for (const headers of [model.headers, options?.headers]) {
@@ -1438,6 +1483,7 @@ function getBetaFeatures(
 	}
 	if (nativeToolChanges) features.push(INLINE_TOOLS_BETA);
 	if (messageThreads) features.push(MESSAGE_THREADS_BETA);
+	if (summary) features.push(COMPACTION_BETA);
 	return [...new Set(features)];
 }
 
@@ -1446,6 +1492,8 @@ interface BuildParamsFlags {
 	disablePreferredStrictTools: boolean;
 	/** The session uses message threads, so the threads beta is sent. */
 	messageThreads: boolean;
+	/** The summary block that leads the request, if the transcript carries one this model wrote. */
+	summaryBlock: JsonObject | undefined;
 }
 
 function buildParams(
@@ -1510,8 +1558,22 @@ function buildParams(
 		model.reasoning && options?.thinkingEnabled === false && model.thinkingLevelMap?.off !== null;
 	// Effort cannot change between messages while thinking is disabled, so "off" sends no effort markers.
 	const effortMessages = model.compat?.supportsMidConvoEffort === true && !thinkingDisabled;
+	// The tool changes of system messages before the first kept message restate what the summarized
+	// conversation changed. The block restores those itself (`tool_changes`), and any message between
+	// the block and the first kept message makes Anthropic drop the kept thinking (both measured). So
+	// they are not sent; their definitions only take the strict shares they had when first sent.
+	// Text that an extension put there is sent, at the cost of the kept thinking.
+	const firstKept = flags.summaryBlock ? conversationMessages.findIndex((message) => message.role !== "system") : 0;
+	const sentMessages = conversationMessages.slice();
+	for (let index = 0; index < (firstKept < 0 ? sentMessages.length : firstKept); index++) {
+		const message = sentMessages[index];
+		if (message.role !== "system") continue;
+		if (nativeToolChanges) convertToolDefinitions(message.toolsAdded ?? []);
+		const { toolsAdded: _added, toolsRemoved: _removed, ...withoutToolChanges } = message;
+		sentMessages[index] = withoutToolChanges;
+	}
 	const converted = convertMessages(
-		conversationMessages,
+		sentMessages,
 		isOAuthToken,
 		cacheControl,
 		compat.allowEmptySignature,
@@ -1520,17 +1582,35 @@ function buildParams(
 		nativeToolChanges ? countLeadingSystemMessages(context.messages) - 1 : 0,
 	);
 	const activeEffort = options?.effort ?? "high";
+	const summaryRequest = options?.providerSummary;
 	const betaFeatures = getBetaFeatures(model, context, options, {
 		isOAuthToken,
 		nativeToolChanges,
 		messageThreads: flags.messageThreads,
+		summary: flags.summaryBlock !== undefined || summaryRequest !== undefined,
 	});
+	// The block stands for every message before the first kept one, including the effort marker that
+	// ended the request it summarizes. Sending that marker again between the block and the first kept
+	// assistant message makes Anthropic drop the kept thinking (measured).
+	if (flags.summaryBlock) converted.assistantLevels.delete(0);
+	const messages = effortMessages ? insertThinkingLevelMessages(converted, activeEffort) : converted.messages;
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
-		messages: effortMessages ? insertThinkingLevelMessages(converted, activeEffort) : converted.messages,
+		messages: flags.summaryBlock
+			? // Opaque: the block is the JSON Anthropic returned, sent back as it is.
+				[{ role: "assistant", content: [flags.summaryBlock as unknown as ContentBlockParam] }, ...messages]
+			: messages,
 		max_tokens: options?.maxTokens ?? model.maxTokens,
 		stream: true,
 		...(betaFeatures.length > 0 ? { betas: betaFeatures } : {}),
+		...(summaryRequest
+			? {
+					compaction: {
+						type: "summarize",
+						...(summaryRequest.instructions ? { instructions: summaryRequest.instructions } : {}),
+					},
+				}
+			: {}),
 	};
 
 	// For OAuth tokens, we MUST include Claude Code identity
@@ -2013,6 +2093,48 @@ function convertTools(
 	});
 }
 
+/** Number of reasoning blocks in the messages of a request body. */
+function countThinkingBlocks(messages: MessageParam[]): number {
+	let count = 0;
+	for (const message of messages) {
+		if (typeof message.content === "string") continue;
+		for (const block of message.content) {
+			if (block.type === "thinking" || block.type === "redacted_thinking") count++;
+		}
+	}
+	return count;
+}
+
+/** The summary block to send first: the one on the leading system message, if this model wrote it. */
+function getSummaryBlock(
+	model: Model<"anthropic-messages">,
+	messages: TranscriptContext["messages"],
+): JsonObject | undefined {
+	const summary = getInitialSystemMessage(messages)?.providerSummary;
+	return summary && wroteProviderSummary(model, summary) ? summary.block : undefined;
+}
+
+/**
+ * Read the usage of a summary request. No reply is generated, so the top-level counts are zero and
+ * Anthropic reports the summarization call as the `compaction` entries of `iterations`.
+ */
+function readSummaryUsage(usage: Usage, iterations: BetaIterationsUsage | null | undefined): void {
+	const calls = (iterations ?? []).filter((iteration) => iteration.type === "compaction");
+	if (calls.length === 0) return;
+	usage.input = 0;
+	usage.output = 0;
+	usage.cacheRead = 0;
+	usage.cacheWrite = 0;
+	usage.cacheWrite1h = 0;
+	for (const call of calls) {
+		usage.input += call.input_tokens;
+		usage.output += call.output_tokens;
+		usage.cacheRead += call.cache_read_input_tokens;
+		usage.cacheWrite += call.cache_creation_input_tokens;
+		usage.cacheWrite1h += call.cache_creation?.ephemeral_1h_input_tokens ?? 0;
+	}
+}
+
 function mapStopReason(
 	reason: BetaStopReason | string,
 	stopDetails?: RefusalStopDetails | null,
@@ -2030,6 +2152,8 @@ function mapStopReason(
 				errorMessage: stopDetails?.explanation || `The model refused to complete the request`,
 			};
 		case "pause_turn": // Stop is good enough -> resubmit
+			return { stopReason: "stop" };
+		case "compaction": // The reply to a summary request: one summary block, no other content
 			return { stopReason: "stop" };
 		case "stop_sequence":
 			return { stopReason: "stop" }; // We don't supply stop sequences, so this should never happen

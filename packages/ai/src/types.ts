@@ -264,6 +264,13 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 */
 	disableContinuation?: boolean;
 	/**
+	 * Ask the provider to answer with a summary block of `context.messages` instead of a reply.
+	 * The block arrives as `AssistantMessage.providerSummary`. Only send this to an API that
+	 * implements it (`supportsProviderSummary(model)` tells; currently `anthropic-messages`); other APIs
+	 * ignore the option and answer normally.
+	 */
+	providerSummary?: ProviderSummaryRequest;
+	/**
 	 * WebSocket connect timeout in milliseconds for providers that support
 	 * WebSocket transports. This covers the connection/open handshake only;
 	 * stream idleness after connection uses timeoutMs.
@@ -556,6 +563,31 @@ export interface DeferredHandle {
 	data?: JsonValue;
 }
 
+/** Request for a provider-written summary block. */
+export interface ProviderSummaryRequest {
+	/** Replaces the provider's own summarization prompt. */
+	instructions?: string;
+}
+
+/**
+ * A summary block that a provider API wrote and signed. It stands in place of the conversation
+ * it summarizes: later requests send it first, followed by the messages that were not summarized.
+ * Only the provider, API and model that wrote the block can read it.
+ */
+export interface ProviderSummary {
+	provider: ProviderId;
+	api: Api;
+	model: string;
+	/** The block exactly as the provider returned it. Opaque: never edit it. */
+	block: JsonObject;
+	/**
+	 * On a leading system message: when the block replaced the conversation before the kept
+	 * messages, as a Unix timestamp in milliseconds. Usage that a kept reply reported before
+	 * that time describes the replaced conversation, not this one.
+	 */
+	timestamp?: number;
+}
+
 /**
  * System instructions and tool declarations at one point in the transcript.
  *
@@ -581,6 +613,12 @@ export interface SystemMessage {
 	toolsAdded?: Tool[];
 	/** Tools that stop being available at this point. */
 	toolsRemoved?: ToolReference[];
+	/**
+	 * Only on the leading system message: a provider-written summary of the conversation that was
+	 * removed before the next message. The adapter whose provider, API and model wrote it sends the
+	 * block first; every other adapter ignores this field and sends the remaining messages as they are.
+	 */
+	providerSummary?: ProviderSummary;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
@@ -610,6 +648,8 @@ export interface AssistantMessage {
 	deferred?: DeferredHandle;
 	errorMessage?: string;
 	rawStopReason?: string;
+	/** The block a provider wrote in answer to a `providerSummary` request. Such a response has no other content. */
+	providerSummary?: ProviderSummary;
 	/**
 	 * Provider indication of whether the model explicitly ended its turn.
 	 * Preserved for debugging and does not currently affect agent control flow.

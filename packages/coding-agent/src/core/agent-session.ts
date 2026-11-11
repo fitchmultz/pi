@@ -32,7 +32,16 @@ import {
 	type StreamFn,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText, getCurrentSystemMessage, getCurrentTools, retryDelayMs } from "@earendil-works/pi-ai";
+import {
+	contentText,
+	getCurrentSystemMessage,
+	getCurrentTools,
+	getProviderSummaryStandIn,
+	normalizeContext,
+	type ProviderSummaryRequest,
+	retryDelayMs,
+	supportsProviderSummary,
+} from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
@@ -92,6 +101,7 @@ import {
 	type ContextUsage,
 	type ExecuteToolOptions,
 	type ExtensionCommandContextActions,
+	type ExtensionCompactionResult,
 	type ExtensionErrorListener,
 	type ExtensionMode,
 	ExtensionRunner,
@@ -132,8 +142,10 @@ import { exportSessionToJsonl } from "./session-export.ts";
 import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
+	type CompactionProviderSummary,
 	type ContextEditEntry,
 	getLatestCompactionEntry,
+	getMessagesBeforeKept,
 	type SessionEntry,
 	SessionManager,
 	type SessionProjection,
@@ -429,6 +441,22 @@ type BackgroundToolRunState =
 			due: "commit" | "usage" | "message";
 	  };
 
+/**
+ * Time limit of a provider summary block request. The slowest measured request took 12.9 s (a
+ * 326k-token conversation whose cache had expired); past the limit the compaction is stored
+ * without a block.
+ */
+const PROVIDER_SUMMARY_TIMEOUT_MS = 30_000;
+
+/** The usage to store on a compaction entry: the summary's plus the block request's. */
+function withProviderSummaryUsage(
+	usage: Usage | undefined,
+	providerSummary: CompactionProviderSummary | undefined,
+): Usage | undefined {
+	if (!providerSummary?.usage) return usage;
+	return usage ? combineUsage(usage, providerSummary.usage) : providerSummary.usage;
+}
+
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
@@ -508,6 +536,8 @@ export class AgentSession {
 	// Compaction state
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
+	/** Set while a provider summary block is requested. Aborting it leaves the compaction itself in place. */
+	private _providerSummaryAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
 
 	// Branch summarization state
@@ -1568,7 +1598,12 @@ export class AgentSession {
 		this.agent.state.messages = projection.messages;
 	}
 
-	private _applyBoundaryDrafts(manager: SessionManager, drafts: SessionBoundaryDraft[]): SessionEntry[] {
+	private _applyBoundaryDrafts(
+		manager: SessionManager,
+		drafts: SessionBoundaryDraft[],
+		/** The provider summary block record of the single compaction draft in `drafts`. */
+		providerSummary?: CompactionProviderSummary,
+	): SessionEntry[] {
 		const appended: SessionEntry[] = [];
 		for (const draft of drafts) {
 			let entryId: string;
@@ -1598,7 +1633,8 @@ export class AgentSession {
 						tokensBefore,
 						draft.details,
 						true,
-						draft.usage,
+						withProviderSummaryUsage(draft.usage, providerSummary),
+						providerSummary,
 					);
 					break;
 				}
@@ -1664,7 +1700,15 @@ export class AgentSession {
 		const result = await this._extensionRunner.emitBoundary(event, (entries) =>
 			this._buildBoundaryContext(entries, event.type),
 		);
-		const appended = this._applyBoundaryDrafts(this.sessionManager, result.entries);
+		const appended: SessionEntry[] = [];
+		// One draft at a time: a block request reads the context that the earlier drafts left.
+		for (const draft of result.entries) {
+			const providerSummary =
+				draft.type === "compaction" && draft.providerSummary
+					? await this._requestProviderSummary(draft.providerSummary, draft.firstKeptEntryId, "threshold")
+					: undefined;
+			appended.push(...this._applyBoundaryDrafts(this.sessionManager, [draft], providerSummary));
+		}
 		this._refreshFinalizedContext();
 		for (const entry of appended) this._emit({ type: "entry_appended", entry });
 		return result.continue;
@@ -2073,7 +2117,10 @@ export class AgentSession {
 		this._workingSessionRequest = undefined;
 		try {
 			this.abortRetry();
-			this.abortCompaction();
+			// abortCompaction() stops only a running block request and lets its compaction be stored.
+			this._providerSummaryAbortController?.abort();
+			this._compactionAbortController?.abort();
+			this._autoCompactionAbortController?.abort();
 			this.abortBranchSummary();
 			this.abortBash();
 			this.agent.abort();
@@ -2512,7 +2559,9 @@ export class AgentSession {
 				...(current?.toolsAdded ? { toolsAdded: current.toolsAdded } : {}),
 				timestamp: current?.timestamp ?? Date.now(),
 			};
-			return [head, ...transformed.filter((message) => message.role !== "system")];
+			// The forced head is not the one a summary block was written under: its text stands in.
+			const standIn = getProviderSummaryStandIn(transformed);
+			return [head, ...(standIn ? [standIn] : []), ...transformed.filter((message) => message.role !== "system")];
 		};
 	}
 
@@ -3660,7 +3709,7 @@ export class AgentSession {
 				throw new Error("Nothing to compact (session too small)");
 			}
 
-			let extensionCompaction: CompactionResult | undefined;
+			let extensionCompaction: ExtensionCompactionResult | undefined;
 
 			if (this._extensionRunner.hasHandlers("session_before_compact")) {
 				const result = (await this._extensionRunner.emit({
@@ -3717,7 +3766,23 @@ export class AgentSession {
 				throw new Error("Compaction cancelled");
 			}
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			const providerSummary = extensionCompaction?.providerSummary
+				? await this._requestProviderSummary(extensionCompaction.providerSummary, firstKeptEntryId, "manual")
+				: undefined;
+			if (this._compactionAbortController.signal.aborted) {
+				throw new Error("Compaction cancelled");
+			}
+			// The block request is part of what the compaction cost, in the entry and in the result.
+			usage = withProviderSummaryUsage(usage, providerSummary);
+			this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				usage,
+				providerSummary,
+			);
 			const newEntries = this.sessionManager.getEntries();
 			this._refreshFinalizedContext();
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
@@ -3785,8 +3850,99 @@ export class AgentSession {
 	 * Cancel in-progress compaction (manual or auto).
 	 */
 	abortCompaction(): void {
+		// While the block is requested the compaction content is complete: stop only the request.
+		if (this._providerSummaryAbortController) {
+			this._providerSummaryAbortController.abort();
+			return;
+		}
 		this._compactionAbortController?.abort();
 		this._autoCompactionAbortController?.abort();
+	}
+
+	/**
+	 * Ask the session's model for a summary block of the messages before `firstKeptEntryId` (see
+	 * `ExtensionCompactionResult.providerSummary`). The request is the one that produced the first
+	 * kept message, sent again through the same context hooks, with the summary parameter added.
+	 * Never throws: an outcome without a block is recorded as `reason`, and the compaction is stored
+	 * without one.
+	 */
+	private async _requestProviderSummary(
+		request: ProviderSummaryRequest,
+		firstKeptEntryId: string | null,
+		reason: "manual" | "threshold" | "overflow",
+	): Promise<CompactionProviderSummary> {
+		const model = this.model;
+		const record = { provider: model?.provider ?? "", api: model?.api ?? "", model: model?.id ?? "", seconds: 0 };
+		// The request that overflowed would overflow again.
+		if (reason === "overflow") return { ...record, reason: "overflow" };
+		if (!model || isVirtualModel(model) || !supportsProviderSummary(model)) return { ...record, reason: "model" };
+		// A forced system prompt replaces the leading system message of every request, and a block is
+		// readable only below the one it was written under.
+		if (this._runSystemPromptOptions?.forceSystemPrompt !== undefined) return { ...record, reason: "prompt" };
+		const projection = this.sessionManager.buildSessionProjection();
+		const summarized = getMessagesBeforeKept(projection, firstKeptEntryId);
+		const firstKept = summarized && projection.messages[summarized.length];
+		// The provider keeps the reasoning of the kept turns only when they start with its reply to the
+		// summarized request. A failed reply is not sent again, so it cannot start them either. A block
+		// written from an earlier block alone does not keep it (measured), so messages must precede.
+		if (
+			!summarized ||
+			summarized[0]?.role !== "system" ||
+			summarized.every((message) => message.role === "system") ||
+			firstKept?.role !== "assistant" ||
+			firstKept.stopReason === "error" ||
+			firstKept.stopReason === "aborted"
+		) {
+			return { ...record, reason: "cut" };
+		}
+
+		const abortController = new AbortController();
+		const timeout = AbortSignal.timeout(PROVIDER_SUMMARY_TIMEOUT_MS);
+		const signal = AbortSignal.any([abortController.signal, timeout]);
+		this._providerSummaryAbortController = abortController;
+		const started = Date.now();
+		const seconds = () => Math.round((Date.now() - started) / 100) / 10;
+		try {
+			const agent = this.agent;
+			const messages = agent.transformContext ? await agent.transformContext(summarized, signal) : summarized;
+			const context = normalizeContext({ messages: await agent.convertToLlm(messages) });
+			// The block stands for the request that the first kept reply answered, effort included. The
+			// thinking level may have changed since then.
+			const thinkingLevel = firstKept.thinkingLevel ?? agent.state.thinkingLevel;
+			const stream = await agent.streamFunction(model, context, {
+				reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
+				sessionId: agent.sessionId,
+				onPayload: agent.onPayload,
+				onResponse: agent.onResponse,
+				transport: agent.transport,
+				thinkingBudgets: agent.thinkingBudgets,
+				maxRetryDelayMs: agent.maxRetryDelayMs,
+				signal,
+				disableContinuation: true,
+				providerSummary: request,
+			});
+			const message = await stream.result();
+			const outcome = { ...record, seconds: seconds(), usage: message.usage };
+			// A block of a request that did not end normally is not used.
+			if (message.providerSummary && message.stopReason === "stop") {
+				return { ...outcome, ...message.providerSummary };
+			}
+			if (timeout.aborted) return { ...outcome, reason: "timeout" };
+			if (abortController.signal.aborted) return { ...outcome, reason: "aborted" };
+			return {
+				...outcome,
+				reason: message.rawStopReason
+					? `stop: ${message.rawStopReason}`
+					: `error: ${message.errorMessage ?? "no block"}`,
+			};
+		} catch (error) {
+			const failed = { ...record, seconds: seconds() };
+			if (timeout.aborted) return { ...failed, reason: "timeout" };
+			if (abortController.signal.aborted) return { ...failed, reason: "aborted" };
+			return { ...failed, reason: `error: ${error instanceof Error ? error.message : String(error)}` };
+		} finally {
+			this._providerSummaryAbortController = undefined;
+		}
 	}
 
 	/**
@@ -3988,7 +4144,7 @@ export class AgentSession {
 			this._emit({ type: "compaction_start", reason });
 			abortController.signal.throwIfAborted();
 
-			let extensionCompaction: CompactionResult | undefined;
+			let extensionCompaction: ExtensionCompactionResult | undefined;
 
 			if (this._extensionRunner.hasHandlers("session_before_compact")) {
 				const extensionResult = (await this._extensionRunner.emit({
@@ -4043,7 +4199,21 @@ export class AgentSession {
 			}
 			abortController.signal.throwIfAborted();
 
-			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+			const providerSummary = extensionCompaction?.providerSummary
+				? await this._requestProviderSummary(extensionCompaction.providerSummary, firstKeptEntryId, reason)
+				: undefined;
+			abortController.signal.throwIfAborted();
+			// The block request is part of what the compaction cost, in the entry and in the result.
+			usage = withProviderSummaryUsage(usage, providerSummary);
+			this.sessionManager.appendCompaction(
+				summary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				usage,
+				providerSummary,
+			);
 			const newEntries = this.sessionManager.getEntries();
 			this._refreshFinalizedContext();
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);

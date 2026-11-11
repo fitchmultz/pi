@@ -191,7 +191,10 @@ export function collectBugReportDiagnostics(
 		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 		assistantMessageCount++;
 		const message = entry.message;
-		const diagnostics = message.diagnostics ?? [];
+		// Thinking block counts are a measurement on every reply, not a sign of a failed turn.
+		const diagnostics = (message.diagnostics ?? []).filter(
+			(diagnostic) => diagnostic.type !== "anthropic_thinking_blocks",
+		);
 		if (
 			diagnostics.length === 0 &&
 			message.stopReason !== "error" &&

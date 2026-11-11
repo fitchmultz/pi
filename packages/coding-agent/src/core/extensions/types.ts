@@ -37,6 +37,7 @@ import type {
 	ProviderHeaders,
 	ProviderId,
 	ProviderImages,
+	ProviderSummaryRequest,
 	RefreshModelsContext,
 	SimpleStreamOptions,
 	TextContent,
@@ -1085,6 +1086,8 @@ export interface CompactionEntryDraft {
 	firstKeptEntryId: string | null;
 	details?: unknown;
 	usage?: Usage;
+	/** Same opt-in as `SessionBeforeCompactResult.compaction.providerSummary`. */
+	providerSummary?: ProviderSummaryRequest;
 }
 
 export type SessionBoundaryDraft =
@@ -1602,7 +1605,20 @@ export interface SessionBeforeForkResult {
 
 export interface SessionBeforeCompactResult {
 	cancel?: boolean;
-	compaction?: CompactionResult;
+	compaction?: ExtensionCompactionResult;
+}
+
+/** Compaction content an extension returns from `session_before_compact`. */
+export interface ExtensionCompactionResult extends CompactionResult {
+	/**
+	 * Ask Pi to also get a summary block from the provider API of the session's model for the
+	 * messages before `firstKeptEntryId`. Pi stores the block on the compaction entry
+	 * (`CompactionEntry.providerSummary`) and sends it in place of those messages, so the model
+	 * keeps the reasoning of the kept turns. `summary` is still stored and sent, after the kept
+	 * turns. When no block can be made (unsupported model, error, refusal, timeout, abort,
+	 * `reason: "overflow"`), the compaction is stored without one and behaves as without this field.
+	 */
+	providerSummary?: ProviderSummaryRequest;
 }
 
 export interface SessionBeforeTreeResult {

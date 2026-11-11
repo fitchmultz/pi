@@ -54,6 +54,7 @@ import {
 	type Provider,
 	type ProviderHeaders,
 	type ProviderRequestOptions,
+	resolveProviderSummary,
 	type SimpleStreamOptions,
 	type StreamOptions,
 } from "@earendil-works/pi-ai";
@@ -884,7 +885,11 @@ export class ModelRuntime implements Models {
 					model,
 					options as (StreamOptions & ModelsRequestTransforms) | undefined,
 				);
-				return prepared.provider.stream(prepared.model, transcript, prepared.options as ApiStreamOptions<TApi>);
+				return prepared.provider.stream(
+					prepared.model,
+					resolveProviderSummary(prepared.model, transcript),
+					prepared.options as ApiStreamOptions<TApi>,
+				);
 			},
 			undefined,
 			options?.signal,
@@ -942,7 +947,12 @@ export class ModelRuntime implements Models {
 				assertChatModel(model);
 				const prepared = await this.prepareRequest(model, options);
 				onPrepared?.(prepared.model, prepared.options);
-				return prepared.provider.streamSimple(prepared.model, transcript, prepared.options as SimpleStreamOptions);
+				return prepared.provider.streamSimple(
+					prepared.model,
+					// Session requests and cache warming pass here with the model that will answer.
+					resolveProviderSummary(prepared.model, transcript),
+					prepared.options as SimpleStreamOptions,
+				);
 			},
 			undefined,
 			options?.signal,
