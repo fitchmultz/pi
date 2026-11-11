@@ -1,10 +1,18 @@
 import { join, resolve } from "node:path";
-import { resetCapabilitiesCache, setCapabilities, Text, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import {
+	resetCapabilitiesCache,
+	setCapabilities,
+	setKeybindings,
+	Text,
+	type TUI,
+	type TuiMouseEvent,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 
 import { getReadmePath } from "../src/config.ts";
 import type { ToolDefinition } from "../src/core/extensions/types.ts";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
 import { withBuiltInRenderers } from "../src/core/tools/renderers/index.ts";
@@ -39,6 +47,8 @@ function createFakeTui(): TUI {
 describe("ToolExecutionComponent parity", () => {
 	beforeAll(() => {
 		initTheme("dark");
+		// The default keys, so a hint names ctrl+o.
+		setKeybindings(new KeybindingsManager());
 	});
 	afterEach(() => {
 		resetCapabilitiesCache();
@@ -474,15 +484,35 @@ describe("ToolExecutionComponent parity", () => {
 		expect(collapsed).toContain('custom_tool query="pi" long="xxx');
 		expect(collapsed).toContain("...");
 		expect(collapsed).not.toContain(longValue);
+		// The header hides argument text, so the row below it names the key that shows it.
+		const textRows = (card: ToolExecutionComponent) =>
+			card
+				.render(300)
+				.map((line) => stripAnsi(line).trim())
+				.filter((line) => line !== "");
+		expect(textRows(component)).toEqual([`custom_tool query="pi" long="${"x".repeat(80)}...`, "(ctrl+o to expand)"]);
 
 		component.setExpanded(true);
 		const expanded = stripAnsi(component.render(300).join("\n"));
 		expect(expanded).toContain("  query: pi");
 		expect(expanded).toContain(longValue);
+		expect(expanded).not.toContain("to expand");
 		const expandedLines = expanded.split("\n").map((line) => line.trimEnd());
 		const textLine = expandedLines.findIndex((line) => line.endsWith("  text: line one"));
 		expect(textLine).toBeGreaterThan(-1);
 		expect(expandedLines[textLine + 1]).toMatch(/^\s+ {4}line two$/);
+
+		// A header that shows every argument hides nothing: no hint.
+		const whole = new ToolExecutionComponent(
+			"custom_tool",
+			"tool-short-args",
+			{ query: "pi", text: "line one\nline two" },
+			{},
+			createBaseToolDefinition(),
+			createFakeTui(),
+			process.cwd(),
+		);
+		expect(textRows(whole)).toEqual(['custom_tool query="pi" text="line one\\nline two"']);
 	});
 
 	test("collapses fallback results until expanded", () => {
@@ -513,6 +543,69 @@ describe("ToolExecutionComponent parity", () => {
 		const expanded = stripAnsi(component.render(120).join("\n"));
 		expect(expanded).toContain("line-15");
 		expect(expanded).not.toContain("more lines");
+	});
+
+	// The preview counts screen rows, as the cards with a renderer do: a long line wraps, so ten text lines
+	// can fill the screen.
+	test("limits a collapsed fallback result to ten rows after wrapping", () => {
+		const throwing: ToolRenderers = {
+			renderCall: () => {
+				throw new Error("call renderer failed");
+			},
+			renderResult: () => {
+				throw new Error("result renderer failed");
+			},
+		};
+		const create = (definition: ToolRenderers | undefined, text: string, isError = false) => {
+			const component = new ToolExecutionComponent(
+				"custom_tool",
+				"tool-rows",
+				{},
+				{},
+				definition,
+				createFakeTui(),
+				process.cwd(),
+			);
+			component.updateResult({ content: [{ type: "text", text }], isError }, false);
+			return component;
+		};
+		const rows = (component: ToolExecutionComponent) => component.render(80).map((line) => stripAnsi(line).trimEnd());
+		// Four text lines of 60 words: each wraps over several rows of the 78 columns inside the card.
+		const line = (index: number) => Array.from({ length: 60 }, (_, word) => `w${index}-${word}`).join(" ");
+		const wrapping = [0, 1, 2, 3].map(line).join("\n");
+		const whole = create({}, wrapping);
+		whole.setExpanded(true);
+		// The expanded card: a blank row, a padding row, the title, the output and a padding row.
+		const wrappedRows = rows(whole).length - 4;
+		expect(wrappedRows).toBeGreaterThan(10);
+
+		for (const definition of [{}, undefined, throwing]) {
+			for (const isError of [false, true]) {
+				const component = create(definition, wrapping, isError);
+				// A blank row, a padding row, the title, ten output rows, the hint and a padding row.
+				const collapsed = rows(component);
+				expect(collapsed).toHaveLength(15);
+				expect(collapsed[2]).toBe(" custom_tool");
+				expect(collapsed[3]).toMatch(/^ w0-0 w0-1 /);
+				expect(collapsed[13]).toBe(` ... (${wrappedRows - 10} more lines, ctrl+o to expand)`);
+
+				component.setExpanded(true);
+				const expanded = rows(component);
+				expect(expanded).toHaveLength(wrappedRows + 4);
+				expect(expanded.slice(0, 13)).toEqual(collapsed.slice(0, 13));
+				expect(expanded.join("\n")).toContain("w3-59");
+				expect(expanded.join("\n")).not.toContain("to expand");
+			}
+		}
+
+		// Ten rows hide nothing: the collapsed card is the expanded card, without a hint.
+		const tenLines = Array.from({ length: 10 }, (_, index) => `line-${index + 1}`).join("\n");
+		const short = create({}, tenLines);
+		const collapsed = rows(short);
+		expect(collapsed).toHaveLength(14);
+		expect(collapsed.join("\n")).not.toContain("to expand");
+		short.setExpanded(true);
+		expect(rows(short)).toEqual(collapsed);
 	});
 
 	// A saved call of a tool that is no longer registered has no definition in the session that shows it.
@@ -548,11 +641,14 @@ describe("ToolExecutionComponent parity", () => {
 		const card = states(undefined);
 		expect(card).toEqual(states({}));
 
-		// Collapsed: a blank row, two padding rows, the cut arguments on two title rows, ten output lines and the hint.
+		// Collapsed: a blank row, two padding rows, the cut arguments on two title rows, their hint, ten output rows
+		// and the hint.
 		const collapsed = stripAnsi(card.collapsed.join("\n"));
-		expect(card.collapsed).toHaveLength(16);
+		expect(card.collapsed).toHaveLength(17);
 		expect(collapsed).toContain('agent_browser_code code="const page');
 		expect(collapsed).not.toContain("page.title()");
+		expect(stripAnsi(card.collapsed[4]).trim()).toBe("(ctrl+o to expand)");
+		expect(stripAnsi(card.pending.join("\n"))).toContain("(ctrl+o to expand)");
 		expect(collapsed).toContain("step 10: ok");
 		expect(collapsed).not.toContain("step 11: ok");
 		expect(collapsed).toContain("... (30 more lines,");

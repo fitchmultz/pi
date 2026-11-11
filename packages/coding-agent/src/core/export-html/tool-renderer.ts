@@ -137,20 +137,17 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 				// that shortens an unexpanded call would otherwise lose that text in every export.
 				// A tool with only a result renderer gets the terminal's fallback header: the page shows the
 				// arguments itself only when nothing is rendered for the call.
+				const context = createRenderContext(
+					toolCallId,
+					renderedCallComponents.get(toolCallId),
+					true,
+					result === undefined,
+					result?.isError ?? false,
+					result?.durationMs,
+				);
 				const component = toolDef.renderCall
-					? toolDef.renderCall(
-							args,
-							theme,
-							createRenderContext(
-								toolCallId,
-								renderedCallComponents.get(toolCallId),
-								true,
-								result === undefined,
-								result?.isError ?? false,
-								result?.durationMs,
-							),
-						)
-					: new Text(formatToolCallWithArgs(toolName, args, theme, true), 0, 0);
+					? toolDef.renderCall(args, theme, context)
+					: new Text(formatToolCallWithArgs(toolName, args, theme, context), 0, 0);
 				renderedCallComponents.set(toolCallId, component);
 				const lines = component.render(width);
 				return ansiLinesToHtml(lines);

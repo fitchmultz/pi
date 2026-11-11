@@ -86,10 +86,16 @@ const COLLAPSED_ARGS_CHARS = 100;
 
 /**
  * Generic tool call header: the title followed by the arguments. Collapsed, they are `key=value`
- * pairs on the title line, cut to {@link COLLAPSED_ARGS_CHARS}. Expanded, each is a `key: value`
- * line below the title, with strings shown raw and continuation lines indented.
+ * pairs on the title line, cut to {@link COLLAPSED_ARGS_CHARS}; cut arguments are followed by a row
+ * that names the expand key. Expanded, each is a `key: value` line below the title, with strings
+ * shown raw and continuation lines indented.
  */
-export function formatToolCallWithArgs(title: string, args: unknown, theme: Theme, expanded: boolean): string {
+export function formatToolCallWithArgs(
+	title: string,
+	args: unknown,
+	theme: Theme,
+	context: Pick<ToolRenderContext, "expanded" | "keyHint">,
+): string {
 	const header = theme.fg("toolTitle", theme.bold(title));
 	if (args == null) return header;
 	const entries =
@@ -97,7 +103,7 @@ export function formatToolCallWithArgs(title: string, args: unknown, theme: Them
 			? Object.entries(args)
 			: ([["args", args]] as [string, unknown][]);
 	if (entries.length === 0) return header;
-	if (expanded) {
+	if (context.expanded) {
 		const lines = entries.map(([key, value]) => {
 			const text = typeof value === "string" ? value : (JSON.stringify(value, null, 2) ?? String(value));
 			return `  ${key}: ${replaceTabs(text).replace(/\r/g, "").split("\n").join("\n    ")}`;
@@ -105,8 +111,10 @@ export function formatToolCallWithArgs(title: string, args: unknown, theme: Them
 		return `${header}\n${theme.fg("muted", lines.join("\n"))}`;
 	}
 	const pairs = entries.map(([key, value]) => `${key}=${JSON.stringify(value) ?? String(value)}`).join(" ");
-	const preview = pairs.length > COLLAPSED_ARGS_CHARS ? `${pairs.slice(0, COLLAPSED_ARGS_CHARS - 3)}...` : pairs;
-	return `${header} ${theme.fg("muted", preview)}`;
+	if (pairs.length <= COLLAPSED_ARGS_CHARS) return `${header} ${theme.fg("muted", pairs)}`;
+	const preview = `${pairs.slice(0, COLLAPSED_ARGS_CHARS - 3)}...`;
+	const hint = `${theme.fg("muted", "(")}${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+	return `${header} ${theme.fg("muted", preview)}\n${hint}`;
 }
 
 /** Duration as `4.2s` below a minute, then `1m 30s` and `2h 3m 4s`. */

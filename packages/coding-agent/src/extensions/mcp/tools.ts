@@ -292,7 +292,7 @@ export function createMcpToolRenderers(label: string): ToolRenderers {
 	return {
 		renderCall(args, theme, context) {
 			const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			component.setText(formatToolCallWithArgs(label, args, theme, context.expanded));
+			component.setText(formatToolCallWithArgs(label, args, theme, context));
 			return component;
 		},
 		renderResult(result, options, theme, context) {

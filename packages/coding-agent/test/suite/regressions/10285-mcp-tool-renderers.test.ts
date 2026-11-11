@@ -1,10 +1,13 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setKeybindings } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import type { ToolRenderContext } from "../../../src/core/extensions/types.ts";
+import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { createMcpExtension } from "../../../src/extensions/mcp/index.ts";
+import { keyHint } from "../../../src/modes/interactive/components/keybinding-hints.ts";
 import { initTheme, theme } from "../../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createHarness } from "../harness.ts";
@@ -27,6 +30,16 @@ describe("MCP tool renderers", () => {
 				expanded: false,
 			} as unknown as ToolRenderContext);
 			expect(stripAnsi(call?.render(100).join("\n") ?? "")).toContain('my_docs/search query="pi"');
+			// The MCP call header is the fallback header: cut arguments are followed by the expand key.
+			setKeybindings(new KeybindingsManager());
+			const long = resolve("mcp__my_docs__search")?.renderCall?.({ query: "pi ".repeat(60) }, theme, {
+				expanded: false,
+				keyHint,
+			} as unknown as ToolRenderContext);
+			expect(long?.render(200).map((row) => stripAnsi(row).trim())).toEqual([
+				`my_docs/search query="${"pi ".repeat(30)}...`,
+				"(ctrl+o to expand)",
+			]);
 			expect(resolve("not_mcp")).toBeUndefined();
 			// Registered tools keep their own renderers.
 			expect(resolve("read")?.renderCall).toBe(harness.session.getToolDefinition("read")?.renderCall);
