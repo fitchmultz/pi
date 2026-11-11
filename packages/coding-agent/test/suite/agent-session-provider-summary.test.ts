@@ -416,6 +416,66 @@ describe("AgentSession provider summary block", () => {
 		expect(getMessageText(harness.session.messages.at(-1))).toBe("done");
 	});
 
+	it("stores the compaction without a block in a run whose system prompt a handler replaced", async () => {
+		const harness = await createHarness({
+			tools: [lookup],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				compactAtTurns([2], { providerSummary: {} }),
+				(pi) => {
+					pi.on("before_agent_start", () => ({ systemPrompt: "forced prompt" }));
+				},
+			],
+		});
+		harnesses.push(harness);
+		const requests = useSummaryModel(harness);
+		harness.setResponses([callLookup("a"), callLookup("b"), fauxAssistantMessage("done")]);
+
+		await harness.session.prompt("start");
+
+		// Every request of the run leads with the forced prompt, below which no block can be read.
+		const [compaction] = getCompactions(harness);
+		expect(compaction.providerSummary).toMatchObject({ reason: "prompt", seconds: 0 });
+		expect(compaction.providerSummary).not.toHaveProperty("block");
+		expect(requests.filter((request) => request.options?.providerSummary)).toHaveLength(0);
+		expect(getMessageText(harness.session.messages.at(-1))).toBe("done");
+	});
+
+	it("stores an overflow compaction without a block and sends no summary request", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", contextWindow: 1000, maxTokens: 100 }],
+			settings: { compaction: { keepRecentTokens: 1, reserveTokens: 0 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => ({
+						compaction: {
+							summary: "overflow compacted",
+							firstKeptEntryId: event.preparation.firstKeptEntryId,
+							tokensBefore: event.preparation.tokensBefore,
+							providerSummary: {},
+						},
+					}));
+				},
+			],
+		});
+		harnesses.push(harness);
+		const requests = useSummaryModel(harness);
+		harness.setResponses([
+			fauxAssistantMessage("partial response", { stopReason: "length" }),
+			fauxAssistantMessage("completed response"),
+		]);
+
+		await harness.session.prompt("x".repeat(5000));
+
+		// The context did not fit the model, so the same messages cannot be summarized by it either.
+		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({ reason: "overflow", aborted: false });
+		const [compaction] = getCompactions(harness);
+		expect(compaction.providerSummary).toMatchObject({ reason: "overflow", seconds: 0 });
+		expect(compaction.providerSummary).not.toHaveProperty("block");
+		expect(requests.filter((request) => request.options?.providerSummary)).toHaveLength(0);
+		expect(harness.session.getLastAssistantText()).toBe("completed response");
+	});
+
 	it("asks for the block of a session_before_compact result, and Escape stops only that request", async () => {
 		const harness = await createHarness({
 			tools: [lookup],
