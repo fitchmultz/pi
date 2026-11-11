@@ -2692,8 +2692,10 @@ Custom editors and `ctx.ui.custom()` components receive `keybindings: Keybinding
 #### Fallback
 
 If a slot renderer is not defined or throws:
-- `renderCall`: Shows the tool name and the arguments. Until the card is expanded, the arguments are cut to one short line.
-- `renderResult`: Shows raw text from `content`. Until the card is expanded, it shows the first 10 lines and names the expand key.
+- `renderCall`: Shows the tool name and the arguments. Until the card is expanded, the arguments are `key=value` pairs after the tool name, cut to 100 characters. When they are cut, the next row names the expand key: `(ctrl+o to expand)`.
+- `renderResult`: Shows raw text from `content`. Until the card is expanded, it shows the first 10 rows, counted after the text is wrapped to the terminal width. When rows are hidden, the next row names their number and the expand key: `... (38 more lines, ctrl+o to expand)`.
+
+A card that hides nothing shows no hint.
 
 A tool without a definition gets both fallbacks. This is the card of a saved call whose tool the session does not register, for example a tool of an extension that is no longer installed.
 
