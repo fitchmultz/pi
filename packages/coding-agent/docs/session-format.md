@@ -75,6 +75,14 @@ For sessions with a parent (created via `/fork`, `/clone`, or `newSession({ pare
 {"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project","parentSession":"/path/to/original/session.jsonl"}
 ```
 
+A session that starts with a copy of another session's conversation (`/fork`, `/clone`, `--fork`, or a `--session` id from another project) also has `cacheSessionId`:
+
+```json
+{"type":"session","version":3,"id":"uuid","timestamp":"2024-12-03T14:00:00.000Z","cwd":"/path/to/project","parentSession":"/path/to/original/session.jsonl","cacheSessionId":"uuid-of-the-first-session"}
+```
+
+`cacheSessionId` is the session id pi sends to providers in place of `id`: the prompt cache key and the session-affinity headers. Providers such as OpenAI route a request to a cache by that id, so a copy that sent its new `id` would not read the cached conversation it was copied from. The value is the source session's `cacheSessionId`, or its `id` when it has none, so a copy of a copy keeps the id of the first session. `id` stays the session's identity everywhere else (file name, `PI_SESSION_ID`, `--session`). A session without the field sends its `id`. `SessionManager.getCacheSessionId()` returns the id in use. An extension that writes a session file with copied entries sets the field the same way.
+
 ### SessionMessageEntry
 
 A message in the conversation. The `message` field contains an `AgentMessage`. System messages carry the prompt and tool loadout: the first request of a session persists one with every prompt section and tool declaration, and later changes persist as system messages that patch `sections` by name (`null` removes one) and list `toolsAdded`/`toolsRemoved`. Replaying them in order yields the current prompt and tools; there is no separate prompt state entry.

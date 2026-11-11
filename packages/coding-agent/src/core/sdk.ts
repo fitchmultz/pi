@@ -537,6 +537,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 	};
 
+	// A fork sends the id of the session its conversation was copied from (see SessionHeader).
+	const cacheSessionId = sessionManager.getCacheSessionId();
 	const agent = new Agent({
 		initialState: {
 			systemPrompt: "",
@@ -553,7 +555,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// the current transcript still extends the request's prefix. Agent state may
 			// shallow-copy the messages array or refresh the model object without changing
 			// the provider request, so top-level object identity is not a valid cache key.
-			if (options?.sessionId === sessionManager.getSessionId()) {
+			if (options?.sessionId === cacheSessionId) {
 				const isCurrent = cacheContextIsCurrent(model);
 				cacheWarmer.cancel();
 				return modelRuntime.streamSimple(model, context, requestOptions, (preparedModel, preparedOptions) => {
@@ -569,7 +571,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		onPayload: transformProviderPayload,
 		onResponse: handleProviderResponse,
 		onProviderStreamEvent: handleProviderStreamEvent,
-		sessionId: sessionManager.getSessionId(),
+		sessionId: cacheSessionId,
 		transformContext: async (messages) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner) return messages;
