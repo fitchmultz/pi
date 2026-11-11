@@ -378,6 +378,8 @@ In messages, the context of such an entry is:
 [system message + providerSummary] [system message: summarized tool changes] [kept entries] [compactionSummary] [later entries]
 ```
 
+`providerSummary` on the leading system message is `{ provider, api, model, block, timestamp }`. `timestamp` is the time of the compaction, in milliseconds. The kept replies reported their usage before that time, for the conversation the block replaced. Token estimates therefore do not take the usage of a kept reply as the size of this context: until the first reply after the compaction they count the messages by size.
+
 Only the model that made a block can read it, and only below the leading system message it was made under. In these requests the block's summary text takes its place, as a user message before the first kept message (`Summary of the earlier conversation:` and the text), and the kept reasoning is not kept valid:
 
 - a request to another provider, API or model, for example after a model switch

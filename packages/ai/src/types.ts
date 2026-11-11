@@ -580,6 +580,12 @@ export interface ProviderSummary {
 	model: string;
 	/** The block exactly as the provider returned it. Opaque: never edit it. */
 	block: JsonObject;
+	/**
+	 * On a leading system message: when the block replaced the conversation before the kept
+	 * messages, as a Unix timestamp in milliseconds. Usage that a kept reply reported before
+	 * that time describes the replaced conversation, not this one.
+	 */
+	timestamp?: number;
 }
 
 /**

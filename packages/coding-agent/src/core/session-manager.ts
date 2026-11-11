@@ -694,14 +694,15 @@ function projectSummaryBlockEntries(
 ): ProjectedSessionEntry[] {
 	const { systemMessage, providerSummary } = compaction;
 	const { provider, api, model, block, toolsAdded, toolsRemoved } = providerSummary;
-	const lead: AgentMessage[] = [{ ...systemMessage, providerSummary: { provider, api, model, block } }];
+	const timestamp = new Date(compaction.timestamp).getTime();
+	const lead: AgentMessage[] = [{ ...systemMessage, providerSummary: { provider, api, model, block, timestamp } }];
 	if (toolsAdded || toolsRemoved) {
 		lead.push({
 			role: "system",
 			content: "",
 			...(toolsAdded ? { toolsAdded } : {}),
 			...(toolsRemoved ? { toolsRemoved } : {}),
-			timestamp: new Date(compaction.timestamp).getTime(),
+			timestamp,
 		});
 	}
 	// System messages before the first kept message belong to the request the block summarizes.

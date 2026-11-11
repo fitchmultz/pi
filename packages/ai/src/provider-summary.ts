@@ -41,7 +41,7 @@ export function getProviderSummaryStandIn(messages: TranscriptMessages): UserMes
 			typeof text === "string" && text.length > 0
 				? `Summary of the earlier conversation:\n\n${text}`
 				: "The earlier conversation was summarized. Its summary is not available to this model.",
-		timestamp: lead.timestamp,
+		timestamp: lead.providerSummary.timestamp ?? lead.timestamp,
 	};
 }
 

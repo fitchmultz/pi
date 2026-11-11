@@ -39,7 +39,7 @@ function contextWith(block: JsonObject) {
 	const base = normalizeContext({ systemPrompt: "You are a test assistant.", messages: [] });
 	const lead: SystemMessage = {
 		...(base.messages[0] as SystemMessage),
-		providerSummary: { provider: writer.provider, api: writer.api, model: writer.id, block },
+		providerSummary: { provider: writer.provider, api: writer.api, model: writer.id, block, timestamp: 7 },
 	};
 	const restated: Message = {
 		role: "system",
@@ -81,10 +81,12 @@ describe("provider summary", () => {
 		const resolved = resolveProviderSummary(reader, context);
 
 		const { providerSummary: _block, ...plainLead } = lead as SystemMessage;
+		// The stand-in carries the time of the block, so the usage of the kept reply is not read as
+		// the size of this transcript.
 		expect(resolved.messages).toEqual([
 			plainLead,
 			restated,
-			{ role: "user", content: "Summary of the earlier conversation:\n\nthe summary", timestamp: lead.timestamp },
+			{ role: "user", content: "Summary of the earlier conversation:\n\nthe summary", timestamp: 7 },
 			kept,
 			record,
 		]);

@@ -10,6 +10,7 @@ import {
 	type Model,
 	type SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CompactionEntry } from "../../src/core/session-manager.ts";
@@ -175,9 +176,11 @@ describe("AgentSession provider summary block", () => {
 			"toolResult: value of b",
 			expect.stringContaining("summary before turn 2"),
 		]);
+		// The kept turn reported its usage before the compaction: it is not the size of this request.
+		expect(estimateContextTokens(third.messages)).toMatchObject({ usageTokens: 0, lastUsageIndex: null });
 		expect(third.messages[0]).toEqual({
 			...second.messages[0],
-			providerSummary: { provider, api, model: id, block },
+			providerSummary: { provider, api, model: id, block, timestamp: new Date(compaction.timestamp).getTime() },
 		});
 		expect(getMessageText(harness.session.messages.at(-1))).toBe("done");
 	});
@@ -238,7 +241,10 @@ describe("AgentSession provider summary block", () => {
 		]);
 		expect(getCurrentTools(third.messages).map((tool) => tool.name)).toEqual(["lookup", "ring"]);
 		expect(third.messages.at(-1)).toMatchObject({ sections: { note: expect.stringContaining("second") } });
-		expect(third.messages[0]).toEqual({ ...second.messages[0], providerSummary: { ...writer(harness), block } });
+		expect(third.messages[0]).toEqual({
+			...second.messages[0],
+			providerSummary: { ...writer(harness), block, timestamp: new Date(compaction.timestamp).getTime() },
+		});
 	});
 
 	it("chains a second block on the first and keeps the first leading system message", async () => {

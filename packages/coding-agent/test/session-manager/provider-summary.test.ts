@@ -123,7 +123,13 @@ describe("SessionManager provider summary block", () => {
 		expect(describeMessages(projection.messages)).toEqual(expected);
 		expect(projection.messages[0]).toEqual({
 			...system("prompt", [tool("lookup")]),
-			providerSummary: { provider: "anthropic", api: "anthropic-messages", model: "claude-test", block },
+			providerSummary: {
+				provider: "anthropic",
+				api: "anthropic-messages",
+				model: "claude-test",
+				block,
+				timestamp: new Date(entry.timestamp).getTime(),
+			},
 		});
 		// Callers that list the context entries get the compaction once.
 		expect(manager.buildContextEntries().map((contextEntry) => contextEntry.id)).toEqual([
