@@ -463,7 +463,7 @@ npm run check
 
 Open the PR with `gh pr create --repo fitchmultz/pi`, follow CI to completion, fix failures and actionable review findings (or record evidence-backed rebuttals), and merge through repository rules. Refresh the canonical local checkout without overwriting unrelated work, install and verify changed resources, then remove only the task's clean worktree and obsolete branch.
 CI adds tmux for the real-terminal restart test, a macOS job for restart, `background_command`,
-bash abort and bash timeout, and one Linux standalone build with the compiled extension regression.
+bash abort and bash timeout (gated by `scripts/ci-scope.mjs` so changes isolated to docs, changelogs or packages outside that macOS surface skip it), backup DNS resolvers before Linux `apt-get`, and one Linux standalone build with the compiled extension regression.
 The standalone step uses pinned Bun 1.3.14 and the existing package build.
 
 ## Install and activate
