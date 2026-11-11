@@ -209,6 +209,28 @@ describe("InteractiveMode assistant diagnostics", () => {
 		expect(thinkingDropNotice(manager, reply(4))).toContain("Anthropic dropped 4 thinking blocks");
 	});
 
+	test("announces the drop of thinking blocks that a compaction kept below a provider summary block", () => {
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "system", content: "prompt", timestamp: 0 });
+		manager.appendMessage({ role: "user", content: "summarized", timestamp: 0 });
+		const firstKept = manager.appendMessage(reply(0, 2));
+		manager.appendMessage(reply(0, 1));
+		manager.appendCompaction("summary", firstKept, 1000, undefined, true, undefined, {
+			provider: message.provider,
+			api: message.api,
+			model: message.model,
+			block: { type: "compaction", content: "summary", signature: "sig" },
+			seconds: 2,
+		});
+
+		// The block stands for the summarized history, so Anthropic keeps the kept blocks: a drop is news.
+		expect(thinkingDropNotice(manager, reply(3))).toBe(
+			"Anthropic dropped 3 thinking blocks after the earlier prompt changed (details in session)",
+		);
+		manager.appendMessage(reply(3));
+		expect(thinkingDropNotice(manager, reply(3))).toBe("");
+	});
+
 	test("announces a drop after a compaction that kept nothing", () => {
 		const manager = SessionManager.inMemory();
 		manager.appendMessage(reply(0, 2));
