@@ -86,7 +86,8 @@ describe.skipIf(process.platform === "win32")("openTerminal", () => {
 		terminal.write("echo READY\n");
 		await output.waitFor("READY");
 		expect(await terminal.foreground()).toBeUndefined();
-		terminal.write("sleep 100\n");
+		// By path: a `sleep` found on PATH can be another program, such as Homebrew's `gsleep`.
+		terminal.write("/bin/sleep 100\n");
 		// The shell forks before it execs: wait until the foreground job is the command itself, not the forked shell.
 		const named = process.platform === "darwin" || process.platform === "linux";
 		let foreground = await terminal.foreground();
