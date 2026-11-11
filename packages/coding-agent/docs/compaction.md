@@ -80,6 +80,8 @@ What the LLM sees:
     prompt   from cmp          messages from firstKeptEntryId
 ```
 
+The leading system message keeps the tool list that the first system message of the context declared before the compaction. When tools changed since then, for example because `tool_search` loaded some, a second system message with those changes follows it, before the summary. Providers cache a request from its tool list onward, so the first request after a compaction can read that list and the prompt from the cache. See [CompactionEntry](session-format.md#compactionentry).
+
 On repeated compactions, the summarized span starts at the previous compaction's kept boundary (`firstKeptEntryId`), not at the compaction entry itself, falling back to the entry after the previous compaction if that kept entry cannot be found in the path. A retain-none compaction records its own ID as `firstKeptEntryId`; repeated compaction starts after that entry. This preserves messages that survived the earlier compaction by including them in the next summarization pass as well. Pi also recalculates `tokensBefore` from the rebuilt, context-edited session projection before writing the new `CompactionEntry`, so the token count reflects the actual pre-compaction context being replaced. Omitted raw entries remain stored but do not affect cut selection, summaries, checkpoints, or token estimates.
 
 ### Overflow and Length Recovery Ordering

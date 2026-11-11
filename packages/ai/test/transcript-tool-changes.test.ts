@@ -2,7 +2,12 @@ import { Type } from "typebox";
 import { describe, expect, test } from "vitest";
 import { getModel, streamSimple } from "../src/compat.ts";
 import type { Api, AssistantMessage, Context, Message, Model, SystemMessage, Tool } from "../src/types.ts";
-import { resolveTranscriptTools } from "../src/utils/transcript.ts";
+import {
+	getCurrentSystemMessage,
+	getCurrentTools,
+	getNetToolChanges,
+	resolveTranscriptTools,
+} from "../src/utils/transcript.ts";
 
 class PayloadCaptured extends Error {}
 
@@ -10,10 +15,10 @@ function tool(name: string): Tool {
 	return { name, description: `${name} tool`, parameters: Type.Object({}) };
 }
 
-async function capturePayload<T>(model: Model<Api>, context: Context): Promise<T> {
+async function capturePayload<T>(model: Model<Api>, context: Context, apiKey = "test-key"): Promise<T> {
 	let captured: T | undefined;
 	const stream = streamSimple(model, context, {
-		apiKey: "test-key",
+		apiKey,
 		onPayload: (payload) => {
 			captured = payload as T;
 			throw new PayloadCaptured();
@@ -454,6 +459,7 @@ describe("transcript system messages", () => {
 		const payload = await capturePayload<ResponsesPayload>(additionalToolsModel, {
 			messages: [
 				{ role: "system", content: "base prompt", toolsAdded: [baseTool, dropTool], timestamp: 0 },
+				{ role: "user", content: "before", timestamp: 1 },
 				{ role: "system", content: "", toolsRemoved: [{ name: "drop_tool" }], timestamp: 1 },
 				{ role: "system", content: "", toolsAdded: [dropTool], timestamp: 2 },
 				{ role: "user", content: "go", timestamp: 3 },
@@ -470,6 +476,7 @@ describe("transcript system messages", () => {
 		const payload = await capturePayload<ResponsesPayload>(additionalToolsModel, {
 			messages: [
 				{ role: "system", content: "base prompt", toolsAdded: [baseTool, dropTool], timestamp: 0 },
+				{ role: "user", content: "before", timestamp: 1 },
 				{
 					role: "system",
 					content: "",
@@ -647,5 +654,259 @@ describe("transcript system messages", () => {
 		expect(payload.tools?.map((value) => value.function?.name)).toEqual(["late_tool"]);
 		expect(payload.messages.map((message) => message.role)).toEqual(["system", "user"]);
 		expect(payload.messages[0]?.content).toBe("base prompt\n\nupdated guidance\n\n<rules>\nnew rules\n</rules>");
+	});
+});
+
+/**
+ * A compacted session: the first system message keeps the session's first tool list, the next
+ * one restates the tools that changed since, and the conversation follows.
+ */
+describe("leading tool changes", () => {
+	const changedBaseTool = { ...baseTool, description: "changed" };
+	const leading: SystemMessage = {
+		role: "system",
+		content: "base prompt",
+		sections: { rules: "<rules>\nold rules\n</rules>" },
+		toolsAdded: [baseTool, dropTool],
+		timestamp: 1731200000001,
+	};
+	const toolUpdate = (...added: Tool[]): SystemMessage => ({
+		role: "system",
+		content: "",
+		toolsRemoved: [{ name: "base_tool" }, { name: "drop_tool" }],
+		toolsAdded: [...added, changedBaseTool],
+		timestamp: 1731200000002,
+	});
+	const reply: AssistantMessage = {
+		role: "assistant",
+		content: [{ type: "text", text: "kept reply" }],
+		api: anthropicNativeModel.api,
+		provider: anthropicNativeModel.provider,
+		model: anthropicNativeModel.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 1731200000004,
+	};
+	const conversation: Message[] = [
+		{ role: "user", content: "[Retained pre-rollover tail]", timestamp: 1731200000003 },
+		reply,
+		{ role: "user", content: "next", timestamp: 1731200000005 },
+	];
+	const countBreakpoints = (payload: unknown): number => JSON.stringify(payload).split('"cache_control"').length - 1;
+	const withoutBreakpoints = (value: unknown): unknown =>
+		JSON.parse(JSON.stringify(value, (key, item: unknown) => (key === "cache_control" ? undefined : item)));
+
+	test.each([
+		{
+			name: "additions, a removal and a redefinition",
+			history: [
+				{ toolsAdded: [lateTool] },
+				{ toolsRemoved: [{ name: "drop_tool" }] },
+				{ toolsRemoved: [{ name: "base_tool" }], toolsAdded: [changedBaseTool] },
+			],
+			changes: {
+				toolsAdded: [lateTool, changedBaseTool],
+				toolsRemoved: [{ name: "base_tool" }, { name: "drop_tool" }],
+			},
+		},
+		{
+			// Comparing the two tool sets finds no change here, but the tool moved to the end.
+			name: "a tool removed and added again unchanged",
+			history: [{ toolsRemoved: [{ name: "base_tool" }] }, { toolsAdded: [baseTool] }],
+			changes: { toolsAdded: [baseTool], toolsRemoved: [{ name: "base_tool" }] },
+		},
+		{
+			name: "a new definition added without a removal",
+			history: [{ toolsAdded: [changedBaseTool, lateTool] }],
+			changes: { toolsAdded: [changedBaseTool, lateTool], toolsRemoved: [] },
+		},
+		{
+			name: "the last tool removed and added again unchanged",
+			history: [{ toolsRemoved: [{ name: "drop_tool" }] }, { toolsAdded: [dropTool] }],
+			changes: { toolsAdded: [], toolsRemoved: [] },
+		},
+	])("restates $name so that replay gives the same tools in the same order", ({ history, changes }) => {
+		const messages: SystemMessage[] = [
+			leading,
+			...history.map((change): SystemMessage => ({ role: "system", content: "", timestamp: 0, ...change })),
+		];
+		const current = getCurrentTools(messages);
+
+		const restated = getNetToolChanges(leading.toolsAdded ?? [], current);
+
+		expect(restated).toEqual(changes);
+		const replayed: SystemMessage[] = [leading, { role: "system", content: "", timestamp: 0, ...restated }];
+		expect(getCurrentTools(replayed)).toEqual(current);
+	});
+
+	test("sends each leading tool change in its own Anthropic system message and caches the last one", async () => {
+		const payload = await capturePayload<AnthropicPayload>(anthropicNativeModel, {
+			messages: [leading, toolUpdate(lateTool), ...conversation],
+		});
+
+		// The request-level list is the session's first: the loaded and the redefined tool stay out.
+		expect(payload.tools).toMatchObject([
+			{ name: "base_tool", description: "base_tool tool" },
+			{ name: "drop_tool", cache_control: { type: "ephemeral" } },
+			{ name: "__pi_deferred_placeholder__" },
+		]);
+		expect(payload.tools).toHaveLength(3);
+		expect(payload.system?.map((block) => block.text)).toEqual(["base prompt\n\n<rules>\nold rules\n</rules>"]);
+		// One block per message, a removal only for the tool that is not defined again, and a cache
+		// breakpoint on the last block.
+		expect(payload.messages).toMatchObject([
+			{ role: "user" },
+			{ role: "system", content: [{ type: "tool_removal", tool: { name: "drop_tool" } }] },
+			{ role: "system", content: [{ type: "tool_addition", tool: { definition: { name: "late_tool" } } }] },
+			{
+				role: "system",
+				content: [
+					{
+						type: "tool_addition",
+						tool: { definition: { name: "base_tool", description: "changed" } },
+						cache_control: { type: "ephemeral" },
+					},
+				],
+			},
+			{ role: "assistant" },
+			{ role: "user" },
+		]);
+		expect(payload.messages.slice(1, 4).map((message) => message.content.length)).toEqual([1, 1, 1]);
+		// Anthropic accepts four breakpoints: tools, prompt, leading tool changes and last message.
+		expect(countBreakpoints(payload)).toBe(4);
+		// Message timestamps differ between compactions; none may reach the cached bytes.
+		expect(JSON.stringify(payload)).not.toMatch(/timestamp|17312000000/);
+	});
+
+	test("appends later leading tool changes after the Anthropic messages already sent", async () => {
+		const first = await capturePayload<AnthropicPayload>(anthropicNativeModel, {
+			messages: [leading, toolUpdate(lateTool), ...conversation],
+		});
+		const second = await capturePayload<AnthropicPayload>(anthropicNativeModel, {
+			messages: [
+				leading,
+				{ ...toolUpdate(lateTool), toolsAdded: [lateTool, changedBaseTool, tool("later_tool")] },
+				...conversation,
+			],
+		});
+
+		expect(second.tools).toEqual(first.tools);
+		expect(second.system).toEqual(first.system);
+		// Everything up to the last earlier definition is sent again byte for byte.
+		expect(withoutBreakpoints(second.messages.slice(0, 4))).toEqual(withoutBreakpoints(first.messages.slice(0, 4)));
+		expect(second.messages[4]).toMatchObject({
+			role: "system",
+			content: [
+				{
+					type: "tool_addition",
+					tool: { definition: { name: "later_tool" } },
+					cache_control: { type: "ephemeral" },
+				},
+			],
+		});
+		expect(countBreakpoints(second)).toBe(4);
+	});
+
+	test("keeps leading prompt updates around the tool changes in place on Anthropic", async () => {
+		const policy: SystemMessage = {
+			role: "system",
+			content: "",
+			sections: { policy: "<policy>\nbe brief\n</policy>" },
+			timestamp: 1731200000006,
+		};
+		const payload = await capturePayload<AnthropicPayload>(anthropicNativeModel, {
+			messages: [leading, policy, toolUpdate(lateTool), { ...policy, content: "later note" }, ...conversation],
+		});
+
+		expect(payload.tools?.map((value) => value.name)).toEqual([
+			"base_tool",
+			"drop_tool",
+			"__pi_deferred_placeholder__",
+		]);
+		const systemMessages = payload.messages.filter((message) => message.role === "system");
+		expect(systemMessages.map((message) => message.content.map((block) => block.type))).toEqual([
+			["text"],
+			["tool_removal"],
+			["tool_addition"],
+			["tool_addition"],
+			["text"],
+		]);
+		// The breakpoint ends the tool changes; the prompt update after them may differ next time.
+		expect(
+			systemMessages.map((message) => message.content.some((block) => block.cache_control !== undefined)),
+		).toEqual([false, false, false, true, false]);
+	});
+
+	test("gives up the identity breakpoint for the leading tool changes with an OAuth token", async () => {
+		type OAuthPayload = { system: Array<{ text: string; cache_control?: unknown }> };
+		const compacted = await capturePayload<OAuthPayload>(
+			anthropicNativeModel,
+			{ messages: [leading, toolUpdate(lateTool), ...conversation] },
+			"sk-ant-oat-test",
+		);
+		const uncompacted = await capturePayload<OAuthPayload>(
+			anthropicNativeModel,
+			{ messages: [leading, ...conversation] },
+			"sk-ant-oat-test",
+		);
+
+		// Anthropic rejects a fifth breakpoint. The prompt's breakpoint caches the identity block too.
+		expect(countBreakpoints(compacted)).toBe(4);
+		expect(compacted.system.map((block) => block.cache_control !== undefined)).toEqual([false, true]);
+		expect(countBreakpoints(uncompacted)).toBe(4);
+		expect(uncompacted.system.map((block) => block.cache_control !== undefined)).toEqual([true, true]);
+	});
+
+	const kimiModel: Model<"openai-completions"> = {
+		...modelBase,
+		id: "kimi-k3",
+		name: "Kimi K3",
+		api: "openai-completions",
+		provider: "moonshotai",
+		compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolAdditions: true },
+	};
+	const policy: SystemMessage = {
+		role: "system",
+		content: "",
+		sections: { policy: "<policy>\nbe brief\n</policy>" },
+		timestamp: 1731200000006,
+	};
+
+	// Before the leading tool list was kept, a compacted session started with one system message
+	// holding the current tools. These routes must still receive exactly that request.
+	test.each<{ route: string; model: Model<Api> }>([
+		{ route: "OpenAI additional tools", model: additionalToolsModel },
+		{
+			route: "OpenAI tool search",
+			model: { ...additionalToolsModel, compat: { supportsMidConvoSystemMessages: true, supportsToolSearch: true } },
+		},
+		{ route: "Kimi tool-bearing system messages", model: kimiModel },
+		{
+			route: "Anthropic system messages without tool changes",
+			model: { ...anthropicNativeModel, compat: { supportsMidConvoSystemMessages: true } },
+		},
+		{
+			route: "Anthropic without system messages in the conversation",
+			model: { ...anthropicNativeModel, compat: {} },
+		},
+	])("starts the $route request with the current tools", async ({ model }) => {
+		for (const between of [[], [policy]]) {
+			const kept = await capturePayload<unknown>(model, {
+				messages: [leading, ...between, toolUpdate(lateTool), ...conversation],
+			});
+			const folded = getCurrentSystemMessage([leading, toolUpdate(lateTool)]);
+			if (!folded) throw new Error("expected a folded system message");
+			const before = await capturePayload<unknown>(model, { messages: [folded, ...between, ...conversation] });
+
+			expect(kept).toEqual(before);
+			expect(JSON.stringify(kept)).toContain("late_tool");
+		}
 	});
 });
