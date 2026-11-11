@@ -217,6 +217,28 @@ describe("Anthropic provider summary block", () => {
 		expect(summary.usage.cost.total).toBeCloseTo(0.0747596, 6);
 	});
 
+	it("reads a block without content as no block", async () => {
+		const h = harness([
+			sse([
+				messageStart(),
+				// Anthropic marks a summary that it failed to write with null content.
+				{ type: "content_block_start", index: 0, content_block: { ...block, content: null } },
+				{ type: "content_block_stop", index: 0 },
+				{ type: "message_delta", delta: { stop_reason: "compaction" }, usage: { output_tokens: 0 } },
+				{ type: "message_stop" },
+			]),
+		]);
+		const context = normalizeContext({
+			systemPrompt: "You are a test assistant.",
+			messages: [user("walk the stations"), assistant("call_1", "first"), toolResult("call_1")],
+		});
+
+		const summary = await stream(model, context, { ...h.options, providerSummary: {} }).result();
+
+		expect(summary.rawStopReason).toBe("compaction");
+		expect(summary).not.toHaveProperty("providerSummary");
+	});
+
 	it("sends no thread with a summary request or with a block", async () => {
 		const replyTo = (): Response =>
 			sse([

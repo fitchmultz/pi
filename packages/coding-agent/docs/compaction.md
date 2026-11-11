@@ -401,7 +401,7 @@ Pi never cancels the compaction and never runs its own summarizer because of `pr
 | `aborted` | The user cancelled (Esc) while the request ran. Esc at that point stops only the request; the compaction is stored. |
 | `timeout` | The request took longer than 30 seconds. |
 | `error: <message>` | The request failed, for example `prompt is too long` when the messages do not fit the model. |
-| `stop: <stop reason>` | The API answered without a block, for example `stop: refusal` when it rejects the `instructions`, or `stop: max_tokens`. |
+| `stop: <stop reason>` | The API answered without a block, for example `stop: refusal` when it rejects the `instructions`, or `stop: max_tokens`. `stop: compaction` means that the API failed to write the summary and returned a block without content. |
 
 ```typescript
 interface CompactionProviderSummary {

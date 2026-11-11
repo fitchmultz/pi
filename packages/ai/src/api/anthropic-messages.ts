@@ -1028,13 +1028,17 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					}
 					if (event.content_block.type === "compaction") {
 						// The block arrives whole in this event. It is stored as returned and sent back unchanged.
-						output.providerSummary = {
-							provider: model.provider,
-							api: model.api,
-							model: model.id,
-							// Parsed wire JSON; the SDK's interface only lacks the index signature.
-							block: event.content_block as unknown as JsonObject,
-						};
+						// Null content marks a summary that Anthropic failed to write. The API reads such a block
+						// as nothing, so it is not a summary block.
+						if (event.content_block.content !== null) {
+							output.providerSummary = {
+								provider: model.provider,
+								api: model.api,
+								model: model.id,
+								// Parsed wire JSON; the SDK's interface only lacks the index signature.
+								block: event.content_block as unknown as JsonObject,
+							};
+						}
 						continue;
 					}
 					const contentIndex = output.content.length;
