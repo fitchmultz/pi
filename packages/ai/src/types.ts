@@ -266,7 +266,7 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	/**
 	 * Ask the provider to answer with a summary block of `context.messages` instead of a reply.
 	 * The block arrives as `AssistantMessage.providerSummary`. Only send this to an API that
-	 * implements it (currently `anthropic-messages` on models with managed effort); other APIs
+	 * implements it (`supportsProviderSummary(model)` tells; currently `anthropic-messages`); other APIs
 	 * ignore the option and answer normally.
 	 */
 	providerSummary?: ProviderSummaryRequest;

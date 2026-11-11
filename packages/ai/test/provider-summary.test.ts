@@ -14,7 +14,7 @@ const writer: Model<"anthropic-messages"> = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 1_000_000,
 	maxTokens: 4096,
-	compat: { supportsMidConvoEffort: true },
+	compat: { supportsMidConvoEffort: true, supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true },
 };
 
 const keptReply: AssistantMessage = {
@@ -52,10 +52,17 @@ function contextWith(block: JsonObject) {
 }
 
 describe("provider summary", () => {
-	it("is supported by Anthropic Messages models with per-message effort only", () => {
+	it("is supported by Anthropic Messages models with per-message effort on routes that keep system messages in place", () => {
 		expect(supportsProviderSummary(writer)).toBe(true);
 		expect(supportsProviderSummary({ ...writer, compat: {} })).toBe(false);
 		expect(supportsProviderSummary({ ...writer, api: "openai-completions", compat: {} })).toBe(false);
+		// A route that folds later system messages or tool changes into the leading one cannot send a block.
+		expect(
+			supportsProviderSummary({ ...writer, compat: { ...writer.compat, supportsMidConvoSystemMessages: false } }),
+		).toBe(false);
+		expect(
+			supportsProviderSummary({ ...writer, compat: { ...writer.compat, supportsMidConvoToolChanges: false } }),
+		).toBe(false);
 	});
 
 	it("leaves the transcript as it is for the model that wrote the block", () => {

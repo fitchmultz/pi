@@ -2,14 +2,20 @@ import type { Api, Model, ProviderSummary, SystemMessage, TranscriptContext, Use
 import { getInitialSystemMessage, type TranscriptMessages } from "./utils/transcript.ts";
 
 /**
- * Whether a `providerSummary` request to this model returns a summary block (see
- * `StreamOptions.providerSummary`). True for the Anthropic Messages models whose thinking blocks are
- * bound to the conversation before them: the models pi sends per-message effort to.
+ * Whether a `providerSummary` request to this model returns a summary block that later requests
+ * can send (see `StreamOptions.providerSummary`). True for the Anthropic Messages models whose
+ * thinking blocks are bound to the conversation before them (the models pi sends per-message
+ * effort to), on routes that take system messages and tool changes inside the conversation. A
+ * block is readable only below an unchanged leading system message and tool list; without those
+ * two capabilities pi folds every later change into them.
  */
 export function supportsProviderSummary(model: Model<Api>): boolean {
+	if (model.api !== "anthropic-messages") return false;
+	const compat = (model as Model<"anthropic-messages">).compat;
 	return (
-		model.api === "anthropic-messages" &&
-		(model as Model<"anthropic-messages">).compat?.supportsMidConvoEffort === true
+		compat?.supportsMidConvoEffort === true &&
+		compat.supportsMidConvoSystemMessages === true &&
+		compat.supportsMidConvoToolChanges === true
 	);
 }
 

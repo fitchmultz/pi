@@ -56,7 +56,7 @@ function useSummaryModel(harness: Harness): SessionRequest[] {
 	harness.session.agent.state.model = {
 		...faux,
 		api: "anthropic-messages",
-		compat: { supportsMidConvoEffort: true },
+		compat: { supportsMidConvoEffort: true, supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true },
 	} as Model<"anthropic-messages">;
 	harness.session.agent.streamFunction = (model, context, options) => {
 		requests.push({ messages: structuredClone(context.messages), options });

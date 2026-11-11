@@ -391,7 +391,7 @@ Pi never cancels the compaction and never runs its own summarizer because of `pr
 | `providerSummary.reason` on the entry | Cause |
 |---|---|
 | `overflow` | The compaction's `reason` is `"overflow"`. The context does not fit the model, so the request would fail too. No request is sent. |
-| `model` | No implementation for the session's model, or the session uses a virtual model. No request is sent. Implemented for `anthropic-messages` models with managed effort; `supportsProviderSummary(model)` from `@earendil-works/pi-ai` tells. |
+| `model` | No implementation for the session's model, or the session uses a virtual model. No request is sent. Implemented for `anthropic-messages` models with managed effort on routes that take system messages and tool changes inside the conversation (`compat.supportsMidConvoEffort`, `supportsMidConvoSystemMessages`, `supportsMidConvoToolChanges`); `supportsProviderSummary(model)` from `@earendil-works/pi-ai` tells. |
 | `prompt` | A `before_agent_start` handler replaced the system prompt of this run. The block could not be sent later. No request is sent. |
 | `cut` | The kept entries do not start with a completed assistant message (see above). No request is sent. |
 | `aborted` | The user cancelled (Esc) while the request ran. Esc at that point stops only the request; the compaction is stored. |
