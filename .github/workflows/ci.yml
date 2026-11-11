@@ -147,7 +147,7 @@ jobs:
   # Fork: restart, background_command, bash abort and bash timeout depend on macOS process groups, signals and Unix sockets.
   macos-restart-background:
     needs: scope
-    if: needs.scope.outputs.macos-required == 'true'
+    if: ${{ !cancelled() && needs.scope.outputs.macos-required != 'false' }}
     # Avoid the arm64 capacity constraints behind macos-latest.
     runs-on: macos-26-intel
     steps:

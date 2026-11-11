@@ -93,7 +93,7 @@ function collectMacosJobReachableFiles() {
 	const macosJob = ciWorkflow.jobs["macos-restart-background"];
 	assert.ok(macosJob, "ci.yml must define jobs.macos-restart-background");
 	assert.equal(macosJob.needs, "scope");
-	assert.equal(macosJob.if, "needs.scope.outputs.macos-required == 'true'");
+	assert.equal(macosJob.if, "${{ !cancelled() && needs.scope.outputs.macos-required != 'false' }}");
 
 	const tracked = new Set(
 		execFileSync("git", ["ls-files", "-z"], { cwd: repoRoot, encoding: "utf8" }).split("\0").filter(Boolean),
@@ -246,13 +246,15 @@ test("requires macos-restart-background for workspace configs, runtime sources, 
 	});
 });
 
-test("fails closed on workflow_dispatch, empty diffs, and initial-branch pushes, and rejects invalid arguments", (t) => {
+test("fails closed on workflow_dispatch, empty diffs, initial-branch pushes, and missing base commits, and rejects invalid arguments", (t) => {
 	const f = createRepoFixture(t);
 	assertPlanned(f.invoke(["--event", "workflow_dispatch", "--base", "", "--head", f.base]), true);
 
 	const emptyCommit = f.commit("empty");
 	assertPlanned(f.invoke(["--event", "push", "--base", f.base, "--head", emptyCommit]), true);
 	assertPlanned(f.invoke(["--event", "push", "--base", "0".repeat(40), "--head", emptyCommit]), true);
+	assertPlanned(f.invoke(["--event", "push", "--base", "a".repeat(40), "--head", emptyCommit]), true);
+	assertPlanned(f.invoke(["--event", "pull_request", "--base", "a".repeat(40), "--head", emptyCommit]), true);
 
 	const helpResult = f.invoke(["--help"]);
 	assert.equal(helpResult.status, 0);
@@ -261,7 +263,7 @@ test("fails closed on workflow_dispatch, empty diffs, and initial-branch pushes,
 	for (const badArgs of [
 		["--event", "schedule", "--base", f.base, "--head", emptyCommit],
 		["--event", "push", "--base", "not-a-sha", "--head", emptyCommit],
-		["--event", "push", "--base", "a".repeat(40), "--head", emptyCommit],
+		["--event", "push", "--base", f.base, "--head", "a".repeat(40)],
 		["extra-positional", "--event", "workflow_dispatch"],
 	]) {
 		const bad = f.invoke(badArgs);

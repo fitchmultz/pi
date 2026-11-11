@@ -75,11 +75,14 @@ const fastPaths = [
 	],
 ];
 
-function verifyCommit(label, sha) {
+function assertShaFormat(label, sha) {
 	if (!SHA_PATTERN.test(sha ?? "")) {
 		throw new Error(`${label} must be a 40-character lowercase hex commit SHA`);
 	}
-	git("rev-parse", "--verify", `${sha}^{commit}`);
+}
+
+function hasCommit(sha) {
+	return spawnSync("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], { timeout: 30_000 }).status === 0;
 }
 
 function resolveScope({ event, base, head }) {
@@ -93,7 +96,10 @@ function resolveScope({ event, base, head }) {
 	if (event !== "pull_request" && event !== "push") {
 		throw new Error("Event must be pull_request, push, or workflow_dispatch");
 	}
-	verifyCommit("head", head);
+	assertShaFormat("head", head);
+	if (!hasCommit(head)) {
+		throw new Error(`head commit ${head} is not in local history`);
+	}
 	if (event === "push" && base === ZERO_SHA) {
 		return {
 			macosRequired: true,
@@ -101,7 +107,14 @@ function resolveScope({ event, base, head }) {
 			files: [],
 		};
 	}
-	verifyCommit("base", base);
+	assertShaFormat("base", base);
+	if (!hasCommit(base)) {
+		return {
+			macosRequired: true,
+			reason: "Base commit is not in local history; running macos-restart-background by default.",
+			files: [],
+		};
+	}
 
 	let before = base;
 	if (event === "pull_request") {
