@@ -619,11 +619,14 @@ describe("AgentSession provider summary block", () => {
 		]);
 
 		await harness.session.prompt("one");
-		await harness.session.compact();
+		const result = await harness.session.compact();
 		await harness.session.prompt("two");
 
 		const [stored] = getCompactions(harness);
 		expect(stored.providerSummary).toMatchObject({ block });
+		// The result reports the cost of the block request too, as the stored entry does.
+		expect(result.usage).toEqual(stored.providerSummary?.usage);
+		expect(result.usage).toEqual(stored.usage);
 		expect(describeMessages(requests[3].messages)).toEqual([
 			"system+block +lookup",
 			"assistant: first done",

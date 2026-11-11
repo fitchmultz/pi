@@ -3772,13 +3772,15 @@ export class AgentSession {
 			if (this._compactionAbortController.signal.aborted) {
 				throw new Error("Compaction cancelled");
 			}
+			// The block request is part of what the compaction cost, in the entry and in the result.
+			usage = withProviderSummaryUsage(usage, providerSummary);
 			this.sessionManager.appendCompaction(
 				summary,
 				firstKeptEntryId,
 				tokensBefore,
 				details,
 				fromExtension,
-				withProviderSummaryUsage(usage, providerSummary),
+				usage,
 				providerSummary,
 			);
 			const newEntries = this.sessionManager.getEntries();
@@ -4201,13 +4203,15 @@ export class AgentSession {
 				? await this._requestProviderSummary(extensionCompaction.providerSummary, firstKeptEntryId, reason)
 				: undefined;
 			abortController.signal.throwIfAborted();
+			// The block request is part of what the compaction cost, in the entry and in the result.
+			usage = withProviderSummaryUsage(usage, providerSummary);
 			this.sessionManager.appendCompaction(
 				summary,
 				firstKeptEntryId,
 				tokensBefore,
 				details,
 				fromExtension,
-				withProviderSummaryUsage(usage, providerSummary),
+				usage,
 				providerSummary,
 			);
 			const newEntries = this.sessionManager.getEntries();
