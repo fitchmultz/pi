@@ -288,6 +288,7 @@ function validateWorkingSession(value: unknown): WorkingSession {
 					fail(`${at}.firstKeptEntryId`);
 				fields(entry, at, "number", "tokensBefore");
 				if (entry.systemMessage !== undefined) message(entry.systemMessage, `${at}.systemMessage`, "system");
+				if (entry.toolUpdate !== undefined) message(entry.toolUpdate, `${at}.toolUpdate`, "system");
 				break;
 			case "branch_summary":
 				// Provenance may name "root" or an abandoned path omitted by createBranchedSession().

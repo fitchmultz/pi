@@ -87,10 +87,11 @@ export interface CreateAgentSessionOptions {
 	 * When omitted, pi uses the resolved `defaultTools` setting for the initial
 	 * selection when configured. Otherwise it enables the default built-in tools
 	 * (read, bash, edit, write). Extension/custom tools remain enabled unless
-	 * `noTools` changes that default. When provided, only matching tools are
-	 * enabled. MCP tools stay registered for codemode and tool search unless an
-	 * entry starts with `mcp__`; then only matching MCP tools are kept. An empty
-	 * list, like `noTools: "all"`, disables MCP tools too.
+	 * `noTools` changes that default or a `-name` entry of the setting removes
+	 * them. When provided, only matching tools are enabled. MCP tools stay
+	 * registered for codemode and tool search unless an entry starts with
+	 * `mcp__`; then only matching MCP tools are kept. An empty list, like
+	 * `noTools: "all"`, disables MCP tools too.
 	 *
 	 * A list of only `+name` and `-name` entries is not an allowlist: it adds tools
 	 * to or removes them from the default selection, like the `defaultTools` setting.
@@ -536,6 +537,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 	};
 
+	// A fork sends the id of the session its conversation was copied from (see SessionHeader).
+	const cacheSessionId = sessionManager.getCacheSessionId();
 	const agent = new Agent({
 		initialState: {
 			systemPrompt: "",
@@ -553,7 +556,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// shallow-copy the messages array or refresh the model object without changing
 			// the provider request, so top-level object identity is not a valid cache key.
 			// A summary block request repeats an earlier request of the session; it replaces nothing.
-			if (options?.sessionId === sessionManager.getSessionId() && !options.providerSummary) {
+			if (options?.sessionId === cacheSessionId && !options.providerSummary) {
 				const isCurrent = cacheContextIsCurrent(model);
 				cacheWarmer.cancel();
 				return modelRuntime.streamSimple(model, context, requestOptions, (preparedModel, preparedOptions) => {
@@ -569,7 +572,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		onPayload: transformProviderPayload,
 		onResponse: handleProviderResponse,
 		onProviderStreamEvent: handleProviderStreamEvent,
-		sessionId: sessionManager.getSessionId(),
+		sessionId: cacheSessionId,
 		transformContext: async (messages) => {
 			const runner = extensionRunnerRef.current;
 			if (!runner) return messages;

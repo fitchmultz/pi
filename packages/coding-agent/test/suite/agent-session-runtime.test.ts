@@ -1010,6 +1010,46 @@ describe("AgentSessionRuntime characterization", () => {
 		).toEqual(beforeMessages);
 	});
 
+	it("sends a fork's requests under the session id whose provider cache holds the copied conversation", async () => {
+		const { runtime, faux } = await createRuntimeForTest(() => {});
+		faux.setResponses(["one", "two", "three", "four", "five"].map((text) => fauxAssistantMessage(text)));
+		// The faux provider keeps one cached prompt per session id, as OpenAI routes by it.
+		const lastUsage = () => {
+			const message = runtime.session.messages.at(-1);
+			if (message?.role !== "assistant") throw new Error("expected an assistant reply");
+			return message.usage;
+		};
+		const forkAtLeaf = async () => {
+			const previousId = runtime.session.sessionId;
+			await runtime.fork(runtime.session.sessionManager.getLeafId()!, { position: "at" });
+			expect(runtime.session.sessionId).not.toBe(previousId);
+		};
+
+		await runtime.session.prompt("hello");
+		await runtime.session.prompt("again");
+		const parentId = runtime.session.sessionId;
+		const parent = lastUsage();
+
+		// A fork's first request reads everything its parent's last request read or wrote.
+		await forkAtLeaf();
+		await runtime.session.prompt("in the fork");
+		const fork = lastUsage();
+		expect(fork.cacheRead).toBe(parent.cacheRead + parent.cacheWrite);
+		expect(runtime.session.sessionManager.getHeader()?.cacheSessionId).toBe(parentId);
+
+		// A fork of the fork continues the same cache.
+		await forkAtLeaf();
+		await runtime.session.prompt("in the second fork");
+		expect(lastUsage().cacheRead).toBe(fork.cacheRead + fork.cacheWrite);
+		expect(runtime.session.sessionManager.getHeader()?.cacheSessionId).toBe(parentId);
+
+		// A new session copies no conversation and keeps its own cache.
+		await runtime.newSession({ parentSession: runtime.session.sessionFile });
+		expect(runtime.session.sessionManager.getHeader()?.cacheSessionId).toBeUndefined();
+		await runtime.session.prompt("hello");
+		expect(lastUsage().cacheRead).toBe(0);
+	});
+
 	it("duplicates the current active branch in-memory when forking at the current position", async () => {
 		const tempDir = join(tmpdir(), `pi-runtime-suite-in-memory-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });

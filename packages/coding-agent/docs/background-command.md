@@ -29,6 +29,12 @@ Status with an ID returns a readable output tail capped at 16KB/100 lines. Witho
 
 Jobs report `starting`, `running`, `succeeded`, `failed`, `cancelled`, `timed_out` or `unknown`. Missing or inaccessible workers and corrupt records report an unknown outcome without hiding healthy jobs or rerunning commands. Cancellation can return `cancelRequested: true` while the worker is still stopping.
 
+## Cards in the terminal
+
+Until it is expanded, the tool card shows the first 10 rows of the command and one status line. A completion notice shows a summary row and the last 5 rows of the notice, which is where the output of a failed job ends. Each card names the expand key when it hides text. Ctrl+O (`app.tools.expand`) or a click shows the whole command, the job record and the whole notice. An error result is always shown in full.
+
+In [compact view](settings.md#compact-view), the tool card takes at most two rows and the notice one summary row.
+
 ## Completion and lifetime
 
 Completion notices enter after the entire foreground tool batch, during idle or after resume. They include the job ID, status, exit code when available, command preview and `logFile`. Success omits output; other outcomes include up to 2KB/20 lines.

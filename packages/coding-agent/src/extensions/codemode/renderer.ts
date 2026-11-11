@@ -11,12 +11,12 @@ import type { TextContent } from "@earendil-works/pi-ai";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import type {
 	BackgroundToolMessageDetails,
+	KeybindingHints,
 	MessageRenderOptions,
 	ToolDefinition,
 } from "../../core/extensions/types.ts";
 import type { CustomMessage } from "../../core/messages.ts";
 import { getTextOutput, replaceTabs, startToolTimer, str, toolTimerText } from "../../core/tools/render-utils.ts";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
 import { CodeHighlighter, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { CodemodeNestedCall, CodemodeToolDetails } from "./tool.ts";
@@ -35,7 +35,7 @@ interface CodemodeRenderState {
 	scriptHighlighter?: CodeHighlighter;
 }
 
-function expandHint(theme: Theme, hidden: number, noun: string): string {
+function expandHint(theme: Theme, hidden: number, noun: string, keyHint: KeybindingHints["keyHint"]): string {
 	return `${theme.fg("muted", `... (${hidden} more ${noun},`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
 }
 
@@ -76,7 +76,12 @@ function formatCall(call: CodemodeNestedCall, theme: Theme, expanded: boolean): 
 	return line;
 }
 
-function callsBlock(calls: readonly CodemodeNestedCall[], expanded: boolean, theme: Theme): string | undefined {
+function callsBlock(
+	calls: readonly CodemodeNestedCall[],
+	expanded: boolean,
+	theme: Theme,
+	keyHint: KeybindingHints["keyHint"],
+): string | undefined {
 	if (calls.length === 0) return undefined;
 	const shown = expanded ? calls : calls.slice(-CALL_PREVIEW_COUNT);
 	const lines = shown.map((call) => formatCall(call, theme, expanded));
@@ -123,7 +128,7 @@ export const codemodeRenderers: Pick<
 							text: highlighted,
 							maxVisualLines: CODE_PREVIEW_LINES,
 							keep: "start",
-							formatHint: (hidden) => expandHint(theme, hidden, "lines"),
+							formatHint: (hidden) => expandHint(theme, hidden, "lines", context.keyHint),
 						}),
 			);
 		}
@@ -133,7 +138,7 @@ export const codemodeRenderers: Pick<
 		const timerText = toolTimerText(context, options.isPartial);
 		const component = (context.lastComponent as Container | undefined) ?? new Container();
 		component.clear();
-		const block = callsBlock(result.details?.calls ?? [], options.expanded, theme);
+		const block = callsBlock(result.details?.calls ?? [], options.expanded, theme, context.keyHint);
 		if (block) {
 			component.addChild(new Spacer(1));
 			component.addChild(new Text(block, 0, 0));
@@ -162,7 +167,7 @@ export const codemodeRenderers: Pick<
 						text: styled,
 						maxVisualLines: OUTPUT_PREVIEW_LINES,
 						keep: "start",
-						formatHint: (hidden) => expandHint(theme, hidden, "lines"),
+						formatHint: (hidden) => expandHint(theme, hidden, "lines", context.keyHint),
 					}),
 				);
 				// The collapsed preview hides the truncation notice at the end, so name the file here.
@@ -196,7 +201,7 @@ export function codemodeBackgroundMessageRenderer(
 		),
 	);
 
-	const block = callsBlock(details?.resultDetails?.calls ?? [], options.expanded, theme);
+	const block = callsBlock(details?.resultDetails?.calls ?? [], options.expanded, theme, options.keyHint);
 	if (block) {
 		component.addChild(new Spacer(1));
 		component.addChild(new Text(block, 0, 0));
@@ -222,7 +227,7 @@ export function codemodeBackgroundMessageRenderer(
 						text: styled,
 						maxVisualLines: OUTPUT_PREVIEW_LINES,
 						keep: "start",
-						formatHint: (hidden) => expandHint(theme, hidden, "lines"),
+						formatHint: (hidden) => expandHint(theme, hidden, "lines", options.keyHint),
 					}),
 		);
 	}

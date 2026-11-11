@@ -168,7 +168,7 @@ describe("SessionManager provider summary block", () => {
 		expect(projection.messages[0]).toMatchObject({ providerSummary: { block: { content: "Second." } } });
 	});
 
-	it("folds the system state as before at a later compaction without a block", () => {
+	it("stores a later compaction without a block as any other: the first tool list, then the tools loaded since", () => {
 		const { manager } = compactedSession();
 		const keptId = manager.appendMessage(user("four"));
 		manager.appendCompaction("plain summary", keptId, 1000, undefined, true, undefined, {
@@ -179,8 +179,10 @@ describe("SessionManager provider summary block", () => {
 			seconds: 0,
 		});
 
+		// The earlier block no longer leads the context, and its tools are not folded into a new list.
 		expect(describeMessages(manager.buildSessionProjection().messages)).toEqual([
-			"system +lookup,ring,chime",
+			"system +lookup",
+			"system +ring,chime",
 			"summary: plain summary",
 			"user: four",
 		]);

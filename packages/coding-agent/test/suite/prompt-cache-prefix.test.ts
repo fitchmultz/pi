@@ -5,6 +5,7 @@ import {
 	type CacheRetention,
 	fauxAssistantMessage,
 	fauxToolCall,
+	getCurrentSystemMessage,
 	getPromptCacheTtlMs,
 	hasApi,
 	InMemoryModelsStore,
@@ -12,6 +13,7 @@ import {
 	type Provider,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import { streamSimple as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { streamSimple as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { streamSimple as completionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as responsesStream } from "@earendil-works/pi-ai/api/openai-responses";
@@ -183,6 +185,185 @@ it.each([
 		}
 	},
 );
+
+interface AnthropicCapture {
+	tools: Array<{ name: string }>;
+	system: unknown;
+	messages: Array<{ role: string; content: string | Array<{ type: string; cache_control?: unknown }> }>;
+}
+
+/**
+ * Run a session that loads `browse` in its first window, compacts, loads `fetch_page` in the
+ * second window and compacts again. `capture` receives the context of every model request.
+ */
+async function runSessionWithLoadsAndCompactions(
+	capture: (context: TranscriptContext, request: number) => Promise<void>,
+	afterCompaction: (activeToolNames: string[]) => void,
+): Promise<void> {
+	const deferred = (name: string, description: string) => ({
+		name,
+		label: name,
+		description,
+		exposure: "deferred" as const,
+		parameters: Type.Object({}),
+		execute: async () => ({ content: [{ type: "text" as const, text: `${name} done` }], details: undefined }),
+	});
+	const h = await createHarness({
+		initialActiveToolNames: ["tool_search"],
+		settings: { cacheWarming: "off", compaction: { keepRecentTokens: 1 } },
+		extensionFactories: [
+			createToolSearchExtension(),
+			(pi) => {
+				pi.registerTool(deferred("browse", "Inspect a page"));
+				pi.registerTool(deferred("fetch_page", "Download a document"));
+				pi.on("session_before_compact", async (event) => ({
+					compaction: {
+						summary: "Earlier work is summarized here.",
+						firstKeptEntryId: event.preparation.firstKeptEntryId,
+						tokensBefore: event.preparation.tokensBefore,
+						details: {},
+					},
+				}));
+			},
+		],
+	});
+	try {
+		await h.session.bindExtensions({});
+		let request = 0;
+		const respond = (message: ReturnType<typeof fauxAssistantMessage>) => async (context: TranscriptContext) => {
+			await capture(context, request++);
+			return message;
+		};
+		const load = (query: string) =>
+			respond(fauxAssistantMessage(fauxToolCall("tool_search", { query }), { stopReason: "toolUse" }));
+		h.setResponses([
+			load("inspect page"),
+			respond(fauxAssistantMessage("loaded browse")),
+			load("download document"),
+			respond(fauxAssistantMessage("loaded fetch_page")),
+			respond(fauxAssistantMessage("continued")),
+		]);
+		await h.session.prompt("Load the page inspector");
+		await h.session.compact();
+		afterCompaction(h.session.getActiveToolNames());
+		await h.session.prompt("Load the downloader");
+		await h.session.compact();
+		afterCompaction(h.session.getActiveToolNames());
+		await h.session.prompt("Continue after the second compaction");
+		expect(request).toBe(5);
+	} finally {
+		h.cleanup();
+	}
+}
+
+// Serializers stop before transport; this is prefix evidence, not a live cache-hit measurement.
+it("keeps the start of an Anthropic request across compactions after tools were loaded", async () => {
+	const model = getBuiltinModel("anthropic", "claude-opus-5-5");
+	expect(model.compat?.supportsMidConvoToolChanges).toBe(true);
+	const captures: AnthropicCapture[] = [];
+	const activeAfterCompaction: string[][] = [];
+	await runSessionWithLoadsAndCompactions(
+		async (context) => {
+			const result = await anthropicStream(model, context, {
+				apiKey: "offline-key",
+				onPayload(value: unknown) {
+					captures.push(JSON.parse(JSON.stringify(value)) as AnthropicCapture);
+					throw new Error("offline payload captured");
+				},
+			}).result();
+			expect(result.errorMessage).toContain("offline payload captured");
+		},
+		(names) => activeAfterCompaction.push(names),
+	);
+
+	const [first, , afterFirst, , afterSecond] = captures;
+	// Loaded tools stay active across a compaction.
+	expect(activeAfterCompaction[0]).toContain("browse");
+	expect(activeAfterCompaction[1]).toEqual(expect.arrayContaining(["browse", "fetch_page"]));
+	// The request-level tool list is the first thing Anthropic caches. It never changes.
+	expect(first.tools.map((tool) => tool.name)).not.toContain("browse");
+	for (const capture of captures) expect(JSON.stringify(capture.tools)).toBe(JSON.stringify(first.tools));
+	// The loaded definitions follow the first user message, one block per system message, and
+	// the last one carries a cache breakpoint.
+	const toolChanges = (capture: AnthropicCapture) =>
+		capture.messages.flatMap((message) =>
+			message.role === "system" && typeof message.content !== "string" && message.content.length > 0
+				? [message.content]
+				: [],
+		);
+	const names = (capture: AnthropicCapture) =>
+		toolChanges(capture).map((blocks) => JSON.stringify(blocks).match(/"name":"([^"]+)"/)?.[1]);
+	expect(afterFirst.messages[0]?.role).toBe("user");
+	expect(toolChanges(afterFirst).map((blocks) => blocks.map((block) => block.type))).toEqual([["tool_addition"]]);
+	expect(names(afterFirst)).toEqual(["browse"]);
+	expect(toolChanges(afterFirst)[0]?.[0]?.cache_control).toBeDefined();
+	// The second compaction appends the newer definition after the one already sent.
+	expect(toolChanges(afterSecond).map((blocks) => blocks.map((block) => block.type))).toEqual([
+		["tool_addition"],
+		["tool_addition"],
+	]);
+	expect(names(afterSecond)).toEqual(["browse", "fetch_page"]);
+	expect(toolChanges(afterSecond).map((blocks) => blocks[0]?.cache_control !== undefined)).toEqual([false, true]);
+	expect(JSON.stringify(afterSecond.system)).toBe(JSON.stringify(afterFirst.system));
+	for (const capture of captures) {
+		expect(JSON.stringify(capture).split('"cache_control"').length - 1).toBeLessThanOrEqual(4);
+		expect(JSON.stringify(capture)).not.toContain("timestamp");
+	}
+});
+
+// Before the leading tool list was kept, a compacted session started with one system message that
+// held the current tools. Models without native tool changes must still receive that request.
+it.each([
+	{ model: getBuiltinModel("openai", "gpt-6.1-sol") },
+	{ model: getBuiltinModel("openai-codex", "gpt-6.1-sol") },
+	{ model: getBuiltinModel("cloudflare-ai-gateway", "gpt-6-astra") },
+	{ model: getBuiltinModel("anthropic", "claude-sonnet-4-5") },
+	{ model: getBuiltinModel("deepseek", "deepseek-v4-pro") },
+] as const)("$model.provider/$model.id starts a compacted request with the current tools", async ({ model }) => {
+	const serialize = async (context: TranscriptContext): Promise<string> => {
+		let payload = "";
+		const options = {
+			apiKey: `x.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture" } })).toString("base64url")}.x`,
+			onPayload(value: unknown) {
+				payload = JSON.stringify(value);
+				throw new Error("offline payload captured");
+			},
+		};
+		const stream = hasApi(model, "openai-responses")
+			? responsesStream(model, context, options)
+			: hasApi(model, "openai-codex-responses")
+				? codexStream(model, context, options)
+				: hasApi(model, "anthropic-messages")
+					? anthropicStream(model, context, options)
+					: completionsStream(model, context, options);
+		expect((await stream.result()).errorMessage).toContain("offline payload captured");
+		return payload;
+	};
+	const compacted: Array<{ sent: string; before: string }> = [];
+	await runSessionWithLoadsAndCompactions(
+		async (context, request) => {
+			if (request !== 2 && request !== 4) return;
+			const conversationStart = context.messages.findIndex((message) => message.role !== "system");
+			// The compacted session starts with the first tool list and the tool update.
+			expect(conversationStart).toBe(2);
+			const folded = getCurrentSystemMessage(context.messages.slice(0, conversationStart));
+			if (!folded) throw new Error("expected a folded system message");
+			compacted.push({
+				sent: await serialize(context),
+				before: await serialize({
+					messages: [folded, ...context.messages.slice(conversationStart)],
+				} as TranscriptContext),
+			});
+		},
+		() => {},
+	);
+
+	expect(compacted).toHaveLength(2);
+	for (const { sent, before } of compacted) {
+		expect(sent).toBe(before);
+		expect(sent).toContain('"name":"browse"');
+	}
+});
 
 it("keeps abandoned branch usage in /session while reporting cache overlap only from native ancestry", async () => {
 	const h = await createHarness({ initialActiveToolNames: [], settings: { cacheWarming: "off" } });

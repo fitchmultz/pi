@@ -1,5 +1,5 @@
 import type { Context, Message, SystemMessage, Tool, ToolReference, TranscriptContext } from "../types.ts";
-import { contentText, getSystemMessageText } from "./text.ts";
+import { contentText, getSystemMessageText, renderSystemMessageUpdate } from "./text.ts";
 
 export type { TranscriptContext } from "../types.ts";
 
@@ -111,12 +111,48 @@ export function collapseSystemMessages(context: TranscriptContext): TranscriptCo
 	return { messages: head ? [head, ...messages] : messages } as TranscriptContext;
 }
 
-/** Keep later system messages in place when the model accepts them; otherwise collapse them. */
+/**
+ * Number of system messages before the first message of another role. No conversation separates
+ * them, so the ones after the first restate what changed before the conversation begins. A
+ * compacted session starts this way: its first system message keeps the session's first tool
+ * list, and the next one names the tools that differ from it.
+ */
+export function countLeadingSystemMessages(messages: TranscriptMessages): number {
+	const conversationStart = messages.findIndex((message) => !isSystemMessage(message));
+	return conversationStart === -1 ? messages.length : conversationStart;
+}
+
+/**
+ * Move the tool changes of the leading system messages (see {@link countLeadingSystemMessages})
+ * into the first one, so the request starts with the current tools. Their prompt text and section
+ * patches stay where they are.
+ */
+function foldLeadingToolChanges(context: TranscriptContext): TranscriptContext {
+	const leading = context.messages.slice(0, countLeadingSystemMessages(context.messages)).filter(isSystemMessage);
+	const changesTools = (message: SystemMessage): boolean =>
+		message.toolsAdded !== undefined || message.toolsRemoved !== undefined;
+	if (!leading.slice(1).some(changesTools)) return context;
+	const tools = getCurrentTools(leading);
+	const folded = leading.flatMap((message, index): SystemMessage[] => {
+		if (index > 0 && !changesTools(message)) return [message];
+		const { toolsAdded: _added, toolsRemoved: _removed, ...prompt } = message;
+		if (index === 0) return [{ ...prompt, ...(tools.length > 0 ? { toolsAdded: tools } : {}) }];
+		// A message that only changed tools has nothing left to send.
+		return renderSystemMessageUpdate(prompt).length > 0 ? [prompt] : [];
+	});
+	return { messages: [...folded, ...context.messages.slice(leading.length)] } as TranscriptContext;
+}
+
+/**
+ * Keep system messages in place when the model accepts them inside the conversation; otherwise
+ * collapse them. Tool changes of the leading system messages become part of the first tool list
+ * either way.
+ */
 export function resolveTranscript(
 	context: TranscriptContext,
 	supportsMidConvoSystemMessages: boolean | undefined,
 ): TranscriptContext {
-	return supportsMidConvoSystemMessages ? context : collapseSystemMessages(context);
+	return supportsMidConvoSystemMessages ? foldLeadingToolChanges(context) : collapseSystemMessages(context);
 }
 
 /** Strip executable and display-only fields from a tool before transcript comparison or persistence. */
@@ -177,6 +213,35 @@ export function getToolStateChanges(previous: readonly Tool[], current: readonly
 				return currentTool === undefined || entry.serialized !== currentTool.serialized;
 			})
 			.map((entry) => ({ name: entry.name })),
+	};
+}
+
+/**
+ * The tool changes that, replayed after a message declaring `base`, give exactly `current`: the
+ * same definitions in the same order. {@link getToolStateChanges} compares two tool sets and
+ * ignores order. This follows the order {@link getCurrentTools} keeps, so that a transcript can
+ * be cut down to its leading tool list and one update without changing what its replay gives:
+ * a base tool stays in place until it is removed, and every other tool follows in the order
+ * of `current`. Tool names are unique within `base` and within `current`.
+ */
+export function getNetToolChanges(base: readonly Tool[], current: readonly Tool[]): ToolStateChanges {
+	const baseTools = new Map(base.map((tool, index) => [tool.name, { tool, index }]));
+	// The current tools that still stand in their base position: the longest run from the start
+	// that follows the base order. A base tool further back was removed and added again.
+	const inPlace = new Set<string>();
+	// A new definition added under a name that stays in place replaces the old one there.
+	const redefinedInPlace: Tool[] = [];
+	let lastBaseIndex = -1;
+	for (const tool of current) {
+		const baseTool = baseTools.get(tool.name);
+		if (baseTool === undefined || baseTool.index < lastBaseIndex) break;
+		lastBaseIndex = baseTool.index;
+		inPlace.add(tool.name);
+		if (!declarationsEqual(baseTool.tool, tool)) redefinedInPlace.push(tool);
+	}
+	return {
+		toolsAdded: [...redefinedInPlace, ...current.slice(inPlace.size)],
+		toolsRemoved: base.filter((tool) => !inPlace.has(tool.name)).map((tool) => ({ name: tool.name })),
 	};
 }
 

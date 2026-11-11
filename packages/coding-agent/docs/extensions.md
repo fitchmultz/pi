@@ -876,7 +876,7 @@ pi.on("context_with_system", async (event, ctx) => {
 });
 ```
 
-Rules: keep a system message at index 0 (providers read the prompt and initial tool declarations there; Pi reports an error if a handler drops it). Removing a system message removes the tool declarations and section patches it carries. Check your output with `getCurrentSystemPrompt()` and `getCurrentTools()` from `@earendil-works/pi-ai`. Handlers run in extension load order; a `systemPrompt` forced from `before_agent_start` is still projected onto the request afterwards.
+Rules: keep a system message at index 0 (providers read the prompt and initial tool declarations there; Pi reports an error if a handler drops it). After a compaction, a second system message can follow it directly: it carries the tools that changed since the session's first request (see [CompactionEntry](session-format.md#compactionentry)). Keep both, in this order. Removing a system message removes the tool declarations and section patches it carries. Check your output with `getCurrentSystemPrompt()` and `getCurrentTools()` from `@earendil-works/pi-ai`. Handlers run in extension load order; a `systemPrompt` forced from `before_agent_start` is still projected onto the request afterwards.
 
 #### before_provider_headers
 
@@ -1620,7 +1620,7 @@ Handlers run in extension load order, then registration order within each extens
 
 Register a custom tool callable by the LLM. See [Custom Tools](#custom-tools) for full details.
 
-`pi.registerTool()` works both during extension load and after startup. You can call it inside `session_start`, command handlers, or other event handlers. New tools are refreshed immediately in the same session, so they appear in `pi.getAllTools()` without `/reload`. Registering a tool activates it unless it sets `defaultActive: false` or an [exposure](#tool-exposure) other than `direct` or `model-only`.
+`pi.registerTool()` works both during extension load and after startup. You can call it inside `session_start`, command handlers, or other event handlers. New tools are refreshed immediately in the same session, so they appear in `pi.getAllTools()` without `/reload`. Registering a tool activates it unless it sets `defaultActive: false` or an [exposure](#tool-exposure) other than `direct` or `model-only`, or the user removed it with a `-name` entry in `--tools` or the [`defaultTools` setting](settings.md#tools).
 
 Use `pi.setActiveTools()` to enable or disable tools (including dynamically added tools) at runtime.
 
@@ -2565,7 +2565,7 @@ export default function (pi: ExtensionAPI) {
 
 Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
 
-By default, tool output is wrapped in a `Box` that handles background and horizontal padding from the `outputPad` setting. Tool renderers are also used in HTML exports. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
+By default, tool output is wrapped in a `Box` that handles background and horizontal padding from the `outputPad` setting. Tool renderers are also used in HTML exports, see [HTML Exports](#html-exports). A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
 
 Set `renderShell: "self"` when the tool should render its own shell instead of using the default `Box`. This is useful for tools that need complete control over framing or background behavior, for example large previews that must stay visually stable after the tool settles.
 
@@ -2671,6 +2671,16 @@ For the exhaustive list of keybinding ids and defaults, see [keybindings.md](key
 
 Custom editors and `ctx.ui.custom()` components receive `keybindings: KeybindingsManager` as an injected argument. They should use that injected manager directly instead of calling `getKeybindings()` or `setKeybindings()`.
 
+#### HTML Exports
+
+`/export`, `/share` and the RPC `export_html` command draw tool cards with the same renderers and store the rows in the page. The page is static, so the render context differs from the terminal's:
+
+- A call is rendered once, with `expanded: true`, because the page has no control that expands a call. A result is rendered collapsed and expanded, and a click on the page switches between the two.
+- A call with a saved result is rendered as finished: `isPartial` is `false`, and `isError` and `durationMs` are those of the result, in `renderCall` and `renderResult`. A call without a saved result is rendered with `isPartial: true`.
+- `context.keyText("app.tools.expand")` returns `click`, so `context.keyHint("app.tools.expand", "to expand")` reads `click to expand`. No key expands a result on the page. A hint built from an imported `keyHint()` or from a literal key name still names the terminal's key.
+- A tool with `renderResult` and no `renderCall` gets the expanded [fallback](#fallback) header: the tool name and one `key: value` line per argument.
+- `showImages` is `false` and `invalidate()` does nothing.
+
 #### Best Practices
 
 - Use `Text` with padding `(0, 0)`. The default Box handles padding.
@@ -2686,8 +2696,12 @@ Custom editors and `ctx.ui.custom()` components receive `keybindings: Keybinding
 #### Fallback
 
 If a slot renderer is not defined or throws:
-- `renderCall`: Shows the tool name
-- `renderResult`: Shows raw text from `content`
+- `renderCall`: Shows the tool name and the arguments. Until the card is expanded, the arguments are `key=value` pairs after the tool name, cut to 100 characters. When they are cut, the next row names the expand key: `(ctrl+o to expand)`.
+- `renderResult`: Shows raw text from `content`. Until the card is expanded, it shows the first 10 rows, counted after the text is wrapped to the terminal width. When rows are hidden, the next row names their number and the expand key: `... (38 more lines, ctrl+o to expand)`.
+
+A card that hides nothing shows no hint.
+
+A tool without a definition gets both fallbacks. This is the card of a saved call whose tool the session does not register, for example a tool of an extension that is no longer installed.
 
 ### Dynamic Tool Loading
 
@@ -2808,7 +2822,7 @@ When `search_tools` adds a match, the model receives the complete updated tool l
 
 `namespace: { name, aliases, description, instructions }` groups related tools, as MCP servers do. Codemode tools list a namespace under one heading with its `description`. `instructions` holds longer usage guidance; it is not listed, and codemode scripts read it with `describeNamespace(name)`. `aliases` are other names scripts may look the namespace up by, for example the server name `docs` for `mcp__docs`; a name and the same name as a script identifier (`my-docs`, `my_docs`) match alike.
 
-Registering a `direct` or `model-only` tool activates it unless it sets `defaultActive: false`; the other exposures are not activated on registration. The active set (`pi.getActiveTools()`, `pi.setActiveTools()`) is the set of tools declared to the model, except active tools whose declarations `prepareLoadout` hides. `pi.getAllTools()` reports each tool's `exposure`, `namespace`, `annotations`, and `reachesTools`.
+Registering a `direct` or `model-only` tool activates it unless it sets `defaultActive: false` or the user removed it with a `-name` entry in `--tools` or the `defaultTools` setting; the other exposures are not activated on registration. The active set (`pi.getActiveTools()`, `pi.setActiveTools()`) is the set of tools declared to the model, except active tools whose declarations `prepareLoadout` hides. `pi.getAllTools()` reports each tool's `exposure`, `namespace`, `annotations`, and `reachesTools`.
 
 The exposure a tool registers with is its default. The user's [`toolExposure` setting](settings.md#tool-exposure) replaces it by tool name or pattern, and the tool then behaves as if it had registered with the setting's exposure. A tool registered as `hidden` stays hidden. `pi.getAllTools()` reports the exposure in effect, so an extension that adds prompt text for its tool, or activates `tool_search` for it, should read the exposure and `pi.getActiveTools()` there instead of assuming what it registered.
 

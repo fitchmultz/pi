@@ -186,19 +186,25 @@ describe("AgentSession compaction characterization", () => {
 		expect(harness.session.messages[1]?.role).toBe("compactionSummary");
 	});
 
-	it("checkpoints the replayed system state and folds summarized and retained system patches into it", async () => {
+	it("keeps the leading tool list across compactions and restates the changed tools in one update", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("declared")]);
 		await harness.session.prompt("declare the prompt");
 		const declared = harness.session.messages[0];
 		if (declared?.role !== "system") throw new Error("expected declared system message");
+		const loaded = (name: string, description = `${name} tool`) => ({
+			name,
+			description,
+			parameters: Type.Object({}),
+		});
 
 		harness.sessionManager.appendMessage({
 			role: "system",
 			content: "summarized instruction",
 			sections: { early: "<early>1</early>" },
 			toolsRemoved: [{ name: "bash" }],
+			toolsAdded: [loaded("browse")],
 			timestamp: Date.now(),
 		});
 		const firstKeptEntryId = harness.sessionManager.appendMessage({
@@ -211,6 +217,7 @@ describe("AgentSession compaction characterization", () => {
 			content: "retained instruction",
 			sections: { extra: "<extra>late</extra>" },
 			toolsRemoved: [{ name: "read" }],
+			toolsAdded: [loaded("read", "read again"), loaded("search")],
 			timestamp: Date.now(),
 		});
 		harness.sessionManager.appendMessage({
@@ -218,21 +225,156 @@ describe("AgentSession compaction characterization", () => {
 			content: [{ type: "text", text: "kept after patch" }],
 			timestamp: Date.now(),
 		});
+		const before = harness.sessionManager.buildSessionContext().messages;
 		harness.sessionManager.appendCompaction("compacted", firstKeptEntryId, 100);
 
 		const messages = harness.sessionManager.buildSessionContext().messages;
-		expect(messages.map((message) => message.role)).toEqual(["system", "compactionSummary", "user", "user"]);
-		const checkpoint = messages[0];
-		if (checkpoint?.role !== "system") throw new Error("expected checkpoint system message");
-		expect(checkpoint.content).toBe("summarized instruction\n\nretained instruction");
-		expect(checkpoint.sections).toEqual({
+		expect(messages.map((message) => message.role)).toEqual([
+			"system",
+			"system",
+			"compactionSummary",
+			"user",
+			"user",
+		]);
+		const [leading, update] = messages;
+		if (leading?.role !== "system" || update?.role !== "system") throw new Error("expected two system messages");
+		// Providers send the leading tool list at the start of every request and cache from there.
+		expect(leading.toolsAdded).toEqual(declared.toolsAdded);
+		// The prompt is the current one: later text and sections are folded into the leading message.
+		expect(leading.content).toBe("summarized instruction\n\nretained instruction");
+		expect(leading.sections).toEqual({
 			...declared.sections,
 			early: "<early>1</early>",
 			extra: "<extra>late</extra>",
 		});
-		expect(checkpoint.toolsAdded?.map((tool) => tool.name)).toEqual(
-			harness.session.getActiveToolNames().filter((name) => name !== "read" && name !== "bash"),
-		);
+		// The update carries tool changes only, in the order the tools were added.
+		expect(Object.keys(update).sort()).toEqual(["content", "role", "timestamp", "toolsAdded", "toolsRemoved"]);
+		expect(update.content).toBe("");
+		expect(update.toolsRemoved?.map((tool) => tool.name).sort()).toEqual(["bash", "read"]);
+		expect(update.toolsAdded?.map((tool) => tool.name)).toEqual(["browse", "read", "search"]);
+		// Nothing changes for the model: the same prompt and the same tools in the same order.
+		expect(getCurrentSystemPrompt(messages)).toBe(getCurrentSystemPrompt(before));
+		expect(getCurrentTools(messages)).toEqual(getCurrentTools(before));
+
+		// A second compaction keeps the same leading list. Definitions the update already had keep
+		// their order, a new one follows, and a redefined one moves to the end.
+		harness.sessionManager.appendMessage({
+			role: "system",
+			content: "",
+			toolsRemoved: [{ name: "browse" }],
+			toolsAdded: [loaded("fetch"), loaded("browse", "browse again")],
+			timestamp: Date.now(),
+		});
+		harness.sessionManager.appendMessage({ role: "user", content: "after first compaction", timestamp: Date.now() });
+		const beforeSecond = harness.sessionManager.buildSessionContext().messages;
+		harness.sessionManager.appendCompaction("compacted again", null, 100);
+
+		const second = harness.sessionManager.buildSessionContext().messages;
+		expect(second.map((message) => message.role)).toEqual(["system", "system", "compactionSummary"]);
+		const [secondLeading, secondUpdate] = second;
+		if (secondLeading?.role !== "system" || secondUpdate?.role !== "system") {
+			throw new Error("expected two system messages");
+		}
+		expect(secondLeading.toolsAdded).toEqual(declared.toolsAdded);
+		expect(secondUpdate.toolsAdded?.map((tool) => tool.name)).toEqual(["read", "search", "fetch", "browse"]);
+		expect(secondUpdate.toolsAdded?.slice(0, 2)).toEqual(update.toolsAdded?.slice(1));
+		expect(getCurrentSystemPrompt(second)).toBe(getCurrentSystemPrompt(beforeSecond));
+		expect(getCurrentTools(second)).toEqual(getCurrentTools(beforeSecond));
+	});
+
+	it("stores no tool update when the tools did not change", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("declared")]);
+		await harness.session.prompt("declare the prompt");
+		const declared = harness.session.messages[0];
+		if (declared?.role !== "system") throw new Error("expected declared system message");
+		harness.sessionManager.appendMessage({
+			role: "system",
+			content: "",
+			sections: { extra: "<extra>late</extra>" },
+			timestamp: Date.now(),
+		});
+
+		const id = harness.sessionManager.appendCompaction("compacted", null, 100);
+
+		const entry = harness.sessionManager.getEntry(id);
+		if (entry?.type !== "compaction") throw new Error("expected compaction entry");
+		expect(entry).not.toHaveProperty("toolUpdate");
+		expect(entry.systemMessage?.toolsAdded).toEqual(declared.toolsAdded);
+		expect(entry.systemMessage?.sections).toEqual({ ...declared.sections, extra: "<extra>late</extra>" });
+		expect(harness.sessionManager.buildSessionContext().messages.map((message) => message.role)).toEqual([
+			"system",
+			"compactionSummary",
+		]);
+	});
+
+	it("keeps the tool list of the first system message when another message is stored before it", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		// A message that an extension sends before the first prompt is stored ahead of the system
+		// message that the first prompt declares.
+		harness.sessionManager.appendCustomMessageEntry("startup-note", "sent before the first prompt", false);
+		harness.setResponses([fauxAssistantMessage("declared")]);
+		await harness.session.prompt("declare the prompt");
+		const declared = harness.sessionManager.buildSessionContext().messages[1];
+		if (declared?.role !== "system") throw new Error("expected the declared system message after the note");
+		const browse = { name: "browse", description: "browse tool", parameters: Type.Object({}) };
+		harness.sessionManager.appendMessage({
+			role: "system",
+			content: "",
+			toolsAdded: [browse],
+			timestamp: Date.now(),
+		});
+
+		const id = harness.sessionManager.appendCompaction("compacted", null, 100);
+
+		const entry = harness.sessionManager.getEntry(id);
+		if (entry?.type !== "compaction") throw new Error("expected compaction entry");
+		expect(entry.systemMessage?.toolsAdded).toEqual(declared.toolsAdded);
+		expect(entry.toolUpdate?.toolsAdded).toEqual([browse]);
+	});
+
+	it("keeps the tool list of an entry written before tool updates existed", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("declared")]);
+		await harness.session.prompt("declare the prompt");
+		const browse = { name: "browse", description: "browse tool", parameters: Type.Object({}) };
+		harness.sessionManager.appendMessage({
+			role: "system",
+			content: "",
+			toolsAdded: [browse],
+			timestamp: Date.now(),
+		});
+		const id = harness.sessionManager.appendCompaction("compacted", null, 100);
+		// Such an entry holds the complete tool state in `systemMessage` and has no `toolUpdate`.
+		const entry = harness.sessionManager.getEntry(id);
+		if (entry?.type !== "compaction" || !entry.systemMessage) throw new Error("expected compaction entry");
+		const complete = getCurrentTools(harness.sessionManager.buildSessionContext().messages);
+		entry.systemMessage = { ...entry.systemMessage, toolsAdded: complete };
+		delete entry.toolUpdate;
+
+		const old = harness.sessionManager.buildSessionContext().messages;
+		expect(old.map((message) => message.role)).toEqual(["system", "compactionSummary"]);
+		expect(getCurrentTools(old)).toEqual(complete);
+
+		// The next compaction keeps that list as the leading one and restates only what changed since.
+		const search = { name: "search", description: "search tool", parameters: Type.Object({}) };
+		harness.sessionManager.appendMessage({
+			role: "system",
+			content: "",
+			toolsAdded: [search],
+			timestamp: Date.now(),
+		});
+		harness.sessionManager.appendMessage({ role: "user", content: "after old compaction", timestamp: Date.now() });
+		harness.sessionManager.appendCompaction("compacted again", null, 100);
+
+		const [leading, update] = harness.sessionManager.buildSessionContext().messages;
+		if (leading?.role !== "system" || update?.role !== "system") throw new Error("expected two system messages");
+		expect(leading.toolsAdded).toEqual(complete);
+		expect(update.toolsAdded).toEqual([search]);
+		expect(update.toolsRemoved).toBeUndefined();
 	});
 
 	it("allows a queued prompt to start when manual compaction ends", async () => {

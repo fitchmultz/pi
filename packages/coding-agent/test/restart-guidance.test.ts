@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -7,7 +7,6 @@ import {
 	fauxToolCall,
 	getCurrentSystemPrompt,
 	type Model,
-	type SystemMessage,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { streamSimple as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
@@ -382,39 +381,70 @@ describe("actual managed restart guidance", () => {
 		expect(getCurrentSystemPrompt(f.requests[0].messages)).not.toContain("<restart>");
 	});
 
-	it("removes only later owned restart patches, preserving unrelated system content, sections and tool deltas", async () => {
-		const added = { name: "added", description: "Additional tool", parameters: Type.Object({}) };
-		const patches: SystemMessage[] = [
-			{ role: "system", content: "", sections: { restart: "obsolete" }, timestamp: 1 },
-			{ role: "system", content: "", sections: { restart: null }, timestamp: 2 },
-			{
-				role: "system",
-				content: [{ type: "text", text: "Keep this content", textSignature: "opaque" }],
-				sections: { restart: null, unrelated: "Keep this section" },
-				toolsAdded: [added],
-				toolsRemoved: [{ name: "work" }],
-				timestamp: 3,
-			},
-			{ role: "system", content: "Keep this text", sections: { restart: "obsolete" }, timestamp: 4 },
-			{ role: "system", content: [], sections: { restart: null }, toolsRemoved: [{ name: "added" }], timestamp: 5 },
-		];
-		const f = await managedFixture({
-			extensions: [
-				(pi) => {
-					pi.on("context_with_system", (event) => ({
-						messages: [...event.messages, ...structuredClone(patches)],
-					}));
-				},
-			],
-		});
+	it("gives a forked child session without managed control the parent's leading system message and a recorded removal", async () => {
+		const f = await managedFixture();
 		f.faux.setResponses([f.response()]);
 		await f.h.session.prompt("Seed");
+		const parentRequest = f.requests[0].messages;
+		// A forked child's journal: its own header, then the parent's branch.
+		const childRoot = mkdtempSync(join(tmpdir(), "pi-restart-guidance-child-"));
+		cleanups.push(async () => rmSync(childRoot, { recursive: true, force: true }));
+		const created = SessionManager.create(childRoot, childRoot);
+		const file = created.getSessionFile()!;
+		const journal = [
+			{ ...created.getHeader(), parentSession: f.h.sessionManager.getSessionFile() },
+			...f.h.sessionManager.getBranch(),
+		];
+		writeFileSync(file, `${journal.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+		await f.close();
+		const child = await managedFixture({ sessionFile: file, mode: "print" });
+		child.faux.setResponses([child.response()]);
+		await child.h.session.prompt("Child task");
+		const childRequest = child.requests[0].messages;
 		restartSection(f.requests[0]);
-		expect(f.requests[0].messages.slice(-3)).toEqual([
-			{ ...patches[2], sections: { unrelated: "Keep this section" } },
-			{ role: "system", content: "Keep this text", timestamp: 4 },
-			{ role: "system", content: [], toolsRemoved: [{ name: "added" }], timestamp: 5 },
+		// The provider's cached prefix and its thinking blocks stay valid only for the same leading bytes.
+		expect(childRequest.slice(0, parentRequest.length)).toEqual(parentRequest);
+		const later = childRequest
+			.slice(parentRequest.length)
+			.flatMap((message) => (message.role === "system" ? [message] : []));
+		expect(later.map((message) => message.sections?.restart).filter((section) => section !== undefined)).toEqual([
+			null,
 		]);
-		expect(f.requests[0].messages.filter((message) => message.role === "system")).toHaveLength(4);
+		expect(getCurrentSystemPrompt(childRequest)).not.toContain("<restart>");
+		// What the provider gets: an API that takes later system messages keeps the parent's start.
+		for (const api of ["openai-responses", "openai-codex-responses"] as const) {
+			const [parent, forked] = await payloads([f.requests[0], child.requests[0]], api);
+			expect(forked.instructions).toEqual(parent.instructions);
+			expect(forked.input?.slice(0, parent.input?.length)).toEqual(parent.input);
+			expect(forked.tools).toEqual(parent.tools);
+		}
+		// An API without them gets every later system message folded into the leading one.
+		const [parent, forked] = await payloads([f.requests[0], child.requests[0]], "openai-completions");
+		expect(JSON.stringify(parent.messages?.[0])).toContain("<restart>");
+		expect(JSON.stringify(forked.messages?.[0])).not.toContain("<restart>");
+	});
+
+	it("adds the guidance to a leading system message that was recorded without it", async () => {
+		// The journal of a window recorded before the guidance was a saved section has no `restart`
+		// in its leading system message; a session first run without managed control records the same.
+		const recorded = await managedFixture({ mode: "print" });
+		recorded.faux.setResponses([recorded.response()]);
+		await recorded.h.session.prompt("Seed");
+		const recordedHead = recorded.requests[0].messages[0];
+		if (recordedHead?.role !== "system") throw new Error("Expected system head");
+		expect(recordedHead.sections?.restart).toBeUndefined();
+		const file = recorded.h.sessionManager.getSessionFile()!;
+		await recorded.close();
+		const managed = await managedFixture({ sessionFile: file });
+		await managed.wake();
+		expect(managed.requests).toHaveLength(2);
+		for (const request of managed.requests) {
+			const section = restartSection(request);
+			expect(request.messages[0]).toEqual({
+				...recordedHead,
+				sections: { ...recordedHead.sections, restart: section },
+			});
+		}
+		await expectStableRequests(managed.requests);
 	});
 });

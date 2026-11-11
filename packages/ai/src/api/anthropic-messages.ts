@@ -2,6 +2,8 @@ import Anthropic, { type ClientOptions } from "@anthropic-ai/sdk";
 import type {
 	BetaInputTransformation,
 	BetaIterationsUsage,
+	BetaRequestToolAdditionBlock,
+	BetaRequestToolRemovalBlock,
 	BetaStopReason,
 	BetaTool,
 	BetaCacheControlEphemeral as CacheControlEphemeral,
@@ -62,6 +64,7 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import {
+	countLeadingSystemMessages,
 	getCurrentTools,
 	getInitialSystemMessage,
 	resolveTranscript,
@@ -261,6 +264,21 @@ function getAnthropicCompat(model: Model<"anthropic-messages">) {
 			model.compat?.supportsMessageThreads ??
 			(model.provider === "anthropic" && model.baseUrl.includes("api.anthropic.com")),
 	};
+}
+
+/**
+ * Whether tool changes are sent natively. The request-level tool list then stays the list of the
+ * leading system message, and every later tool is defined by value in a `tool_addition` block,
+ * which also expresses same-name redefinitions. Anthropic rejects a tool list where every tool is
+ * deferred, so there must be an initial active tool to anchor the placeholder. Otherwise the
+ * current tool list is sent.
+ */
+function usesNativeToolChanges(compat: ReturnType<typeof getAnthropicCompat>, context: TranscriptContext): boolean {
+	return (
+		compat.supportsMidConvoSystemMessages &&
+		compat.supportsMidConvoToolChanges &&
+		(getInitialSystemMessage(context.messages)?.toolsAdded?.length ?? 0) > 0
+	);
 }
 
 /**
@@ -840,7 +858,11 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 	const compat = getAnthropicCompat(model);
-	const normalizedContext = resolveTranscript(context, compat.supportsMidConvoSystemMessages);
+	// Native tool changes send the tool changes of the leading system messages in place: the
+	// request-level tool list is the first message's, and folding would add their tools to it.
+	const normalizedContext = usesNativeToolChanges(compat, context)
+		? context
+		: resolveTranscript(context, compat.supportsMidConvoSystemMessages);
 	const currentTools = getCurrentTools(normalizedContext.messages);
 	const summaryBlock = getSummaryBlock(model, normalizedContext.messages);
 
@@ -1488,14 +1510,10 @@ function buildParams(
 	const initialSystemText = initialSystemMessage ? getSystemMessageText(initialSystemMessage) : "";
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 	const conversationMessages = initialSystemMessage ? transformedMessages.slice(1) : transformedMessages;
-	// Native tool changes keep the request-level tool list fixed and define every later tool
-	// by value in a `tool_addition` block, which also expresses same-name redefinitions.
-	// Anthropic rejects a tool list where every tool is deferred, so there must be an initial
-	// active tool to anchor the placeholder. Otherwise the current tool list is sent.
-	const initialTools = initialSystemMessage?.toolsAdded ?? [];
-	const nativeToolChanges =
-		compat.supportsMidConvoSystemMessages && compat.supportsMidConvoToolChanges && initialTools.length > 0;
-	const requestToolList = nativeToolChanges ? initialTools : getCurrentTools(context.messages);
+	const nativeToolChanges = usesNativeToolChanges(compat, context);
+	const requestToolList = nativeToolChanges
+		? (initialSystemMessage?.toolsAdded ?? [])
+		: getCurrentTools(context.messages);
 	const resolveStrict = (tool: Tool): boolean | undefined =>
 		flags.disablePreferredStrictTools && prefersJsonSchemaStrictSampling(tool)
 			? undefined
@@ -1557,6 +1575,7 @@ function buildParams(
 		compat.allowEmptySignature,
 		effortMessages ? model.provider : undefined,
 		nativeToolChanges ? convertToolDefinitions : undefined,
+		nativeToolChanges ? countLeadingSystemMessages(context.messages) - 1 : 0,
 	);
 	const activeEffort = options?.effort ?? "high";
 	const summaryRequest = options?.providerSummary;
@@ -1592,11 +1611,15 @@ function buildParams(
 
 	// For OAuth tokens, we MUST include Claude Code identity
 	if (isOAuthToken) {
+		// Anthropic accepts four cache breakpoints: tools, identity, prompt and last message use
+		// them all. A breakpoint on the leading tool changes takes the identity's; the prompt's
+		// breakpoint caches the identity block as well.
+		const identityCacheControl = converted.cachesLeadingToolChanges && initialSystemText ? undefined : cacheControl;
 		params.system = [
 			{
 				type: "text",
 				text: "You are Claude Code, Anthropic's official CLI for Claude.",
-				...(cacheControl ? { cache_control: cacheControl } : {}),
+				...(identityCacheControl ? { cache_control: identityCacheControl } : {}),
 			},
 		];
 		if (initialSystemText) {
@@ -1713,7 +1736,11 @@ function convertToolResult(msg: ToolResultMessage, content = msg.content): Conte
 interface ConvertedAnthropicMessages {
 	messages: MessageParam[];
 	assistantLevels: Map<number, AnthropicEffort>;
+	/** The tool changes of the leading system messages end with a cache breakpoint. */
+	cachesLeadingToolChanges: boolean;
 }
+
+type ToolChangeBlock = BetaRequestToolRemovalBlock | BetaRequestToolAdditionBlock;
 
 function convertMessages(
 	transformedMessages: Message[],
@@ -1723,6 +1750,11 @@ function convertMessages(
 	managedProvider?: string,
 	/** Converts tool definitions for native `tool_addition` blocks; undefined when tool changes are not native. */
 	convertToolDefinitions?: (tools: Tool[]) => BetaTool[],
+	/**
+	 * Number of system messages at the start of `transformedMessages` that follow the leading system
+	 * message without a conversation message in between; 0 when tool changes are not native.
+	 */
+	leadingUpdates = 0,
 ): ConvertedAnthropicMessages {
 	const params: MessageParam[] = [];
 	const assistantLevels = new Map<number, AnthropicEffort>();
@@ -1738,6 +1770,19 @@ function convertMessages(
 		params.push(...pendingSystemMessages);
 		pendingSystemMessages.length = 0;
 	};
+	// The system messages that follow the leading one directly restate what changed before the
+	// conversation: a compacted session carries its loaded tools there. The request-level tool
+	// list stays the session's first, so these definitions are the next part of the prompt that
+	// every request repeats, and the last of them gets a cache breakpoint.
+	//
+	// Each of their blocks is sent as its own system message. Anthropic writes a cache entry only
+	// at a breakpoint, and a later request reads it only if the entry's last message ends at most
+	// about 20 messages before one of its own breakpoints (measured in November 2026: read from 21
+	// messages back, not from 25; definitions appended to the same message are not read). So a
+	// later compaction that appends definitions still reads the earlier ones. If it appends more
+	// than that, or changes an earlier block, these messages are written again and nothing before
+	// them is. Each extra system message costs 42 input tokens (measured).
+	let leadingToolChangesEnd: ToolChangeBlock | undefined;
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
@@ -1746,24 +1791,30 @@ function convertMessages(
 			// Later system messages only reach this point when the model accepts them natively;
 			// otherwise the transcript was collapsed into the leading message before conversion.
 			const text = renderSystemMessageUpdate(msg);
-			const blocks: ContentBlockParam[] = [];
-			if (text.length > 0) blocks.push({ type: "text", text: sanitizeSurrogates(text) });
+			const toolBlocks: ToolChangeBlock[] = [];
 			if (convertToolDefinitions) {
 				const added = msg.toolsAdded ?? [];
 				const redefined = new Set(added.map((tool) => tool.name));
 				for (const tool of msg.toolsRemoved ?? []) {
 					// A new definition under the same name replaces the old one, so no removal is needed.
 					if (redefined.has(tool.name)) continue;
-					blocks.push({
+					toolBlocks.push({
 						type: "tool_removal",
 						tool: { type: "tool_reference", name: isOAuthToken ? toClaudeCodeName(tool.name) : tool.name },
 					});
 				}
 				for (const definition of convertToolDefinitions(added)) {
-					blocks.push({ type: "tool_addition", tool: { type: "tool_definition", definition } });
+					toolBlocks.push({ type: "tool_addition", tool: { type: "tool_definition", definition } });
 				}
 			}
-			if (blocks.length > 0) pendingSystemMessages.push({ role: "system", content: blocks });
+			const blocks: ContentBlockParam[] =
+				text.length > 0 ? [{ type: "text", text: sanitizeSurrogates(text) }, ...toolBlocks] : toolBlocks;
+			if (i < leadingUpdates) {
+				pendingSystemMessages.push(...blocks.map((block): MessageParam => ({ role: "system", content: [block] })));
+				leadingToolChangesEnd = toolBlocks.at(-1) ?? leadingToolChangesEnd;
+			} else if (blocks.length > 0) {
+				pendingSystemMessages.push({ role: "system", content: blocks });
+			}
 		} else if (msg.role === "user") {
 			if (typeof msg.content === "string") {
 				if (msg.content.trim().length > 0) {
@@ -1893,6 +1944,8 @@ function convertMessages(
 
 	flushPendingSystemMessages();
 
+	if (cacheControl && leadingToolChangesEnd) leadingToolChangesEnd.cache_control = cacheControl;
+
 	// Add cache_control to the last user or system message to cache conversation history
 	if (cacheControl && params.length > 0) {
 		const lastMessage = params[params.length - 1];
@@ -1921,7 +1974,11 @@ function convertMessages(
 		}
 	}
 
-	return { messages: params, assistantLevels };
+	return {
+		messages: params,
+		assistantLevels,
+		cachesLeadingToolChanges: cacheControl !== undefined && leadingToolChangesEnd !== undefined,
+	};
 }
 
 function isAnthropicEffort(value: unknown): value is AnthropicEffort {

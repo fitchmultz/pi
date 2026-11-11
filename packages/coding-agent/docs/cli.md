@@ -151,7 +151,7 @@ The MCP resource tools (`list_mcp_resources`, `list_mcp_resource_templates`, `re
 | `find` | Find paths using glob patterns |
 | `ls` | List directory contents |
 
-Built-in extensions also add the following tools. `background_command` starts, inspects, and cancels [durable background shell commands](sdk.md#background-commands); it is enabled by default for new CLI sessions. Explicit tool allowlists, saved selections, and exclusions still apply; `--no-extensions` disables it, and `--no-builtin-tools` does not disable extension tools. `codemode` and `tool_search` are off by default; the MCP extension turns them on when an MCP server needs them (see [MCP](mcp.md#control-tool-exposure)). To enable them yourself, name them in `--tools` or `defaultTools`.
+Built-in extensions also add the following tools. `background_command` starts, inspects, and cancels [durable background shell commands](sdk.md#background-commands); it is enabled by default for new CLI sessions. Explicit tool allowlists, saved selections, exclusions, and a `-background_command` entry in `--tools` or `defaultTools` still apply; `--no-extensions` disables it, and `--no-builtin-tools` does not disable extension tools. `codemode` and `tool_search` are off by default; the MCP extension turns them on when an MCP server needs them (see [MCP](mcp.md#control-tool-exposure)). To enable them yourself, name them in `--tools` or `defaultTools`.
 
 | Built-in extension | Purpose |
 |---|---|

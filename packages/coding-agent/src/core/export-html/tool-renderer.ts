@@ -6,10 +6,11 @@
  */
 
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import type { Component } from "@earendil-works/pi-tui";
+import { type Component, type Keybinding, Text } from "@earendil-works/pi-tui";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolRenderContext, ToolRenderers } from "../extensions/types.ts";
+import { formatToolCallWithArgs } from "../tools/render-utils.ts";
 import { ansiLinesToHtml } from "./ansi-to-html.ts";
 
 export interface ToolHtmlRendererDeps {
@@ -24,8 +25,17 @@ export interface ToolHtmlRendererDeps {
 }
 
 export interface ToolHtmlRenderer {
-	/** Render a tool call to HTML. Returns undefined if tool has no custom renderer. */
-	renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined;
+	/**
+	 * Render a tool call to HTML in its expanded form, because a page cannot expand a call. `result` is the call's
+	 * saved result: with it the call is rendered as finished, without it as still running. Returns undefined if the
+	 * tool has no renderer; the page then shows the arguments as JSON.
+	 */
+	renderCall(
+		toolCallId: string,
+		toolName: string,
+		args: unknown,
+		result?: { isError: boolean; durationMs?: number },
+	): string | undefined;
 	/** Render a tool result to collapsed/expanded HTML. Returns undefined if tool has no custom renderer. */
 	renderResult(
 		toolCallId: string,
@@ -33,6 +43,7 @@ export interface ToolHtmlRenderer {
 		result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 		details: unknown,
 		isError: boolean,
+		durationMs?: number,
 	): { collapsed?: string; expanded?: string } | undefined;
 }
 
@@ -73,12 +84,17 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 		return state;
 	};
 
+	// On the page a click switches a result between its two forms, and the expand key does nothing.
+	const pageKeyText = (keybinding: Keybinding): string =>
+		keybinding === "app.tools.expand" ? "click" : keyText(keybinding);
+
 	const createRenderContext = (
 		toolCallId: string,
 		lastComponent: Component | undefined,
 		expanded: boolean,
 		isPartial: boolean,
 		isError: boolean,
+		durationMs: number | undefined,
 	): ToolRenderContext => {
 		return {
 			args: renderedArgs.get(toolCallId),
@@ -93,27 +109,45 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 			expanded,
 			showImages: false,
 			isError,
-			durationMs: undefined,
+			durationMs,
 			outputPad: 1,
-			keyText,
-			keyHint,
+			keyText: pageKeyText,
+			keyHint: (keybinding, description) =>
+				keybinding === "app.tools.expand"
+					? theme.fg("dim", pageKeyText(keybinding)) + theme.fg("muted", ` ${description}`)
+					: keyHint(keybinding, description),
 		};
 	};
 
 	return {
-		renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined {
+		renderCall(
+			toolCallId: string,
+			toolName: string,
+			args: unknown,
+			result?: { isError: boolean; durationMs?: number },
+		): string | undefined {
 			try {
 				renderedArgs.set(toolCallId, args);
 				const toolDef = getToolRenderers(toolName);
-				if (!toolDef?.renderCall) {
+				if (!toolDef?.renderCall && !toolDef?.renderResult) {
 					return undefined;
 				}
 
-				const component = toolDef.renderCall(
-					args,
-					theme,
-					createRenderContext(toolCallId, renderedCallComponents.get(toolCallId), false, true, false),
+				// The page has no control that expands a call, so the call is rendered expanded. A renderer
+				// that shortens an unexpanded call would otherwise lose that text in every export.
+				// A tool with only a result renderer gets the terminal's fallback header: the page shows the
+				// arguments itself only when nothing is rendered for the call.
+				const context = createRenderContext(
+					toolCallId,
+					renderedCallComponents.get(toolCallId),
+					true,
+					result === undefined,
+					result?.isError ?? false,
+					result?.durationMs,
 				);
+				const component = toolDef.renderCall
+					? toolDef.renderCall(args, theme, context)
+					: new Text(formatToolCallWithArgs(toolName, args, theme, context), 0, 0);
 				renderedCallComponents.set(toolCallId, component);
 				const lines = component.render(width);
 				return ansiLinesToHtml(lines);
@@ -129,6 +163,7 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 			result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
 			details: unknown,
 			isError: boolean,
+			durationMs?: number,
 		): { collapsed?: string; expanded?: string } | undefined {
 			try {
 				const toolDef = getToolRenderers(toolName);
@@ -149,7 +184,14 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					agentToolResult,
 					{ expanded: false, isPartial: false },
 					theme,
-					createRenderContext(toolCallId, renderedResultComponents.get(toolCallId), false, false, isError),
+					createRenderContext(
+						toolCallId,
+						renderedResultComponents.get(toolCallId),
+						false,
+						false,
+						isError,
+						durationMs,
+					),
 				);
 				renderedResultComponents.set(toolCallId, collapsedComponent);
 				const collapsed = ansiLinesToHtml(trimRenderedResultLines(collapsedComponent.render(width)));
@@ -159,7 +201,14 @@ export function createToolHtmlRenderer(deps: ToolHtmlRendererDeps): ToolHtmlRend
 					agentToolResult,
 					{ expanded: true, isPartial: false },
 					theme,
-					createRenderContext(toolCallId, renderedResultComponents.get(toolCallId), true, false, isError),
+					createRenderContext(
+						toolCallId,
+						renderedResultComponents.get(toolCallId),
+						true,
+						false,
+						isError,
+						durationMs,
+					),
 				);
 				renderedResultComponents.set(toolCallId, expandedComponent);
 				const expanded = ansiLinesToHtml(trimRenderedResultLines(expandedComponent.render(width)));

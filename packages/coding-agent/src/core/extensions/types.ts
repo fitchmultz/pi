@@ -714,6 +714,7 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 * Whether registering the tool activates it. Default: `true` for `direct` and `model-only` tools;
 	 * other exposures are never activated on registration. A tool with `defaultActive: false` is
 	 * activated by naming it in `--tools` or the `defaultTools` setting, or with `setActiveTools()`.
+	 * A `-name` entry there keeps a tool inactive that registering would activate.
 	 */
 	defaultActive?: boolean;
 

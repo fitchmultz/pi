@@ -5,6 +5,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "../../core/extensions/types.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { getShellEnv } from "../../utils/shell.ts";
 import {
@@ -37,6 +38,8 @@ const schema = Type.Object({
 	offset: Type.Optional(Type.Integer({ description: "List offset after filtering; up to 20 jobs, newest first" })),
 });
 export type BackgroundCommandInput = Static<typeof schema>;
+/** Rows of the call header before it is expanded: the row count of a collapsed codemode script. */
+const COMMAND_PREVIEW_LINES = 10;
 type Details =
 	| (BackgroundCommandJob & { cancelRequested?: boolean; outputTail: string; guidance?: string })
 	| { jobs: ReturnType<typeof summarizeBackgroundCommand>[]; total: number; nextOffset: number | null };
@@ -159,17 +162,24 @@ export function createBackgroundCommandTool(
 			}
 			return { content: [{ type: "text", text: JSON.stringify(details, null, 2) }], details };
 		},
-		renderCall(args, theme) {
+		renderCall(args, theme, context) {
 			const target = args.command ?? args.id?.slice(0, 8) ?? "";
-			return new Text(
+			const text =
 				theme.fg("toolTitle", theme.bold(`background ${args.action ?? ""}`)) +
-					(target ? ` ${theme.fg("muted", target)}` : ""),
-				0,
-				0,
-			);
+				(target ? ` ${theme.fg("muted", target)}` : "");
+			if (context.expanded) return new Text(text, 0, 0);
+			// A command can be a whole script. Limit wrapped rows, as codemode does for its script.
+			return new VisualLinePreview({
+				text,
+				maxVisualLines: COMMAND_PREVIEW_LINES,
+				keep: "start",
+				formatHint: (hidden) =>
+					`${theme.fg("muted", `... (${hidden} more lines,`)} ${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+			});
 		},
 		renderResult(result, { expanded }, theme, context) {
 			const detail = result.details;
+			// An error is shown in full, like an error of the built-in read tool.
 			if (expanded || !detail || context.isError)
 				return new Text(
 					result.content
@@ -179,13 +189,15 @@ export function createBackgroundCommandTool(
 					0,
 					0,
 				);
+			// The status line stands for the whole record, which the expanded card shows.
+			const hint = ` ${theme.fg("muted", "(")}${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
 			if (!("id" in detail))
 				return new Text(
-					detail.total === 0
+					(detail.total === 0
 						? context.args.activeOnly
 							? "No active background jobs"
 							: "No background jobs"
-						: `${detail.jobs.length} shown · ${detail.total} total`,
+						: `${detail.jobs.length} shown · ${detail.total} total`) + hint,
 					0,
 					0,
 				);
@@ -201,7 +213,7 @@ export function createBackgroundCommandTool(
 				theme.fg(
 					detail.status === "succeeded" ? "success" : running || detail.status === "cancelled" ? "muted" : "error",
 					`${label} · ${detail.id.slice(0, 8)}`,
-				),
+				) + hint,
 				0,
 				0,
 			);

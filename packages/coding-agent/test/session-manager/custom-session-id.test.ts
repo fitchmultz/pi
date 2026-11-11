@@ -169,6 +169,48 @@ describe("SessionManager.newSession with custom id", () => {
 });
 
 describe("SessionManager.forkFrom", () => {
+	it("records the session id whose provider cache holds the copied conversation", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
+		try {
+			const sourcePath = join(tempDir, "source.jsonl");
+			writeFileSync(
+				sourcePath,
+				`${[
+					JSON.stringify({
+						type: "session",
+						version: 3,
+						id: "source-id",
+						timestamp: new Date().toISOString(),
+						cwd: tempDir,
+					}),
+					JSON.stringify({
+						type: "message",
+						id: "e0",
+						parentId: null,
+						timestamp: new Date().toISOString(),
+						message: { role: "user", content: "hello", timestamp: 0 },
+					}),
+				].join("\n")}\n`,
+			);
+
+			const forked = SessionManager.forkFrom(sourcePath, tempDir, join(tempDir, "sessions"));
+			expect(forked.getHeader()?.cacheSessionId).toBe("source-id");
+			expect(forked.getCacheSessionId()).toBe("source-id");
+
+			// A fork of a fork continues the first session's cache, also after a reload from disk.
+			const second = SessionManager.forkFrom(forked.getSessionFile()!, tempDir, join(tempDir, "sessions"));
+			expect(second.getSessionId()).not.toBe(forked.getSessionId());
+			expect(SessionManager.open(second.getSessionFile()!).getCacheSessionId()).toBe("source-id");
+
+			// A session that is not a fork sends its own id.
+			const source = SessionManager.open(sourcePath);
+			expect(source.getHeader()?.cacheSessionId).toBeUndefined();
+			expect(source.getCacheSessionId()).toBe("source-id");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("copies all entries unchanged into the forked session", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
 		try {
