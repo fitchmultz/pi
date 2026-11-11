@@ -355,7 +355,7 @@ return {
 
 Without `providerSummary`, nothing changes. With it, Pi does this before it stores the compaction entry:
 
-1. Pi sends one request to the session's current model, with the session's credentials and route. The request holds exactly the messages before `firstKeptEntryId`, built the way Pi built the request that the first kept message answered, plus `instructions`. The model answers with the block instead of a reply. The compaction waits for this request, at most 30 seconds. The request repeats one that Pi already sent, so the API reads it from the prompt cache while that cache entry lives.
+1. Pi sends one request to the session's current model, with the session's credentials and route. The request holds exactly the messages before `firstKeptEntryId`, built the way Pi built the request that the first kept message answered, plus `instructions`. The model answers with the block instead of a reply. The compaction waits for this request, at most 30 seconds. Unless the kept entries reach back across an earlier compaction, the request repeats one that Pi already sent, so the API reads it from the prompt cache while that cache entry lives.
 2. Pi stores the entry. `summary`, `firstKeptEntryId`, `tokensBefore` and `details` are stored as returned. `providerSummary` on the entry holds the block and the record of the request. The request's usage is added to the entry's `usage`, so session totals include it.
 3. From then on, a request to that same provider, API and model starts with the block. The kept entries follow unchanged, including system messages among them. `summary` follows the kept entries. Entries after the compaction follow `summary`.
 
