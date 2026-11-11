@@ -542,6 +542,45 @@ describe("AgentSession provider summary block", () => {
 		expect(harness.session.getLastAssistantText()).toBe("completed response");
 	});
 
+	it("asks for the block at the thinking level of the first kept turn after the level changed", async () => {
+		const harness = await createHarness({
+			models: [{ id: "faux-1", reasoning: true }],
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", (event) => {
+						const lastReply = event.branchEntries.findLast(
+							(entry) => entry.type === "message" && entry.message.role === "assistant",
+						);
+						if (!lastReply) throw new Error("expected an assistant message");
+						return {
+							compaction: {
+								summary: "manual summary",
+								firstKeptEntryId: lastReply.id,
+								tokensBefore: event.preparation.tokensBefore,
+								providerSummary: {},
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		const requests = useSummaryModel(harness);
+		harness.setResponses([fauxAssistantMessage("first done"), blockReply(harness)]);
+
+		harness.session.setThinkingLevel("high");
+		await harness.session.prompt("one");
+		harness.session.setThinkingLevel("low");
+		await harness.session.compact();
+
+		const [kept, summary] = requests;
+		expect(kept.options?.reasoning).toBe("high");
+		// The block stands for the request that the kept reply answered, effort included.
+		expect(summary.options).toMatchObject({ providerSummary: {}, reasoning: "high" });
+		expect(getCompactions(harness)[0].providerSummary).toMatchObject({ block });
+	});
+
 	it("asks for the block of a session_before_compact result, and Escape stops only that request", async () => {
 		const harness = await createHarness({
 			tools: [lookup],

@@ -3904,7 +3904,9 @@ export class AgentSession {
 			const agent = this.agent;
 			const messages = agent.transformContext ? await agent.transformContext(summarized, signal) : summarized;
 			const context = normalizeContext({ messages: await agent.convertToLlm(messages) });
-			const thinkingLevel = agent.state.thinkingLevel;
+			// The block stands for the request that the first kept reply answered, effort included. The
+			// thinking level may have changed since then.
+			const thinkingLevel = firstKept.thinkingLevel ?? agent.state.thinkingLevel;
 			const stream = await agent.streamFunction(model, context, {
 				reasoning: thinkingLevel === "off" ? undefined : thinkingLevel,
 				sessionId: agent.sessionId,
