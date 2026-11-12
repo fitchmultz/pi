@@ -155,7 +155,7 @@ how people sign in, how plugins are found and rolled out.</p>
 states the rule behind it. The app is one directory, <code>test/examples/61-tutorial/</code>; run every step at once from
 <code>packages/chord</code>:</p>
 <pre><code>node --conditions=source --experimental-strip-types test/examples/<span class="tk-n">61</span>-tutorial/main.ts</code></pre>
-<p>With Node 26.5.1 or later the terminal client of chapter V runs too (its sandbox needs that Node); with an older one,
+<p>With Node 26.13.1 or later the terminal client of chapter V runs too (its sandbox needs that Node); with an older one,
 that step says so and the rest runs.</p>
 <h3 id="ten-things-to-know">Ten things to know</h3>
 <ol class="findings">
@@ -911,7 +911,7 @@ languages fixed (by default they are the machine&#39;s system locale):</p>
 	<span class="tk-k">await</span> <span class="tk-f">until</span>(() =&gt; <span class="tk-f">screen</span>(frames).<span class="tk-f">includes</span>(<span class="tk-s">"butter"</span>));
 	console.<span class="tk-f">log</span>(<span class="tk-s">"5. the terminal shows:"</span>);
 	<span class="tk-k">for</span> (<span class="tk-k">const</span> line <span class="tk-k">of</span> <span class="tk-f">screen</span>(frames).<span class="tk-f">trim</span>().<span class="tk-f">split</span>(<span class="tk-s">"\r\n"</span>)) console.<span class="tk-f">log</span>(<span class="tk-s">`   ${line}`</span>);
-} <span class="tk-k">else</span> console.<span class="tk-f">log</span>(<span class="tk-s">"5. (the terminal client needs Node 26.5.1 or later for its sandbox)"</span>);</code></pre>
+} <span class="tk-k">else</span> console.<span class="tk-f">log</span>(<span class="tk-s">"5. (the terminal client needs Node 26.13.1 or later for its sandbox)"</span>);</code></pre>
 <!-- output: tui -->
 <pre class="plain"><code>5. the terminal shows:
    Groceries

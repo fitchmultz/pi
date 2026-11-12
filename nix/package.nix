@@ -1,30 +1,70 @@
 {
   autoPatchelfHook,
+  brotli,
   fd,
   fetchurl,
   importNpmLock,
   lib,
   libxcb,
+  llhttp,
   makeWrapper,
+  newScope,
   nodejs_22,
   ripgrep,
   source,
+  sqlite,
   stdenv,
   wl-clipboard,
   xclip,
 }:
 
 let
+  nodeVersion = "22.23.5";
+  nodeSource = fetchurl {
+    url = "https://nodejs.org/dist/v${nodeVersion}/node-v${nodeVersion}.tar.xz";
+    sha256 = "6cce7c58bf058700c643944903d60a325e8c9ceede1f5c2c088b435f2ada091a";
+  };
   # Keep the pinned platform dependencies, including Intel Darwin, while applying
-  # the Node security source update from NixOS/nixpkgs@cc368858ca7a.
+  # Node's security update to both its source and its shared libraries.
   nodejs = nodejs_22.override (previousArgs: {
-    nodejs-slim = previousArgs.nodejs-slim.overrideAttrs (finalAttrs: _previousAttrs: {
-      version = "22.23.5";
-      src = fetchurl {
-        url = "https://nodejs.org/dist/v${finalAttrs.version}/node-v${finalAttrs.version}.tar.xz";
-        sha256 = "6cce7c58bf058700c643944903d60a325e8c9ceede1f5c2c088b435f2ada091a";
+    nodejs-slim = (previousArgs.nodejs-slim.override {
+      callPackage = newScope {
+        brotli = brotli.overrideAttrs (previous: {
+          version = "1.2.1";
+          src = fetchurl {
+            url = "https://github.com/google/brotli/archive/refs/tags/v1.2.1.tar.gz";
+            sha256 = "98d35d11a78dc453aebb7d10c3748f3f73ff78c8267c0dc697b8631f67bf7e8f";
+          };
+          meta = previous.meta // {
+            changelog = "https://github.com/google/brotli/blob/v1.2.1/CHANGELOG.md";
+          };
+        });
+        llhttp = llhttp.overrideAttrs {
+          version = "9.4.4";
+          src = nodeSource;
+          sourceRoot = "node-v${nodeVersion}/deps/llhttp";
+        };
+        sqlite = sqlite.overrideAttrs {
+          version = "3.54.1";
+          src = fetchurl {
+            url = "https://sqlite.org/2026/sqlite-src-3540100.zip";
+            sha256 = "387e7f6cad4797b17848c07d453dc6606917bb356a6cfe5a3abafd38c240c71b";
+          };
+          docsrc = fetchurl {
+            url = "https://sqlite.org/2026/sqlite-doc-3540100.zip";
+            sha256 = "e9f634ac28a4c7b48f5c389e4b08c039654ec1487512092b330ccfcfdc0816e0";
+          };
+          postInstall = ''
+            mkdir -p "$doc/share/doc"
+            unzip "$docsrc"
+            mv sqlite-doc-3540100 "$doc/share/doc/sqlite"
+          '';
+        };
       };
-    });
+    }).overrideAttrs {
+      version = nodeVersion;
+      src = nodeSource;
+    };
   });
   packageJson = lib.importJSON (source + "/packages/coding-agent/package.json");
   # Lockfile root used by the pi.dev installer. It pins the coding agent's
@@ -143,6 +183,11 @@ stdenv.mkDerivation {
   installCheckPhase = ''
     runHook preInstallCheck
     test "$(${nodejs}/bin/node --version)" = "v22.23.5"
+    ${nodejs}/bin/node -e \
+      'const assert = require("node:assert/strict");
+       assert.equal(process.versions.brotli, "1.2.1");
+       assert.equal(process.versions.llhttp, "9.4.4");
+       assert.equal(process.versions.sqlite, "3.54.1");'
     test "$("$out/bin/pi" --version)" = "${packageJson.version}"
     # Load host-platform TUI helpers directly so missing native dependencies
     # fail the build rather than silently disabling clipboard support.
