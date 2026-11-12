@@ -1,4 +1,6 @@
-# Run Pi on Windows
+# Upstream Windows reference
+
+Windows is not supported or tested in this fork. The following upstream reference is retained for context; use the [Quickstart](quickstart.md) for supported platforms.
 
 Run Pi either as a native Windows process or inside Windows Subsystem for Linux (WSL). Native Windows uses Git Bash by default for Bash commands and can optionally expose PowerShell to the model. Pi inside WSL uses the Linux environment and its Bash installation.
 

@@ -2,7 +2,7 @@
 
 Pi runs in your terminal and works with files on your machine. To use it, you need access to a model through a supported provider. This can be a subscription, an API key, or a local model.
 
-For native Windows setup, read [Windows Setup](windows.md). For Android, read [Termux Setup](termux.md).
+This fork supports Apple Silicon macOS and Linux (x64/arm64). For Android, read [Termux Setup](termux.md). Windows and Intel macOS are not supported or tested.
 
 ## 1. Install Pi
 

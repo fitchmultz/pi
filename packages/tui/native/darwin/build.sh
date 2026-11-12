@@ -66,4 +66,3 @@ build() {
 }
 
 build arm64 arm64-apple-macos11.0
-build x64 x86_64-apple-macos10.15

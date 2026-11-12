@@ -5,6 +5,9 @@ v1.0.0 and synchronized through upstream main at
 `6273031b012ab3c017cdbf593a62b7e6792186a8` (2026-11-10), four commits after official v1.5.2.
 It is upstream plus the features below. Everything else follows upstream behavior and APIs.
 
+Supported and tested desktop platforms are Apple Silicon macOS and Linux (x64/arm64).
+Android/Termux device functionality is retained. Windows and Intel macOS are not supported or tested.
+
 Each integration record documents its baseline, conflict decisions and verification, newest first:
 
 - [v1.5.2](docs/upstream-sync-1.5.2.md), the current baseline, including official v1.5.2
@@ -268,8 +271,7 @@ Upstream's `scripts/preview-packages.mjs` is kept but unused;
 the preview script's tests still run. Nix builds
 retain upstream's derivation and locks with the batched install-phase packing above; automatic
 catalog-pin commits and stable-branch promotion are upstream-only. The
-Nix install check now follows upstream's removal of esbuild from the installer dependencies. Env's upstream platform check accepts the
-darwin-x64 daemon under native arm64 Node with Rosetta, so CI no longer forces x64 Node. Upstream
+Nix install check now follows upstream's removal of esbuild from the installer dependencies. Upstream
 also supplies foreground-job polling, the large-listing timeout, and Chord's private short-path lock
 fallback for deep temporary directories. The fork retains Windows teardown retries and enough time
 to delete the large listing and watch trees.

@@ -4,13 +4,13 @@ Provides modifier-key state and asynchronous text, image, and file-path clipboar
 
 ## Building
 
-On macOS, run from the repository root:
+On Apple Silicon macOS, run from the repository root:
 
 ```sh
 npm --prefix packages/tui run build:native:darwin
 ```
 
-The build uses Apple clang and the macOS SDK found through `xcrun`. Either Intel or Apple Silicon can build both targets: arm64 (macOS 11+) and x64 (macOS 10.15+).
+The build uses Apple clang and the macOS SDK found through `xcrun` to build arm64 (macOS 11+).
 
 Cross-building requires a Darwin toolchain with a macOS SDK and Mach-O linker, such as osxcross:
 
