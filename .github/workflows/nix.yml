@@ -106,8 +106,6 @@ jobs:
             system: aarch64-linux
           - runner: macos-latest
             system: aarch64-darwin
-          - runner: macos-26-intel
-            system: x86_64-darwin
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
