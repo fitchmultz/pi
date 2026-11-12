@@ -5,8 +5,9 @@ the TUI threat model. Production/data directories must not be used for tests. Co
 
 ## Server and TUI
 
-The server supports Node 22.19+. The launcher requires Node >=26.5.1; slayer has Node 26.11.1 at
-`~/.local/bin/node26`. This wrapper supplies the libraries required by that binary. From `apps/p2`:
+The server requires Node 22.23.5+, 24.22.3+, or 26.13.1+ on those release lines. The launcher requires
+Node >=26.13.1. On slayer, update the binary behind `~/.local/bin/node26` before launching; the wrapper
+supplies the libraries required by that binary. From `apps/p2`:
 
 ```sh
 ~/.local/bin/node26 --import ./src/source.ts src/hosts/tui.ts
@@ -18,8 +19,8 @@ npm run check
 To use `npm run tui`/`npm test` with this Node, put its binary directory first in PATH and supply its library path:
 
 ```sh
-PATH="$HOME/node-v26.11.1-linux-x64/bin:$PATH" LD_LIBRARY_PATH="$HOME/node26-lib" npm run tui
-PATH="$HOME/node-v26.11.1-linux-x64/bin:$PATH" LD_LIBRARY_PATH="$HOME/node26-lib" npm test
+PATH="$HOME/node-v26.13.1-linux-x64/bin:$PATH" LD_LIBRARY_PATH="$HOME/node26-lib" npm run tui
+PATH="$HOME/node-v26.13.1-linux-x64/bin:$PATH" LD_LIBRARY_PATH="$HOME/node26-lib" npm test
 ```
 
 The server builds one ESM bundle through esbuild and serves it only to web-admitted owners/share guests. Facets

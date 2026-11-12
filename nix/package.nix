@@ -15,7 +15,17 @@
 }:
 
 let
-  nodejs = nodejs_22;
+  # Keep the pinned platform dependencies, including Intel Darwin, while applying
+  # the Node security source update from NixOS/nixpkgs@cc368858ca7a.
+  nodejs = nodejs_22.override (previousArgs: {
+    nodejs-slim = previousArgs.nodejs-slim.overrideAttrs (finalAttrs: _previousAttrs: {
+      version = "22.23.5";
+      src = fetchurl {
+        url = "https://nodejs.org/dist/v${finalAttrs.version}/node-v${finalAttrs.version}.tar.xz";
+        sha256 = "6cce7c58bf058700c643944903d60a325e8c9ceede1f5c2c088b435f2ada091a";
+      };
+    });
+  });
   packageJson = lib.importJSON (source + "/packages/coding-agent/package.json");
   # Lockfile root used by the pi.dev installer. It pins the coding agent's
   # runtime dependency tree and is kept in sync with package-lock.json by
@@ -132,6 +142,7 @@ stdenv.mkDerivation {
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
+    test "$(${nodejs}/bin/node --version)" = "v22.23.5"
     test "$("$out/bin/pi" --version)" = "${packageJson.version}"
     # Load host-platform TUI helpers directly so missing native dependencies
     # fail the build rather than silently disabling clipboard support.

@@ -14,8 +14,9 @@ distribution, see [Upstream installation](#upstream-installation).
 
 For the fitchmultz/pi fork, use an immutable release rather than an ordinary npm
 package directory. This supports macOS, Linux, and [Termux](termux.md#install-the-fork)
-on arm64/x64 with Node.js >=22.19, npm installed alongside Node, Git, bash, tar,
-gzip, and tmux.
+on arm64/x64 with Node.js 22.23.5+, 24.22.3+, or 26.13.1+ on those release lines,
+npm installed alongside Node, Git, bash, tar, gzip, and tmux. These minimums include the
+[November 2026 security fixes](https://nodejs.org/en/blog/vulnerability/november-2026-security-releases).
 
 From a fork checkout, install dependencies without lifecycle scripts, hydrate the
 model-data snapshot, then build and validate an exact commit:

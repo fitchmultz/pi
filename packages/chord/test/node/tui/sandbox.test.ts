@@ -3,7 +3,7 @@
 // no file, no SQLite, no network, no child process, worker, addon or inspector, no environment (signals, machine
 // details and whether a path exists are its known gaps). The whole sandbox, from the app's terminal code and from a
 // plugin: no builtin past the allowlist (shared prototypes changed first included), no getter on a prototype of Node's
-// process, no `import()`, no Node `process`. Run under Node 26.5.1 or later (`TUI_NODE`), on a pseudo-terminal;
+// process, no `import()`, no Node `process`. Run under Node 26.13.1 or later (`TUI_NODE`), on a pseudo-terminal;
 // skipped without.
 
 import { execFileSync } from "node:child_process";

@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Require patched Node.js 22.23.5+, 24.22.3+, or 26.13.1+ on those release lines for the November 2026 security fixes. Unsupported Node 23 and 25 are no longer accepted.
 - The undocumented `ExtensionRunner.emitBoundary()` preview-builder callback must return synchronously; boundary events still expose a synchronous `context` preview.
 - Boundary `event.context` is now readonly. Empty-proposal previews are computed from the live session on first read; read them during the handler rather than retaining an unread event.
 - Complete native working-session capture and restore require a persistence-capable `ResourceLoader`; `getWorkingSessionResources()` is optional for ordinary SDK sessions. Directly constructed sessions must supply an explicit launch owner. Snapshot values must be plain finite JSON; lossy values are rejected.

@@ -1,9 +1,9 @@
 // The terminal surface (slice 11 §4): the board (example 56's app) with a terminal client. The server builds the
 // terminal's base bundle from the app's terminal entry (`56-web/tui/main.ts`) and serves the plugins' terminal facets
-// as registered scripts, like the web's. The client's launcher (trusted, Node 26.5.1 or later) signs in with the owner
+// as registered scripts, like the web's. The client's launcher (trusted, Node 26.13.1 or later) signs in with the owner
 // token file, downloads the bundle and the scripts and runs them in its sandbox, always: a child process without file
 // system, processes, network or terminal, its link and its actions relayed and confirmed by the launcher.
-// Run from packages/chord (with Node 26.5.1 or later the launcher runs here on a scripted terminal; `--serve` keeps the
+// Run from packages/chord (with Node 26.13.1 or later the launcher runs here on a scripted terminal; `--serve` keeps the
 // board running for `terminal.ts`):
 //   node --conditions=source --experimental-strip-types test/examples/57-tui/main.ts
 import { rm } from "node:fs/promises";

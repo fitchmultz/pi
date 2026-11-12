@@ -1,7 +1,7 @@
 // Tests of the terminal launcher (slice 11 §4, decision "Slice 11, P8") with a kit app's terminal surface: it signs in
 // with the owner token file or by pairing, runs the app's terminal code in the sandbox with the plugins' scripts, relays
 // its Chord link, confirms its actions on its own prompt, applies a plugin edit in place, and ends with its exit code.
-// Run under Node 26.5.1 or later (`TUI_NODE`); skipped without one.
+// Run under Node 26.13.1 or later (`TUI_NODE`); skipped without one.
 
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -17,12 +17,13 @@ const RESET =
 	"\x1b[?2026l\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[?25h\x1b7\x1b[r\x1b8\x1b[?7h\x1b[?1049l\x1b[0m";
 
 describe("the Node it needs", () => {
-	it("refuses a Node older than 26.5.1 with a clear error", () => {
+	it("refuses a Node older than 26.13.1 with a clear error", () => {
 		expect(() => requireSandboxNode("24.4.1")).toThrow(
-			"needs Node 26.5.1 or later for its sandbox (this is Node 24.4.1)",
+			"needs Node 26.13.1 or later for its sandbox (this is Node 24.4.1)",
 		);
-		expect(() => requireSandboxNode("26.5.0")).toThrow();
-		expect(() => requireSandboxNode("26.5.1")).not.toThrow();
+		expect(() => requireSandboxNode("26.5.1")).toThrow();
+		expect(() => requireSandboxNode("26.13.0")).toThrow();
+		expect(() => requireSandboxNode("26.13.1")).not.toThrow();
 		expect(() => requireSandboxNode("27.0.0")).not.toThrow();
 	});
 });

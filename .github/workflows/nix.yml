@@ -71,7 +71,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22
+          node-version: "22.23.5"
 
       - name: Refresh the model catalog pin if stale
         id: pin
@@ -106,6 +106,8 @@ jobs:
             system: aarch64-linux
           - runner: macos-latest
             system: aarch64-darwin
+          - runner: macos-26-intel
+            system: x86_64-darwin
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read

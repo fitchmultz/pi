@@ -1,4 +1,4 @@
-// The operating system's layer of the terminal's sandbox alone, for the TUI tests (Node 26.5.1 or later): starts a
+// The operating system's layer of the terminal's sandbox alone, for the TUI tests (Node 26.13.1 or later): starts a
 // child as the sandbox starts one (its flags, environment, pipes and private directory) but running the probe below
 // instead of the bootstrap, so the probe has every builtin and Node's own `process`, as code that got past the
 // JavaScript layer would. Prints the probe's outcomes as JSON. Run it on a pseudo-terminal: the probe looks for one.

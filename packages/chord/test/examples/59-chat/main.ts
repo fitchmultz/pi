@@ -2,7 +2,7 @@
 // with every message in a table of the worker's store (the newest 100 live, older ones by page: `history`) and the
 // attachments in its files (the kit's `Files`, sent in chunks); the server keeps the channel list and serves the page
 // (`/chat`, after picking a name at `/`) and the terminal client. A browser and a terminal are live in the same room.
-// Here a user who picked a name ("ada") joins over the same Chord link a page uses, and with Node 26.5.1 or later the
+// Here a user who picked a name ("ada") joins over the same Chord link a page uses, and with Node 26.13.1 or later the
 // owner's terminal client joins too.
 // Run from packages/chord (`--serve` keeps it running: open the printed URL, and run the terminal with 57-tui's
 // `terminal.ts` and the owner token file):
@@ -68,7 +68,7 @@ console.log(
 	`4. #random keeps ${older.length + live.length} messages: ${live.length} live (from "${live[0]!.text}"), ${older.length} older by history (from "${older[0]!.text}")`,
 );
 
-// 5. The owner's terminal client in the same room (Node 26.5.1 or later): it shows ada's messages; its post and an
+// 5. The owner's terminal client in the same room (Node 26.13.1 or later): it shows ada's messages; its post and an
 //    attached file (the launcher asks before it reads the file) reach ada at once; PgUp in #random loads older ones.
 let sandboxed = true;
 try {

@@ -4,8 +4,8 @@ export const MAX_TUI_BUNDLE = 8 * 1024 * 1024;
 const HEAP_LIMIT_MB = 96;
 export function requireTuiNode(version = process.versions.node): void {
 	const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
-	if (major < 26 || (major === 26 && (minor < 5 || (minor === 5 && patch < 1))))
-		throw new Error("p2 TUI requires Node >=26.5.1 (on slayer: ~/.local/bin/node26, Node 26.11.1)");
+	if (major < 26 || (major === 26 && (minor < 13 || (minor === 13 && patch < 1))))
+		throw new Error("p2 TUI requires Node >=26.13.1");
 }
 
 /** The most of one guest error report the launcher prints. */

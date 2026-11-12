@@ -62,7 +62,7 @@ The installer pins all dependencies and updates Pi with `pi update`. Alternative
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 ```
 
-Pi requires Node.js 22.19 or newer. The macOS, Linux, and Windows installers can install it if needed. Pi does not require dependency lifecycle scripts for a normal npm installation.
+Use patched Node.js 22.23.5+, 24.22.3+, or 26.13.1+ on those release lines. The macOS, Linux, and Windows installers can install it if needed. Pi does not require dependency lifecycle scripts for a normal npm installation.
 
 ### Start Pi
 

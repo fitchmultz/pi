@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Require patched Node.js 22.23.5+, 24.22.3+, or 26.13.1+ on those release lines. The terminal launcher requires Node 26.13.1 or later for the November 2026 security fixes.
+
 ### Fixed
 
 - Chord v2's `workers.state` no longer shows a stopping worker as `running`: when a stop began while the worker's `ready` was on its way (a `stop` from the app's `principal` hook, say), its state went `starting`, `stopping`, then `running` until it exited, so the rollout step and the app kit's `exportData` could treat it as running. Its `ready` still settles the start; the worker stays `stopping` until its exit.
