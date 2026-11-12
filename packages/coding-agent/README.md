@@ -27,7 +27,7 @@ Use Pi [interactively](docs/usage.md), automate it in [print or JSON mode](docs/
 
 ## Getting started
 
-Use [fork installation](docs/quickstart.md#fork-installation) on macOS or Linux,
+Use [fork installation](docs/quickstart.md#fork-installation) on Apple Silicon macOS or Linux (x64/arm64),
 or [Termux setup](docs/termux.md#install-the-fork) on Android. After installation:
 
 ```bash
@@ -44,12 +44,6 @@ The following commands install the official upstream distribution:
 
 ```bash
 curl -fsSL https://pi.dev/install.sh | sh
-```
-
-On Windows:
-
-```shell
-powershell -c "irm https://pi.dev/install.ps1 | iex"
 ```
 
 The installer pins all dependencies and updates Pi with `pi update`. Alternatively, install directly with npm, which does not pin transitive dependencies:

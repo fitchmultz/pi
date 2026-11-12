@@ -28,7 +28,7 @@ Use Pi [interactively](packages/coding-agent/docs/usage.md), automate it in [pri
 ## Getting started
 
 Follow [fork installation](packages/coding-agent/docs/quickstart.md#fork-installation)
-for macOS or Linux, or [Termux setup](packages/coding-agent/docs/termux.md#install-the-fork)
+for Apple Silicon macOS or Linux (x64/arm64), or [Termux setup](packages/coding-agent/docs/termux.md#install-the-fork)
 for Android. The installer builds an exact fork commit with frozen dependencies
 and keeps the previous release available for rollback.
 
@@ -48,12 +48,6 @@ The following commands install the official upstream distribution:
 
 ```bash
 curl -fsSL https://pi.dev/install.sh | sh
-```
-
-On Windows:
-
-```shell
-powershell -c "irm https://pi.dev/install.ps1 | iex"
 ```
 
 The installer pins all dependencies and updates Pi with `pi update`. Alternatively, install directly with npm, which does not pin transitive dependencies:
