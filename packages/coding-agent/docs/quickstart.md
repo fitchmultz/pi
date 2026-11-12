@@ -175,7 +175,9 @@ curl -fsSL https://pi.dev/install.sh | sh
 powershell -c "irm https://pi.dev/install.ps1 | iex"
 ```
 
-Both installers pin all dependencies and update Pi with `pi update`. Alternatively, install Pi from npm, which does not pin transitive dependencies. This requires Node.js 22.19 or newer:
+Both installers pin all dependencies and update Pi with `pi update`. Alternatively,
+install Pi from npm, which does not pin transitive dependencies. Use a patched
+Node.js release: 22.23.5+ (22.x), 24.22.3+ (24.x), or >=26.13.1:
 
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent

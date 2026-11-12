@@ -397,8 +397,9 @@ On an immutable fork installation, self-updates use the fork updater unless
 PI_SELF_UPDATE_COMMAND or selfUpdateCommand selects a custom updater.
 
 --fork requires an existing immutable fork selector in the active npm global prefix
-(or Termux's ~/.local/share/npm-global with ~/.local/bin/pi), Node >=22.19 with
-adjacent npm, Git, bash, tar, gzip, tmux, and network access.
+(or Termux's ~/.local/share/npm-global with ~/.local/bin/pi), patched Node
+22.23.5+ (22.x), 24.22.3+ (24.x), or >=26.13.1 with adjacent npm, Git, bash, tar,
+gzip, tmux, and network access. Update Node first; the updater does not update it.
 Supports macOS/Linux/Termux arm64/x64, not Windows, ordinary npm directories, or other
 install methods. No existing checkout needed. Does not update extensions/settings
 or restart running sessions. Cannot combine with other targets or --force.

@@ -61,7 +61,7 @@ npm run dev                  # dev mode: apply plugin changes, including web fac
 npm start                    # without the dev supervisor
 P2_FAKE=1 npm start          # fake model, no provider needed
 npm run owner-link [url]     # one-time owner sign-in link for another device (run on the machine itself)
-npm run tui [url]            # TUI (Node >= 26.5.1); on loopback it signs in with the data directory's owner key
+npm run tui [url]            # TUI (Node >= 26.13.1); on loopback it signs in with the data directory's owner key
 npm run reload [plugins] [--restart]
 npm run check                # Biome + tsc
 npm test                     # full suite; TUI tests need Node 26, browser tests need CHROMIUM_BIN
@@ -119,7 +119,7 @@ verifying an agent's files on their own before committing. Node 24: `~/node-v24.
 
 ## The TUI
 
-`npm run tui [url]` (Node ≥ 26.5.1). The launcher owns the terminal, the connection and sign-in; all TUI code (pi-tui
+`npm run tui [url]` (Node ≥ 26.13.1). The launcher owns the terminal, the connection and sign-in; all TUI code (pi-tui
 and plugin facets) comes from the server as one bundle and runs in a worker that drops every Node permission first.
 Output passes a strict escape-sequence allowlist; privileged actions (copy, open URL, download, external editor,
 attach, saving preferences, sign-out) need launcher grants, mostly with a launcher-drawn consent screen. Preferences
