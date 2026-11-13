@@ -36,6 +36,14 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 	'"code"\\s*:\\s*"?1308(?![0-9])',
 ]);
 
+const RETRYABLE_RAW_STOP_REASONS = new Set([
+	// Gemini ends an HTTP 200 stream with these finish reasons when a generated
+	// tool call cannot be parsed or validated; retrying the turn recovers transient
+	// malformed tool-call generations.
+	"malformed_function_call",
+	"unexpected_tool_call",
+]);
+
 const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	// Generic provider load, HTTP status, and server-side transient failures.
 	"overloaded",
@@ -135,6 +143,10 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	// failures can arrive mid-stream without an HTTP 503 in the message.
 	"subscription_sharing_usage_unavailable",
 	"subscription_sharing_user_unavailable",
+
+	// Gemini tool-call generation failures relayed through formatted error text
+	// or OpenAI-compatible gateways without `rawStopReason`.
+	"(?<![a-z0-9_])(?:malformed_function_call|unexpected_tool_call)(?![a-z0-9_])",
 ]);
 
 /**
@@ -258,8 +270,12 @@ export async function retryAssistantCall(
  * before restarting the assistant turn.
  */
 export function isRetryableAssistantError(message: AssistantMessage): boolean {
-	if (message.stopReason !== "error" || !message.errorMessage) return false;
+	if (message.stopReason !== "error") return false;
+	if (message.rawStopReason && RETRYABLE_RAW_STOP_REASONS.has(message.rawStopReason.toLowerCase())) {
+		return true;
+	}
 	const errorMessage = message.errorMessage;
+	if (!errorMessage) return false;
 	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
 	return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
 }

@@ -228,6 +228,54 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.faux.state.callCount).toBe(4);
 	});
 
+	it("omits a partial MALFORMED_FUNCTION_CALL turn before retrying and skips broken tool execution", async () => {
+		const toolRuns: string[] = [];
+		const echoTool: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo text back",
+			parameters: Type.Object({ text: Type.String() }),
+			execute: async (_toolCallId, params) => {
+				const text = typeof params === "object" && params !== null && "text" in params ? String(params.text) : "";
+				toolRuns.push(text);
+				return { content: [{ type: "text", text: `echo:${text}` }], details: { text } };
+			},
+		};
+		const seenAssistantCounts: number[] = [];
+		const harness = await createHarness({
+			tools: [echoTool],
+			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			(context) => {
+				seenAssistantCounts.push(context.messages.filter((m) => m.role === "assistant").length);
+				return {
+					...fauxAssistantMessage([fauxThinking("drafting call"), fauxToolCall("echo", { text: "broken" })], {
+						stopReason: "error",
+						errorMessage: "Provider stopped with: MALFORMED_FUNCTION_CALL",
+					}),
+					rawStopReason: "MALFORMED_FUNCTION_CALL",
+				};
+			},
+			(context) => {
+				seenAssistantCounts.push(context.messages.filter((m) => m.role === "assistant").length);
+				return fauxAssistantMessage([fauxToolCall("echo", { text: "clean" })], { stopReason: "toolUse" });
+			},
+			(context) => {
+				seenAssistantCounts.push(context.messages.filter((m) => m.role === "assistant").length);
+				return fauxAssistantMessage("done");
+			},
+		]);
+
+		await harness.session.prompt("run echo");
+
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(seenAssistantCounts).toEqual([0, 0, 1]);
+		expect(toolRuns).toEqual(["clean"]);
+		expect(harness.eventsOfType("auto_retry_end").at(-1)).toMatchObject({ success: true, attempt: 1 });
+	});
+
 	it("emits extension events before public event subscribers", async () => {
 		const order: string[] = [];
 		const harness = await createHarness({
