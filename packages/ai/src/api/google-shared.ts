@@ -25,6 +25,7 @@ import type {
 	Tool,
 	ToolCall,
 	TranscriptContext,
+	Usage,
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -213,6 +214,12 @@ export function streamGoogle(
 						},
 					};
 					calculateCost(model, output.usage);
+					if (api === "google-generative-ai") {
+						// @google/genai 2.32.0 retains this wire field but omits it from this response type.
+						const serviceTier =
+							"serviceTier" in chunk.usageMetadata ? chunk.usageMetadata.serviceTier : undefined;
+						applyGoogleServiceTierPricing(model, output.usage, serviceTier);
+					}
 				}
 			}
 
@@ -245,6 +252,40 @@ export function streamGoogle(
 	})();
 
 	return stream;
+}
+
+// Published Flex/Priority models and token rates, checked 2026-11-13:
+// https://aistudio.google.com/docs/pricing
+const GOOGLE_SERVICE_TIER_MODELS = new Set([
+	"gemini-4-carbon",
+	"gemini-4-argon",
+	"gemini-4-hydrogen",
+	"gemini-3.8-flash",
+	"gemini-3.6-flash",
+	"gemini-3.5-flash-lite",
+	"gemini-3.1-flash-lite",
+	"gemini-3.1-pro-preview",
+	"gemini-3-flash-preview",
+	"gemini-2.5-pro",
+	"gemini-2.5-flash",
+	"gemini-2.5-flash-lite",
+]);
+
+function applyGoogleServiceTierPricing(model: Model<GoogleApiType>, usage: Usage, serviceTier: unknown): void {
+	const sendsToGeminiApi =
+		model.provider === "google" ||
+		!model.baseUrl ||
+		(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com");
+	if (!sendsToGeminiApi || !GOOGLE_SERVICE_TIER_MODELS.has(model.id)) return;
+
+	const multiplier = serviceTier === "flex" ? 0.5 : serviceTier === "priority" ? 1.8 : 1;
+	if (multiplier === 1) return;
+
+	usage.cost.input *= multiplier;
+	usage.cost.output *= multiplier;
+	// Flash-Lite's published Priority cache-read price is $0.05/M versus $0.03/M Standard.
+	usage.cost.cacheRead *= serviceTier === "priority" && model.id === "gemini-3.5-flash-lite" ? 5 / 3 : multiplier;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }
 
 function buildParams(

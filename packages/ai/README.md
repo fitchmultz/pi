@@ -241,6 +241,10 @@ Snippets in the rest of this README assume a `models` collection set up like thi
 
 `usage.cost.total` is the best available total cost. For OpenRouter chat responses, it uses the cost reported by OpenRouter, including both the OpenRouter charge and upstream inference cost for BYOK requests. When provider accounting is unavailable or invalid, it falls back to the model's catalog rates. The `input`, `output`, `cacheRead`, and `cacheWrite` cost components remain catalog estimates and may not sum to a provider-reported total.
 
+For the Gemini API (`google-generative-ai`), token cost estimates follow the returned `usageMetadata.serviceTier`, not the requested tier. Exact text-model IDs listed in Google's [Flex](https://aistudio.google.com/docs/flex-inference#supported-models) and [Priority](https://aistudio.google.com/docs/priority-inference#supported-models) documentation receive the [published price adjustment](https://aistudio.google.com/docs/pricing) after prompt-length pricing. Standard, missing or unknown tiers, and unknown model IDs retain catalog estimates. Token counts are unchanged, and `totalFromProvider` remains `false`.
+
+This adjustment applies to the `google` provider, including gateway endpoint overrides, and direct Gemini API endpoints. Google Vertex and other custom endpoints retain their catalog estimates.
+
 ## Providers and Models
 
 A **provider** is the runtime unit: it owns its model catalog, its auth (API key resolution, OAuth flows), and its stream behavior. A `Models` collection holds providers and routes every request to the provider that owns the model.

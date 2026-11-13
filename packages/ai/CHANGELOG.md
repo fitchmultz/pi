@@ -32,6 +32,7 @@
 - Fixed the abort-test helper returning before checking the aborted result and follow-up; added an offline regression ([#10508](https://github.com/earendil-works/pi/issues/10508)).
 - Fixed exact `gpt-6-astra` Ultrafast estimates in OpenAI and Codex Responses: terminal-confirmed `ultrafast` costs 6x every standard or long-context component; request-only Ultrafast does not imply delivery.
 - Fixed legacy Codex Responses `fast` pricing to match `priority`, including its existing requested-tier fallback.
+- Fixed Gemini API Flex and Priority cost estimates using Standard prices. Supported text-model IDs now use the tier confirmed in streamed usage, including Priority downgrades and cache-read pricing; token counts, unknown model IDs and tiers, other custom endpoints and Google Vertex are unchanged.
 - Fixed a provider's auth-check failure hiding healthy providers; global availability now exposes provider-local diagnostics.
 - Fixed optional null tool arguments inside schema unions being coerced into values instead of omitted.
 - Fixed retained Codex payload objects mutating the cached continuation baseline.
