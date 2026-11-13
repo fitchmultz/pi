@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as hostPiAi from "@earendil-works/pi-ai/compat";
@@ -23,24 +23,13 @@ afterEach(() => {
 	}
 });
 
-describe("extension native ESM and CJS host module resolution", () => {
-	it("resolves host packages inside .mjs, type=module .js, and .cjs helpers without extension node_modules", async () => {
+describe("extension native ESM and CJS host module fallback", () => {
+	it("resolves host packages in compiled type=module .js, dynamic .mjs imports, and .cjs helpers without node_modules", async () => {
 		const root = createTempDir("pi-ext-native-esm-");
-		const esmSubpkg = join(root, "subpkg");
-		mkdirSync(esmSubpkg, { recursive: true });
-
-		writeFileSync(join(esmSubpkg, "package.json"), JSON.stringify({ name: "ext-subpkg", type: "module" }));
-		writeFileSync(
-			join(esmSubpkg, "index.js"),
-			[
-				'import { truncateToWidth } from "@earendil-works/pi-tui";',
-				'import { registerFauxProvider } from "@earendil-works/pi-ai";',
-				"export const esmJsRefs = { truncateToWidth, registerFauxProvider };",
-			].join("\n"),
-		);
+		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "compiled-ext-pkg", type: "module" }));
 
 		writeFileSync(
-			join(root, "helper.mjs"),
+			join(root, "dynamic-helper.mjs"),
 			[
 				'import { formatDimensionNote } from "@earendil-works/pi-coding-agent";',
 				'import { resizeImage } from "@mariozechner/pi-coding-agent";',
@@ -57,17 +46,17 @@ describe("extension native ESM and CJS host module resolution", () => {
 			].join("\n"),
 		);
 
-		const extensionPath = join(root, "ext.ts");
+		const extensionPath = join(root, "index.js");
 		writeFileSync(
 			extensionPath,
 			[
-				'import { formatDimensionNote } from "@earendil-works/pi-coding-agent";',
-				'import { mjsRefs } from "./helper.mjs";',
-				'import { esmJsRefs } from "./subpkg/index.js";',
+				'import { truncateToWidth } from "@earendil-works/pi-tui";',
+				'import { registerFauxProvider } from "@earendil-works/pi-ai";',
 				'import cjsRefs from "./helper.cjs";',
 				"",
-				"export default function (pi) {",
-				"\t(globalThis as Record<string, unknown>).__piNativeEsmProbe = { tsFormat: formatDimensionNote, mjsRefs, esmJsRefs, cjsRefs };",
+				"export default async function (pi) {",
+				'\tconst { mjsRefs } = await import("./dynamic-helper.mjs");',
+				"\tglobalThis.__piNativeEsmProbe = { truncateToWidth, registerFauxProvider, mjsRefs, cjsRefs };",
 				'\tpi.registerCommand("probe", { description: "probe", handler: async () => {} });',
 				"}",
 			].join("\n"),
@@ -79,59 +68,17 @@ describe("extension native ESM and CJS host module resolution", () => {
 		expect(result.extensions).toHaveLength(1);
 
 		const probe = (globalThis as Record<string, unknown>).__piNativeEsmProbe as {
-			tsFormat: unknown;
+			truncateToWidth: unknown;
+			registerFauxProvider: unknown;
 			mjsRefs: { formatDimensionNote: unknown; resizeImage: unknown; Type: unknown };
-			esmJsRefs: { truncateToWidth: unknown; registerFauxProvider: unknown };
 			cjsRefs: { formatDimensionNote: unknown };
 		};
-		expect(probe.tsFormat).toBe(hostPiCodingAgent.formatDimensionNote);
+		expect(probe.truncateToWidth).toBe(hostPiTui.truncateToWidth);
+		expect(probe.registerFauxProvider).toBe(hostPiAi.registerFauxProvider);
 		expect(probe.mjsRefs.formatDimensionNote).toBe(hostPiCodingAgent.formatDimensionNote);
 		expect(probe.mjsRefs.resizeImage).toBe(hostPiCodingAgent.resizeImage);
 		expect(probe.mjsRefs.Type).toBe(hostTypebox.Type);
-		expect(probe.esmJsRefs.truncateToWidth).toBe(hostPiTui.truncateToWidth);
-		expect(probe.esmJsRefs.registerFauxProvider).toBe(hostPiAi.registerFauxProvider);
 		expect(probe.cjsRefs.formatDimensionNote).toBe(hostPiCodingAgent.formatDimensionNote);
-	});
-
-	it("prefers host modules over duplicate @earendil-works/* copies in an extension's node_modules", async () => {
-		const root = createTempDir("pi-ext-shadow-nm-");
-		const shadowPkgDir = join(root, "node_modules", "@earendil-works", "pi-coding-agent");
-		mkdirSync(shadowPkgDir, { recursive: true });
-		writeFileSync(
-			join(shadowPkgDir, "package.json"),
-			JSON.stringify({ name: "@earendil-works/pi-coding-agent", type: "module", exports: "./index.js" }),
-		);
-		writeFileSync(
-			join(shadowPkgDir, "index.js"),
-			[
-				"(globalThis.__piShadowCopyLoaded = ((globalThis.__piShadowCopyLoaded ?? 0) + 1));",
-				"export function formatDimensionNote() { return 'shadow-copy'; }",
-			].join("\n"),
-		);
-
-		writeFileSync(
-			join(root, "tools.mjs"),
-			'import { formatDimensionNote } from "@earendil-works/pi-coding-agent";\nexport { formatDimensionNote };\n',
-		);
-		const extensionPath = join(root, "macuse-like.ts");
-		writeFileSync(
-			extensionPath,
-			[
-				'import { formatDimensionNote } from "./tools.mjs";',
-				"export default function (pi) {",
-				"\t(globalThis as Record<string, unknown>).__piShadowResolved = formatDimensionNote;",
-				'\tpi.registerCommand("shadow", { description: "shadow", handler: async () => {} });',
-				"}",
-			].join("\n"),
-		);
-
-		delete (globalThis as Record<string, unknown>).__piShadowCopyLoaded;
-		delete (globalThis as Record<string, unknown>).__piShadowResolved;
-
-		const result = await loadExtensions([extensionPath], root);
-		expect(result.errors).toEqual([]);
-		expect((globalThis as Record<string, unknown>).__piShadowCopyLoaded).toBeUndefined();
-		expect((globalThis as Record<string, unknown>).__piShadowResolved).toBe(hostPiCodingAgent.formatDimensionNote);
 	});
 
 	it("persists jiti transpile cache entries under XDG_CACHE_HOME/pi/jiti", async () => {

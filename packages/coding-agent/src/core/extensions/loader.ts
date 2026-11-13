@@ -67,7 +67,7 @@ function getVirtualModules(): Promise<Record<string, unknown>> {
 
 type NodeExtensionHookMode =
 	| { kind: "virtual"; modules: Record<string, unknown> }
-	| { kind: "alias"; aliases: Record<string, string>; skipParentUrl: string };
+	| { kind: "alias"; aliases: Record<string, string> };
 
 interface NodeExtensionHookState {
 	registered: boolean;
@@ -85,10 +85,10 @@ function getExtensionHookState(): NodeExtensionHookState {
 }
 
 /**
- * Ensure Node's native ESM and CommonJS loaders resolve Pi's host packages to the active runtime.
- * Jiti delegates `.mjs` and `"type": "module"` `.js` imports inside extensions to Node's native
- * `import()`, which would otherwise bypass Jiti's `virtualModules`/`alias` table and either fail
- * or load duplicate `@earendil-works/*` trees from an extension's `node_modules`.
+ * Fall back to Pi's host packages in Node's native ESM and CommonJS loaders when an extension has
+ * no physical copy installed. Jiti delegates `.mjs` and `"type": "module"` `.js` entrypoints and
+ * dynamic `import()` calls to Node's native loader, which bypasses Jiti's `virtualModules`/`alias`
+ * table while `DefaultPackageManager` omits peer dependencies (#9863).
  */
 function ensureNodeExtensionHooks(mode: NodeExtensionHookMode): void {
 	const state = getExtensionHookState();
@@ -101,25 +101,32 @@ function ensureNodeExtensionHooks(mode: NodeExtensionHookMode): void {
 	nodeModule.registerHooks({
 		resolve(specifier, context, nextResolve) {
 			const current = getExtensionHookState().mode;
-			if (!current) {
+			const isHostModule =
+				current !== undefined &&
+				(current.kind === "virtual"
+					? Object.hasOwn(current.modules, specifier)
+					: Object.hasOwn(current.aliases, specifier));
+			if (!isHostModule) {
 				return nextResolve(specifier, context);
+			}
+			try {
+				return nextResolve(specifier, context);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (code !== "ERR_MODULE_NOT_FOUND" && code !== "MODULE_NOT_FOUND") {
+					throw error;
+				}
 			}
 			if (current.kind === "virtual") {
-				if (Object.hasOwn(current.modules, specifier)) {
-					return {
-						url: `${VIRTUAL_MODULE_URL_PREFIX}${encodeURIComponent(specifier)}`,
-						shortCircuit: true,
-					};
-				}
-				return nextResolve(specifier, context);
-			}
-			if (context.parentURL !== current.skipParentUrl && Object.hasOwn(current.aliases, specifier)) {
 				return {
-					url: pathToFileURL(current.aliases[specifier]).href,
+					url: `${VIRTUAL_MODULE_URL_PREFIX}${encodeURIComponent(specifier)}`,
 					shortCircuit: true,
 				};
 			}
-			return nextResolve(specifier, context);
+			return {
+				url: pathToFileURL(current.aliases[specifier]).href,
+				shortCircuit: true,
+			};
 		},
 		load(url, context, nextLoad) {
 			if (!url.startsWith(VIRTUAL_MODULE_URL_PREFIX)) {
@@ -138,16 +145,18 @@ function ensureNodeExtensionHooks(mode: NodeExtensionHookMode): void {
 				return {
 					format: "commonjs",
 					shortCircuit: true,
-					source: `module.exports = process[Symbol.for("pi.codingAgent.extensionHookState")].mode.modules[${JSON.stringify(specifier)}];`,
+					source: `module.exports = globalThis.process[globalThis.Symbol.for("pi.codingAgent.extensionHookState")].mode.modules[${JSON.stringify(specifier)}];`,
 				};
 			}
-			const namedExports = Object.keys(mod).filter((key) => key !== "default" && JS_IDENTIFIER_RE.test(key));
-			const exportLine = namedExports.length > 0 ? `export const { ${namedExports.join(", ")} } = mod;\n` : "";
-			const defaultLine = "default" in mod ? "export default mod.default;\n" : "export default mod;\n";
+			const namedExports = Object.keys(mod).filter(
+				(key) => key !== "default" && key !== "__piMod" && JS_IDENTIFIER_RE.test(key),
+			);
+			const exportLine = namedExports.length > 0 ? `export const { ${namedExports.join(", ")} } = __piMod;\n` : "";
+			const defaultLine = "default" in mod ? "export default __piMod.default;\n" : "export default __piMod;\n";
 			return {
 				format: "module",
 				shortCircuit: true,
-				source: `import process from "node:process";\nconst mod = process[Symbol.for("pi.codingAgent.extensionHookState")].mode.modules[${JSON.stringify(specifier)}];\n${exportLine}${defaultLine}`,
+				source: `const __piMod = globalThis.process[globalThis.Symbol.for("pi.codingAgent.extensionHookState")].mode.modules[${JSON.stringify(specifier)}];\n${exportLine}${defaultLine}`,
 			};
 		},
 	});
@@ -734,11 +743,7 @@ async function getJitiLoader(): Promise<ReturnType<typeof createJiti>> {
 		resolutionOptions = { virtualModules, tsconfigPaths: true };
 	} else {
 		const aliases = getAliases();
-		ensureNodeExtensionHooks({
-			kind: "alias",
-			aliases,
-			skipParentUrl: pathToFileURL(aliases["@earendil-works/pi-ai"]).href,
-		});
+		ensureNodeExtensionHooks({ kind: "alias", aliases });
 		resolutionOptions = { alias: aliases };
 	}
 
