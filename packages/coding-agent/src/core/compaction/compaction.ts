@@ -552,17 +552,20 @@ export function getSummarizationFailure(response: AssistantMessage, label: strin
 	if (response.stopReason === "length") {
 		return `${label} failed: generation hit the token cap and the summary is incomplete`;
 	}
+	if (response.content.some((block) => block.type === "toolCall")) {
+		return `${label} attempted to call a tool`;
+	}
 	return undefined;
 }
 
-function createSummarizationOptions(
+export function createSummarizationOptions(
 	model: Model<any>,
 	apiKey: string | undefined,
 	headers: Record<string, string> | undefined,
 	env: Record<string, string> | undefined,
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
-	sessionId: string | undefined,
+	sessionId?: string,
 ): SimpleStreamOptions {
 	const options: SimpleStreamOptions = { signal, apiKey, headers, env, sessionId };
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
@@ -642,9 +645,12 @@ export async function generateSummary(
 }
 
 /** Build the provider context for a standalone summary request. */
-function buildSummarizationContext(promptText: string): TranscriptContext {
+export function buildSummarizationContext(
+	promptText: string,
+	systemPrompt = SUMMARIZATION_SYSTEM_PROMPT,
+): TranscriptContext {
 	return normalizeContext({
-		systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+		systemPrompt,
 		messages: [
 			{
 				role: "user",
@@ -705,9 +711,6 @@ export async function generateSummaryWithUsage(
 	const failure = getSummarizationFailure(response, "Summarization");
 	if (failure) {
 		throw new Error(failure);
-	}
-	if (response.content.some((block) => block.type === "toolCall")) {
-		throw new Error("Summarization attempted to call a tool");
 	}
 
 	const textContent = contentText(response.content);
@@ -1055,9 +1058,6 @@ async function generateTurnPrefixSummary(
 	const failure = getSummarizationFailure(response, "Turn prefix summarization");
 	if (failure) {
 		throw new Error(failure);
-	}
-	if (response.content.some((block) => block.type === "toolCall")) {
-		throw new Error("Turn prefix summarization attempted to call a tool");
 	}
 
 	return {

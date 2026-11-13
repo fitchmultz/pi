@@ -121,26 +121,38 @@ function detectMiss(
 	};
 }
 
-function asPreviousRequest(message: AssistantMessage, prev: PreviousRequest | undefined): PreviousRequest | undefined {
-	const usage = message.usage;
+function toPreviousRequest(
+	req: {
+		usage: AssistantMessage["usage"];
+		provider: string;
+		model: string;
+		thinkingLevel?: AssistantMessage["thinkingLevel"];
+		providerThinkingLevel?: string;
+		cacheIdentity?: string;
+		timestamp: number;
+		reportedCache: boolean;
+	},
+	prev: PreviousRequest | undefined,
+): PreviousRequest | undefined {
+	const usage = req.usage;
 	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 	if (promptTokens <= 0) return undefined;
-	const modelKey = `${message.provider}/${message.responseModel ?? message.model}`;
+	const modelKey = `${req.provider}/${req.model}`;
 	return {
 		promptTokens,
 		modelKey,
-		provider: message.provider,
-		thinkingLevel: message.thinkingLevel,
-		providerThinkingLevel: message.providerThinkingLevel,
-		cacheIdentity: message.cacheIdentity,
-		timestamp: message.timestamp,
+		provider: req.provider,
+		thinkingLevel: req.thinkingLevel,
+		providerThinkingLevel: req.providerThinkingLevel,
+		cacheIdentity: req.cacheIdentity,
+		timestamp: req.timestamp,
 		readPerToken:
 			usage.cacheRead > 0
 				? usage.cost.cacheRead / usage.cacheRead
-				: modelKey === prev?.modelKey && message.cacheIdentity === prev.cacheIdentity
+				: modelKey === prev?.modelKey && req.cacheIdentity === prev.cacheIdentity
 					? prev.readPerToken
 					: undefined,
-		reportedCache: (prev?.reportedCache ?? false) || usage.cacheRead + usage.cacheWrite > 0,
+		reportedCache: req.reportedCache,
 	};
 }
 
@@ -170,28 +182,18 @@ function scan(
 		if (entry.type === "compaction" || entry.type === "branch_summary") {
 			prev = undefined;
 		} else if (entry.type === "usage" && entry.kind === "cache_warm") {
-			const promptTokens = entry.usage.input + entry.usage.cacheRead + entry.usage.cacheWrite;
-			if (promptTokens > 0) {
-				const modelKey = `${entry.provider}/${entry.model}`;
-				prev = {
-					promptTokens,
-					modelKey,
-					provider: entry.provider,
-					cacheIdentity: entry.cacheIdentity,
-					thinkingLevel: entry.thinkingLevel,
-					providerThinkingLevel: entry.providerThinkingLevel,
-					timestamp: Date.parse(entry.timestamp),
-					readPerToken:
-						entry.usage.cacheRead > 0
-							? entry.usage.cost.cacheRead / entry.usage.cacheRead
-							: modelKey === prev?.modelKey && entry.cacheIdentity === prev.cacheIdentity
-								? prev.readPerToken
-								: undefined,
-					reportedCache: true,
-				};
-			}
+			prev =
+				toPreviousRequest(
+					{
+						...entry,
+						timestamp: Date.parse(entry.timestamp),
+						reportedCache: true,
+					},
+					prev,
+				) ?? prev;
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			const miss = detectMiss(prev, entry.message, models);
+			const message = entry.message;
+			const miss = detectMiss(prev, message, models);
 			if (miss) {
 				totals.missedTokens += miss.missedTokens;
 				totals.missedCost += miss.missedCost;
@@ -202,9 +204,18 @@ function scan(
 				if (miss.readPriceSource === "ancestor") totals.ancestorPriceCount += 1;
 				if (miss.readPriceSource === "catalog") totals.catalogPriceCount += 1;
 				if (miss.readPriceSource === "unknown") totals.unpricedMissCount += 1;
-				misses.set(entry.message, miss);
+				misses.set(message, miss);
 			}
-			prev = asPreviousRequest(entry.message, prev) ?? prev;
+			prev =
+				toPreviousRequest(
+					{
+						...message,
+						model: message.responseModel ?? message.model,
+						reportedCache:
+							(prev?.reportedCache ?? false) || message.usage.cacheRead + message.usage.cacheWrite > 0,
+					},
+					prev,
+				) ?? prev;
 		}
 		requestsByEntry.set(entry.id, prev);
 	}

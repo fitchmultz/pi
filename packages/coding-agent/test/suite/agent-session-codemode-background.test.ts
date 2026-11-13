@@ -14,7 +14,7 @@ import {
 	CODEMODE_STORE_ENTRY_TYPE,
 	type CodemodeToolDetails,
 } from "../../src/extensions/codemode/tool.ts";
-import { createHarness, type Harness, type HarnessOptions } from "./harness.ts";
+import { createHarness, getMessageText, getToolResult, type Harness, type HarnessOptions } from "./harness.ts";
 
 const BACKGROUND = '// @options: {"background": true}\n';
 
@@ -163,20 +163,6 @@ function createTinyBmp(): string {
 
 const toolExtension = (tool: ToolDefinition) => (pi: ExtensionAPI) => pi.registerTool(tool);
 
-const resultText = (result: { content: Array<{ type: string; text?: string }> }): string =>
-	result.content
-		.filter((block): block is TextContent => block.type === "text")
-		.map((block) => block.text ?? "")
-		.join("\n");
-
-const codemodeResult = (harness: Harness): ToolResultMessage => {
-	const result = harness.session.messages.findLast(
-		(message): message is ToolResultMessage => message.role === "toolResult" && message.toolName === "codemode",
-	);
-	if (!result) throw new Error("No codemode tool result");
-	return result;
-};
-
 const completions = (
 	harness: Harness,
 	customType = CODEMODE_BACKGROUND_COMPLETION_TYPE,
@@ -196,9 +182,6 @@ const storeEntries = (harness: Harness): unknown[] =>
 			(entry): entry is CustomEntry => entry.type === "custom" && entry.customType === CODEMODE_STORE_ENTRY_TYPE,
 		)
 		.map((entry) => entry.data);
-
-const messageText = (message: { content: string | Array<{ type: string; text?: string }> }): string =>
-	typeof message.content === "string" ? message.content : resultText({ content: message.content });
 
 async function waitForCompletion(
 	harness: Harness,
@@ -286,7 +269,7 @@ describe("codemode background runs", () => {
 				background,
 				`${BACKGROUND}await tools.second({}); store("step", load("queued")); return load("queued");`,
 			);
-			const receipt = codemodeResult(background);
+			const receipt = getToolResult(background, "codemode");
 			expect(receipt.details).toEqual({ calls: [], background: { runId: receipt.toolCallId } });
 			expect(background.session.getLastAssistantText()).toBe("foreground done");
 			expect(second.starts()).toBe(0);
@@ -341,7 +324,7 @@ describe("codemode background runs", () => {
 			await third.started;
 			third.release();
 			await foregroundRun;
-			expect(resultText(codemodeResult(foreground))).toMatch(/Output:\n\nthird$/);
+			expect(getMessageText(getToolResult(foreground, "codemode"))).toMatch(/Output:\n\nthird$/);
 			await background.session.waitForIdle();
 			expect(completions(background)).toHaveLength(1);
 			const entries = background.sessionManager.getEntries();
@@ -377,7 +360,9 @@ describe("codemode background runs", () => {
 			await launch(resident, `${BACKGROUND}await tools.first({});`);
 			await first.started;
 			await launch(background, `${BACKGROUND}await tools.queued({}); store("step", 1);`);
-			expect(codemodeResult(background).details).toMatchObject({ background: { runId: expect.any(String) } });
+			expect(getToolResult(background, "codemode").details).toMatchObject({
+				background: { runId: expect.any(String) },
+			});
 			await background.session.abort();
 			expect(queued.starts()).toBe(0);
 			expect(completions(background)).toHaveLength(0);
@@ -418,7 +403,7 @@ describe("codemode background runs", () => {
 				background,
 				'// @options: {"background": true, "timeout_ms": 50}\nawait tools.queued({}); store("step", 1);',
 			);
-			const receipt = codemodeResult(background);
+			const receipt = getToolResult(background, "codemode");
 			expect(receipt.isError).toBe(false);
 			const completion = await waitForCompletion(background);
 			expect(completion.details?.runId).toBe(receipt.toolCallId);
@@ -462,7 +447,7 @@ describe("codemode background runs", () => {
 		const harness = await setup([gate.tool]);
 		await launch(harness, `${BACKGROUND}await tools.gated({});\nstore("step", 1);\nreturn "script output";`);
 
-		const receipt = codemodeResult(harness);
+		const receipt = getToolResult(harness, "codemode");
 		await gate.started;
 		expect(gate.starts()).toBe(1);
 		expect(receipt.content).toEqual([
@@ -803,7 +788,7 @@ describe("codemode background runs", () => {
 			"foreground done",
 		]);
 		await gate.started;
-		const script = codemodeResult(harness).toolCallId;
+		const script = getToolResult(harness, "codemode").toolCallId;
 		await promptTool(harness, "deferred_run", ["second foreground done", "after completion"]);
 		await run.started;
 
@@ -1085,7 +1070,7 @@ describe("codemode background runs", () => {
 		);
 		await launch(harness, `return await tools.nested_launch({});`, ["foreground done"]);
 
-		expect(messageText(codemodeResult(harness))).toContain(
+		expect(getMessageText(getToolResult(harness, "codemode"))).toContain(
 			"runInBackground() is only available to the model-issued tool call that is running",
 		);
 	});
@@ -1116,7 +1101,7 @@ describe("codemode background runs", () => {
 			parameters: Type.Object({}),
 			execute: async (_toolCallId, _params, _signal, _onUpdate, ctx) => {
 				const outcome = await ctx.executeTool("inner", {});
-				return { content: [{ type: "text", text: resultText(outcome.result) }], details: undefined };
+				return { content: [{ type: "text", text: getMessageText(outcome.result) }], details: undefined };
 			},
 		};
 		const harness = await setup([inner], [toolExtension(outer)]);
@@ -1180,7 +1165,7 @@ describe("codemode background runs", () => {
 		const image = completion.content.find((block) => block.type === "image");
 		expect(image).toMatchObject({ type: "image", mimeType: "image/png" });
 		expect(completion.content.map((block) => block.type)).toEqual(["text", "image", "text"]);
-		expect(resultText({ content: completion.content })).toContain("[Image converted from image/bmp to image/png.]");
+		expect(getMessageText(completion)).toContain("[Image converted from image/bmp to image/png.]");
 	});
 
 	it("runs sequential nested calls of a background script one at a time", async () => {

@@ -1,12 +1,17 @@
 import * as os from "node:os";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { contentText, normalizeContext, type RetryPolicy, uuidv7 } from "@earendil-works/pi-ai";
+import { contentText, type RetryPolicy, uuidv7 } from "@earendil-works/pi-ai";
 import type { Api, Model, Provider, SimpleStreamOptions } from "@earendil-works/pi-ai/compat";
 import { VERSION } from "../config.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { writeZipArchive } from "../utils/zip.ts";
-import { completeSummarization, getSummarizationFailure } from "./compaction/compaction.ts";
-import { serializeConversation } from "./compaction/utils.ts";
+import {
+	buildSummarizationContext,
+	completeSummarization,
+	createSummarizationOptions,
+	getSummarizationFailure,
+} from "./compaction/compaction.ts";
+import { estimateSerializedTokens, serializeConversation } from "./compaction/utils.ts";
 import type { CrashRecord } from "./crash-log.ts";
 import type { Extension } from "./extensions/types.ts";
 import { convertToLlm } from "./messages.ts";
@@ -307,7 +312,7 @@ function selectMessages(messages: readonly AgentMessage[], tokenBudget: number):
 	let tokens = 0;
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
-		const next = Math.ceil(serializeConversation(convertToLlm([message])).length / 4);
+		const next = estimateSerializedTokens(convertToLlm([message]));
 		if (selected.length > 0 && tokens + next > tokenBudget) break;
 		selected.push(message);
 		tokens += next;
@@ -346,22 +351,20 @@ export async function generateBugReportSummary(options: GenerateBugReportSummary
 		.filter((part) => part !== undefined)
 		.join("\n\n");
 	const requestOptions: SimpleStreamOptions = {
+		...createSummarizationOptions(
+			model,
+			options.apiKey,
+			options.headers,
+			options.env,
+			options.signal,
+			options.thinkingLevel,
+			options.sessionId,
+		),
 		maxTokens: Math.min(4096, model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY),
-		signal: options.signal,
-		apiKey: options.apiKey,
-		headers: options.headers,
-		env: options.env,
-		sessionId: options.sessionId,
-		...(model.reasoning && options.thinkingLevel && options.thinkingLevel !== "off"
-			? { reasoning: options.thinkingLevel }
-			: {}),
 	};
 	const response = await completeSummarization(
 		model,
-		normalizeContext({
-			systemPrompt: BUG_SUMMARY_SYSTEM_PROMPT,
-			messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
-		}),
+		buildSummarizationContext(prompt, BUG_SUMMARY_SYSTEM_PROMPT),
 		requestOptions,
 		options.streamFn,
 		options.retry,
@@ -369,9 +372,6 @@ export async function generateBugReportSummary(options: GenerateBugReportSummary
 	if (response.stopReason === "aborted") throw new Error("Bug report summary was cancelled");
 	const failure = getSummarizationFailure(response, "Bug report summary");
 	if (failure) throw new Error(failure);
-	if (response.content.some((block) => block.type === "toolCall")) {
-		throw new Error("Bug report summary attempted to call a tool");
-	}
 	const text = contentText(response.content).trim();
 	if (!text) throw new Error("Bug report summary was empty");
 	return text;

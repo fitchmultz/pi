@@ -8,6 +8,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { jsonChunks, readFileChunksSync, readJsonFileSync } from "../utils/streaming-file.ts";
+import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { assertValidSessionId, type SessionEntry, type SessionHeader, SessionManager } from "./session-manager.ts";
 import { getToolListError, isToolModifier, type Settings } from "./settings-manager.ts";
 import type { NormalizedBuildSystemPromptOptions } from "./system-prompt.ts";
@@ -38,9 +39,9 @@ export interface WorkingSession {
 	followUp: AgentMessage[];
 	steeringText: string[];
 	followUpText: string[];
-	nextTurn: AgentMessage[];
-	pendingCustom: AgentMessage[];
-	pendingBash: AgentMessage[];
+	nextTurn: CustomMessage[];
+	pendingCustom: CustomMessage[];
+	pendingBash: BashExecutionMessage[];
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
 	settings: Settings;
@@ -400,12 +401,11 @@ export function copyWorkingSession(value: unknown): WorkingSession {
 /** Validate the complete snapshot, then detach only the memory retained by AgentSession. */
 export function copyWorkingSessionMemory(value: unknown) {
 	// Proxies need the existing descriptor copy before schema reads.
-	const state = isJsonValue(value, {
+	const plain = isJsonValue(value, {
 		omitUndefinedProperties: true,
 		validateContainer: (container) => !types.isProxy(container),
-	})
-		? validateWorkingSession(value)
-		: copyWorkingSession(value);
+	});
+	const state = plain ? validateWorkingSession(value) : copyWorkingSession(value);
 	const memory = {
 		steering: state.steering,
 		followUp: state.followUp,
@@ -428,17 +428,14 @@ export function copyWorkingSessionMemory(value: unknown) {
 		launch: state.launch,
 		mode: state.mode,
 	};
-	return copyJson(memory, { omitUndefinedProperties: true }) as unknown as typeof memory;
+	return plain ? (copyJson(memory, { omitUndefinedProperties: true }) as unknown as typeof memory) : memory;
 }
 
 /** Parsed trees are already private; reject non-finite JSON numbers without cloning them again. */
-function validateParsedWorkingSession(value: unknown): WorkingSession {
+export function parseWorkingSession(text: string): WorkingSession {
+	const value: unknown = JSON.parse(text);
 	if (!isJsonValue(value)) throw new TypeError("Value contains a non-finite number and is not strict JSON");
 	return validateWorkingSession(value);
-}
-
-export function parseWorkingSession(text: string): WorkingSession {
-	return validateParsedWorkingSession(JSON.parse(text));
 }
 
 export function readWorkingSession(path: string): WorkingSession {

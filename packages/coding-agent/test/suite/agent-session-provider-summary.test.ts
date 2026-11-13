@@ -691,7 +691,7 @@ describe("AgentSession provider summary block", () => {
 			await harness.session.prompt("next");
 
 			expect(describeMessages(received)).toEqual([
-				reader === "a forced system prompt" ? "system +lookup" : "system +lookup",
+				"system +lookup",
 				"user: Summary of the earlier conversation:\n\nRead the task note.",
 				'assistant: lookup({"key":"b"})',
 				...(reader === "a changed conversation" ? [] : ["toolResult: value of b"]),
@@ -700,6 +700,9 @@ describe("AgentSession provider summary block", () => {
 				"user: next",
 			]);
 			expect(received[0]).not.toHaveProperty("providerSummary");
+			if (reader === "a forced system prompt") {
+				expect(received[0]).toMatchObject({ role: "system", content: "forced prompt" });
+			}
 		},
 	);
 });
