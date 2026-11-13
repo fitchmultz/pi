@@ -3,91 +3,20 @@
  * renderers. The page shows each call once and switches a result between two forms on a click.
  */
 
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { JsonValue, Message } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type JsonValue, type Message } from "@earendil-works/pi-ai";
 import { setKeybindings, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { beforeAll, describe, expect, onTestFinished, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
-import { SessionManager } from "../../src/core/session-manager.ts";
 import backgroundCommand from "../../src/extensions/background-command/index.ts";
 import { createCodemodeExtension } from "../../src/extensions/codemode/index.ts";
 import { createMcpExtension } from "../../src/extensions/mcp/index.ts";
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
-import { createHarness, type HarnessOptions } from "./harness.ts";
-
-interface ExportedCard {
-	call?: string[];
-	collapsed?: string[];
-	expanded?: string[];
-}
-
-/** The text rows of a card part, without markup. */
-function rows(html: string | undefined): string[] | undefined {
-	return html
-		?.split("</div>")
-		.filter((row) => row !== "")
-		.map((row) =>
-			row
-				.replace(/<[^>]+>/g, "")
-				.replace(/&nbsp;/g, "")
-				.trimEnd(),
-		);
-}
+import { exportSessionToolCards as exportCards } from "./ui-harness.ts";
 
 function call(id: string, name: string, args: Record<string, string>): Message {
-	return {
-		role: "assistant",
-		content: [{ type: "toolCall", id, name, arguments: args }],
-		api: "anthropic-messages",
-		provider: "anthropic",
-		model: "test",
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "toolUse",
-		timestamp: 2,
-	};
-}
-
-/** Saves the messages in a session with the extensions, exports it, and returns what the page holds per call id. */
-async function exportCards(
-	extensionFactories: NonNullable<HarnessOptions["extensionFactories"]>,
-	messages: Message[],
-): Promise<Record<string, ExportedCard>> {
-	const dir = mkdtempSync(join(tmpdir(), "pi-export-cards-"));
-	const sessionManager = SessionManager.create(dir, join(dir, "sessions"));
-	const harness = await createHarness({ extensionFactories, sessionManager });
-	onTestFinished(async () => {
-		await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-		harness.cleanup();
-		rmSync(dir, { recursive: true, force: true });
-	});
-	sessionManager.appendMessage({ role: "user", content: "Go.", timestamp: 1 });
-	for (const message of messages) sessionManager.appendMessage(message);
-
-	const html = readFileSync(await harness.session.exportToHtml(join(dir, "export.html")), "utf8");
-	const data = /<script id="session-data" type="application\/json">([^<]*)<\/script>/.exec(html)?.[1] ?? "";
-	const rendered: Record<string, { callHtml?: string; resultHtmlCollapsed?: string; resultHtmlExpanded?: string }> =
-		JSON.parse(Buffer.from(data, "base64").toString("utf8")).renderedTools ?? {};
-	return Object.fromEntries(
-		Object.entries(rendered).map(([id, card]) => [
-			id,
-			{
-				call: rows(card.callHtml),
-				collapsed: rows(card.resultHtmlCollapsed),
-				expanded: rows(card.resultHtmlExpanded),
-			},
-		]),
-	);
+	return fauxAssistantMessage(fauxToolCall(name, args, { id }), { stopReason: "toolUse" });
 }
 
 beforeAll(() => {

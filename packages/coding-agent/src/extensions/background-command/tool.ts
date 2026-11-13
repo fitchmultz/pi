@@ -5,6 +5,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "../../core/extensions/types.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import { formatExpandKeyHint, formatExpandMoreHint } from "../../core/tools/render-utils.ts";
 import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { getShellEnv } from "../../utils/shell.ts";
@@ -173,8 +174,7 @@ export function createBackgroundCommandTool(
 				text,
 				maxVisualLines: COMMAND_PREVIEW_LINES,
 				keep: "start",
-				formatHint: (hidden) =>
-					`${theme.fg("muted", `... (${hidden} more lines,`)} ${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+				formatHint: (hidden) => formatExpandMoreHint(theme, `${hidden} more lines`, context.keyHint),
 			});
 		},
 		renderResult(result, { expanded }, theme, context) {
@@ -190,7 +190,7 @@ export function createBackgroundCommandTool(
 					0,
 				);
 			// The status line stands for the whole record, which the expanded card shows.
-			const hint = ` ${theme.fg("muted", "(")}${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+			const hint = ` ${formatExpandKeyHint(theme, context.keyHint)}`;
 			if (!("id" in detail))
 				return new Text(
 					(detail.total === 0

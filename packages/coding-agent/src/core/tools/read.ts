@@ -157,11 +157,6 @@ interface SelectedLines {
 	uncutText: string | undefined;
 }
 
-/** Whether the shown page leaves out selected text. */
-function isCut(truncation: TruncationResult): boolean {
-	return truncation.truncated || truncation.firstLineExceedsLimit;
-}
-
 /**
  * Whether a range can be streamed and its remaining pages named. Other values (fractional, negative limit)
  * keep the whole-file path, whose array slicing defines what they select, for example limit -1 as all
@@ -254,7 +249,7 @@ function selectLinesFromBuffer(
 		firstLineBytes,
 		lineBytes: (line) => Buffer.byteLength(allLines[line], "utf-8"),
 		uncutText:
-			limit === undefined && isCut(truncation) && truncation.totalBytes <= STRUCTURED_MAX_BYTES
+			limit === undefined && truncation.truncated && truncation.totalBytes <= STRUCTURED_MAX_BYTES
 				? selected
 				: undefined,
 	};
@@ -377,7 +372,7 @@ async function selectLinesFromStream(
 		firstLineBytes,
 		lineBytes: (index) => lineSizes[index - startLine],
 		// Joined only for a cut page: an uncut page already is the whole selection.
-		uncutText: isCut(truncation) ? uncutPieces?.join("") : undefined,
+		uncutText: truncation.truncated ? uncutPieces?.join("") : undefined,
 	};
 }
 

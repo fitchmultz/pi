@@ -1,8 +1,25 @@
-import { type TuiMouseEvent, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, type Container, type TuiMouseEvent, truncateToWidth } from "@earendil-works/pi-tui";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
 
 const INLINE_IMAGE = /\x1b(?:_G|\]1337;File=)/;
+
+/** Handled mouse dispatch receipt targeting `component` at `event`'s origin and bounds. */
+export function handledMouseTarget(
+	component: Component,
+	event: TuiMouseEvent,
+): NonNullable<ReturnType<Container["handleMouse"]>> {
+	return {
+		handled: true,
+		target: {
+			component,
+			originX: event.screenX - event.x,
+			originY: event.screenY - event.y,
+			width: event.width,
+			height: event.height,
+		},
+	};
+}
 
 /**
  * The collapsed form of a card in compact view: at most two rows of the card's native rendering.

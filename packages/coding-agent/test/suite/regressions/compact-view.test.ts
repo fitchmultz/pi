@@ -2,11 +2,9 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { type AutocompleteProvider, type Container, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { describe, expect, onTestFinished, test, vi } from "vitest";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
-import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { type CustomMessage, convertToLlm } from "../../../src/core/messages.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
@@ -17,60 +15,12 @@ import {
 	cancelBackgroundCommand,
 	listBackgroundCommands,
 } from "../../../src/extensions/background-command/jobs.ts";
-import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import { keyHint, keyText } from "../../../src/modes/interactive/components/keybinding-hints.ts";
 import type { SettingsSelectorComponent } from "../../../src/modes/interactive/components/settings-selector.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { initTheme, theme } from "../../../src/modes/interactive/theme/theme.ts";
+import { theme } from "../../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
-import { createHarness, type Harness } from "../harness.ts";
-
-type View = {
-	isInitialized: boolean;
-	defaultEditor: CustomEditor;
-	autocompleteProvider: AutocompleteProvider | undefined;
-	chatContainer: Container;
-	pendingMessagesContainer: Container;
-	editorContainer: Container;
-	setupKeyHandlers(): void;
-	setupEditorSubmitHandler(): void;
-	bindCurrentSessionExtensions(): Promise<void>;
-	subscribeToAgent(): void;
-	setToolsExpanded(expanded: boolean): void;
-	showSettingsSelector(): void;
-};
-
-async function createView(harness: Harness) {
-	initTheme("dark");
-	let rebind = async () => {};
-	const terminal = new VirtualTerminal(80, 40);
-	const mode = new InteractiveMode(
-		{
-			session: harness.session,
-			setBeforeSessionInvalidate() {},
-			setRebindSession(callback: () => Promise<void>) {
-				rebind = callback;
-			},
-		} as unknown as AgentSessionRuntime,
-		{ terminal },
-	);
-	const view = mode as unknown as View;
-	view.isInitialized = true;
-	view.setupKeyHandlers();
-	view.setupEditorSubmitHandler();
-	await view.bindCurrentSessionExtensions();
-	view.subscribeToAgent();
-	onTestFinished(() => mode.stop("resume-hint"));
-	return {
-		view,
-		terminal,
-		rebind: () => rebind(),
-		submit: async (text: string) => {
-			await view.defaultEditor.onSubmit?.(text);
-		},
-		text: () => stripAnsi(view.chatContainer.render(80).join("\n")),
-	};
-}
+import { createHarness } from "../harness.ts";
+import { createTestInteractiveView as createView } from "../ui-harness.ts";
 
 describe("compact view settings and native event lifecycle", () => {
 	test("defaults off, ignores project overrides and preserves concurrent unrelated writes", async () => {

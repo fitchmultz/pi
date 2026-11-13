@@ -10,7 +10,7 @@ import { Text } from "@earendil-works/pi-tui";
 import type { Theme } from "../../../modes/interactive/theme/theme.ts";
 import type { KeybindingHints, ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
 import type { FindToolDetails } from "../find.ts";
-import { getTextOutput, invalidArgText, shortenPath, str } from "../render-utils.ts";
+import { formatExpandMoreHint, getTextOutput, invalidArgText, shortenPath, str } from "../render-utils.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "../truncate.ts";
 
 function formatFindCall(args: { pattern: string; path?: string; limit?: number } | undefined, theme: Theme): string {
@@ -48,7 +48,7 @@ function formatFindResult(
 		const remaining = lines.length - maxLines;
 		text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
 		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+			text += `\n${formatExpandMoreHint(theme, `${remaining} more lines`, keyHint)}`;
 		}
 	}
 

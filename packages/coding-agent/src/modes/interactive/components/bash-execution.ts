@@ -3,6 +3,7 @@
  */
 
 import { Container, Loader, Spacer, Text, type TUI, type TuiMouseEvent, truncateToWidth } from "@earendil-works/pi-tui";
+import { formatExpandKeyHint } from "../../../core/tools/render-utils.ts";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -11,8 +12,10 @@ import {
 } from "../../../core/tools/truncate.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
+import { handledMouseTarget } from "./compact-preview.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
+import { VisualLinePreview } from "./visual-truncate.ts";
 
 // Preview line limit when not expanded (matches tool execution behavior)
 const PREVIEW_LINES = 20;
@@ -86,16 +89,7 @@ export class BashExecutionComponent extends Container {
 		if (!this.compactView) return super.handleMouse(event);
 		if (event.type !== "click" || event.button !== "left") return undefined;
 		this.setExpanded(!this.expanded);
-		return {
-			handled: true,
-			target: {
-				component: this,
-				originX: event.screenX - event.x,
-				originY: event.screenY - event.y,
-				width: event.width,
-				height: event.height,
-			},
-		};
+		return handledMouseTarget(this, event);
 	}
 
 	override render(width: number): string[] {
@@ -208,24 +202,14 @@ export class BashExecutionComponent extends Container {
 				this.contentContainer.addChild(new Text(`\n${displayText}`, this.outputPad, 0));
 			} else {
 				const styledOutput = previewLogicalLines.map((line) => theme.fg("muted", line)).join("\n");
-				const styledInput = `\n${styledOutput}`;
-				const output = new Text(styledInput, this.outputPad, 0);
-				// The preview follows the Text's own lines, so it changes whenever they do.
-				let cachedSource: string[] | undefined;
-				let cachedLines: string[] = [];
-				this.contentContainer.addChild({
-					render: (width: number) => {
-						const lines = output.render(width);
-						if (lines !== cachedSource) {
-							cachedSource = lines;
-							cachedLines = lines.slice(-PREVIEW_LINES);
-						}
-						return cachedLines;
-					},
-					invalidate: () => {
-						cachedSource = undefined;
-					},
-				});
+				this.contentContainer.addChild(
+					new VisualLinePreview({
+						text: `\n${styledOutput}`,
+						maxVisualLines: PREVIEW_LINES,
+						keep: "end",
+						paddingX: this.outputPad,
+					}),
+				);
 			}
 		}
 
@@ -238,12 +222,10 @@ export class BashExecutionComponent extends Container {
 			// Show how many lines are hidden (collapsed preview)
 			if (hiddenLineCount > 0) {
 				if (this.expanded) {
-					statusParts.push(
-						`${theme.fg("muted", "(")}${keyHint("app.tools.expand", "to collapse")}${theme.fg("muted", ")")}`,
-					);
+					statusParts.push(formatExpandKeyHint(theme, keyHint, "to collapse"));
 				} else {
 					statusParts.push(
-						`${theme.fg("muted", `... ${hiddenLineCount} more lines (`)}${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+						`${theme.fg("muted", `... ${hiddenLineCount} more lines `)}${formatExpandKeyHint(theme, keyHint)}`,
 					);
 				}
 			}

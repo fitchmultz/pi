@@ -33,8 +33,9 @@ export interface VisualLinePreviewOptions {
 	maxVisualLines: number;
 	/** Which visual lines to keep. The hint goes before kept end lines and after kept start lines. */
 	keep: "start" | "end";
-	/** Styled hint line for the given number of hidden visual lines. */
-	formatHint: (hidden: number) => string;
+	paddingX?: number;
+	/** Styled hint line for the given number of hidden visual lines, or undefined to omit a hint line. */
+	formatHint?: (hidden: number) => string;
 }
 
 /**
@@ -51,7 +52,7 @@ export class VisualLinePreview implements Component {
 
 	constructor(options: VisualLinePreviewOptions) {
 		this.options = options;
-		this.text = new Text(options.text, 0, 0);
+		this.text = new Text(options.text, options.paddingX ?? 0, 0);
 	}
 
 	render(width: number): string[] {
@@ -65,7 +66,7 @@ export class VisualLinePreview implements Component {
 						? allLines.slice(0, maxVisualLines)
 						: allLines.slice(-maxVisualLines)
 					: allLines;
-			if (skippedCount > 0) {
+			if (skippedCount > 0 && formatHint) {
 				const hint = truncateToWidth(formatHint(skippedCount), width, "...");
 				this.cachedLines = keep === "start" ? [...lines, hint] : [hint, ...lines];
 			} else {

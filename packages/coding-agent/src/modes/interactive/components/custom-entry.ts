@@ -3,7 +3,7 @@ import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import type { EntryRenderer } from "../../../core/extensions/types.ts";
 import type { CustomEntry } from "../../../core/session-manager.ts";
 import { theme } from "../theme/theme.ts";
-import { CompactPreview } from "./compact-preview.ts";
+import { CompactPreview, handledMouseTarget } from "./compact-preview.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 
 /**
@@ -64,16 +64,7 @@ export class CustomEntryComponent extends Container {
 		const result = native && super.handleMouse(native);
 		if (result || !this.compactView || event.type !== "click" || event.button !== "left") return result;
 		this.setExpanded(!this._expanded);
-		return {
-			handled: true,
-			target: {
-				component: this,
-				originX: event.screenX - event.x,
-				originY: event.screenY - event.y,
-				width: event.width,
-				height: event.height,
-			},
-		};
+		return handledMouseTarget(this, event);
 	}
 
 	private rebuild(): void {

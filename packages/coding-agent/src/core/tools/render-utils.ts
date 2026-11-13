@@ -1,11 +1,20 @@
 import { pathToFileURL } from "node:url";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
-import { getCapabilities, getImageDimensions, hyperlink, imageFallback } from "@earendil-works/pi-tui";
+import {
+	type Container,
+	getCapabilities,
+	getImageDimensions,
+	hyperlink,
+	imageFallback,
+	Spacer,
+	Text,
+} from "@earendil-works/pi-tui";
+import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { resolvePath, shortenHomePath } from "../../utils/paths.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
-import type { ToolRenderContext } from "../extensions/types.ts";
+import type { KeybindingHints, ToolRenderContext } from "../extensions/types.ts";
 
 export function shortenPath(path: unknown): string {
 	if (typeof path !== "string") return "";
@@ -84,6 +93,53 @@ export type ToolRenderResultLike<TDetails> = {
 
 const COLLAPSED_ARGS_CHARS = 100;
 
+/** Parenthesized expand/collapse key hint: `(ctrl+o to expand)`. */
+export function formatExpandKeyHint(theme: Theme, keyHint: KeybindingHints["keyHint"], action = "to expand"): string {
+	return `${theme.fg("muted", "(")}${keyHint("app.tools.expand", action)}${theme.fg("muted", ")")}`;
+}
+
+/** Ellipsis line for hidden rows or items: `... (5 more lines, ctrl+o to expand)`. */
+export function formatExpandMoreHint(theme: Theme, summary: string, keyHint: KeybindingHints["keyHint"]): string {
+	return `${theme.fg("muted", `... (${summary},`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+}
+
+/** Append styled tool output to `component`, showing all lines when expanded or a visual-line preview otherwise. */
+export function appendToolOutputPreview(
+	component: Container,
+	output: string,
+	options: {
+		expanded: boolean;
+		isError?: boolean;
+		maxVisualLines: number;
+		fullOutputPath?: string;
+		theme: Theme;
+		keyHint: KeybindingHints["keyHint"];
+	},
+): void {
+	if (!output) return;
+	const color = options.isError ? "error" : "toolOutput";
+	const styled = replaceTabs(output)
+		.split("\n")
+		.map((line) => options.theme.fg(color, line))
+		.join("\n");
+	component.addChild(new Spacer(1));
+	if (options.expanded) {
+		component.addChild(new Text(styled, 0, 0));
+		return;
+	}
+	component.addChild(
+		new VisualLinePreview({
+			text: styled,
+			maxVisualLines: options.maxVisualLines,
+			keep: "start",
+			formatHint: (hidden) => formatExpandMoreHint(options.theme, `${hidden} more lines`, options.keyHint),
+		}),
+	);
+	if (options.fullOutputPath) {
+		component.addChild(new Text(options.theme.fg("muted", `Full output: ${options.fullOutputPath}`), 0, 0));
+	}
+}
+
 /**
  * Generic tool call header: the title followed by the arguments. Collapsed, they are `key=value`
  * pairs on the title line, cut to {@link COLLAPSED_ARGS_CHARS}; cut arguments are followed by a row
@@ -113,8 +169,7 @@ export function formatToolCallWithArgs(
 	const pairs = entries.map(([key, value]) => `${key}=${JSON.stringify(value) ?? String(value)}`).join(" ");
 	if (pairs.length <= COLLAPSED_ARGS_CHARS) return `${header} ${theme.fg("muted", pairs)}`;
 	const preview = `${pairs.slice(0, COLLAPSED_ARGS_CHARS - 3)}...`;
-	const hint = `${theme.fg("muted", "(")}${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
-	return `${header} ${theme.fg("muted", preview)}\n${hint}`;
+	return `${header} ${theme.fg("muted", preview)}\n${formatExpandKeyHint(theme, context.keyHint)}`;
 }
 
 /** Duration as `4.2s` below a minute, then `1m 30s` and `2h 3m 4s`. */

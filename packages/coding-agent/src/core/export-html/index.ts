@@ -7,33 +7,9 @@ import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { SessionEntry } from "../session-manager.ts";
 import { SessionManager } from "../session-manager.ts";
+import type { ToolHtmlRenderer } from "./tool-renderer.ts";
 
-/**
- * Interface for rendering custom tools to HTML.
- * Used by agent-session to pre-render extension tool output.
- */
-export interface ToolHtmlRenderer {
-	/**
-	 * Render a tool call to HTML in its expanded form, because a page cannot expand a call. `result` is the call's
-	 * saved result: with it the call is rendered as finished, without it as still running. Returns undefined if the
-	 * tool has no renderer; the page then shows the arguments as JSON.
-	 */
-	renderCall(
-		toolCallId: string,
-		toolName: string,
-		args: unknown,
-		result?: { isError: boolean; durationMs?: number },
-	): string | undefined;
-	/** Render a tool result to HTML. Returns collapsed/expanded or undefined if tool has no custom renderer. */
-	renderResult(
-		toolCallId: string,
-		toolName: string,
-		result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
-		details: unknown,
-		isError: boolean,
-		durationMs?: number,
-	): { collapsed?: string; expanded?: string } | undefined;
-}
+export type { ToolHtmlRenderer };
 
 /** Pre-rendered HTML for a custom tool call and result */
 interface RenderedToolHtml {
