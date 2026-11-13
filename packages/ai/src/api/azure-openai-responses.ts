@@ -1,7 +1,7 @@
 import { AzureOpenAI } from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
-import type { Api, Model, SimpleStreamOptions, StreamFunction, TranscriptContext } from "../types.ts";
+import type { Model, SimpleStreamOptions, StreamFunction, TranscriptContext } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
@@ -50,7 +50,7 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 	(async () => {
 		const deploymentName = resolveDeploymentName(model, options);
 
-		const output = createPendingAssistantMessage("azure-openai-responses" as Api, model);
+		const output = createPendingAssistantMessage("azure-openai-responses", model);
 
 		try {
 			// Create Azure OpenAI client

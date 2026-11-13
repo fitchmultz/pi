@@ -392,4 +392,38 @@ describe("Anthropic provider summary block", () => {
 		expect(withText.messages[1]).toEqual({ role: "system", content: [{ type: "text", text: "Extension state." }] });
 		expect(addedTools(withText.messages)).toEqual(["chime"]);
 	});
+
+	it("does not retry an unchanged payload when only a summarized tool preferred strict sampling", async () => {
+		const grammarError =
+			"The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools.";
+		const strictError = () =>
+			Response.json(
+				{ type: "error", error: { type: "invalid_request_error", message: grammarError } },
+				{ status: 400 },
+			);
+		const h = harness([strictError(), strictError()]);
+		const summarizedPrefer = {
+			...lookup,
+			name: "ring",
+			constrainedSampling: { type: "json_schema" as const, strict: "prefer" as const },
+		};
+		const base = normalizeContext({ systemPrompt: "You are a test assistant.", tools: [lookup], messages: [] });
+		const lead = base.messages[0] as SystemMessage;
+		const result = await stream(
+			{ ...model, compat: { ...model.compat, supportsStrictTools: true } },
+			{
+				messages: [
+					{ ...lead, providerSummary: { provider: model.provider, api: model.api, model: model.id, block } },
+					{ role: "system", content: "", toolsAdded: [summarizedPrefer], timestamp: 1 },
+					assistant("call_6", "sixth"),
+					toolResult("call_6"),
+				],
+			} as typeof base,
+			h.options,
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(h.requests).toHaveLength(1);
+		expect(result.diagnostics).toBeUndefined();
+	});
 });

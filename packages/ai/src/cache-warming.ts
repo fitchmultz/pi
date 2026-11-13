@@ -83,8 +83,8 @@ export function getPromptCacheTtlMs(model: Model<Api>, options: SimpleStreamOpti
  * different budget, which Anthropic keys the message cache on, and the model could still think for thousands of tokens.
  */
 export function isCacheWarmingReplayable(model: Model<Api>, options: SimpleStreamOptions | undefined): boolean {
-	if (!options?.reasoning || model.api !== "anthropic-messages") return true;
-	return (model as Model<"anthropic-messages">).compat?.forceAdaptiveThinking === true;
+	if (!options?.reasoning || !hasApi(model, "anthropic-messages")) return true;
+	return model.compat?.forceAdaptiveThinking === true;
 }
 
 /**

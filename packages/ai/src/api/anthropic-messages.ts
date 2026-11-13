@@ -24,7 +24,6 @@ import { calculateCost } from "../models.ts";
 import { wroteProviderSummary } from "../provider-summary.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
-	Api,
 	AssistantMessage,
 	CacheRetention,
 	ImageContent,
@@ -37,6 +36,7 @@ import type {
 	StopReason,
 	StreamFunction,
 	StreamOptions,
+	SystemMessage,
 	TextContent,
 	ThinkingContent,
 	Tool,
@@ -70,21 +70,14 @@ import {
 	resolveTranscript,
 	type TranscriptContext,
 } from "../utils/transcript.ts";
-import {
-	getJsonSchemaToolParameters,
-	prefersJsonSchemaStrictSampling,
-	requiresJsonSchemaStrictSampling,
-	resolveJsonSchemaStrictSampling,
-	type UnsupportedStrictSchemaKeywordCheck,
-} from "./constrained-sampling.ts";
+import type { UnsupportedStrictSchemaKeywordCheck } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampMaxTokensToContext } from "./simple-options.ts";
 import {
-	admitStrictTool,
 	hasExceededStrictToolLimits,
 	isStrictToolLimitErrorMessage,
 	markStrictToolLimitsExceeded,
-	startStrictToolBudget,
+	planStrictTools,
 } from "./strict-tool-limits.ts";
 import { splitErrorToolResultImages, transformMessages } from "./transform-messages.ts";
 
@@ -867,7 +860,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	const summaryBlock = getSummaryBlock(model, normalizedContext.messages);
 
 	(async () => {
-		const output = createPendingAssistantMessage(model.api as Api, model);
+		const output = createPendingAssistantMessage(model.api, model);
 
 		try {
 			let client: Anthropic;
@@ -1073,7 +1066,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							name: isOAuth
 								? fromClaudeCodeName(event.content_block.name, currentTools)
 								: event.content_block.name,
-							arguments: (event.content_block.input as Record<string, any>) ?? {},
+							arguments: (event.content_block.input as ToolCall["arguments"]) ?? {},
 						};
 						output.content.push(block);
 						openBlocks.set(event.index, {
@@ -1518,38 +1511,18 @@ function buildParams(
 	const requestToolList = nativeToolChanges
 		? (initialSystemMessage?.toolsAdded ?? [])
 		: getCurrentTools(context.messages);
-	const resolveStrict = (tool: Tool): boolean | undefined =>
-		flags.disablePreferredStrictTools && prefersJsonSchemaStrictSampling(tool)
-			? undefined
-			: resolveJsonSchemaStrictSampling(tool, compat.supportsStrictTools, isAnthropicStrictUnsupportedKeyword);
 	// Claude's strict tool limits cover the whole request: the request-level tools and every inline definition.
 	// Required tools anywhere in it are budgeted before the first preferred tool.
 	const inlineTools = nativeToolChanges
 		? conversationMessages.flatMap((message) => (message.role === "system" ? (message.toolsAdded ?? []) : []))
 		: [];
-	const strictBudget = startStrictToolBudget(
-		[...requestToolList, ...inlineTools].filter(
-			(tool) => requiresJsonSchemaStrictSampling(tool) && resolveStrict(tool) === true,
-		),
-	);
-	let hasPreferredStrictTools = false;
-	const convertToolDefinitions = (tools: Tool[], toolCacheControl?: CacheControlEphemeral): BetaTool[] => {
-		const definitions = convertTools(
-			tools,
-			isOAuthToken,
-			compat.supportsEagerToolInputStreaming,
-			(tool) => resolveStrict(tool) === true && admitStrictTool(strictBudget, tool),
-			toolCacheControl,
-		);
-		if (
-			definitions.some(
-				(definition, index) => definition.strict === true && prefersJsonSchemaStrictSampling(tools[index]),
-			)
-		) {
-			hasPreferredStrictTools = true;
-		}
-		return definitions;
-	};
+	const strictPlan = planStrictTools([...requestToolList, ...inlineTools], {
+		supportsStrictMode: compat.supportsStrictTools,
+		disablePreferred: flags.disablePreferredStrictTools,
+		isUnsupportedKeyword: isAnthropicStrictUnsupportedKeyword,
+	});
+	const convertToolDefinitions = (tools: Tool[], toolCacheControl?: CacheControlEphemeral): BetaTool[] =>
+		convertTools(tools, isOAuthToken, compat.supportsEagerToolInputStreaming, strictPlan.admit, toolCacheControl);
 	const requestTools = convertToolDefinitions(
 		requestToolList,
 		compat.supportsCacheControlOnTools ? cacheControl : undefined,
@@ -1563,14 +1536,18 @@ function buildParams(
 	// the block and the first kept message makes Anthropic drop the kept thinking (both measured). So
 	// they are not sent; their definitions only take the strict shares they had when first sent.
 	// Text that an extension put there is sent, at the cost of the kept thinking.
-	const firstKept = flags.summaryBlock ? conversationMessages.findIndex((message) => message.role !== "system") : 0;
-	const sentMessages = conversationMessages.slice();
-	for (let index = 0; index < (firstKept < 0 ? sentMessages.length : firstKept); index++) {
-		const message = sentMessages[index];
-		if (message.role !== "system") continue;
-		if (nativeToolChanges) convertToolDefinitions(message.toolsAdded ?? []);
-		const { toolsAdded: _added, toolsRemoved: _removed, ...withoutToolChanges } = message;
-		sentMessages[index] = withoutToolChanges;
+	const sentMessages = flags.summaryBlock ? conversationMessages.slice() : conversationMessages;
+	if (flags.summaryBlock) {
+		const firstKept = sentMessages.findIndex((message) => message.role !== "system");
+		const end = firstKept < 0 ? sentMessages.length : firstKept;
+		for (let index = 0; index < end; index++) {
+			const message = sentMessages[index] as SystemMessage;
+			if (nativeToolChanges) {
+				for (const tool of message.toolsAdded ?? []) strictPlan.consume(tool);
+			}
+			const { toolsAdded: _added, toolsRemoved: _removed, ...withoutToolChanges } = message;
+			sentMessages[index] = withoutToolChanges;
+		}
 	}
 	const converted = convertMessages(
 		sentMessages,
@@ -1720,7 +1697,11 @@ function buildParams(
 		params.fallbacks = allowedFallbackModels.map((fallback) => ({ model: fallback.model }));
 	}
 
-	return { params, hasPreferredStrictTools, providerThinkingLevel: effortMessages ? activeEffort : undefined };
+	return {
+		params,
+		hasPreferredStrictTools: strictPlan.hasPreferredStrictTools,
+		providerThinkingLevel: effortMessages ? activeEffort : undefined,
+	};
 }
 
 // Normalize tool call IDs to match Anthropic's required pattern and length
@@ -2051,15 +2032,16 @@ function convertTools(
 	tools: Tool[],
 	isOAuthToken: boolean,
 	supportsEagerToolInputStreaming: boolean,
-	/** Decides whether a definition is sent strict. Called once per definition, in declaration order. */
-	sendsStrict: (tool: Tool) => boolean,
+	/** Returns the strict schema when a definition is sent strict. Called once per definition, in declaration order. */
+	resolveStrictParameters: (tool: Tool) => Tool["parameters"] | undefined,
 	cacheControl?: CacheControlEphemeral,
 ): BetaTool[] {
 	if (!tools) return [];
 
 	return tools.map((tool, index) => {
-		const strict = sendsStrict(tool);
-		const parameters = getJsonSchemaToolParameters(tool, strict);
+		const strictParameters = resolveStrictParameters(tool);
+		const strict = strictParameters !== undefined;
+		const parameters = strictParameters ?? tool.parameters;
 		const schema = parameters as {
 			properties?: unknown;
 			required?: string[];

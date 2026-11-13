@@ -38,7 +38,7 @@ import {
 	getInitialSystemMessage,
 	withoutInitialSystemMessage,
 } from "../utils/transcript.ts";
-import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
+import { resolveJsonSchemaStrictSampling, resolveStrictJsonSchema } from "./constrained-sampling.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
@@ -427,8 +427,7 @@ export function isThinkingPart(part: Pick<Part, "thought" | "thoughtSignature">)
  * a signature from being overwritten with `undefined` within the same streamed block.
  */
 export function retainThoughtSignature(existing: string | undefined, incoming: string | undefined): string | undefined {
-	if (typeof incoming === "string" && incoming.length > 0) return incoming;
-	return existing;
+	return incoming || existing;
 }
 
 // Thought signatures must be base64 for Google APIs (TYPE_BYTES).
@@ -569,7 +568,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					// Only keep as thinking block if same provider AND same model
 					// Otherwise convert to plain text (no tags to avoid model mimicking them)
 					if (isSameProviderAndModel) {
-						const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thinkingSignature);
+						const thoughtSignature = isValidThoughtSignature(block.thinkingSignature)
+							? block.thinkingSignature
+							: undefined;
 						// Same rule as text blocks: an empty thinking block is dropped only when it
 						// carries no signature (mirrors the anthropic converter's handling).
 						if ((!block.thinking || block.thinking.trim() === "") && !thoughtSignature) continue;
@@ -767,13 +768,12 @@ export function convertTools(
 	return [
 		{
 			functionDeclarations: tools.map((tool) => {
-				const strict = resolveJsonSchemaStrictSampling(tool, supportsStrictMode);
-				const parameters = getJsonSchemaToolParameters(tool, strict);
+				const parameters = resolveStrictJsonSchema(tool, supportsStrictMode) ?? tool.parameters;
 				return {
 					name: tool.name,
 					description: tool.description,
 					...(useParameters
-						? { parameters: sanitizeForOpenApi(parameters as unknown) }
+						? { parameters: sanitizeForOpenApi(parameters) }
 						: { parametersJsonSchema: rewriteConstAsEnum(parameters) }),
 				};
 			}),

@@ -1,11 +1,39 @@
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type { Tool } from "../types.ts";
-import { makeStrictJsonSchema, requiresJsonSchemaStrictSampling } from "./constrained-sampling.ts";
+import {
+	prefersJsonSchemaStrictSampling,
+	requiresJsonSchemaStrictSampling,
+	resolveStrictJsonSchema,
+	type UnsupportedStrictSchemaKeywordCheck,
+} from "./constrained-sampling.ts";
 
-/** What is left of Claude's counted limits for one request's strict tools. */
-export interface StrictToolBudget {
+interface StrictToolBudget {
 	tools: number;
 	unionParameters: number;
+}
+
+/** Planned strict schemas and request-wide budget admission for one provider request. */
+export interface StrictToolPlan {
+	/**
+	 * Admit one sent tool definition in declaration order. Returns its strict schema when sent strict,
+	 * or `undefined` when sent non-strict.
+	 */
+	admit: (tool: Tool) => Tool["parameters"] | undefined;
+	/**
+	 * Reserve the strict budget share of an earlier summarized definition without marking the outgoing
+	 * request as carrying relaxable `strict: "prefer"` definitions.
+	 */
+	consume: (tool: Tool) => void;
+	/** True when at least one sent definition used `strict: "prefer"` and can be relaxed on retry. */
+	readonly hasPreferredStrictTools: boolean;
+}
+
+export interface PlanStrictToolsOptions {
+	supportsStrictMode: boolean;
+	disablePreferred: boolean;
+	/** Apply Claude's 20-tool / 16-union request-wide limits. Defaults to `true`. */
+	applyClaudeLimits?: boolean;
+	isUnsupportedKeyword?: UnsupportedStrictSchemaKeywordCheck;
 }
 
 /**
@@ -33,35 +61,66 @@ export function isStrictToolLimitErrorMessage(message: string): boolean {
 }
 
 /**
- * Starts the strict tool budget of one request to Claude. `requiredTools` holds every tool definition the request
- * sends strict because its tool requires that (`strict: "require"`). They take their share here, wherever they are
- * declared, so tools that only prefer strict sampling cannot use up the limits before them. Throws when the required
- * tools alone exceed the limits, which sending other tools non-strict cannot repair.
+ * Plans strict JSON-schema sampling across one request's tool definitions, building each candidate
+ * strict schema at most once. When `applyClaudeLimits` is enabled (default), tools with
+ * `strict: "require"` reserve their share up front so `strict: "prefer"` tools cannot crowd them out;
+ * throws when the required tools alone exceed Claude's limits.
  */
-export function startStrictToolBudget(requiredTools: Tool[]): StrictToolBudget {
-	const budget = { ...CLAUDE_STRICT_TOOL_LIMITS };
-	for (const tool of requiredTools) {
-		if (!takeStrictToolShare(budget, tool)) {
-			throw new Error(
-				`Tool "${tool.name}" requires strict sampling, but the tools that require it exceed Claude's limits of ${CLAUDE_STRICT_TOOL_LIMITS.tools} strict tools and ${CLAUDE_STRICT_TOOL_LIMITS.unionParameters} union-typed parameters per request.`,
-			);
+export function planStrictTools(tools: readonly Tool[], options: PlanStrictToolsOptions): StrictToolPlan {
+	const schemas = new Map<Tool, Tool["parameters"] | null>();
+	const getStrictSchema = (tool: Tool): Tool["parameters"] | undefined => {
+		const cached = schemas.get(tool);
+		if (cached !== undefined) return cached ?? undefined;
+		if (options.disablePreferred && prefersJsonSchemaStrictSampling(tool)) {
+			schemas.set(tool, null);
+			return undefined;
+		}
+		const schema = resolveStrictJsonSchema(tool, options.supportsStrictMode, options.isUnsupportedKeyword);
+		schemas.set(tool, schema ?? null);
+		return schema;
+	};
+
+	const budget = options.applyClaudeLimits === false ? undefined : { ...CLAUDE_STRICT_TOOL_LIMITS };
+	if (budget) {
+		for (const tool of tools) {
+			if (!requiresJsonSchemaStrictSampling(tool)) continue;
+			const schema = getStrictSchema(tool);
+			if (schema && !takeStrictSchemaShare(budget, schema)) {
+				throw new Error(
+					`Tool "${tool.name}" requires strict sampling, but the tools that require it exceed Claude's limits of ${CLAUDE_STRICT_TOOL_LIMITS.tools} strict tools and ${CLAUDE_STRICT_TOOL_LIMITS.unionParameters} union-typed parameters per request.`,
+				);
+			}
 		}
 	}
-	return budget;
-}
 
-/**
- * Returns whether a tool definition that can be strict is sent strict. Call it once per definition, in declaration
- * order: a required tool always is, its share was taken when the budget started; a preferred tool is while the
- * budget still covers it, and is sent non-strict otherwise.
- */
-export function admitStrictTool(budget: StrictToolBudget, tool: Tool): boolean {
-	return requiresJsonSchemaStrictSampling(tool) || takeStrictToolShare(budget, tool);
+	const tryTake = (tool: Tool): Tool["parameters"] | undefined => {
+		const schema = getStrictSchema(tool);
+		if (!schema) return undefined;
+		if (budget && !requiresJsonSchemaStrictSampling(tool) && !takeStrictSchemaShare(budget, schema)) {
+			return undefined;
+		}
+		return schema;
+	};
+
+	let hasPreferredStrictTools = false;
+	return {
+		admit: (tool) => {
+			const schema = tryTake(tool);
+			if (schema && prefersJsonSchemaStrictSampling(tool)) hasPreferredStrictTools = true;
+			return schema;
+		},
+		consume: (tool) => {
+			tryTake(tool);
+		},
+		get hasPreferredStrictTools() {
+			return hasPreferredStrictTools;
+		},
+	};
 }
 
 /** Takes one strict tool definition's share from the budget; returns false, taking nothing, when it does not fit. */
-function takeStrictToolShare(budget: StrictToolBudget, tool: Tool): boolean {
-	const unionParameters = countUnionParameters(makeStrictJsonSchema(tool.parameters));
+function takeStrictSchemaShare(budget: StrictToolBudget, schema: unknown): boolean {
+	const unionParameters = countUnionParameters(schema);
 	if (budget.tools === 0 || unionParameters > budget.unionParameters) return false;
 	budget.tools--;
 	budget.unionParameters -= unionParameters;

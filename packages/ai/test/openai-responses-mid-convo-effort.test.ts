@@ -1,4 +1,3 @@
-import { zstdDecompressSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { type OpenAIResponsesOptions, stream as streamOpenAIResponses } from "../src/api/openai-responses.ts";
 import type { AssistantMessage, Message, Model, ToolResultMessage } from "../src/types.ts";
@@ -74,11 +73,7 @@ async function runOpenAI(
 ): Promise<{ payload: Payload; message: AssistantMessage }> {
 	let payload: Payload | undefined;
 	const fetchMock = async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		const json =
-			new Headers(init?.headers).get("content-encoding") === "zstd"
-				? zstdDecompressSync(init?.body as Uint8Array).toString("utf8")
-				: String(init?.body);
-		payload = JSON.parse(json) as Payload;
+		payload = JSON.parse(String(init?.body)) as Payload;
 		const body = responseEvents("resp_1", options.withToolCall ?? false)
 			.map((event) => `data: ${JSON.stringify(event)}\n\n`)
 			.join("");

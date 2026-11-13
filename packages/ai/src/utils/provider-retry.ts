@@ -1,3 +1,4 @@
+import { operationSignal } from "./abort.ts";
 import { sleep } from "./sleep.ts";
 
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
@@ -76,19 +77,6 @@ function createAbortError(): Error {
 	return error;
 }
 
-/** Backoff sleep that stays interruptible; keeps the abort rejection shape callers see today. */
-async function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
-	if (signal === undefined) {
-		await new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
-		return;
-	}
-	try {
-		await sleep(Math.max(0, ms), signal);
-	} catch {
-		throw createAbortError();
-	}
-}
-
 /**
  * Reproduce the retry behavior used by the OpenAI and Anthropic SDKs while making
  * their backoff sleep interruptible. Their built-in retry timers ignore the
@@ -115,7 +103,12 @@ export async function retryProviderRequest<T>(
 
 			const retryIndex = maxRetries - retriesRemaining;
 			retriesRemaining--;
-			await abortableSleep(getRetryDelayMs(error, retryIndex, options.maxRetryDelayMs), options.signal);
+			const delayMs = Math.max(0, getRetryDelayMs(error, retryIndex, options.maxRetryDelayMs));
+			try {
+				await sleep(delayMs, operationSignal(options.signal));
+			} catch {
+				throw createAbortError();
+			}
 		}
 	}
 }

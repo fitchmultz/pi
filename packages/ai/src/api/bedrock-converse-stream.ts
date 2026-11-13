@@ -29,7 +29,6 @@ import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { calculateCost } from "../models.ts";
 import type {
-	Api,
 	AssistantMessage,
 	CacheRetention,
 	ImageContent,
@@ -69,23 +68,16 @@ import {
 	withoutInitialSystemMessage,
 } from "../utils/transcript.ts";
 import {
-	getJsonSchemaToolParameters,
-	prefersJsonSchemaStrictSampling,
-	requiresJsonSchemaStrictSampling,
-	resolveJsonSchemaStrictSampling,
-} from "./constrained-sampling.ts";
-import {
 	adjustMaxTokensForThinking,
 	buildBaseOptions,
 	clampMaxTokensToContext,
 	clampReasoning,
 } from "./simple-options.ts";
 import {
-	admitStrictTool,
 	hasExceededStrictToolLimits,
 	isStrictToolLimitErrorMessage,
 	markStrictToolLimitsExceeded,
-	startStrictToolBudget,
+	planStrictTools,
 } from "./strict-tool-limits.ts";
 import { splitErrorToolResultImages, transformMessages } from "./transform-messages.ts";
 
@@ -164,7 +156,7 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 	const normalizedContext = collapseSystemMessages(context);
 
 	(async () => {
-		const output = createPendingAssistantMessage("bedrock-converse-stream" as Api, model);
+		const output = createPendingAssistantMessage("bedrock-converse-stream", model);
 
 		const openBlocks: OpenBlocks = new Map();
 
@@ -943,18 +935,6 @@ function supportsPromptCaching(model: Model<"bedrock-converse-stream">, env?: Pr
 	return false;
 }
 
-/**
- * Check if the model supports thinking signatures in reasoningContent.
- * Only Anthropic Claude models support the signature field.
- * Other models (OpenAI, Qwen, Minimax, Moonshot, etc.) reject it with:
- * "This model doesn't support the reasoningContent.reasoningText.signature field"
- *
- * Checks both model ID and model name to support application inference profiles.
- */
-function supportsThinkingSignature(model: Model<"bedrock-converse-stream">): boolean {
-	return isAnthropicClaudeModel(model);
-}
-
 function buildSystemPrompt(
 	systemPrompt: string | undefined,
 	model: Model<"bedrock-converse-stream">,
@@ -1095,7 +1075,7 @@ function convertMessages(
 							// Only Anthropic models support the signature field in reasoningText.
 							// For other models, we omit the signature to avoid errors like:
 							// "This model doesn't support the reasoningContent.reasoningText.signature field"
-							if (supportsThinkingSignature(model)) {
+							if (isAnthropicClaudeModel(model)) {
 								// Signatures arrive after thinking deltas. If a partial or externally
 								// persisted message lacks a signature, Bedrock rejects the replayed
 								// reasoning block. Fall back to plain text, matching Anthropic.
@@ -1196,27 +1176,20 @@ function convertToolConfig(
 ): { toolConfig: ToolConfiguration | undefined; hasPreferredStrictTools: boolean } {
 	if (!tools?.length || toolChoice === "none") return { toolConfig: undefined, hasPreferredStrictTools: false };
 
-	const supportsStrictMode = model.compat?.supportsStrictMode ?? false;
-	const resolveStrict = (tool: Tool): boolean | undefined =>
-		disablePreferredStrictTools && prefersJsonSchemaStrictSampling(tool)
-			? undefined
-			: resolveJsonSchemaStrictSampling(tool, supportsStrictMode);
 	// Only Claude has known request-wide strict tool limits. Other models get every strict tool they support.
-	const strictBudget = isAnthropicClaudeModel(model)
-		? startStrictToolBudget(
-				tools.filter((tool) => requiresJsonSchemaStrictSampling(tool) && resolveStrict(tool) === true),
-			)
-		: undefined;
-	let hasPreferredStrictTools = false;
+	const strictPlan = planStrictTools(tools, {
+		supportsStrictMode: model.compat?.supportsStrictMode ?? false,
+		disablePreferred: disablePreferredStrictTools,
+		applyClaudeLimits: isAnthropicClaudeModel(model),
+	});
 	const bedrockTools: BedrockTool[] = tools.map((tool) => {
-		const strict = resolveStrict(tool) === true && (!strictBudget || admitStrictTool(strictBudget, tool));
-		if (strict && prefersJsonSchemaStrictSampling(tool)) hasPreferredStrictTools = true;
+		const strictParameters = strictPlan.admit(tool);
 		return {
 			toolSpec: {
 				name: tool.name,
 				description: tool.description,
-				inputSchema: { json: getJsonSchemaToolParameters(tool, strict) as unknown as DocumentType },
-				...(strict ? { strict: true } : {}),
+				inputSchema: { json: (strictParameters ?? tool.parameters) as unknown as DocumentType },
+				...(strictParameters ? { strict: true } : {}),
 			},
 		};
 	});
@@ -1235,7 +1208,10 @@ function convertToolConfig(
 			}
 	}
 
-	return { toolConfig: { tools: bedrockTools, toolChoice: bedrockToolChoice }, hasPreferredStrictTools };
+	return {
+		toolConfig: { tools: bedrockTools, toolChoice: bedrockToolChoice },
+		hasPreferredStrictTools: strictPlan.hasPreferredStrictTools,
+	};
 }
 
 function mapStopReason(reason: string | undefined): { stopReason: StopReason; errorMessage?: string } {

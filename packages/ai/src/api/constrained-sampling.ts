@@ -246,21 +246,21 @@ function inferGrammarInputProperty(tool: Tool): string {
 }
 
 /**
- * Decide whether a JSON-schema tool is sent in strict mode. `isUnsupportedKeyword` lets a provider
- * reject extra keywords its strict mode does not accept, so "prefer" tools fall back to non-strict.
+ * Build the strict JSON schema for a tool when it should be sent in strict mode, or `undefined` when
+ * it should be sent non-strict. `isUnsupportedKeyword` lets a provider reject extra keywords its
+ * strict mode does not accept, so `"prefer"` tools fall back to non-strict.
  */
-export function resolveJsonSchemaStrictSampling(
+export function resolveStrictJsonSchema(
 	tool: Tool,
 	supportsStrictMode: boolean,
 	isUnsupportedKeyword?: UnsupportedStrictSchemaKeywordCheck,
-): boolean | undefined {
+): Tool["parameters"] | undefined {
 	const config = tool.constrainedSampling;
 	if (!config || config.type !== "json_schema") return undefined;
 
 	if (supportsStrictMode) {
 		try {
-			makeStrictJsonSchema(tool.parameters, isUnsupportedKeyword);
-			return true;
+			return makeStrictJsonSchema(tool.parameters, isUnsupportedKeyword) as Tool["parameters"];
 		} catch (error) {
 			if (!(error instanceof UnsupportedStrictJsonSchemaError)) throw error;
 			if (config.strict !== "require") return undefined;
@@ -273,6 +273,18 @@ export function resolveJsonSchemaStrictSampling(
 		);
 	}
 	return undefined;
+}
+
+/**
+ * Decide whether a JSON-schema tool is sent in strict mode. `isUnsupportedKeyword` lets a provider
+ * reject extra keywords its strict mode does not accept, so "prefer" tools fall back to non-strict.
+ */
+export function resolveJsonSchemaStrictSampling(
+	tool: Tool,
+	supportsStrictMode: boolean,
+	isUnsupportedKeyword?: UnsupportedStrictSchemaKeywordCheck,
+): boolean | undefined {
+	return resolveStrictJsonSchema(tool, supportsStrictMode, isUnsupportedKeyword) ? true : undefined;
 }
 
 export function resolveGrammarConstrainedSampling(

@@ -1,3 +1,4 @@
+import { hasApi } from "./models.ts";
 import type { Api, Model, ProviderSummary, SystemMessage, TranscriptContext, UserMessage } from "./types.ts";
 import { getInitialSystemMessage, type TranscriptMessages } from "./utils/transcript.ts";
 
@@ -10,18 +11,29 @@ import { getInitialSystemMessage, type TranscriptMessages } from "./utils/transc
  * two capabilities pi folds every later change into them.
  */
 export function supportsProviderSummary(model: Model<Api>): boolean {
-	if (model.api !== "anthropic-messages") return false;
-	const compat = (model as Model<"anthropic-messages">).compat;
+	if (!hasApi(model, "anthropic-messages")) return false;
 	return (
-		compat?.supportsMidConvoEffort === true &&
-		compat.supportsMidConvoSystemMessages === true &&
-		compat.supportsMidConvoToolChanges === true
+		model.compat?.supportsMidConvoEffort === true &&
+		model.compat.supportsMidConvoSystemMessages === true &&
+		model.compat.supportsMidConvoToolChanges === true
 	);
 }
 
 /** Whether `model` wrote the summary block. Only the provider, API and model that wrote a block can read it. */
 export function wroteProviderSummary(model: Model<Api>, summary: ProviderSummary): boolean {
 	return summary.provider === model.provider && summary.api === model.api && summary.model === model.id;
+}
+
+function buildStandIn(lead: SystemMessage, summary: ProviderSummary): UserMessage {
+	const text = summary.block.content;
+	return {
+		role: "user",
+		content:
+			typeof text === "string" && text.length > 0
+				? `Summary of the earlier conversation:\n\n${text}`
+				: "The earlier conversation was summarized. Its summary is not available to this model.",
+		timestamp: summary.timestamp ?? lead.timestamp,
+	};
 }
 
 /**
@@ -33,16 +45,7 @@ export function wroteProviderSummary(model: Model<Api>, summary: ProviderSummary
  */
 export function getProviderSummaryStandIn(messages: TranscriptMessages): UserMessage | undefined {
 	const lead = getInitialSystemMessage(messages);
-	if (!lead?.providerSummary) return undefined;
-	const text = lead.providerSummary.block.content;
-	return {
-		role: "user",
-		content:
-			typeof text === "string" && text.length > 0
-				? `Summary of the earlier conversation:\n\n${text}`
-				: "The earlier conversation was summarized. Its summary is not available to this model.",
-		timestamp: lead.providerSummary.timestamp ?? lead.timestamp,
-	};
+	return lead?.providerSummary ? buildStandIn(lead, lead.providerSummary) : undefined;
 }
 
 /**
@@ -54,14 +57,18 @@ export function getProviderSummaryStandIn(messages: TranscriptMessages): UserMes
  */
 export function resolveProviderSummary(model: Model<Api>, context: TranscriptContext): TranscriptContext {
 	const lead = getInitialSystemMessage(context.messages);
-	const standIn = getProviderSummaryStandIn(context.messages);
-	if (!lead?.providerSummary || !standIn || wroteProviderSummary(model, lead.providerSummary)) return context;
+	if (!lead?.providerSummary || wroteProviderSummary(model, lead.providerSummary)) return context;
 	const plainLead: SystemMessage = { ...lead };
 	delete plainLead.providerSummary;
 	const firstKept = context.messages.findIndex((message) => message.role !== "system");
 	const index = firstKept < 0 ? context.messages.length : firstKept;
 	return {
 		...context,
-		messages: [plainLead, ...context.messages.slice(1, index), standIn, ...context.messages.slice(index)],
+		messages: [
+			plainLead,
+			...context.messages.slice(1, index),
+			buildStandIn(lead, lead.providerSummary),
+			...context.messages.slice(index),
+		],
 	};
 }
