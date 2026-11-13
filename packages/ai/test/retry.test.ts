@@ -171,6 +171,50 @@ describe("provider retry classification", () => {
 		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
 	});
 
+	it.each(["MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL"])(
+		"retries Gemini tool-call generation finish reason %s",
+		(rawStopReason) => {
+			expect(
+				isRetryableAssistantError({
+					...fauxAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: `Provider stopped with: ${rawStopReason}`,
+					}),
+					rawStopReason,
+				}),
+			).toBe(true);
+			expect(
+				isRetryableAssistantError({
+					...fauxAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: `Provider stopped with: ${rawStopReason} (billing argument truncated)`,
+					}),
+					rawStopReason,
+				}),
+			).toBe(true);
+			expect(
+				isRetryableAssistantError(
+					fauxAssistantMessage("", {
+						stopReason: "error",
+						errorMessage: `Provider finish_reason: ${rawStopReason}`,
+					}),
+				),
+			).toBe(true);
+		},
+	);
+
+	it.each([
+		"Provider stopped with: SAFETY",
+		"Provider stopped with: BLOCKLIST",
+		"Provider stopped with: PROHIBITED_CONTENT",
+		"Provider stopped with: RECITATION",
+		"Provider stopped with: TOO_MANY_TOOL_CALLS",
+		"Provider stopped with: OTHER",
+		"Unknown identifier MALFORMED_FUNCTION_CALL_HANDLER",
+	])("keeps non-retryable finish reasons and identifier substrings non-retryable: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+
 	it("classifies assistant error messages", () => {
 		expect(
 			isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })),
