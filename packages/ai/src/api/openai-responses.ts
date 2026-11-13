@@ -20,7 +20,6 @@ import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { createPendingAssistantMessage } from "../utils/pending-assistant.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { createRequestCompressionFetch } from "../utils/request-compression.ts";
 import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -185,7 +184,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				apiKey,
 				options?.headers,
 				options?.identity,
-				createRequestCompressionFetch("openai-responses", options?.fetch),
+				options?.fetch,
 				cacheSessionId,
 			);
 			let params = buildParams(

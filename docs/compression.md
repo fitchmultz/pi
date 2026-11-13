@@ -12,18 +12,20 @@ an OpenAI/Anthropic-compatible JSON schema.
 | Adapter / destination | Encoding | Boundary |
 | --- | --- | --- |
 | Anthropic Messages at `https://api.anthropic.com/v1/messages` | gzip | API key, OAuth and header/federation auth; Node/Bun native gzip, or the Web `CompressionStream` when available |
-| OpenAI Responses at `https://api.openai.com/v1/responses` | zstd | Native runtime support required; public Responses endpoint, not Chat Completions, Azure or compatible gateways |
 | Codex SSE at `https://chatgpt.com/backend-api/codex/responses` | zstd | Existing Codex compression, now restricted to the canonical resolved endpoint; WebSocket JSON frames are unchanged |
+
+`https://api.openai.com/v1/responses` is deliberately not compressed. A byte-for-byte
+reproduction on 2026-11-13 showed the service returning `400 {"detail":"Bad Request"}`
+for a valid 131,904-byte JSON request sent as a 33,869-byte zstd frame, while the
+identical uncompressed bytes returned `200`. Automatic compression for this endpoint
+was removed rather than retried or detected per-response; set an explicit
+`Content-Encoding` header on custom fetch implementations if a qualified proxy needs one.
 
 For the new Anthropic and public OpenAI paths:
 
 - Only serialized JSON POST bodies of at least 1 KiB are candidates. Compression
   is asynchronous, and the original body is retained if compression fails or does
-  not make it smaller. Native gzip uses level 1; native zstd uses level 3.
-- OpenAI's documented limits are checked before sending compressed bytes: both
-  representations must be at most 128 MiB, and decompression must not expand the
-  compressed body by more than 100 times. Otherwise the ordinary JSON request is
-  sent; normal provider request/context limits still apply.
+  not make it smaller. Native gzip uses level 1.
 - Existing `Content-Encoding` headers are respected. Set `Content-Encoding: identity`
   in provider/model/request headers to disable automatic compression, for example
   for an inspecting proxy or custom fetch implementation that requires plain JSON.
@@ -79,8 +81,7 @@ verified a lossless gzip round trip. No paid model calls are required.
 
 ```sh
 ./test.sh -- node node_modules/vitest/dist/cli.js --run --root packages/ai \
-  test/anthropic-request-compression.test.ts test/openai-request-compression.test.ts \
-  test/openai-codex-stream.test.ts
+  test/anthropic-request-compression.test.ts test/openai-codex-stream.test.ts
 npm run check
 ./test.sh
 ```
