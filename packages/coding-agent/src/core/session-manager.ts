@@ -742,10 +742,7 @@ export function buildSessionProjection(
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 ): SessionProjection {
-	return buildSessionProjectionFromPath(buildSessionPath(entries, leafId, byId));
-}
-
-function buildSessionProjectionFromPath(path: SessionEntry[]): SessionProjection {
+	const path = buildSessionPath(entries, leafId, byId);
 	return projectContextEntries(buildContextEntriesFromPath(path), getSessionContextSettings(path));
 }
 

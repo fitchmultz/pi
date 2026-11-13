@@ -888,9 +888,9 @@ export class AgentSession {
 		this.agent.followUpMode = memory.followUpMode;
 		this._steeringMessages = memory.steeringText;
 		this._followUpMessages = memory.followUpText;
-		this._pendingNextTurnMessages = memory.nextTurn as CustomMessage[];
-		this._pendingCustomMessages = memory.pendingCustom as CustomMessage[];
-		this._pendingBashMessages = memory.pendingBash as BashExecutionMessage[];
+		this._pendingNextTurnMessages = memory.nextTurn;
+		this._pendingCustomMessages = memory.pendingCustom;
+		this._pendingBashMessages = memory.pendingBash;
 		this._usesDefaultTools = memory.usesDefaultTools;
 		this._defaultToolModifiers = memory.defaultToolModifiers ?? [];
 		this._setToolFilters(memory.allowedTools, memory.excludedTools);
@@ -1162,7 +1162,10 @@ export class AgentSession {
 			isSequential: () => this.agent.toolExecution === "sequential",
 			runToolCall: (toolCall, parentId, signal, onUpdate) => {
 				// A background run keeps the assistant message that issued its launching call.
-				const assistantMessage = this._backgroundOriginAssistant(parentId) ?? this._findLastAssistantMessage();
+				const owner = this._nestedToolCalls?.backgroundOwner(parentId);
+				const assistantMessage =
+					(owner === undefined ? undefined : this._backgroundRuns.get(owner)?.originAssistant) ??
+					this._findLastAssistantMessage();
 				if (!assistantMessage) {
 					return Promise.resolve({
 						toolCall,
@@ -1294,11 +1297,6 @@ export class AgentSession {
 		return undefined;
 	}
 
-	private _backgroundOriginAssistant(callerId: string): AssistantMessage | undefined {
-		const owner = this._nestedToolCalls?.backgroundOwner(callerId);
-		return owner === undefined ? undefined : this._backgroundRuns.get(owner)?.originAssistant;
-	}
-
 	private async _cancelBackgroundRuns(reason: string): Promise<void> {
 		if (this._backgroundRuns.size === 0) return;
 		await this._stopBackgroundRuns([...this._backgroundRuns.values()], reason);
@@ -1352,9 +1350,9 @@ export class AgentSession {
 				if (!this._disposed && !run.controller.signal.aborted) state.result.commit?.();
 				state.due = "usage";
 			}
-			if (state.due === "usage") this._recordBackgroundRunUsage(run);
+			if (state.due === "usage") this._recordBackgroundRunUsage(run, state);
 			if (this._disposed || run.controller.signal.aborted) {
-				this._finishBackgroundRun(run);
+				this._backgroundRuns.delete(run.runId);
 				return true;
 			}
 			await this.sendCustomMessage(
@@ -1377,21 +1375,22 @@ export class AgentSession {
 				},
 				{ deliverAs: "steer", triggerTurn: true },
 			);
-			this._finishBackgroundRun(run);
+			this._backgroundRuns.delete(run.runId);
 			return true;
 		} catch (error) {
 			// A hold that started after the checks leaves the remaining steps for a later pass.
 			if (this.workingSessionGate.reserved) return false;
 			this._reportBackgroundRunError(run, error);
-			this._finishBackgroundRun(run);
+			this._backgroundRuns.delete(run.runId);
 			return false;
 		}
 	}
 
 	/** Record a settled run's descendant and model usage once; the step advances only after the write. */
-	private _recordBackgroundRunUsage(run: BackgroundToolRun): void {
-		const state = run.state;
-		if (state.status !== "settled" || state.due !== "usage") return;
+	private _recordBackgroundRunUsage(
+		run: BackgroundToolRun,
+		state: Extract<BackgroundToolRunState, { status: "settled" }>,
+	): void {
 		const nestedUsage = state.nested?.usage;
 		const modelUsage = state.result.usage;
 		const usage = nestedUsage && modelUsage ? combineUsage(nestedUsage, modelUsage) : (nestedUsage ?? modelUsage);
@@ -1400,10 +1399,6 @@ export class AgentSession {
 			this._emit({ type: "entry_appended", entry });
 		}
 		state.due = "message";
-	}
-
-	private _finishBackgroundRun(run: BackgroundToolRun): void {
-		this._backgroundRuns.delete(run.runId);
 	}
 
 	private _reportBackgroundRunError(run: BackgroundToolRun, error: unknown): void {

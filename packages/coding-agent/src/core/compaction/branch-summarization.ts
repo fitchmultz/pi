@@ -7,8 +7,8 @@
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { RetryCallbacks, RetryPolicy } from "@earendil-works/pi-ai";
-import { contentText, normalizeContext } from "@earendil-works/pi-ai";
-import type { Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai/compat";
+import { contentText } from "@earendil-works/pi-ai";
+import type { Model, Usage } from "@earendil-works/pi-ai/compat";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -22,15 +22,20 @@ import {
 	type SessionEntry,
 } from "../session-manager.ts";
 import { SETTINGS_DEFAULTS } from "../settings-defaults.ts";
-import { completeSummarization, getSummarizationFailure } from "./compaction.ts";
+import {
+	buildSummarizationContext,
+	completeSummarization,
+	createSummarizationOptions,
+	getSummarizationFailure,
+} from "./compaction.ts";
 import {
 	computeFileLists,
 	createFileOps,
+	estimateSerializedTokens,
 	extractFileOpsFromMessage,
 	type FileOperations,
 	formatCheckpointPrompt,
 	formatFileOperations,
-	SUMMARIZATION_SYSTEM_PROMPT,
 	serializeConversation,
 } from "./utils.ts";
 
@@ -241,7 +246,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		extractFileOpsFromMessage(message, fileOps);
 
 		// Budget the text sent to the summarizer, not replay-only signatures or images.
-		const tokens = Math.ceil(serializeConversation(convertToLlm([message])).length / 4);
+		const tokens = estimateSerializedTokens(convertToLlm([message]));
 
 		// Check budget before adding
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
@@ -338,24 +343,18 @@ export async function generateBranchSummary(
 	}
 	const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${instructions}`;
 
-	const summarizationMessages = [
-		{
-			role: "user" as const,
-			content: [{ type: "text" as const, text: promptText }],
-			timestamp: Date.now(),
-		},
-	];
-
 	// Call LLM for summarization. Prefer the session stream function so SDK
 	// request behavior (timeouts, retries, attribution headers) stays consistent
 	// without running through agent state/events. Retried via completeSummarization
 	// so transient stream drops reuse the configured retry policy.
-	const context = normalizeContext({ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages });
-	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal };
-	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
-		requestOptions.reasoning = thinkingLevel;
-	}
-	const response = await completeSummarization(model, context, requestOptions, streamFn, retry, callbacks);
+	const response = await completeSummarization(
+		model,
+		buildSummarizationContext(promptText),
+		createSummarizationOptions(model, apiKey, headers, env, signal, thinkingLevel),
+		streamFn,
+		retry,
+		callbacks,
+	);
 
 	// Check if aborted or errored
 	if (response.stopReason === "aborted") {
@@ -364,9 +363,6 @@ export async function generateBranchSummary(
 	const failure = getSummarizationFailure(response, "Branch summarization");
 	if (failure) {
 		return { error: failure };
-	}
-	if (response.content.some((block) => block.type === "toolCall")) {
-		return { error: "Branch summarization attempted to call a tool" };
 	}
 
 	let summary = contentText(response.content);

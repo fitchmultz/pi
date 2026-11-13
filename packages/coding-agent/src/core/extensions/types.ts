@@ -2309,7 +2309,6 @@ export interface ExtensionRuntimeState {
 	beforeMutation?: () => void;
 	runWorkingSessionActivity?: <T>(action: () => Promise<T>) => Promise<T>;
 	flagValues: Map<string, boolean | string>;
-	authFallbacks: Array<{ providerId: string; fallback: ProviderAuthFallback; dispose?: () => void; active: boolean }>;
 	registerProviderAuthFallback: (providerId: string, fallback: ProviderAuthFallback) => () => void;
 	bindProviderAuthFallbacks: (register: (providerId: string, fallback: ProviderAuthFallback) => () => void) => boolean;
 	/** Legacy provider-config registrations queued during extension loading, processed when runner binds. */

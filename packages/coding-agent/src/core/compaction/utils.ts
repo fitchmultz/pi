@@ -167,6 +167,11 @@ export function serializeConversation(messages: Message[]): string {
 	return parts.join("\n\n");
 }
 
+/** Estimate token count for serialized messages using the chars/4 heuristic. */
+export function estimateSerializedTokens(messages: Message[]): number {
+	return Math.ceil(serializeConversation(messages).length / 4);
+}
+
 // ============================================================================
 // Checkpoint Prompt Format
 // ============================================================================
