@@ -117,6 +117,9 @@ fi
 value="${NODE_EXTRA_CA_CERTS-}"
 [[ -z "$value" ]] || test_env+=("NODE_EXTRA_CA_CERTS=$value")
 
+# The pi-env tests build their daemon with cargo, whose toolchains live under the real home.
+test_env+=("RUSTUP_HOME=${RUSTUP_HOME:-$HOME/.rustup}" "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}")
+
 # Explicit test inputs only; never inherit provider keys or runtime/session state.
 for name in CI GITHUB_ACTIONS PI_TEST_CLI; do
 	value="${!name-}"

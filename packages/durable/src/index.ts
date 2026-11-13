@@ -32,7 +32,7 @@ export {
 	CompactionTask,
 	type SummaryRequest,
 } from "./harness/compaction.ts";
-export { defineExtension, defineTool, hook, runEndTask, section, wrapSection, wrapTool } from "./harness/define.ts";
+export { defineExtension, defineTool, hook, hookTask, section, wrapSection, wrapTool } from "./harness/define.ts";
 export {
 	type GenerationCheckpoint,
 	type GenerationInput,
@@ -76,6 +76,7 @@ export {
 } from "./harness/transcript.ts";
 export type {
 	AfterFailedRun,
+	AfterToolsDecision,
 	Agent,
 	AgentChange,
 	AgentState,
@@ -104,9 +105,11 @@ export type {
 	HookRegistration,
 	HookResult,
 	HooksOf,
+	HookTask,
 	InputEntry,
 	InputSubmissionDraft,
 	ModelRef,
+	NestedToolCall,
 	NestedToolExecutionResult,
 	ProgressPolicy,
 	PromptInput,
@@ -115,7 +118,6 @@ export type {
 	Registry,
 	RegistryReader,
 	RegistrySnapshot,
-	RunEndTask,
 	RunSummary,
 	Settings,
 	SettledSubmissionRecord,
@@ -130,14 +132,26 @@ export type {
 	ToolExecutionResult,
 	ToolHookCall,
 	ToolHooks,
+	ToolNamespace,
+	ToolPark,
 	ToolRegistration,
 	UserInput,
 	Wake,
 	Wrap,
+	YieldDecision,
 } from "./harness/types.ts";
 export { UsageDoc, type UsageState } from "./harness/usage.ts";
 export type { ConversationView, ConversationWindow } from "./harness/view.ts";
 export { createSession } from "./session/session.ts";
+export {
+	defineSignal,
+	type SignalDefinition,
+	type SignalKey,
+	type SignalResult,
+	type SignalState,
+	type SignalToken,
+	SubmissionSettled,
+} from "./signals.ts";
 export { MemoryStorage } from "./storage/memory.ts";
 export { defineTask } from "./tasks.ts";
 export type {
@@ -212,6 +226,7 @@ export type {
 	StoredDocument,
 	SubmissionCreate,
 	SubmissionId,
+	SubmissionNotify,
 	SubmissionQuery,
 	SubmissionRecord,
 	SubmissionSettlement,
@@ -232,5 +247,6 @@ export type {
 	Tx,
 	TypedEntry,
 	TypedEntryDraft,
+	WakeReason,
 } from "./types.ts";
 export { ROOT_CONVERSATION_ID } from "./types.ts";

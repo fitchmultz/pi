@@ -3,6 +3,7 @@
 // or the archived sessions, each restored on a click. Its search finds sessions and messages within the list only.
 import {
 	ErrorToast,
+	inPage,
 	MenuIcon,
 	NavAddIcon,
 	openPage,
@@ -10,18 +11,22 @@ import {
 	requestReveal,
 	SearchIcon,
 	SideNavigation,
+	Slot,
+	SlotList,
+	useLinkHref,
 	useScrollMemory,
 } from "@p2/app/v1/web";
 import { useEffect, useRef, useState } from "react";
 import type { SearchResults } from "../../search/contract.ts";
 import { type ListEntry, type ListPageData, type NewTarget, WINDOWS } from "./model.ts";
-import { inPage, pageHref, type RowActions, SessionItem } from "./Row.tsx";
+import { pageRoute, type RowActions, SessionItem } from "./Row.tsx";
 
 /** What the page says under its title: the window, or what the archive holds. */
 function subtitle(data: ListPageData | undefined): string {
 	if (!data) return "";
 	if (data.archived) return "Archived sessions. Open one to restore it.";
-	if (!data.window || data.window === "forever") return "Every session shows in the sidebar.";
+	if (!data.window || data.window === "forever" || data.window === "none")
+		return "Every session shows in the sidebar.";
 	const label = WINDOWS.find((each) => each.window === data.window)?.label.toLowerCase();
 	return `Sessions without activity in the last ${label} are dimmed; the sidebar shows the others.`;
 }
@@ -117,6 +122,7 @@ export function ListPage({
 	/** Starts a new session in a group (the owner's). */
 	onNewIn?: (target: NewTarget) => void;
 }) {
+	const linkHref = useLinkHref();
 	const archived = data?.archived ?? false;
 	const [query, setQuery] = useState(() => storedQuery(page));
 	const body = useRef<HTMLDivElement>(null);
@@ -134,7 +140,15 @@ export function ListPage({
 	const rows = (entries: readonly ListEntry[]) => (
 		<SideNavigation.List>
 			{matching(entries).map(({ row, aged }) => (
-				<SessionItem key={row.id} session={row} scope="page" archived={archived} aged={aged} actions={actions} />
+				<SessionItem
+					key={row.id}
+					session={row}
+					scope="page"
+					listsConversations={false}
+					archived={archived}
+					aged={aged}
+					actions={actions}
+				/>
 			))}
 		</SideNavigation.List>
 	);
@@ -144,7 +158,9 @@ export function ListPage({
 			<header className="topbar">
 				<button type="button" className="icon-button menu sidebar-open" onClick={openSidebar} aria-label="Sessions">
 					<MenuIcon />
+					<Slot name="menu-badge" />
 				</button>
+				<SlotList prefix="topbar-start" />
 				<div className="title">
 					<h1>{data?.name ?? "Sessions"}</h1>
 					<p className="list-page-subtitle">{subtitle(data)}</p>
@@ -152,66 +168,71 @@ export function ListPage({
 				{data && <NewIn name={data.name} target={data.target} onNewIn={onNewIn} />}
 			</header>
 			<ErrorToast />
-			<div className="list-page-body" ref={body} hidden={loading}>
-				{data && onSearch && (
-					<label className="search">
-						<SearchIcon />
-						<input
-							type="search"
-							value={query}
-							onChange={(event) => {
-								setQuery(event.target.value);
-								storeQuery(page, event.target.value);
-							}}
-							placeholder={archived ? "Search the archive" : `Search ${data.name}`}
-							aria-label="Search sessions and messages"
-						/>
-					</label>
-				)}
-				{content?.layout === "sessions" && rows(content.entries)}
-				{content?.layout === "groups" &&
-					content.groups.map((group) =>
-						results && matching(group.entries).length === 0 ? null : (
-							<section className="list-group" key={group.key}>
-								<h2 className="list-group-label">
-									{/* A group's own list: the sidebar's group rows show or hide their sessions instead. */}
-									<a
-										className="list-group-link"
-										href={pageHref(group.key)}
-										onClick={inPage(() => openPage(group.key))}
-									>
-										{group.name}
-									</a>
-									<NewIn name={group.name} target={group.target} onNewIn={onNewIn} />
-								</h2>
-								{group.entries.length > 0 ? rows(group.entries) : <p className="empty-note">No sessions</p>}
-							</section>
-						),
-					)}
-				{messages.length > 0 && (
-					<section className="list-group">
-						<h2 className="list-group-label">Messages</h2>
-						{messages.slice(0, 40).map((hit) => (
-							<button
-								type="button"
-								key={`${hit.session}-${hit.entryId}`}
-								className="hit"
-								// p2 indexes subagent messages too: a hit opens the conversation it was found in, at the message.
-								onClick={() => {
-									requestReveal(hit.session, hit.conversationId, hit.entryId);
-									if (archived) actions.onRestore(hit.session, hit.conversationId);
-									else actions.onOpen(hit.session, hit.conversationId);
+			{/* One scroller across the main area, as the transcript's; the list in the transcript's column. */}
+			<div className="scroller list-page-scroller" ref={body}>
+				<div className="list-page-body" hidden={loading}>
+					{data && onSearch && (
+						<label className="search">
+							<SearchIcon />
+							<input
+								type="search"
+								value={query}
+								onChange={(event) => {
+									setQuery(event.target.value);
+									storeQuery(page, event.target.value);
 								}}
-							>
-								<strong>{hit.title}</strong>
-								<span>{hit.text.slice(0, 160)}</span>
-							</button>
-						))}
-					</section>
-				)}
-				{data && listed.length === 0 && content?.layout === "sessions" && <p className="empty-note">No sessions</p>}
-				{results && !found && messages.length === 0 && <p className="empty-note">Nothing found</p>}
-				{!data && <p className="empty-note">This list no longer exists</p>}
+								placeholder={archived ? "Search the archive" : `Search ${data.name}`}
+								aria-label="Search sessions and messages"
+							/>
+						</label>
+					)}
+					{content?.layout === "sessions" && rows(content.entries)}
+					{content?.layout === "groups" &&
+						content.groups.map((group) =>
+							results && matching(group.entries).length === 0 ? null : (
+								<section className="list-group" key={group.key}>
+									<h2 className="list-group-label">
+										{/* A group's own list: the sidebar's group rows show or hide their sessions instead. */}
+										<a
+											className="list-group-link"
+											href={linkHref(pageRoute(group.key))}
+											onClick={inPage(() => openPage(group.key))}
+										>
+											{group.name}
+										</a>
+										<NewIn name={group.name} target={group.target} onNewIn={onNewIn} />
+									</h2>
+									{group.entries.length > 0 ? rows(group.entries) : <p className="empty-note">No sessions</p>}
+								</section>
+							),
+						)}
+					{messages.length > 0 && (
+						<section className="list-group">
+							<h2 className="list-group-label">Messages</h2>
+							{messages.slice(0, 40).map((hit) => (
+								<button
+									type="button"
+									key={`${hit.session}-${hit.entryId}`}
+									className="hit"
+									// p2 indexes subagent messages too: a hit opens the conversation it was found in, at the message.
+									onClick={() => {
+										requestReveal(hit.session, hit.conversationId, hit.entryId);
+										if (archived) actions.onRestore(hit.session, hit.conversationId);
+										else actions.onOpen(hit.session, hit.conversationId);
+									}}
+								>
+									<strong>{hit.title}</strong>
+									<span>{hit.text.slice(0, 160)}</span>
+								</button>
+							))}
+						</section>
+					)}
+					{data && listed.length === 0 && content?.layout === "sessions" && (
+						<p className="empty-note">No sessions</p>
+					)}
+					{results && !found && messages.length === 0 && <p className="empty-note">Nothing found</p>}
+					{!data && <p className="empty-note">This list no longer exists</p>}
+				</div>
 			</div>
 		</div>
 	);

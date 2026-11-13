@@ -1772,7 +1772,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (fullRedraw) {
 			this.fullRedrawCount += 1;
 			if (this.imageProtocol === "kitty" && hadUploadedKittyImages) {
-				// Erase-display can free unplaced image data; the per-row clears below erase the screen instead.
+				// Kitty frees image data without placements on ED 2, which would break placement-only reuse.
+				// Every row is cleared with EL 2 below, so keep the uploads and skip the screen clear.
 				buffer += deleteAllKittyPlacements();
 			} else {
 				buffer += `${this.deleteKittyImages()}\x1b[2J`;

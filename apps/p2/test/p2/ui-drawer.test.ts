@@ -43,7 +43,7 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 
 	it("hides the new-session title, opens sign-in and the model sheet, selects cwd, and sends an attached first message", async () => {
 		await browser.metrics(390, 844);
-		await browser.open(`http://127.0.0.1:${fixture.server.port}/`);
+		await browser.open(`http://127.0.0.1:${fixture.server.port}/new`);
 		await browser.wait(`document.querySelector('.composer textarea') && !document.querySelector('.offline')`);
 		assert.equal(
 			await browser.evaluate<string>(`getComputedStyle(document.querySelector('.topbar .title')).visibility`),
@@ -98,7 +98,7 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 
 	it("collapses and reopens the desktop sidebar without a navigation step; closes the phone drawer through Back and scrim", async () => {
 		await browser.metrics(1280, 900);
-		await browser.open(`http://127.0.0.1:${fixture.server.port}/`);
+		await browser.open(`http://127.0.0.1:${fixture.server.port}/new`);
 		await browser.wait(`document.querySelector('.collapse-sidebar') && !document.querySelector('.offline')`);
 		const length = await browser.evaluate<number>("history.length");
 		await browser.click('button[aria-label="Collapse sidebar"]');
@@ -123,7 +123,7 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 
 	it("resizes the desktop sidebar from its edge within limits, remembers the width, and ignores it on phones", async () => {
 		await browser.metrics(1280, 900);
-		await browser.open(`http://127.0.0.1:${fixture.server.port}/`);
+		await browser.open(`http://127.0.0.1:${fixture.server.port}/new`);
 		await browser.wait(`document.querySelector('.sidebar-resize') && !document.querySelector('.offline')`);
 		await browser.evaluate("localStorage.removeItem('pi-sidebar-width')");
 		const width = () => browser.evaluate<number>(`document.querySelector('.drawer').getBoundingClientRect().width`);
@@ -154,7 +154,7 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		await browser.wait(`localStorage.getItem('pi-sidebar-width')==='220'`);
 		await drag(1200);
 		await browser.wait(`localStorage.getItem('pi-sidebar-width')==='560'`);
-		await browser.open(`http://127.0.0.1:${fixture.server.port}/`);
+		await browser.open(`http://127.0.0.1:${fixture.server.port}/new`);
 		await browser.wait(`document.querySelector('.sidebar-resize') && !document.querySelector('.offline')`);
 		assert.equal(await width(), 560);
 		await browser.metrics(390, 844);
@@ -206,11 +206,18 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		);
 		await browser.click(".session-header.has-subagents .subagent-toggle");
 		await browser.wait(`!${conversations}.hidden && ${conversations}.querySelector('.subagent-row')`);
+		// An idle subagent's row ends with when it was last active, in its session's time column; its model and where it
+		// works are its tooltip.
+		const subagentRow = `document.querySelector('.nav-row:has(> .subagent-row)')`;
+		await browser.wait(`${subagentRow}.querySelector('.session-time')?.textContent === 'now'`);
+		assert.equal(await browser.evaluate<number>(`${subagentRow}.querySelectorAll('.subagent-model').length`), 0);
+		const edges = await browser.evaluate<number[]>(
+			`[${subagentRow}.closest('.session-row').querySelector('.session-header .session-time'), ${subagentRow}.querySelector('.session-time')].map(e=>Math.round(e.getBoundingClientRect().right))`,
+		);
+		assert.equal(edges[0], edges[1]);
 		assert.equal(
-			await browser.evaluate<string>(
-				`document.querySelector('.nav-row:has(> .subagent-row) .subagent-model').textContent`,
-			),
-			"faux-1",
+			await browser.evaluate<string>(`${subagentRow}.querySelector('.subagent-row').title`),
+			"faux-1 · off\nFollows the session",
 		);
 		await browser.click(".session-header.has-subagents .subagent-toggle");
 		await browser.wait(`${conversations}.hidden`);
@@ -221,11 +228,15 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 			"participant",
 		);
 		await childChat.send({ text: "slow child", requestId: "drawer-busy" }, BACKGROUND_CONTEXT);
-		await browser.wait(`document.querySelector('.session-header.has-subagents .live-dot')`);
+		await browser.wait(
+			`document.querySelector('.session-header.has-subagents :is(.working-frame, .run-mark[data-state=working])')`,
+		);
 		await browser.click(".session-header.has-subagents .subagent-toggle");
 		await browser.wait(
-			`!${conversations}.hidden && document.querySelector('.nav-row:has(> .subagent-row) .live-dot')`,
+			`!${conversations}.hidden && document.querySelector('.nav-row:has(> .subagent-row) .run-mark[data-state=working]')`,
 		);
+		// While it works, its row ends with its step: the model's answer streams.
+		await browser.wait(`${subagentRow}.querySelector('.subagent-step')?.textContent === 'Thinking'`);
 		await browser.click(".subagent-row");
 		await browser.wait(
 			`location.pathname.endsWith('/c/${child.conversationId}') && document.querySelector('.subagent-row.active')`,
@@ -233,6 +244,8 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		const status = await holdIn(owner, SessionStatus, {}, "reader");
 		await childChat.stop(BACKGROUND_CONTEXT);
 		await until(status.statuses, (states) => !states?.[pinned.id]?.busy.includes(child.conversationId));
+		// A stopped run says so at the row's end (a tool's step words: test/p2/subagent-state.test.ts).
+		await browser.wait(`${subagentRow}.querySelector('.subagent-step')?.textContent === 'Stopped'`);
 		// With `/tree` branches as well, the one control shows the branch rows, then the subagents, and hides both.
 		await until(status.statuses, (states) => states?.[pinned.id]?.tasks === 0);
 		const tree = await holdIn(owner, SessionTree, { session: pinned.id }, "owner");
@@ -267,7 +280,7 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		await browser.click("[role=dialog] .list .row-button:nth-child(3)");
 		await until(sessions.sessions, (list) => Boolean(list?.find((row) => row.id === session.id)?.pinned));
 		await browser.click("[role=dialog] .row-button.danger");
-		await browser.wait(`location.pathname==='/' && !document.querySelector('[role=dialog]')`);
+		await browser.wait(`location.pathname==='/new' && !document.querySelector('[role=dialog]')`);
 		await until(sessions.sessions, (list) => Boolean(list?.find((row) => row.id === session.id)?.archivedAt));
 		// The Archive's heading opens its list in the main area; a row there restores and opens the session.
 		await browser.click(".sidebar-section[data-key=archive] .group-label");
@@ -543,9 +556,9 @@ describe("guest drawer in Chromium", { skip: !browserTests }, () => {
 			assert.equal(state.search, false);
 			await browser.click('nav[aria-label="Shared session"] .theme-toggle');
 			await browser.wait(`document.documentElement.dataset.theme==='light'`);
-			// A shared session installs as a home-screen app too, and can poll the current bundle manifest.
+			// A shared session installs as a home-screen app too, and can ask the current base bundle.
 			const fetched = await browser.evaluate<{ manifest: number; icon: number; bundle: number; title: string }>(
-				`Promise.all(['/manifest.webmanifest','/icons/icon-192.png','/__p2_web'].map((path)=>fetch(path).then((r)=>r.status))).then(([manifest,icon,bundle])=>({manifest,icon,bundle,title:document.title}))`,
+				`Promise.all(['/manifest.webmanifest','/icons/icon-192.png','/_chord/web/base'].map((path)=>fetch(path).then((r)=>r.status))).then(([manifest,icon,bundle])=>({manifest,icon,bundle,title:document.title}))`,
 			);
 			assert.deepEqual(fetched, { manifest: 200, icon: 200, bundle: 200, title: "Pi" });
 			assert.equal(

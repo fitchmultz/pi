@@ -1,5 +1,6 @@
 import { execFileSync } from "child_process";
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import type * as fsPromises from "fs/promises";
 import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { pathToFileURL } from "url";
@@ -44,6 +45,17 @@ function referenceReadCalls(offsets: number[], limit: number | undefined): strin
 			: `offsets ${offsets.slice(0, -1).join(", ")} and ${offsets.at(-1)}`;
 	return `call read at ${list}${limit === undefined ? "" : " with no limit"}${offsets.length > 1 ? " in one response" : ""}`;
 }
+
+// Runs when a file is opened, so a test can abort while the read tool opens the file.
+const openHook = vi.hoisted(() => ({ run: undefined as (() => void) | undefined }));
+vi.mock("fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof fsPromises>();
+	const open: typeof actual.open = (...args) => {
+		openHook.run?.();
+		return actual.open(...args);
+	};
+	return { ...actual, open };
+});
 
 // The read tool's text path before it streamed (#9654), kept as the reference the new path must match.
 function referenceRead(
@@ -370,6 +382,54 @@ describe("read tool streaming", () => {
 		});
 	});
 
+	// #11956
+	it("rejects without an unhandled stream error when aborted while opening a local file", async () => {
+		const path = join(tempDir, "abort-on-open.txt");
+		writeFileSync(path, "line\n");
+		const controller = new AbortController();
+		openHook.run = () => {
+			openHook.run = undefined;
+			controller.abort();
+		};
+		const uncaught: unknown[] = [];
+		const onUncaught = (error: unknown) => uncaught.push(error);
+		process.on("uncaughtException", onUncaught);
+		try {
+			const tool = createReadToolDefinition(tempDir);
+			await expect(tool.execute("call", { path }, controller.signal, undefined, undefined as never)).rejects.toThrow(
+				"Operation aborted",
+			);
+			// The stream's 'error' would be emitted on a later tick.
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		} finally {
+			process.off("uncaughtException", onUncaught);
+			openHook.run = undefined;
+		}
+		expect(uncaught).toEqual([]);
+	});
+
+	it("stops reading a local file when aborted mid-read", async () => {
+		const path = join(tempDir, "abort-mid-read.txt");
+		// Many 64 KB stream chunks, so the abort lands with most of the file unread.
+		writeFileSync(path, "x".repeat(1024 * 1024));
+		const controller = new AbortController();
+		let decodedChunks = 0;
+		decodeHook.run = () => {
+			decodedChunks++;
+			controller.abort();
+		};
+		try {
+			const tool = createReadToolDefinition(tempDir);
+			await expect(tool.execute("call", { path }, controller.signal, undefined, undefined as never)).rejects.toThrow(
+				"Operation aborted",
+			);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+		} finally {
+			decodeHook.run = undefined;
+		}
+		expect(decodedChunks).toBe(1);
+	});
+
 	it("reads a 200 MB line with a 64 MB heap", () => {
 		// A child process, so a regression that stores the whole line runs out of memory instead of passing.
 		const sourceResolverUrl = pathToFileURL(resolve(__dirname, "../src/experimental/source-resolver.ts")).href;
@@ -392,42 +452,6 @@ describe("read tool streaming", () => {
 		expect(output).toBe(
 			`[Line 1 is 200.0MB, exceeds 50.0KB limit. Use bash: sed -n '1p' big.log | head -c ${DEFAULT_MAX_BYTES}]`,
 		);
-	});
-
-	it("survives cancellation during local file setup and permits a later read", () => {
-		const path = join(tempDir, "cancelled.txt");
-		writeFileSync(path, "one\ntwo");
-		const sourceResolverUrl = pathToFileURL(resolve(__dirname, "../src/experimental/source-resolver.ts")).href;
-		const readToolUrl = pathToFileURL(resolve(__dirname, "../src/core/tools/read.ts")).href;
-		const script = `
-			import assert from "node:assert/strict";
-			import { open } from "node:fs/promises";
-			import { createReadToolDefinition } from ${JSON.stringify(readToolUrl)};
-			const path = ${JSON.stringify(path)};
-			const handle = await open(path, "r");
-			const prototype = Object.getPrototypeOf(handle);
-			const stat = prototype.stat;
-			await handle.close();
-			const controller = new AbortController();
-			// Cancel after real metadata I/O, before the read tool can construct its native stream.
-			prototype.stat = async function (...args) {
-				const stats = await stat.apply(this, args);
-				controller.abort();
-				return stats;
-			};
-			const tool = createReadToolDefinition(process.cwd());
-			await assert.rejects(tool.execute("cancel", { path }, controller.signal), /Operation aborted/);
-			prototype.stat = stat;
-			const result = await tool.execute("after", { path });
-			assert.equal(result.content[0].text, "one\\ntwo");
-			process.stdout.write("cancelled and subsequent read succeeded");
-		`;
-		const output = execFileSync(
-			process.execPath,
-			["--import", sourceResolverUrl, "--input-type=module", "--eval", script],
-			{ encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
-		);
-		expect(output).toBe("cancelled and subsequent read succeeded");
 	});
 
 	it("stops consuming the stream when aborted", async () => {

@@ -2,7 +2,11 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveCliModel, resolveModelScope, selectScopedInitialModel } from "../../src/core/model-resolver.ts";
+import {
+	resolveCliModel,
+	resolveModelScopeWithDiagnostics,
+	selectScopedInitialModel,
+} from "../../src/core/model-resolver.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
@@ -172,7 +176,7 @@ describe("model unavailability diagnostics", () => {
 		const runtime = h.session.modelRuntime;
 		await runtime.setRuntimeApiKey("anthropic", "test-key");
 		const patterns = [`anthropic/${SCOPED}`];
-		const scopedModels = await resolveModelScope(patterns, runtime);
+		const { scopedModels } = await resolveModelScopeWithDiagnostics(patterns, runtime);
 		const select = (savedScope?: { source: string; patterns: string[] }) =>
 			selectScopedInitialModel({
 				scopedModels,
@@ -199,7 +203,7 @@ describe("model unavailability diagnostics", () => {
 		await runtime.refresh({ allowNetwork: false });
 		const both = [`anthropic/${SCOPED}`, `anthropic/${HIDDEN}`];
 		const filtered = selectScopedInitialModel({
-			scopedModels: await resolveModelScope(both, runtime),
+			scopedModels: (await resolveModelScopeWithDiagnostics(both, runtime)).scopedModels,
 			defaultProvider: "anthropic",
 			defaultModelId: HIDDEN,
 			savedScope: { source: "enabledModels", patterns: both },

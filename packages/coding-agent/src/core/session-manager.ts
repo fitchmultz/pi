@@ -1144,6 +1144,7 @@ async function buildSessionInfo(
 				firstMessage = textContent;
 			}
 		}
+		signal?.throwIfAborted();
 
 		if (!header) return null;
 

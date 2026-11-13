@@ -4,7 +4,7 @@
 use crate::decode::StreamDecoder;
 use crate::errors::Failure;
 use crate::frame::{EVENT, Frame};
-use crate::output::Output;
+use crate::output::{Gate, Output};
 use crate::sys;
 use crate::window::{Pending, Window};
 use serde_json::{Map, Value, json};
@@ -31,47 +31,10 @@ pub enum Message {
     Eof(usize),
     Exit(ExitStatus),
     WaitFailed(String),
-    OutputPaused,
-    OutputResumed,
     /// Abort: the command settles as `aborted`.
     Cancel,
     /// Kill without aborting, as `cleanup()` does: the command settles with the killed process's status.
     Kill,
-}
-
-/// Post-exit silence excludes time a reader spends waiting for the output link to drain.
-#[derive(Default)]
-pub struct StdioGrace {
-    deadline: Option<Instant>,
-    paused_readers: usize,
-}
-
-impl StdioGrace {
-    pub fn observe(&mut self, message: &Message) {
-        match message {
-            Message::OutputPaused => self.paused_readers += 1,
-            Message::OutputResumed => {
-                self.paused_readers -= 1;
-                if self.deadline.is_some() {
-                    self.deadline = Some(Instant::now() + EXIT_STDIO_GRACE);
-                }
-            }
-            Message::Exit(_) => self.deadline = Some(Instant::now() + EXIT_STDIO_GRACE),
-            Message::Data(_, _) if self.deadline.is_some() => {
-                self.deadline = Some(Instant::now() + EXIT_STDIO_GRACE);
-            }
-            _ => {}
-        }
-    }
-
-    pub fn remaining(&self) -> Option<Duration> {
-        if self.paused_readers > 0 {
-            None
-        } else {
-            self.deadline
-                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-        }
-    }
 }
 
 /// Cancellation of one request, registered before the request runs so a cancel that arrives first is not lost.
@@ -334,28 +297,22 @@ pub fn running<T>(
         .ok_or_else(|| Failure::new("EBADF", format!("no running {what} with this id")))
 }
 
-/// Read one pipe on its own thread until it ends or `stop` is set. With `output`, reading waits while too much output
-/// is unsent.
+/// Read one pipe on its own thread until it ends or `stop` is set. With `gate`, reading waits while too much output is
+/// unsent.
 pub fn spawn_reader(
     stream: usize,
     pipe: impl sys::Pipe + Send + 'static,
     sender: Sender<Message>,
     stop: Arc<AtomicBool>,
-    output: Option<Arc<Output>>,
+    gate: Option<Gate>,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new().spawn(move || {
         sys::read_pipe(pipe, &stop, |bytes| {
-            let delivered = sender.send(Message::Data(stream, bytes.to_vec())).is_ok();
-            if let Some(output) = &output {
-                output.wait_for_room(&stop, |paused| {
-                    let _ = sender.send(if paused {
-                        Message::OutputPaused
-                    } else {
-                        Message::OutputResumed
-                    });
-                });
+            let deliver = || sender.send(Message::Data(stream, bytes.to_vec())).is_ok();
+            match &gate {
+                Some(gate) => gate.pass(&stop, deliver),
+                None => deliver(),
             }
-            delivered
         });
         let _ = sender.send(Message::Eof(stream));
     })
@@ -435,7 +392,7 @@ pub fn run(
     let stop = Arc::new(AtomicBool::new(false));
     // Without a window, output is not coalesced; reading then waits for the link.
     let gate = if request.window.is_none() {
-        Some(output.clone())
+        Some(Gate::new(output))
     } else {
         None
     };
@@ -456,7 +413,7 @@ pub fn run(
         return Err(abandon(child, error));
     }
     let stderr = child.stderr.take().unwrap();
-    if let Err(error) = spawn_reader(1, stderr, sender.clone(), stop.clone(), gate) {
+    if let Err(error) = spawn_reader(1, stderr, sender.clone(), stop.clone(), gate.clone()) {
         return Err(abandon(child, error));
     }
     if let Err((child, error)) = start_waiter(child, None, sender.clone()) {
@@ -497,7 +454,7 @@ pub fn run(
     };
     let mut ended = [false, false];
     let mut status: Option<Result<ExitStatus, String>> = None;
-    let mut grace = StdioGrace::default();
+    let mut idle_until: Option<Instant> = None;
     let mut timed_out = false;
     let mut aborted = false;
     let mut killed = false;
@@ -520,6 +477,15 @@ pub fn run(
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
+        if idle_until.is_some_and(|idle| now >= idle) {
+            // Silence while the link holds a reader up is not the end of the output: the pipe may hold more.
+            if gate.as_ref().is_some_and(Gate::held) {
+                idle_until = Some(now + EXIT_STDIO_GRACE);
+            } else {
+                // A descendant may hold the pipes open after the process exited; stop waiting for it.
+                break;
+            }
+        }
         if let Some(pending) = &mut pending
             && !pending.is_empty()
             && now >= pending.next_send()
@@ -531,8 +497,8 @@ pub fn run(
         if let Some(deadline) = deadline.filter(|_| !timed_out) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
-        if let Some(remaining) = grace.remaining() {
-            wait = wait.min(remaining);
+        if let Some(idle) = idle_until {
+            wait = wait.min(idle.saturating_duration_since(now));
         }
         if let Some(pending) = pending.as_ref().filter(|pending| !pending.is_empty()) {
             wait = wait.min(if unsent.load(Ordering::SeqCst) > 0 {
@@ -541,11 +507,7 @@ pub fn run(
                 pending.next_send().saturating_duration_since(now)
             });
         }
-        let message = receiver.recv_timeout(wait);
-        if let Ok(message) = &message {
-            grace.observe(message);
-        }
-        match message {
+        match receiver.recv_timeout(wait) {
             Ok(Message::Data(stream, bytes)) => {
                 emit(&mut pending, stream, decoders[stream].decode(&bytes, false));
                 if let Some(spill) = &mut spill {
@@ -553,6 +515,9 @@ pub fn run(
                     if spill.failed.is_some() {
                         kill(&mut killed);
                     }
+                }
+                if status.is_some() {
+                    idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
                 }
             }
             Ok(Message::Eof(stream)) => ended[stream] = true,
@@ -562,25 +527,18 @@ pub fn run(
                     sys::kill_group_after_exit(pid);
                 }
                 status = Some(Ok(exit));
+                idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
             }
             Ok(Message::WaitFailed(error)) => {
                 status = Some(Err(error));
-                break;
+                idle_until = Some(Instant::now());
             }
             Ok(Message::Cancel) => {
                 aborted = true;
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
-            Ok(Message::OutputPaused | Message::OutputResumed) => {}
-            Err(RecvTimeoutError::Timeout) => {
-                if grace
-                    .remaining()
-                    .is_some_and(|remaining| remaining.is_zero())
-                {
-                    break;
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }

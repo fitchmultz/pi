@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, request } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,10 +21,8 @@ import {
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { NativeWatchable, Watchable } from "@earendil-works/chord/watch";
 import { WebSocket as NodeWebSocket, WebSocketServer } from "ws";
-import type { WebManifest } from "../../src/hosts/bundles.ts";
 import { type P2Server, type ServerOptions, startServer } from "../../src/hosts/server.ts";
 import { hasTuiNode } from "../../src/hosts/tui-sandbox.ts";
-import { WEB_MANIFEST_PATH } from "../../src/hosts/web.ts";
 import {
 	type Ctx,
 	createHost,
@@ -49,6 +47,7 @@ import {
 	type SessionWorkerControl,
 	serveServerRegistries,
 } from "../../src/runtime/server.ts";
+import { clientLinkPath } from "../../src/runtime/stale-page.ts";
 import { webCoreFacet } from "../../src/runtime/web-core.ts";
 import {
 	HarnessHost,
@@ -103,7 +102,9 @@ export async function localOwner(server: Pick<P2Server, "port" | "dataDir">): Pr
 export function clientHost(target: LocalOwner | ClientSocket, facets: readonly PluginFacet<P2Principal>[] = []): Host {
 	const socket =
 		"cookie" in target
-			? new NodeWebSocket(`ws://127.0.0.1:${target.port}/chord`, { headers: { Cookie: target.cookie } })
+			? new NodeWebSocket(`ws://127.0.0.1:${target.port}${clientLinkPath("script")}`, {
+					headers: { Cookie: target.cookie },
+				})
 			: target;
 	const host = createHost({ onError: reportTo() });
 	// Both sockets have the subset of the WebSocket API the link uses; the types differ in their event signatures.
@@ -136,11 +137,21 @@ export type Fixture = {
 /** The p2 app directory, as the server tells facets (`Server.info.app`, `WorkerInit.app`). */
 export const APP = fileURLToPath(new URL("../../", import.meta.url));
 
-export async function startFixture(options: ServerOptions = {}): Promise<Fixture> {
+export async function startFixture(
+	options: ServerOptions & {
+		/** settings.json written into the data directory before the server starts (keys read at the start: `telemetry`). */
+		readonly settings?: Readonly<Record<string, unknown>>;
+	} = {},
+): Promise<Fixture> {
 	const root = mkdtempSync(join(tmpdir(), "p2-test-"));
 	const dataDir = join(root, "data");
 	const workspace = join(root, "workspace");
 	mkdirSync(workspace, { recursive: true });
+	const { settings, ...serverOptions } = options;
+	if (settings !== undefined) {
+		mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+		writeFileSync(join(dataDir, "settings.json"), JSON.stringify(settings), { mode: 0o600 });
+	}
 	let server: P2Server;
 	try {
 		server = await startServer({
@@ -148,7 +159,7 @@ export async function startFixture(options: ServerOptions = {}): Promise<Fixture
 			port: 0,
 			fake: true,
 			web: false,
-			...options,
+			...serverOptions,
 		});
 	} catch (error) {
 		rmSync(root, { recursive: true, force: true });
@@ -173,7 +184,7 @@ export async function startFixture(options: ServerOptions = {}): Promise<Fixture
 			return browser;
 		},
 		client: (headers) => {
-			const socket = new NodeWebSocket(`ws://127.0.0.1:${server.port}/chord`, { headers });
+			const socket = new NodeWebSocket(`ws://127.0.0.1:${server.port}${clientLinkPath("script")}`, { headers });
 			const client = clientHost(socket);
 			browsers.push(client);
 			return { host: client, socket };
@@ -428,6 +439,7 @@ export async function testHost(options: {
 				resourceOptions: {},
 				workers: NO_WORKERS,
 				root: (fn, context) => host.root(fn, context),
+				plugins: { root: "", reload: async () => ({ refused: "no plugins here", plugins: [], logs: [] }) },
 				...options.server,
 			});
 		}
@@ -595,11 +607,25 @@ export function http(port: number, path: string, options: HttpOptions = {}): Pro
 	});
 }
 
-/** The server's current web bundle manifest, as `headers` (a cookie or tunnel Host) may read it. */
-export async function webBundle(port: number, headers: Record<string, string> = {}): Promise<WebManifest> {
-	const response = await http(port, WEB_MANIFEST_PATH, { headers });
+/** What the app page loads now (the web surface's): its base hash, base script, combined plugins file, stylesheets. */
+export type WebAssets = {
+	readonly base: string;
+	readonly script: string;
+	readonly plugins: string;
+	readonly styles: readonly string[];
+};
+
+/** What the app page at `/` loads now, as `headers` (a cookie or tunnel Host) may read it. */
+export async function webAssets(port: number, headers: Record<string, string> = {}): Promise<WebAssets> {
+	const response = await http(port, "/", { headers });
 	assert.equal(response.status, 200, response.body);
-	return JSON.parse(response.body) as WebManifest;
+	const base = /data-web-version="([0-9a-f]+)"/.exec(response.body)?.[1];
+	const scripts = [...response.body.matchAll(/<script defer src="([^"]+)"/g)].map(([, src]) => src!);
+	const styles = [...response.body.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map(([, href]) => href!);
+	const plugins = scripts.find((src) => src.includes("/plugins."));
+	const script = scripts.find((src) => src.includes("/base."));
+	assert(base && plugins && script, response.body);
+	return { base, script, plugins, styles };
 }
 
 /**

@@ -576,9 +576,11 @@ export class AgentSession {
 	/**
 	 * Tools of the restored or reloaded loadout that are not registered yet, such as tools of MCP
 	 * servers that are still connecting. They are activated when they are registered, and dropped when
-	 * `setActiveToolsByName()` deactivates a tool or the next agent run starts.
+	 * `setActiveToolsByName()` deactivates a tool of that loadout or the next agent run starts.
 	 */
 	private _pendingToolNames = new Set<string>();
+	/** The restored or reloaded loadout that `_pendingToolNames` belongs to. */
+	private _restoredToolNames = new Set<string>();
 	private _usesDefaultTools: boolean;
 	private _defaultToolModifiers: string[];
 	/** Original patterns retained for native working-session persistence. */
@@ -2245,13 +2247,15 @@ export class AgentSession {
 		this.workingSessionGate.beforeMutation();
 		const previous = this.getActiveToolNames();
 		this._setActiveTools(toolNames);
-		// A loadout that deactivates a tool replaces the restored one, whose pending tools are dropped.
-		// One that only adds tools, like activating tool_search, keeps them.
+		// A loadout that deactivates a tool of the restored one replaces it, and its pending tools are
+		// dropped. One that only adds tools, like activating tool_search, keeps them, and so does one
+		// that only deactivates tools outside the restored loadout, such as an extension's own tool that
+		// the restore or reload activated as newly registered.
 		// With no registered active tools, compare the requested loadout to the pending names.
 		const active = new Set(this.getActiveToolNames());
 		if (
 			toolNames.length === 0 ||
-			previous.some((name) => !active.has(name)) ||
+			previous.some((name) => !active.has(name) && this._restoredToolNames.has(name)) ||
 			(previous.length === 0 && [...this._pendingToolNames].some((name) => !toolNames.includes(name)))
 		)
 			this._pendingToolNames.clear();
@@ -2568,6 +2572,7 @@ export class AgentSession {
 	 */
 	private _restoreToolsFromTranscript(modifiers: readonly string[] = []): void {
 		this._pendingToolNames.clear();
+		this._restoredToolNames.clear();
 		// All system messages on the branch, including those before a compaction. Compaction snapshots
 		// are derived from these, so replaying them gives the current loadout.
 		const systemMessages = this.sessionManager
@@ -2595,6 +2600,12 @@ export class AgentSession {
 		// Recorded tools that are not registered yet, such as MCP tools of servers still connecting, are
 		// activated when they register. Excluded tools never register, so they are not kept pending.
 		this._pendingToolNames = new Set(names.filter((name) => this._isAllowedTool(name)));
+		this._restoredToolNames = new Set(
+			applyToolModifiers(
+				getCurrentTools(systemMessages).map((tool) => tool.name),
+				modifiers,
+			),
+		);
 		// Ignores names that are not registered.
 		this._setActiveTools(names);
 	}
@@ -4792,6 +4803,7 @@ export class AgentSession {
 		const newlyDeclaredByDefault = previouslyUndeclared.filter(isDeclaredByDefault);
 		// Tools the new extensions register later, such as MCP tools, are pending until then.
 		for (const name of this.getActiveToolNames()) this._pendingToolNames.add(name);
+		this._restoredToolNames = new Set(this.getActiveToolNames());
 		this._buildRuntime({
 			activeToolNames: [...this.getActiveToolNames(), ...addedDefaultTools, ...newlyDeclaredByDefault],
 			flagValues: previousFlagValues,
@@ -5497,9 +5509,9 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Get text content of last assistant message.
+	 * Get text content of the last assistant reply.
 	 * Useful for /copy command.
-	 * @returns Text content, or undefined if no assistant message exists
+	 * @returns Text content, or undefined if no assistant message exists or the last reply has no text
 	 */
 	getLastAssistantText(): string | undefined {
 		const lastAssistant = this.messages
@@ -5508,8 +5520,9 @@ export class AgentSession {
 			.find((m) => {
 				if (m.role !== "assistant") return false;
 				const msg = m as AssistantMessage;
-				// Skip aborted messages with no content
-				if (msg.stopReason === "aborted" && msg.content.length === 0) return false;
+				// Skip messages without text from a turn that did not end normally: aborted, failed or only
+				// calling tools (#12119). A reply that ended normally stays the last reply even without text.
+				if (msg.stopReason !== "stop" && !msg.content.some((c) => c.type === "text" && c.text.trim())) return false;
 				return true;
 			});
 
