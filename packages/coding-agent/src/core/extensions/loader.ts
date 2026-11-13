@@ -4,7 +4,7 @@
  */
 
 import * as fs from "node:fs";
-import { createRequire, registerHooks } from "node:module";
+import * as nodeModule from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -41,7 +41,7 @@ import type {
 	ToolRendererResolver,
 } from "./types.ts";
 
-const require = createRequire(import.meta.url);
+const require = nodeModule.createRequire(import.meta.url);
 
 const isNodeSeaBinary =
 	("sea" in process.features && process.features.sea === true) ||
@@ -93,11 +93,12 @@ function getExtensionHookState(): NodeExtensionHookState {
 function ensureNodeExtensionHooks(mode: NodeExtensionHookMode): void {
 	const state = getExtensionHookState();
 	state.mode = mode;
-	if (state.registered || isBunRuntime) {
+	// Bun's node:module omits registerHooks at runtime; guard before property access.
+	if (state.registered || isBunRuntime || !("registerHooks" in nodeModule)) {
 		return;
 	}
 	state.registered = true;
-	registerHooks({
+	nodeModule.registerHooks({
 		resolve(specifier, context, nextResolve) {
 			const current = getExtensionHookState().mode;
 			if (!current) {
