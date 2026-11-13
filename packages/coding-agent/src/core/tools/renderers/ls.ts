@@ -7,11 +7,10 @@
  */
 
 import { Text } from "@earendil-works/pi-tui";
-import { keyHint } from "../../../modes/interactive/components/keybinding-hints.ts";
 import type { Theme } from "../../../modes/interactive/theme/theme.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
+import type { KeybindingHints, ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
 import type { LsToolDetails } from "../ls.ts";
-import { getTextOutput, renderToolPath, str } from "../render-utils.ts";
+import { formatExpandMoreHint, getTextOutput, renderToolPath, str } from "../render-utils.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "../truncate.ts";
 
 function formatLsCall(args: { path?: string; limit?: number } | undefined, theme: Theme, cwd: string): string {
@@ -31,6 +30,7 @@ function formatLsResult(
 	options: ToolRenderResultOptions,
 	theme: Theme,
 	showImages: boolean,
+	keyHint: KeybindingHints["keyHint"],
 ): string {
 	const output = getTextOutput(result, showImages).trim();
 	let text = "";
@@ -41,7 +41,7 @@ function formatLsResult(
 		const remaining = lines.length - maxLines;
 		text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
 		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+			text += `\n${formatExpandMoreHint(theme, `${remaining} more lines`, keyHint)}`;
 		}
 	}
 
@@ -64,7 +64,7 @@ export const lsRenderers: Pick<ToolDefinition<any, any>, "renderCall" | "renderR
 	},
 	renderResult(result, options, theme, context) {
 		const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-		text.setText(formatLsResult(result as any, options, theme, context.showImages));
+		text.setText(formatLsResult(result as any, options, theme, context.showImages, context.keyHint));
 		return text;
 	},
 };

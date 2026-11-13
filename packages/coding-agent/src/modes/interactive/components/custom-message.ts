@@ -14,7 +14,7 @@ import type { MarkdownTransformer, MessageRenderer } from "../../../core/extensi
 import type { CustomMessage } from "../../../core/messages.ts";
 import { ensurePngTranscoder } from "../../../utils/image-convert.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
-import { CompactPreview } from "./compact-preview.ts";
+import { CompactPreview, handledMouseTarget } from "./compact-preview.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
 
@@ -125,16 +125,7 @@ export class CustomMessageComponent extends Container {
 		const result = native && super.handleMouse(native);
 		if (result || event.type !== "click" || event.button !== "left") return result;
 		this.setExpanded(!this._expanded);
-		return {
-			handled: true,
-			target: {
-				component: this,
-				originX: event.screenX - event.x,
-				originY: event.screenY - event.y,
-				width: event.width,
-				height: event.height,
-			},
-		};
+		return handledMouseTarget(this, event);
 	}
 
 	private rebuild(): void {

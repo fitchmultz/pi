@@ -3,62 +3,25 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import type { Container } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { describe, expect, onTestFinished, test, vi } from "vitest";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
 import { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
-import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import type { SettingsSelectorComponent } from "../../../src/modes/interactive/components/settings-selector.ts";
 import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { initTheme } from "../../../src/modes/interactive/theme/theme.ts";
-import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createHarness, type Harness, type HarnessOptions } from "../harness.ts";
-
-type View = {
-	isInitialized: boolean;
-	defaultEditor: CustomEditor;
-	chatContainer: Container;
-	editorContainer: Container;
-	setupKeyHandlers(): void;
-	setupEditorSubmitHandler(): void;
-	bindCurrentSessionExtensions(): Promise<void>;
-	subscribeToAgent(): void;
-};
+import { createTestInteractiveView } from "../ui-harness.ts";
 
 async function createView(harness: Harness) {
-	initTheme("dark");
-	let rebind = async () => {};
-	const mode = new InteractiveMode(
-		{
-			session: harness.session,
-			setBeforeSessionInvalidate() {},
-			setRebindSession(callback: () => Promise<void>) {
-				rebind = callback;
-			},
-		} as unknown as AgentSessionRuntime,
-		{ terminal: new VirtualTerminal(100, 40) },
-	);
-	const view = mode as unknown as View;
-	view.isInitialized = true;
-	view.setupKeyHandlers();
-	view.setupEditorSubmitHandler();
-	await view.bindCurrentSessionExtensions();
-	view.subscribeToAgent();
-	onTestFinished(() => mode.stop("resume-hint"));
-	const submit = async (text: string) => {
-		await view.defaultEditor.onSubmit?.(text);
-	};
+	const { view, rebind, submit, text } = await createTestInteractiveView(harness, { width: 100 });
 	return {
-		rebind: () => rebind(),
+		rebind,
 		submit,
 		rows: () => view.chatContainer.children.filter((child) => child instanceof ToolExecutionComponent),
-		text: () => stripAnsi(view.chatContainer.render(100).join("\n")),
+		text,
 		/** Trimmed transcript lines. An output line equals the printed text; the command's `$ ...` line only contains it. */
 		lines: () =>
-			stripAnsi(view.chatContainer.render(100).join("\n"))
+			text()
 				.split("\n")
 				.map((line) => line.trim()),
 		/** Toggle cache miss notices in /settings, which rebuilds the transcript from the saved session. */

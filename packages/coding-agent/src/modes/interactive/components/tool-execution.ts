@@ -15,7 +15,11 @@ import type { ToolDefinition, ToolRenderContext, ToolRenderers } from "../../../
 /** What this component needs from a tool: how to draw it, without executing it. */
 export type { ToolRenderers };
 
-import { formatToolCallWithArgs, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
+import {
+	formatExpandMoreHint,
+	formatToolCallWithArgs,
+	getTextOutput as getRenderedTextOutput,
+} from "../../../core/tools/render-utils.ts";
 import { ensurePngTranscoder } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 import { CompactPreview } from "./compact-preview.ts";
@@ -65,7 +69,6 @@ export class ToolExecutionComponent extends Container {
 		details?: any;
 		durationMs?: number;
 	};
-	private hideComponent = false;
 
 	constructor(
 		toolName: string,
@@ -97,21 +100,13 @@ export class ToolExecutionComponent extends Container {
 		this.contentBox = new Box(1, 1, (text: string) => theme.bg("toolPendingBg", text));
 		this.selfRenderContainer = new Container();
 
-		this.addChild(this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox);
+		this.addChild(this.isSelfRenderShell() ? this.selfRenderContainer : this.contentBox);
 
 		this.updateDisplay();
 	}
 
-	private getCallRenderer(): ToolDefinition<any, any>["renderCall"] | undefined {
-		return this.toolDefinition?.renderCall;
-	}
-
-	private getResultRenderer(): ToolDefinition<any, any>["renderResult"] | undefined {
-		return this.toolDefinition?.renderResult;
-	}
-
-	private getRenderShell(): "default" | "self" {
-		return this.toolDefinition?.renderShell ?? "default";
+	private isSelfRenderShell(): boolean {
+		return this.toolDefinition?.renderShell === "self";
 	}
 
 	private getRenderContext(lastComponent: Component | undefined): ToolRenderContext {
@@ -164,8 +159,7 @@ export class ToolExecutionComponent extends Container {
 			text,
 			maxVisualLines: FALLBACK_PREVIEW_LINES,
 			keep: "start",
-			formatHint: (hidden) =>
-				`${theme.fg("muted", `... (${hidden} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+			formatHint: (hidden) => formatExpandMoreHint(theme, `${hidden} more lines`, keyHint),
 		});
 	}
 
@@ -251,14 +245,11 @@ export class ToolExecutionComponent extends Container {
 
 	override render(width: number): string[] {
 		if (this.argsPending) this.updateDisplay();
-		if (this.hideComponent) {
-			return [];
-		}
 
 		if (this.compactView && !this.expanded) {
 			// Keep native child layouts live for inner card clicks and asynchronous renderers.
 			const source = super.render(width);
-			const self = this.getRenderShell() === "self";
+			const self = this.isSelfRenderShell();
 			const paddingX = self ? 0 : this.outputPad;
 			const container = self ? this.selfRenderContainer : this.contentBox;
 			const resultStart = this.result
@@ -267,7 +258,7 @@ export class ToolExecutionComponent extends Container {
 			return this.compactPreview.render(source, width, resultStart);
 		}
 
-		if (this.getRenderShell() === "self") {
+		if (this.isSelfRenderShell()) {
 			const contentLines = this.selfRenderContainer.render(width);
 			this.selfRenderHeight = contentLines.length;
 			if (contentLines.length === 0 && this.imageComponents.length === 0) {
@@ -300,7 +291,7 @@ export class ToolExecutionComponent extends Container {
 			const native = this.compactPreview.toNative(event);
 			return native && super.handleMouse(native);
 		}
-		if (this.getRenderShell() !== "self") return super.handleMouse(event);
+		if (!this.isSelfRenderShell()) return super.handleMouse(event);
 		if (event.y <= 0 || event.y > this.selfRenderHeight) return undefined;
 		return this.selfRenderContainer.handleMouse({
 			...event,
@@ -318,39 +309,34 @@ export class ToolExecutionComponent extends Container {
 				? (text: string) => theme.bg("toolErrorBg", text)
 				: (text: string) => theme.bg("toolSuccessBg", text);
 
-		let hasContent = false;
-		this.hideComponent = false;
-		const renderContainer = this.getRenderShell() === "self" ? this.selfRenderContainer : this.contentBox;
-		if (renderContainer instanceof Box) {
-			renderContainer.setBgFn(bgFn);
-			renderContainer.setPaddingX(this.outputPad);
+		const selfRender = this.isSelfRenderShell();
+		if (!selfRender) {
+			this.contentBox.setBgFn(bgFn);
+			this.contentBox.setPaddingX(this.outputPad);
 		}
+		const renderContainer = selfRender ? this.selfRenderContainer : this.contentBox;
 		renderContainer.clear();
 
-		const callRenderer = this.getCallRenderer();
+		const callRenderer = this.toolDefinition?.renderCall;
 		if (!callRenderer) {
 			renderContainer.addChild(this.createResultRegion(this.createCallFallback()));
-			hasContent = true;
 		} else {
 			try {
 				const component = callRenderer(this.args, theme, this.getRenderContext(this.callRendererComponent));
 				this.callRendererComponent = component;
 				renderContainer.addChild(this.createResultRegion(component));
-				hasContent = true;
 			} catch {
 				this.callRendererComponent = undefined;
 				renderContainer.addChild(this.createResultRegion(this.createCallFallback()));
-				hasContent = true;
 			}
 		}
 
 		if (this.result) {
-			const resultRenderer = this.getResultRenderer();
+			const resultRenderer = this.toolDefinition?.renderResult;
 			if (!resultRenderer) {
 				const component = this.createResultFallback();
 				if (component) {
 					renderContainer.addChild(this.createResultRegion(component));
-					hasContent = true;
 				}
 			} else {
 				try {
@@ -362,13 +348,11 @@ export class ToolExecutionComponent extends Container {
 					);
 					this.resultRendererComponent = component;
 					renderContainer.addChild(this.createResultRegion(component));
-					hasContent = true;
 				} catch {
 					this.resultRendererComponent = undefined;
 					const component = this.createResultFallback();
 					if (component) {
 						renderContainer.addChild(this.createResultRegion(component));
-						hasContent = true;
 					}
 				}
 			}
@@ -419,10 +403,6 @@ export class ToolExecutionComponent extends Container {
 					this.addChild(imageComponent);
 				}
 			}
-		}
-
-		if (!hasContent && this.imageComponents.length === 0) {
-			this.hideComponent = true;
 		}
 	}
 

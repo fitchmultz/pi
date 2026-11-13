@@ -9,6 +9,7 @@ import type {
 	ExtensionFactory,
 } from "../../core/extensions/types.ts";
 import { type FileEntry, parseSessionEntries } from "../../core/session-manager.ts";
+import { formatExpandMoreHint } from "../../core/tools/render-utils.ts";
 import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
 import {
 	type BackgroundCommandJob,
@@ -274,8 +275,7 @@ export function createBackgroundCommandExtension(options: BackgroundCommandExten
 							.join("\n"),
 						maxVisualLines: NOTICE_PREVIEW_LINES,
 						keep: "end",
-						formatHint: (hidden) =>
-							`${theme.fg("muted", `... (${hidden} earlier lines,`)} ${options.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+						formatHint: (hidden) => formatExpandMoreHint(theme, `${hidden} earlier lines`, options.keyHint),
 					}),
 				);
 				return card;

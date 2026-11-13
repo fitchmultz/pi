@@ -22,7 +22,7 @@ import {
 	normalizeMcpInputSchema,
 	toLlmContent,
 } from "@earendil-works/pi-mcp";
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Text } from "@earendil-works/pi-tui";
 import type { TSchema } from "typebox";
 import type {
 	ToolAnnotations,
@@ -32,9 +32,8 @@ import type {
 	ToolRenderers,
 } from "../../core/extensions/types.ts";
 import { READ_MCP_RESOURCE_TOOL } from "../../core/mcp-servers.ts";
-import { formatToolCallWithArgs, getTextOutput, replaceTabs } from "../../core/tools/render-utils.ts";
+import { appendToolOutputPreview, formatToolCallWithArgs, getTextOutput } from "../../core/tools/render-utils.ts";
 import { formatSize } from "../../core/tools/truncate.ts";
-import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
 import { writeOutputFile } from "../../utils/output-files.ts";
 import type { McpExposure } from "./config.ts";
 
@@ -298,30 +297,14 @@ export function createMcpToolRenderers(label: string): ToolRenderers {
 		renderResult(result, options, theme, context) {
 			const component = (context.lastComponent as Container | undefined) ?? new Container();
 			component.clear();
-			const output = getTextOutput(result, context.showImages).trim();
-			if (!output) return component;
-			const color = context.isError ? "error" : "toolOutput";
-			const styled = replaceTabs(output)
-				.split("\n")
-				.map((line) => theme.fg(color, line))
-				.join("\n");
-			component.addChild(new Spacer(1));
-			if (options.expanded) {
-				component.addChild(new Text(styled, 0, 0));
-			} else {
-				// Limit wrapped lines, not logical ones: MCP results are often one long JSON line.
-				component.addChild(
-					new VisualLinePreview({
-						text: styled,
-						maxVisualLines: OUTPUT_PREVIEW_LINES,
-						keep: "start",
-						formatHint: (hidden) =>
-							`${theme.fg("muted", `... (${hidden} more lines,`)} ${context.keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
-					}),
-				);
-				const fullOutputPath = (result.details as McpToolDetails | undefined)?.fullOutputPath;
-				if (fullOutputPath) component.addChild(new Text(theme.fg("muted", `Full output: ${fullOutputPath}`), 0, 0));
-			}
+			appendToolOutputPreview(component, getTextOutput(result, context.showImages).trim(), {
+				expanded: options.expanded,
+				isError: context.isError,
+				maxVisualLines: OUTPUT_PREVIEW_LINES,
+				fullOutputPath: (result.details as McpToolDetails | undefined)?.fullOutputPath,
+				theme,
+				keyHint: context.keyHint,
+			});
 			return component;
 		},
 	};

@@ -7,15 +7,14 @@
  */
 
 import { Container, Text } from "@earendil-works/pi-tui";
-import { keyHint } from "../../../modes/interactive/components/keybinding-hints.ts";
 import {
 	CodeHighlighter,
 	getLanguageFromPath,
 	highlightCode,
 	type Theme,
 } from "../../../modes/interactive/theme/theme.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
-import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "../render-utils.ts";
+import type { KeybindingHints, ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
+import { formatExpandMoreHint, normalizeDisplayText, renderToolPath, replaceTabs, str } from "../render-utils.ts";
 
 type WriteHighlightCache = {
 	rawPath: string | null;
@@ -112,6 +111,7 @@ function formatWriteCall(
 	cache: WriteHighlightCache | undefined,
 	highlighter: CodeHighlighter,
 	cwd: string,
+	keyHint: KeybindingHints["keyHint"],
 ): string {
 	const rawPath = str(args?.file_path ?? args?.path);
 	const fileContent = str(args?.content);
@@ -132,7 +132,7 @@ function formatWriteCall(
 		const remaining = lines.length - maxLines;
 		text += `\n\n${displayLines.map((line) => (lang ? line : theme.fg("toolOutput", replaceTabs(line)))).join("\n")}`;
 		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines, ${totalLines} total,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+			text += `\n${formatExpandMoreHint(theme, `${remaining} more lines, ${totalLines} total`, keyHint)}`;
 		}
 	}
 
@@ -174,6 +174,7 @@ export const writeRenderers: Pick<ToolDefinition<any, any>, "renderCall" | "rend
 				component.cache,
 				component.highlighter,
 				context.cwd,
+				context.keyHint,
 			),
 		);
 		return component;

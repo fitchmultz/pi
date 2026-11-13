@@ -1,11 +1,8 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { type Component, setKeybindings, type TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, onTestFinished, test } from "vitest";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import type { CustomMessage } from "../../src/core/messages.ts";
-import { SessionManager } from "../../src/core/session-manager.ts";
 import { withBuiltInRenderers } from "../../src/core/tools/renderers/index.ts";
 import backgroundCommand, { BACKGROUND_COMMAND_NOTICE } from "../../src/extensions/background-command/index.ts";
 import { CustomMessageComponent } from "../../src/modes/interactive/components/custom-message.ts";
@@ -13,6 +10,7 @@ import { ToolExecutionComponent } from "../../src/modes/interactive/components/t
 import { initTheme } from "../../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../../src/utils/ansi.ts";
 import { createHarness } from "./harness.ts";
+import { exportSessionToolCards } from "./ui-harness.ts";
 
 const WIDTH = 120;
 const id = "0a1b2c3d-1111-4222-8333-444455556666";
@@ -223,43 +221,16 @@ describe("background_command tool card, compact view off", () => {
 describe("background_command in an HTML export", () => {
 	// The exported page has no control that expands a call, so it must show the call whole.
 	test("the exported call holds the whole command and no expand hint", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "pi-background-cards-"));
-		const sessionManager = SessionManager.create(dir, join(dir, "sessions"));
-		const harness = await createHarness({ extensionFactories: [backgroundCommand], sessionManager });
-		onTestFinished(async () => {
-			await harness.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
-			harness.cleanup();
-			rmSync(dir, { recursive: true, force: true });
-		});
-		sessionManager.appendMessage({ role: "user", content: "Run it.", timestamp: 1 });
-		sessionManager.appendMessage({
-			role: "assistant",
-			content: [
-				{
-					type: "toolCall",
-					id: "call-1",
-					name: "background_command",
-					arguments: { action: "start", command: script.join("\n") },
-				},
+		const cards = await exportSessionToolCards(
+			[backgroundCommand],
+			[
+				fauxAssistantMessage(
+					fauxToolCall("background_command", { action: "start", command: script.join("\n") }, { id: "call-1" }),
+					{ stopReason: "toolUse" },
+				),
 			],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "test",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			stopReason: "toolUse",
-			timestamp: 2,
-		});
-
-		const html = readFileSync(await harness.session.exportToHtml(join(dir, "export.html")), "utf8");
-		const data = /<script id="session-data" type="application\/json">([^<]*)<\/script>/.exec(html)?.[1] ?? "";
-		const call: string = JSON.parse(Buffer.from(data, "base64").toString("utf8")).renderedTools["call-1"].callHtml;
+		);
+		const call = cards["call-1"]?.call?.join("\n") ?? "";
 		for (const line of script) expect(call).toContain(line);
 		expect(call).not.toContain("to expand");
 	});

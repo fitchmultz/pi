@@ -16,7 +16,15 @@ import type {
 	ToolDefinition,
 } from "../../core/extensions/types.ts";
 import type { CustomMessage } from "../../core/messages.ts";
-import { getTextOutput, replaceTabs, startToolTimer, str, toolTimerText } from "../../core/tools/render-utils.ts";
+import {
+	appendToolOutputPreview,
+	formatExpandMoreHint,
+	getTextOutput,
+	replaceTabs,
+	startToolTimer,
+	str,
+	toolTimerText,
+} from "../../core/tools/render-utils.ts";
 import { VisualLinePreview } from "../../modes/interactive/components/visual-truncate.ts";
 import { CodeHighlighter, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { CodemodeNestedCall, CodemodeToolDetails } from "./tool.ts";
@@ -33,10 +41,6 @@ const BACKGROUND_HEADER = /^Background run [^\n]* (?:completed|failed)\.\r?\n/;
 interface CodemodeRenderState {
 	// Progress, timer ticks and expanding redraw the call, so the row keeps the script's highlighting.
 	scriptHighlighter?: CodeHighlighter;
-}
-
-function expandHint(theme: Theme, hidden: number, noun: string, keyHint: KeybindingHints["keyHint"]): string {
-	return `${theme.fg("muted", `... (${hidden} more ${noun},`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
 }
 
 function formatDuration(ms: number | undefined): string {
@@ -86,9 +90,7 @@ function callsBlock(
 	const shown = expanded ? calls : calls.slice(-CALL_PREVIEW_COUNT);
 	const lines = shown.map((call) => formatCall(call, theme, expanded));
 	if (shown.length < calls.length) {
-		lines.unshift(
-			`${theme.fg("muted", `... (${calls.length - shown.length} earlier calls,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
-		);
+		lines.unshift(formatExpandMoreHint(theme, `${calls.length - shown.length} earlier calls`, keyHint));
 	}
 	// Collapsed rows hide earlier calls, so the total covers every call.
 	const priced = calls.filter((call) => call.cost);
@@ -128,7 +130,7 @@ export const codemodeRenderers: Pick<
 							text: highlighted,
 							maxVisualLines: CODE_PREVIEW_LINES,
 							keep: "start",
-							formatHint: (hidden) => expandHint(theme, hidden, "lines", context.keyHint),
+							formatHint: (hidden) => formatExpandMoreHint(theme, `${hidden} more lines`, context.keyHint),
 						}),
 			);
 		}
@@ -151,30 +153,14 @@ export const codemodeRenderers: Pick<
 		const output = options.isPartial
 			? ""
 			: getTextOutput({ ...result, content: hasHeader ? rest : result.content }, context.showImages).trim();
-		if (output) {
-			const color = context.isError ? "error" : "toolOutput";
-			const styled = replaceTabs(output)
-				.split("\n")
-				.map((line) => theme.fg(color, line))
-				.join("\n");
-			component.addChild(new Spacer(1));
-			if (options.expanded) {
-				component.addChild(new Text(styled, 0, 0));
-			} else {
-				// Limit wrapped lines, not logical ones: script output is often one long JSON line.
-				component.addChild(
-					new VisualLinePreview({
-						text: styled,
-						maxVisualLines: OUTPUT_PREVIEW_LINES,
-						keep: "start",
-						formatHint: (hidden) => expandHint(theme, hidden, "lines", context.keyHint),
-					}),
-				);
-				// The collapsed preview hides the truncation notice at the end, so name the file here.
-				const fullOutputPath = result.details?.fullOutputPath;
-				if (fullOutputPath) component.addChild(new Text(theme.fg("muted", `Full output: ${fullOutputPath}`), 0, 0));
-			}
-		}
+		appendToolOutputPreview(component, output, {
+			expanded: options.expanded,
+			isError: context.isError,
+			maxVisualLines: OUTPUT_PREVIEW_LINES,
+			fullOutputPath: result.details?.fullOutputPath,
+			theme,
+			keyHint: context.keyHint,
+		});
 		if (timerText) {
 			component.addChild(new Spacer(1));
 			component.addChild(new Text(theme.fg("muted", timerText), 0, 0));
@@ -213,23 +199,12 @@ export function codemodeBackgroundMessageRenderer(
 	// The run header repeats the title line; the script's own header keeps its wall time. Result blocks
 	// follow each other directly, their own newlines included.
 	const output = replaceTabs(texts.join("").replace(BACKGROUND_HEADER, "")).trim();
-	if (output) {
-		const color = details?.isError ? "error" : "toolOutput";
-		const styled = output
-			.split("\n")
-			.map((line) => theme.fg(color, line))
-			.join("\n");
-		component.addChild(new Spacer(1));
-		component.addChild(
-			options.expanded
-				? new Text(styled, 0, 0)
-				: new VisualLinePreview({
-						text: styled,
-						maxVisualLines: OUTPUT_PREVIEW_LINES,
-						keep: "start",
-						formatHint: (hidden) => expandHint(theme, hidden, "lines", options.keyHint),
-					}),
-		);
-	}
+	appendToolOutputPreview(component, output, {
+		expanded: options.expanded,
+		isError: details?.isError,
+		maxVisualLines: OUTPUT_PREVIEW_LINES,
+		theme,
+		keyHint: options.keyHint,
+	});
 	return component;
 }

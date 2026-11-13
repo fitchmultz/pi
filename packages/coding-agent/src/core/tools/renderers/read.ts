@@ -10,13 +10,20 @@ import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } 
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { Text } from "@earendil-works/pi-tui";
 import { getReadmePath } from "../../../config.ts";
-import { keyHint, keyText } from "../../../modes/interactive/components/keybinding-hints.ts";
+import { keyText } from "../../../modes/interactive/components/keybinding-hints.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../../../modes/interactive/theme/theme.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../../utils/paths.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
+import type { KeybindingHints, ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
 import { resolveToCwd } from "../path-utils.ts";
 import type { ReadToolDetails } from "../read.ts";
-import { formatReadLineRange, getTextOutput, renderToolPath, replaceTabs, str } from "../render-utils.ts";
+import {
+	formatExpandMoreHint,
+	formatReadLineRange,
+	getTextOutput,
+	renderToolPath,
+	replaceTabs,
+	str,
+} from "../render-utils.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "../truncate.ts";
 
 interface CompactReadClassification {
@@ -112,8 +119,8 @@ function formatReadResult(
 	options: ToolRenderResultOptions,
 	theme: Theme,
 	showImages: boolean,
-	_cwd: string,
 	isError: boolean,
+	keyHint: KeybindingHints["keyHint"],
 ): string {
 	if (!options.expanded && !isError) {
 		return "";
@@ -129,7 +136,7 @@ function formatReadResult(
 	const remaining = lines.length - maxLines;
 	let text = `\n${displayLines.map((line) => (lang ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line)))).join("\n")}`;
 	if (remaining > 0) {
-		text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
+		text += `\n${formatExpandMoreHint(theme, `${remaining} more lines`, keyHint)}`;
 	}
 
 	const truncation = result.details?.truncation;
@@ -164,8 +171,8 @@ export const readRenderers: Pick<ToolDefinition<any, ReadToolDetails | undefined
 				options,
 				theme,
 				context.showImages,
-				context.cwd,
 				context.isError,
+				context.keyHint,
 			),
 		);
 		return text;

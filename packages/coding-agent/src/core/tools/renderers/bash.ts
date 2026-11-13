@@ -11,7 +11,14 @@ import { VisualLinePreview } from "../../../modes/interactive/components/visual-
 import { theme } from "../../../modes/interactive/theme/theme.ts";
 import type { KeybindingHints, ToolDefinition, ToolRenderResultOptions } from "../../extensions/types.ts";
 import type { BashToolDetails } from "../bash.ts";
-import { getTextOutput, invalidArgText, startToolTimer, str, toolTimerText } from "../render-utils.ts";
+import {
+	formatExpandMoreHint,
+	getTextOutput,
+	invalidArgText,
+	startToolTimer,
+	str,
+	toolTimerText,
+} from "../render-utils.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "../truncate.ts";
 
 const BASH_PREVIEW_LINES = 5;
@@ -61,9 +68,7 @@ function rebuildBashResultRenderComponent(
 					text: styledOutput,
 					maxVisualLines: BASH_PREVIEW_LINES,
 					keep: "end",
-					formatHint: (hidden) =>
-						theme.fg("muted", `... (${hidden} earlier lines,`) +
-						` ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`,
+					formatHint: (hidden) => formatExpandMoreHint(theme, `${hidden} earlier lines`, keyHint),
 				}),
 			);
 		}
