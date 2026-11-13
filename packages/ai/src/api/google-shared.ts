@@ -254,21 +254,21 @@ export function streamGoogle(
 	return stream;
 }
 
-// Published Flex/Priority models and token rates, checked 2026-11-13:
+// Published Flex/Priority cache-read multipliers, checked 2026-11-13:
 // https://aistudio.google.com/docs/pricing
-const GOOGLE_SERVICE_TIER_MODELS = new Set([
-	"gemini-4-carbon",
-	"gemini-4-argon",
-	"gemini-4-hydrogen",
-	"gemini-3.8-flash",
-	"gemini-3.6-flash",
-	"gemini-3.5-flash-lite",
-	"gemini-3.1-flash-lite",
-	"gemini-3.1-pro-preview",
-	"gemini-3-flash-preview",
-	"gemini-2.5-pro",
-	"gemini-2.5-flash",
-	"gemini-2.5-flash-lite",
+const GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS = new Map<string, { flex: number; priority: number }>([
+	["gemini-4-carbon", { flex: 0.5, priority: 1.8 }],
+	["gemini-4-argon", { flex: 0.5, priority: 1.8 }],
+	["gemini-4-hydrogen", { flex: 0.5, priority: 1.8 }],
+	["gemini-3.8-flash", { flex: 0.5, priority: 1.8 }],
+	["gemini-3.6-flash", { flex: 0.5, priority: 1.8 }],
+	["gemini-3.5-flash-lite", { flex: 2 / 3, priority: 5 / 3 }],
+	["gemini-3.1-flash-lite", { flex: 0.5, priority: 1.8 }],
+	["gemini-3.1-pro-preview", { flex: 1, priority: 1.8 }],
+	["gemini-3-flash-preview", { flex: 1, priority: 1.8 }],
+	["gemini-2.5-pro", { flex: 1, priority: 1.8 }],
+	["gemini-2.5-flash", { flex: 1, priority: 1.8 }],
+	["gemini-2.5-flash-lite", { flex: 1, priority: 1.8 }],
 ]);
 
 function applyGoogleServiceTierPricing(model: Model<GoogleApiType>, usage: Usage, serviceTier: unknown): void {
@@ -276,15 +276,15 @@ function applyGoogleServiceTierPricing(model: Model<GoogleApiType>, usage: Usage
 		model.provider === "google" ||
 		!model.baseUrl ||
 		(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com");
-	if (!sendsToGeminiApi || !GOOGLE_SERVICE_TIER_MODELS.has(model.id)) return;
+	const cacheMultipliers = GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS.get(model.id);
+	if (!sendsToGeminiApi || !cacheMultipliers) return;
 
 	const multiplier = serviceTier === "flex" ? 0.5 : serviceTier === "priority" ? 1.8 : 1;
 	if (multiplier === 1) return;
 
 	usage.cost.input *= multiplier;
 	usage.cost.output *= multiplier;
-	// Flash-Lite's published Priority cache-read price is $0.05/M versus $0.03/M Standard.
-	usage.cost.cacheRead *= serviceTier === "priority" && model.id === "gemini-3.5-flash-lite" ? 5 / 3 : multiplier;
+	usage.cost.cacheRead *= serviceTier === "flex" ? cacheMultipliers.flex : cacheMultipliers.priority;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }
 

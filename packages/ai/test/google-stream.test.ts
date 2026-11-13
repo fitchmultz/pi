@@ -181,6 +181,8 @@ describe("Google SDK streaming protocol", () => {
 		{ id: "gemini-4-carbon", tier: "priority", input: 144, output: 54, cacheRead: 108, total: 306 },
 		{ id: "gemini-4-argon", tier: "priority", input: 144, output: 54, cacheRead: 108, total: 306 },
 		{ id: "gemini-3.5-flash-lite", tier: "priority", input: 144, output: 54, cacheRead: 100, total: 298 },
+		{ id: "gemini-3.5-flash-lite", tier: "flex", input: 40, output: 15, cacheRead: 40, total: 95 },
+		{ id: "gemini-2.5-pro", tier: "flex", input: 40, output: 15, cacheRead: 60, total: 115 },
 		{ id: "gemini-4-carbon", tier: "standard", input: 80, output: 30, cacheRead: 60, total: 170 },
 		{ id: "gemini-4-carbon", tier: undefined, input: 80, output: 30, cacheRead: 60, total: 170 },
 		{ id: "gemini-4-carbon", tier: "unknown", input: 80, output: 30, cacheRead: 60, total: 170 },
