@@ -15,10 +15,9 @@ async function compressRequest(
 	} catch {
 		return init;
 	}
-	const encoding = "gzip";
-	const origin = "https://api.anthropic.com";
-	const path = "/v1/messages";
-	if (url.origin !== origin || url.pathname !== path || url.username || url.password) return init;
+	if (url.origin !== "https://api.anthropic.com" || url.pathname !== "/v1/messages" || url.username || url.password) {
+		return init;
+	}
 	const headers = new Headers(init.headers);
 	if (
 		headers.has("content-encoding") ||
@@ -35,12 +34,12 @@ async function compressRequest(
 			| typeof NodeZlib
 			| undefined;
 		let compression: Promise<Uint8Array<ArrayBuffer> | undefined> | undefined;
-		if (encoding === "gzip" && zlib?.gzip) {
+		if (zlib?.gzip) {
 			compression = new Promise<Uint8Array<ArrayBuffer> | undefined>((resolve) => {
 				// Prefer upload latency over maximum compression; do not block the event loop.
 				zlib.gzip(bytes, { level: 1 }, (error, result) => resolve(error ? undefined : new Uint8Array(result)));
 			});
-		} else if (encoding === "gzip" && typeof CompressionStream !== "undefined") {
+		} else if (typeof CompressionStream !== "undefined") {
 			// Direct Anthropic Messages permits Content-Encoding in its browser CORS preflight.
 			const body = new Blob([bytes])
 				.stream()
@@ -57,7 +56,7 @@ async function compressRequest(
 	}
 	init.signal?.throwIfAborted();
 	if (!compressed || compressed.byteLength >= bytes.byteLength) return init;
-	headers.set("content-encoding", encoding);
+	headers.set("content-encoding", "gzip");
 	// The transport must calculate the length from the compressed bytes.
 	headers.delete("content-length");
 	return { ...init, headers, body: compressed };

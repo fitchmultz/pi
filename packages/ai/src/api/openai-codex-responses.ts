@@ -9,7 +9,6 @@ import type {
 import { clampThinkingLevel } from "../models.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
-	Api,
 	AssistantMessage,
 	Model,
 	ProviderEnv,
@@ -254,7 +253,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
 
 	(async () => {
-		const output = createPendingAssistantMessage("openai-codex-responses" as Api, model);
+		const output = createPendingAssistantMessage("openai-codex-responses", model);
 
 		try {
 			const apiKey = options?.apiKey;
