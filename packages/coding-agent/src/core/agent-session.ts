@@ -896,9 +896,11 @@ export class AgentSession {
 		this._usesDefaultTools = memory.usesDefaultTools;
 		this._defaultToolModifiers = memory.defaultToolModifiers ?? [];
 		this._setToolFilters(memory.allowedTools, memory.excludedTools);
-		this._pendingToolNames = new Set([...memory.activeTools, ...memory.pendingTools]);
+		const restoredTools = [...memory.activeTools, ...memory.pendingTools];
+		this._pendingToolNames = new Set(restoredTools);
+		this._restoredToolNames = new Set(restoredTools);
 		this._refreshToolRegistry({ activeToolNames: memory.activeTools });
-		this._setActiveTools([...memory.activeTools, ...memory.pendingTools]);
+		this._setActiveTools(restoredTools);
 		this._baseSystemPromptOptions = memory.prompt;
 		this._runSystemPromptOptions = memory.runPrompt;
 		for (const [name, value] of memory.flags)
