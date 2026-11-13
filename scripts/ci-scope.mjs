@@ -69,6 +69,7 @@ const fastPaths = [
 		"non-macOS-job package tests",
 		(path) =>
 			!isWorkspaceConfig(path) &&
+			path !== "packages/tui/test/virtual-terminal.ts" &&
 			/^packages\/(tui|chord|codemode|durable|mcp)\/(test|test-workers|examples|vitest[^/]*\.config\.ts)(\/|$)/.test(
 				path,
 			),
