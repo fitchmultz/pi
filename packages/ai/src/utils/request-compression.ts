@@ -2,11 +2,9 @@ import type * as NodeZlib from "node:zlib";
 import { raceWithAbortSignal } from "./abort.ts";
 
 const MIN_COMPRESSION_BYTES = 1024;
-type CompressedApi = "anthropic-messages";
 
 /** Endpoint support evidence and deliberate exclusions are recorded in docs/compression.md. */
 async function compressRequest(
-	api: CompressedApi,
 	input: Parameters<typeof globalThis.fetch>[0],
 	init?: RequestInit,
 ): Promise<RequestInit | undefined> {
@@ -65,9 +63,6 @@ async function compressRequest(
 	return { ...init, headers, body: compressed };
 }
 
-export function createRequestCompressionFetch(
-	api: CompressedApi,
-	fetch?: typeof globalThis.fetch,
-): typeof globalThis.fetch {
-	return async (input, init) => (fetch ?? globalThis.fetch)(input, await compressRequest(api, input, init));
+export function createAnthropicRequestCompressionFetch(fetch?: typeof globalThis.fetch): typeof globalThis.fetch {
+	return async (input, init) => (fetch ?? globalThis.fetch)(input, await compressRequest(input, init));
 }

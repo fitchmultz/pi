@@ -21,7 +21,7 @@ identical uncompressed bytes returned `200`. Automatic compression for this endp
 was removed rather than retried or detected per-response; set an explicit
 `Content-Encoding` header on custom fetch implementations if a qualified proxy needs one.
 
-For the new Anthropic and public OpenAI paths:
+For the Anthropic Messages path:
 
 - Only serialized JSON POST bodies of at least 1 KiB are candidates. Compression
   is asynchronous, and the original body is retained if compression fails or does
@@ -52,8 +52,10 @@ Audited 2026-10-19 against the fork's pinned SDKs, Anthropic 0.133.0 and OpenAI
   arbitrary proxies. An unauthenticated Messages OPTIONS preflight also allowed
   `content-encoding`; no authenticated live generation was used for qualification.
 - OpenAI's [production best practices](https://developers.openai.com/api/docs/guides/production-best-practices#compress-request-bodies)
-  explicitly show `Content-Encoding: zstd` on public `/v1/responses` and specify
-  the size and expansion-ratio limits above.
+  show `Content-Encoding: zstd` on public `/v1/responses`. Despite that guidance,
+  a byte-for-byte reproduction on 2026-11-13 measured the service rejecting one
+  valid compressed request with `400`; see the removal note above. This evidence
+  is retained as history, not a qualification to re-add compression.
 - The [official Codex client](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs)
   selects zstd for its OpenAI Codex backend. That does not establish support for
   arbitrary URLs configured through `baseUrl`.

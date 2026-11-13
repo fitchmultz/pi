@@ -59,7 +59,7 @@ import {
 import { createPendingAssistantMessage } from "../utils/pending-assistant.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { createRequestCompressionFetch } from "../utils/request-compression.ts";
+import { createAnthropicRequestCompressionFetch } from "../utils/request-compression.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
@@ -902,7 +902,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					model,
 					apiKey,
 					options?.headers,
-					federation ? options?.fetch : createRequestCompressionFetch("anthropic-messages", options?.fetch),
+					federation ? options?.fetch : createAnthropicRequestCompressionFetch(options?.fetch),
 					copilotDynamicHeaders,
 					cacheSessionId,
 					federation,
@@ -912,7 +912,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				// Keep the federation owner's shared credential cache and original fetch identity.
 				if (federation)
 					client = client.withOptions({
-						fetch: createRequestCompressionFetch("anthropic-messages", options?.fetch),
+						fetch: createAnthropicRequestCompressionFetch(options?.fetch),
 					});
 				isOAuth = created.isOAuthToken;
 			}
