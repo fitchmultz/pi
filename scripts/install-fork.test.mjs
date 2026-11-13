@@ -97,7 +97,10 @@ function receipt(commit = "a", catalog = defaultCatalog) {
 }
 
 function packages(f, { brokenCli = false } = {}) {
-	const packages = [name, "@earendil-works/chord", aiName].map((name) => ({ name, directory: join(f.root, "source/packages", name) }));
+	const packages = [[name, "coding-agent"], ["@earendil-works/chord", "chord"], [aiName, "ai"]].map(([name, folder]) => ({
+		name,
+		directory: join(f.root, "source/packages", folder),
+	}));
 	for (const pkg of packages) {
 		if (pkg.name === aiName) { writeCatalogFixture(pkg.directory); continue; }
 		const coding = pkg.name === name;

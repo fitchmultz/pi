@@ -714,8 +714,9 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 			} finally {
 				await handle.close();
 			}
-			// Node's `readdir` fails on any entry it cannot lstat. libuv sorts names by their bytes on POSIX; on Windows it
-			// keeps the file system's order, which the daemon reports.
+			// Like `NodeExecutionEnv.listDir`, leave out entries removed between enumeration and lstat; any other entry error
+			// fails the listing. libuv sorts names by their bytes on POSIX; on Windows it keeps the file system's order, which
+			// the daemon reports.
 			const paths = await remotePath(this.connection);
 			const ordered =
 				paths === posix
@@ -731,7 +732,10 @@ export class RemoteExecutionEnv implements ExecutionEnv {
 			for (const entry of ordered) {
 				if (context.abortSignal?.aborted) throw new FileError("aborted", "aborted", resolved);
 				const entryPath = paths.resolve(resolved, entry.name);
-				if (entry.error !== undefined) throw toFileError(new RemoteError(entry.error), entryPath);
+				if (entry.error !== undefined) {
+					if (entry.error.code === "ENOENT") continue;
+					throw toFileError(new RemoteError(entry.error), entryPath);
+				}
 				const info = toInfo(entryPath, entry.info!, paths);
 				if (info.ok) infos.push(info.value);
 			}

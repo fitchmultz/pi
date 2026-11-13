@@ -19,7 +19,7 @@ import {
 	withTelemetry,
 } from "../context/index.ts";
 import type { Address, Contract, HostKind, ParamsOf } from "../contracts/index.ts";
-import { contractData, type Params } from "../contracts/internal.ts";
+import { contractData, joinKey, type Params } from "../contracts/internal.ts";
 import { ChordError, type FailureCause, type Principal, type PrincipalKeyFunction } from "../data/index.ts";
 import {
 	asChordError,
@@ -28,12 +28,13 @@ import {
 	checkParams,
 	identityKey,
 	invalid,
+	principalJson,
 	principalKey,
 } from "../data/internal.ts";
 import type { TransactionCancelled } from "../documents/internal.ts";
 import type { JsonValue } from "../json.ts";
 import { binaryCodec, type Codec, type Compression, type Link, type PartLimits } from "../link/index.ts";
-import { linkLimits } from "../link/internal.ts";
+import { linkLimits, type WireAddress } from "../link/internal.ts";
 import type { Registry, RegistryValue } from "../registries/index.ts";
 import type { RegistryValueSource } from "../registries/internal.ts";
 import { type RegistryContribution, type RegistryError, RegistryRecord } from "../registries/internal.ts";
@@ -67,6 +68,7 @@ import { type Attempt, notLive } from "./attempt.ts";
 import { Backoff } from "./backoff.ts";
 import { type Caller, type Ctx, withLinkedAbortSignal } from "./ctx.ts";
 import { Destination, type Placed } from "./destination.ts";
+import { HostEvents } from "./events.ts";
 import type { Facet } from "./facet.ts";
 import { deleteFrom, HostDataGate, type HostDataSite, importInto } from "./host-data.ts";
 import { contributionOf } from "./members.ts";
@@ -136,6 +138,18 @@ export type HostOptions<P extends Principal = Principal, R extends JsonValue = J
 	 */
 	readonly heartbeat?: { readonly ping?: number; readonly close?: number };
 	/**
+	 * How many concurrent calls of one origin this host accepts on a link it was not given as trusted (its call window,
+	 * announced in `hello`); 10,000 by default, a positive integer. On a trusted link it announces none (decision "Call
+	 * windows only for untrusted links"): the app's own hosts never queue calls behind each other.
+	 */
+	readonly callWindow?: number;
+	/**
+	 * How many `event` messages of its own this host leaves unacknowledged per link and origin (decision "Events:
+	 * fire-and-forget members"); 32 by default. A flush finding the window full drops that origin's events (counted):
+	 * nothing waits for a slow consumer.
+	 */
+	readonly eventWindow?: number;
+	/**
 	 * What revokes a principal (§4): `host.revoke(r)` ends the objects and closes the child links of every principal
 	 * `p` whose `revokedBy(p)` holds `r` (compared as canonical JSON). The same function on every host.
 	 */
@@ -176,6 +190,17 @@ export type HostError =
 	| { readonly kind: "close_failed"; readonly object: string; readonly native: Position; readonly error: unknown }
 	| { readonly kind: "close_timeout"; readonly object: string; readonly native: Position }
 	| { readonly kind: "drain_timeout"; readonly object: string }
+	/**
+	 * An event mapping for an older consumer threw (decision "Events: fire-and-forget members"): that emit is dropped for
+	 * that version only; once per failure episode (the next mapped emit ends it).
+	 */
+	| {
+			readonly kind: "event_mapping_failed";
+			readonly object: string;
+			readonly member: string;
+			readonly version: number;
+			readonly error: unknown;
+	  }
 	| { readonly kind: "protocol_error"; readonly error: unknown }
 	| { readonly kind: "resolve_failed"; readonly address: string; readonly error: unknown }
 	/**
@@ -528,6 +553,12 @@ const NO_ATTRIBUTES: Readonly<SpanAttributes> = Object.freeze({});
 export class ChordHost<P extends Principal = Principal, R extends JsonValue = JsonValue> implements Host<P, R> {
 	readonly batch: Batch;
 	readonly timeouts: { readonly close: number; readonly ready: number; readonly reload: number };
+	/** The call window it announces on links it was not given as trusted (`HostOptions.callWindow`). */
+	readonly callWindow: number;
+	/** Its own `event` messages unacknowledged per link and origin at most (`HostOptions.eventWindow`). */
+	readonly eventWindow: number;
+	/** Its events: the emit counter, the list waiting for the event flush, the flush. */
+	readonly events: HostEvents;
 	/** Its old work during reloads (whether a context runs under it): see `old-work.ts`. */
 	readonly oldWork = new OldWork();
 	/** The waits of old work on objects that are not live, cut at once when they cycle through their own drain. */
@@ -583,6 +614,11 @@ export class ChordHost<P extends Principal = Principal, R extends JsonValue = Js
 	 * resolves for them) until `ref.retry()` places them anew; ended at `close` like the others.
 	 */
 	readonly unplaced = new Path(() => {});
+	/**
+	 * The remote objects references of this host share, per path, by sharing key (decision "References share one wire
+	 * hold"); each entry owned by its object, which takes it out (`#share`). A dropped route path takes its table.
+	 */
+	readonly #shared = new WeakMap<Path, Map<string, RemoteObject>>();
 	readonly #routes = new Map<string, Route>();
 	readonly #destination: Destination;
 	/** The downstream origins this host relays holds for, by their number on upstream links (never reused). */
@@ -620,6 +656,9 @@ export class ChordHost<P extends Principal = Principal, R extends JsonValue = Js
 		const reload = Math.min(close, options.reloadDrainTimeout ?? 5_000);
 		this.timeouts = { close, ready: options.readyTimeout ?? 60_000, reload };
 		this.#heartbeat = { ping: options.heartbeat?.ping ?? 15_000, close: options.heartbeat?.close ?? 30_000 };
+		this.callWindow = options.callWindow ?? 10_000;
+		this.eventWindow = options.eventWindow ?? 32;
+		this.events = new HostEvents(this.metrics, (error) => this.report(error));
 		this.#destination = new Destination(this.address, this.#routes, this.#parent);
 		// Chord's own: `openStore` made it.
 		this.store = options.store as ChordStore | undefined;
@@ -1407,22 +1446,7 @@ export class ChordHost<P extends Principal = Principal, R extends JsonValue = Js
 	bind(binding: Binding, Type: Contract, params: CheckedParams, context: Context): Target | undefined {
 		const { principal } = binding.caller;
 		const placed = this.#destination.reference(Type, params.params, principal, context);
-		if (placed.kind === "path") {
-			const { caller, dependent } = binding;
-			const remote = new RemoteObject(
-				this,
-				Type,
-				params,
-				placed.address,
-				caller,
-				placed.path,
-				dependent,
-				context.telemetry,
-			);
-			placed.path.attach(remote);
-			binding.bind(remote);
-			return remote;
-		}
+		if (placed.kind === "path") return this.#bindRemote(binding, Type, params, placed.path, placed.address, context);
 		const served = this.#types.get(Type.name);
 		const unbound =
 			unboundCause(served, Type.kind, Type.name, Type.version, Type.fingerprint) ??
@@ -1454,6 +1478,81 @@ export class ChordHost<P extends Principal = Principal, R extends JsonValue = Js
 		const activation = object.activationSpan;
 		if (activation !== undefined && !untraced(context.telemetry)) context.telemetry.addLink({ context: activation });
 		return object;
+	}
+
+	/**
+	 * Binds `binding` to a remote object over `path` (decision "References share one wire hold"): the one this host
+	 * holds for its sharing key, joined with no message (on a path whose route failed to resolve here, a join is a new
+	 * request: `path.requested`), or a new one, stored and bound before it attaches (a resolver re-entering `bind` finds
+	 * it, and a reference it makes and releases there is not its last). A `self.get` reference (its hold carries its
+	 * dependent's chain, Q5), one on a suspended path, and one whose key's object a provider or relay left failed
+	 * `waiting` (a new hold is a new request there: a relay's failed route resolves again for it) hold on their own, as
+	 * before.
+	 */
+	#bindRemote(
+		binding: Binding,
+		Type: Contract,
+		params: CheckedParams,
+		path: Path,
+		address: WireAddress,
+		context: Context,
+	): RemoteObject {
+		const { caller, dependent } = binding;
+		const shared = dependent === undefined && !path.suspended;
+		const key = shared ? this.#sharingKey(Type, params, address, caller, context) : undefined;
+		const found = key === undefined ? undefined : this.#shared.get(path)?.get(key);
+		const waiting = found?.state.kind === "failed" && found.state.cause.kind === "waiting";
+		if (found !== undefined && !(waiting && path.link !== undefined)) {
+			binding.bind(found);
+			if (waiting) path.requested(found);
+			// A joining getter links to the hold while it is open (decision "Shared work").
+			const span = found.span;
+			if (span !== undefined && !untraced(context.telemetry)) context.telemetry.addLink({ context: span });
+			return found;
+		}
+		// Owned entries: only the object an entry maps to takes it out, so an ended object never removes a newer one.
+		const table = key !== undefined && found === undefined ? this.#tableOf(path) : undefined;
+		const unindex =
+			table === undefined || key === undefined
+				? undefined
+				: () => {
+						if (table.get(key) === remote) table.delete(key);
+					};
+		const remote = new RemoteObject(this, Type, params, address, caller, path, dependent, context.telemetry, unindex);
+		if (table !== undefined && key !== undefined) table.set(key, remote);
+		binding.bind(remote);
+		path.attach(remote);
+		return remote;
+	}
+
+	/** The sharing table of `path`, made by its first shared object. */
+	#tableOf(path: Path): Map<string, RemoteObject> {
+		let table = this.#shared.get(path);
+		if (table === undefined) {
+			table = new Map();
+			this.#shared.set(path, table);
+		}
+		return table;
+	}
+
+	/**
+	 * The key under which references of this host share a remote object: its type, version and fingerprint, its params'
+	 * identity key, the address its placement computed (`hostAddress` is not in the fingerprint), and its caller (its
+	 * principal's JSON as the wire carries it, and the incarnation it acts with); every part escaped (`joinKey`).
+	 */
+	#sharingKey(Type: Contract, params: CheckedParams, address: WireAddress, caller: Caller, context: Context): string {
+		const { principal, incarnation } = caller;
+		// A `hostAddress` returns JSON params (checked where the address is routed or served).
+		const placed = joinKey([address.kind, canonicalJson(address.params as JsonValue, context)]);
+		return joinKey([
+			Type.name,
+			String(Type.version),
+			Type.fingerprint,
+			params.key,
+			placed,
+			principal === undefined ? "-" : `+${principalJson(principal, context)}`,
+			incarnation,
+		]);
 	}
 
 	/** Where a hold arriving on `link` goes (`Destination.hold`: by the address it names); `released` once the host closed. */
@@ -1626,7 +1725,8 @@ export class ChordHost<P extends Principal = Principal, R extends JsonValue = Js
 
 	/** A new reference's binding made by `caller`; its parked calls wait its `readyTimeout`. */
 	#binding(Type: Contract, dependent: ChordObject | undefined, caller: Caller, options: GetOptions): Binding {
-		return new Binding(Type, this.batch, dependent, caller, options.readyTimeout ?? this.timeouts.ready);
+		const timeout = options.readyTimeout ?? this.timeouts.ready;
+		return new Binding(Type, this.batch, dependent, caller, timeout, this.events);
 	}
 
 	/** This host as the maker of its own references: its principal and incarnation. */

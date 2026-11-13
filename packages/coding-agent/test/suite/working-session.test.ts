@@ -192,10 +192,28 @@ describe("Native working sessions", () => {
 			expect(declared[0]).not.toContain("late");
 			expect(declared[1]).toContain("late");
 			expect(declared[1]).not.toContain("retired");
-			session.restoreWorkingSession({ ...hold.state, pendingTools: ["mcp__server__reconnecting"] });
-			await expect(session.prompt("before reconnect")).rejects.toThrow(
-				"Saved tools have not registered: mcp__server__reconnecting.",
-			);
+			const explicit = await createAgentSession({
+				workingSession: {
+					...hold.state,
+					usesDefaultTools: false,
+					activeTools: ["read", "bash"],
+					pendingTools: ["mcp__server__reconnecting"],
+				},
+				modelRuntime: h.session.modelRuntime,
+				settingsManager,
+				resourceLoader: await loader(true),
+			});
+			try {
+				await expect(explicit.session.prompt("before reconnect")).rejects.toThrow(
+					"Saved tools have not registered: mcp__server__reconnecting.",
+				);
+				explicit.session.setActiveToolsByName(["read"]);
+				h.setResponses([respond]);
+				await explicit.session.prompt("after changing tool selection");
+				expect(declared[2]).toEqual(["read"]);
+			} finally {
+				explicit.session.dispose();
+			}
 		} finally {
 			session.dispose();
 		}

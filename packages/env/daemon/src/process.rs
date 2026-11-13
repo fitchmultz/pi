@@ -4,11 +4,11 @@
 
 use crate::errors::Failure;
 use crate::exec::{
-    Control, Ending, Groups, Launch, Message, StdioGrace, kill_group, running, spawn, spawn_reader,
+    Control, Ending, Groups, Launch, Message, kill_group, running, spawn, spawn_reader,
     start_waiter,
 };
 use crate::frame::{EVENT, Frame};
-use crate::output::Output;
+use crate::output::{Gate, Output};
 use crate::sys;
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -18,7 +18,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// After the program exits, output still arriving is collected until this much silence, as for `exec`.
+const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 
 /// Input for a program's stdin, in arrival order.
 enum Input {
@@ -123,24 +126,13 @@ pub fn run(
         Err(error) => return Err(abandon(child, error)),
     };
     // Like a full pipe: a program that writes faster than the link waits.
+    let gate = Gate::new(output);
     let stdout = child.stdout.take().unwrap();
-    if let Err(error) = spawn_reader(
-        0,
-        stdout,
-        sender.clone(),
-        stop.clone(),
-        Some(output.clone()),
-    ) {
+    if let Err(error) = spawn_reader(0, stdout, sender.clone(), stop.clone(), Some(gate.clone())) {
         return Err(abandon(child, error));
     }
     let stderr = child.stderr.take().unwrap();
-    if let Err(error) = spawn_reader(
-        1,
-        stderr,
-        sender.clone(),
-        stop.clone(),
-        Some(output.clone()),
-    ) {
+    if let Err(error) = spawn_reader(1, stderr, sender.clone(), stop.clone(), Some(gate.clone())) {
         return Err(abandon(child, error));
     }
     let (input, inputs) = mpsc::channel::<Input>();
@@ -189,7 +181,7 @@ pub fn run(
     let names = ["stdout", "stderr"];
     let mut ended = [false, false];
     let mut status: Option<Result<ExitStatus, String>> = None;
-    let mut grace = StdioGrace::default();
+    let mut idle_until: Option<Instant> = None;
     let mut aborted = false;
     let mut killed = false;
     let kill = |killed: &mut bool| {
@@ -209,12 +201,23 @@ pub fn run(
         if status.is_some() && ended[0] && ended[1] {
             break;
         }
-        let wait = grace.remaining().unwrap_or(Duration::from_secs(3600));
-        let message = receiver.recv_timeout(wait);
-        if let Ok(message) = &message {
-            grace.observe(message);
-        }
-        match message {
+        let wait = match idle_until {
+            Some(idle) => {
+                let now = Instant::now();
+                if now < idle {
+                    idle - now
+                } else if gate.held() {
+                    // Silence while the link holds a reader up is not the end of the output: the pipe may hold more.
+                    idle_until = Some(now + EXIT_STDIO_GRACE);
+                    EXIT_STDIO_GRACE
+                } else {
+                    // A descendant may hold the pipes open after the program exited; stop waiting for it.
+                    break;
+                }
+            }
+            None => Duration::from_secs(3600),
+        };
+        match receiver.recv_timeout(wait) {
             Ok(Message::Data(stream, bytes)) => {
                 output.bulk(
                     Frame::with_payload(
@@ -225,31 +228,27 @@ pub fn run(
                     ),
                     None,
                 );
+                if status.is_some() {
+                    idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
+                }
             }
             Ok(Message::Eof(stream)) => ended[stream] = true,
             Ok(Message::Exit(exit)) => {
                 // The waiter already ended the group; nothing is left to kill.
                 killed = true;
                 status = Some(Ok(exit));
+                idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
             }
             Ok(Message::WaitFailed(error)) => {
                 status = Some(Err(error));
-                break;
+                idle_until = Some(Instant::now());
             }
             Ok(Message::Cancel) => {
                 aborted = true;
                 kill(&mut killed);
             }
             Ok(Message::Kill) => kill(&mut killed),
-            Ok(Message::OutputPaused | Message::OutputResumed) => {}
-            Err(RecvTimeoutError::Timeout) => {
-                if grace
-                    .remaining()
-                    .is_some_and(|remaining| remaining.is_zero())
-                {
-                    break;
-                }
-            }
+            Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }

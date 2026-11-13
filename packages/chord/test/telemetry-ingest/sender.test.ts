@@ -28,6 +28,7 @@ async function sending(principal: Principal, scope: (incarnation: string) => str
 				return batch.spans.length;
 			},
 		},
+		admit: () => true,
 		workerHost: (who) => (who.kind === "worker" ? "project|p1" : undefined),
 		principalAttributes: () => ({}),
 	});
@@ -57,8 +58,9 @@ describe("a page's sender", () => {
 		connect();
 		await transported();
 		await sender.send(true);
+		// The sender's own hold is shared work: a `chord.hold` root on the page's adapter, sent with the rest.
 		expect(batches.map(({ spans, metrics }) => [spans.map(({ name }) => name), metrics])).toEqual([
-			[["page.click"], []],
+			[["page.click", "chord.hold"], []],
 		]);
 		expect(recorder.queuedSpans).toBe(0);
 		// Nothing waits: no call.
@@ -105,7 +107,7 @@ describe("a worker's sender", () => {
 		recorder.metrics.counter("runs").add(2);
 		await sender.send(true);
 		const [batch] = batches;
-		expect(batch!.spans.map(({ name }) => name)).toEqual(["worker.job"]);
+		expect(batch!.spans.map(({ name }) => name)).toEqual(["chord.hold", "worker.job"]);
 		expect(batch!.metrics.find(({ name }) => name === "runs")?.sum).toBe(2);
 	});
 
@@ -124,7 +126,7 @@ describe("a worker's sender", () => {
 			await recorder.startSpan({ name: "worker.first" }, () => {});
 			pending.push(sender.send(false));
 			await transported();
-			expect(batches.map(({ spans }) => spans.map(({ name }) => name))).toEqual([["worker.first"]]);
+			expect(batches.map(({ spans }) => spans.map(({ name }) => name))).toEqual([["chord.hold", "worker.first"]]);
 			await recorder.startSpan({ name: "worker.second" }, () => {});
 			pending.push(sender.send(false));
 			await transported();
@@ -135,7 +137,10 @@ describe("a worker's sender", () => {
 			await Promise.all(pending);
 			sender.stop();
 		}
-		expect(batches.map(({ spans }) => spans.map(({ name }) => name))).toEqual([["worker.first"], ["worker.second"]]);
+		expect(batches.map(({ spans }) => spans.map(({ name }) => name))).toEqual([
+			["chord.hold", "worker.first"],
+			["worker.second"],
+		]);
 	});
 
 	it("stops queued sends and releases the server's object", async () => {

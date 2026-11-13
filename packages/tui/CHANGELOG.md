@@ -16,7 +16,6 @@
 ### Fixed
 
 - Fixed `Text` and `Markdown` returning private selection annotations from `render()` to callers outside a fullscreen frame, such as tests, HTML export and `TuiMainScreen`. They now add annotations only while `TuiAltScreen` renders a frame, so other callers get plain lines without calling `stripSelectionMetadata()`.
-- Fixed fullscreen Kitty images disappearing after a terminal resize when the terminal clears cached image data during a screen erase.
 - Fixed inline math stripping dollar signs, braces and shell operators from quoted shell arguments.
 - Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
 - Fixed a rejected `getSuggestions()` call stopping all later autocomplete requests and escaping as an unhandled rejection, which ends Node processes by default. `Editor` now handles a failed lookup like one with no suggestions, including a rejection with the abort reason after a newer request supersedes it.
@@ -25,6 +24,9 @@
 - Fixed a fullscreen scrollbar drag staying active when it was released over an overlay opened during the drag, such as transcript search. Pointer motion without a pressed button kept scrolling the transcript. The drag now keeps every button and motion event until its release.
 - Fixed a fullscreen text-selection drag staying active when a component handled its release, such as an overlay opened during the drag. Its auto-scroll kept scrolling the transcript with no button held. The primary button's release now ends the drag whichever component handles it.
 - Fixed `wrapTextWithAnsi()` adding a blank row after a line that fills the width when a space follows it and then a word longer than the width, or nothing else on that line. This affected text with an active style or hyperlink and, in a fullscreen frame, all `Text` and `Markdown` text.
+- Fixed fullscreen Kitty images disappearing after a full redraw such as a window resize. Clearing the screen made Kitty free the cached image data that the redraw then tried to reuse ([#12010](https://github.com/earendil-works/pi/issues/12010))
+- Fixed text after a multi-row inline image in Markdown drawing over the image when the image's rows were joined with hard line breaks ([#12017](https://github.com/earendil-works/pi/issues/12017))
+- Fixed Kitty and iTerm2 images covering overlays drawn over them. An image that an overlay overlaps by row and column is now removed while the overlay is open and drawn again when it closes. Images beside an overlay, such as a sidebar, stay visible ([#11584](https://github.com/earendil-works/pi/issues/11584))
 
 ## [1.5.2] - 2026-11-10
 

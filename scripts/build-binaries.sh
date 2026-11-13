@@ -135,11 +135,12 @@ for platform in "${PLATFORMS[@]}"; do
     # common directory of all entrypoints, so the main entry must stay in dist/
     # for the worker specifiers in the runtime to resolve.
     #
-    # Load runtime package manifests for extension dependencies and conditional exports.
     # Disable cwd bunfig.toml autoload so project preload scripts cannot crash the
     # standalone binary before pi starts (see #7684). Disable cwd .env autoload so
-    # project env files do not leak into pi's environment (see #10473).
-    bun build --compile --compile-autoload-package-json --no-compile-autoload-bunfig --no-compile-autoload-dotenv --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$OUTPUT_DIR/$platform/pi"
+    # project env files do not leak into pi's environment (see #10473). Enable
+    # package.json autoload so extension dependencies resolve through their
+    # package.json main/exports entries instead of only a root index.* (see #12012).
+    bun build --compile --no-compile-autoload-bunfig --no-compile-autoload-dotenv --compile-autoload-package-json --target="$bun_target" ./dist/bun/cli.js ./src/utils/image-resize-worker.ts ./src/extensions/codemode/worker.ts --outfile "$OUTPUT_DIR/$platform/pi"
 done
 
 echo "==> Creating release archives..."
