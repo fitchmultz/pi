@@ -177,6 +177,64 @@ describe("Google SDK streaming protocol", () => {
 	});
 
 	it.each([
+		{ id: "gemini-4-carbon", tier: "flex", input: 40, output: 15, cacheRead: 30, total: 85 },
+		{ id: "gemini-4-carbon", tier: "priority", input: 144, output: 54, cacheRead: 108, total: 306 },
+		{ id: "gemini-4-argon", tier: "priority", input: 144, output: 54, cacheRead: 108, total: 306 },
+		{ id: "gemini-3.5-flash-lite", tier: "priority", input: 144, output: 54, cacheRead: 100, total: 298 },
+		{ id: "gemini-3.5-flash-lite", tier: "flex", input: 40, output: 15, cacheRead: 40, total: 95 },
+		{ id: "gemini-2.5-pro", tier: "flex", input: 40, output: 15, cacheRead: 60, total: 115 },
+		{ id: "gemini-4-carbon", tier: "standard", input: 80, output: 30, cacheRead: 60, total: 170 },
+		{ id: "gemini-4-carbon", tier: undefined, input: 80, output: 30, cacheRead: 60, total: 170 },
+		{ id: "gemini-4-carbon", tier: "unknown", input: 80, output: 30, cacheRead: 60, total: 170 },
+		{ id: "custom-model", tier: "priority", input: 80, output: 30, cacheRead: 60, total: 170 },
+		{
+			id: "gemini-4-carbon",
+			provider: "custom-proxy",
+			tier: "priority",
+			input: 80,
+			output: 30,
+			cacheRead: 60,
+			total: 170,
+		},
+	])(
+		"prices $id from returned $tier rather than requested Priority",
+		async ({ id, provider = "google", tier, input, output, cacheRead, total }) => {
+			const fetch = respond([
+				{
+					candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }],
+					usageMetadata: {
+						promptTokenCount: 100,
+						cachedContentTokenCount: 20,
+						candidatesTokenCount: 10,
+						thoughtsTokenCount: 5,
+						totalTokenCount: 115,
+						serviceTier: tier,
+					},
+				},
+			]);
+			const result = await streamGoogle({ ...model("google-generative-ai"), id, provider }, context, {
+				apiKey: "test-key",
+				onPayload: (payload) => {
+					const params = payload as GenerateContentParameters;
+					return { ...params, config: { ...params.config, serviceTier: "priority" } };
+				},
+			}).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(result.usage).toEqual({
+				input: 80,
+				output: 15,
+				cacheRead: 20,
+				cacheWrite: 0,
+				reasoning: 5,
+				totalTokens: 115,
+				cost: { input, output, cacheRead, cacheWrite: 0, total, totalFromProvider: false },
+			});
+			expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toHaveProperty("serviceTier", "priority");
+		},
+	);
+
+	it.each([
 		{
 			api: "google-generative-ai",
 			prefix: "Google",

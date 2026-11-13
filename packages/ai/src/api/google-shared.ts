@@ -25,6 +25,7 @@ import type {
 	Tool,
 	ToolCall,
 	TranscriptContext,
+	Usage,
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
@@ -213,6 +214,12 @@ export function streamGoogle(
 						},
 					};
 					calculateCost(model, output.usage);
+					if (api === "google-generative-ai") {
+						// @google/genai 2.32.0 retains this wire field but omits it from this response type.
+						const serviceTier =
+							"serviceTier" in chunk.usageMetadata ? chunk.usageMetadata.serviceTier : undefined;
+						applyGoogleServiceTierPricing(model, output.usage, serviceTier);
+					}
 				}
 			}
 
@@ -245,6 +252,40 @@ export function streamGoogle(
 	})();
 
 	return stream;
+}
+
+// Published Flex/Priority cache-read multipliers, checked 2026-11-13:
+// https://aistudio.google.com/docs/pricing
+const GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS = new Map<string, { flex: number; priority: number }>([
+	["gemini-4-carbon", { flex: 0.5, priority: 1.8 }],
+	["gemini-4-argon", { flex: 0.5, priority: 1.8 }],
+	["gemini-4-hydrogen", { flex: 0.5, priority: 1.8 }],
+	["gemini-3.8-flash", { flex: 0.5, priority: 1.8 }],
+	["gemini-3.6-flash", { flex: 0.5, priority: 1.8 }],
+	["gemini-3.5-flash-lite", { flex: 2 / 3, priority: 5 / 3 }],
+	["gemini-3.1-flash-lite", { flex: 0.5, priority: 1.8 }],
+	["gemini-3.1-pro-preview", { flex: 1, priority: 1.8 }],
+	["gemini-3-flash-preview", { flex: 1, priority: 1.8 }],
+	["gemini-2.5-pro", { flex: 1, priority: 1.8 }],
+	["gemini-2.5-flash", { flex: 1, priority: 1.8 }],
+	["gemini-2.5-flash-lite", { flex: 1, priority: 1.8 }],
+]);
+
+function applyGoogleServiceTierPricing(model: Model<GoogleApiType>, usage: Usage, serviceTier: unknown): void {
+	const sendsToGeminiApi =
+		model.provider === "google" ||
+		!model.baseUrl ||
+		(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com");
+	const cacheMultipliers = GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS.get(model.id);
+	if (!sendsToGeminiApi || !cacheMultipliers) return;
+
+	const multiplier = serviceTier === "flex" ? 0.5 : serviceTier === "priority" ? 1.8 : 1;
+	if (multiplier === 1) return;
+
+	usage.cost.input *= multiplier;
+	usage.cost.output *= multiplier;
+	usage.cost.cacheRead *= serviceTier === "flex" ? cacheMultipliers.flex : cacheMultipliers.priority;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }
 
 function buildParams(
