@@ -4,14 +4,15 @@
  */
 
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
+import { createRequire, registerHooks } from "node:module";
+import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Provider } from "@earendil-works/pi-ai";
 import { mcpNamespace } from "@earendil-works/pi-mcp";
 import type { KeyId } from "@earendil-works/pi-tui";
 import type { createJiti } from "jiti";
-import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../config.ts";
+import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode, isBunRuntime } from "../../config.ts";
 import { canonicalizePath, pathsEqual, resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
@@ -63,6 +64,95 @@ function getVirtualModules(): Promise<Record<string, unknown>> {
 	virtualModulesPromise ??= import("./virtual-modules.ts").then((module) => module.VIRTUAL_MODULES);
 	return virtualModulesPromise;
 }
+
+type NodeExtensionHookMode =
+	| { kind: "virtual"; modules: Record<string, unknown> }
+	| { kind: "alias"; aliases: Record<string, string>; skipParentUrl: string };
+
+interface NodeExtensionHookState {
+	registered: boolean;
+	mode?: NodeExtensionHookMode;
+}
+
+const VIRTUAL_MODULE_URL_PREFIX = "pi-virtual:";
+const JS_IDENTIFIER_RE = /^[$_\p{ID_Start}][$\p{ID_Continue}]*$/u;
+const EXTENSION_HOOK_STATE_KEY = Symbol.for("pi.codingAgent.extensionHookState");
+
+function getExtensionHookState(): NodeExtensionHookState {
+	const proc = process as unknown as Record<symbol, NodeExtensionHookState | undefined>;
+	proc[EXTENSION_HOOK_STATE_KEY] ??= { registered: false };
+	return proc[EXTENSION_HOOK_STATE_KEY];
+}
+
+/**
+ * Ensure Node's native ESM and CommonJS loaders resolve Pi's host packages to the active runtime.
+ * Jiti delegates `.mjs` and `"type": "module"` `.js` imports inside extensions to Node's native
+ * `import()`, which would otherwise bypass Jiti's `virtualModules`/`alias` table and either fail
+ * or load duplicate `@earendil-works/*` trees from an extension's `node_modules`.
+ */
+function ensureNodeExtensionHooks(mode: NodeExtensionHookMode): void {
+	const state = getExtensionHookState();
+	state.mode = mode;
+	if (state.registered || isBunRuntime) {
+		return;
+	}
+	state.registered = true;
+	registerHooks({
+		resolve(specifier, context, nextResolve) {
+			const current = getExtensionHookState().mode;
+			if (!current) {
+				return nextResolve(specifier, context);
+			}
+			if (current.kind === "virtual") {
+				if (Object.hasOwn(current.modules, specifier)) {
+					return {
+						url: `${VIRTUAL_MODULE_URL_PREFIX}${encodeURIComponent(specifier)}`,
+						shortCircuit: true,
+					};
+				}
+				return nextResolve(specifier, context);
+			}
+			if (context.parentURL !== current.skipParentUrl && Object.hasOwn(current.aliases, specifier)) {
+				return {
+					url: pathToFileURL(current.aliases[specifier]).href,
+					shortCircuit: true,
+				};
+			}
+			return nextResolve(specifier, context);
+		},
+		load(url, context, nextLoad) {
+			if (!url.startsWith(VIRTUAL_MODULE_URL_PREFIX)) {
+				return nextLoad(url, context);
+			}
+			const current = getExtensionHookState().mode;
+			if (current?.kind !== "virtual") {
+				return nextLoad(url, context);
+			}
+			const specifier = decodeURIComponent(url.slice(VIRTUAL_MODULE_URL_PREFIX.length));
+			if (!Object.hasOwn(current.modules, specifier)) {
+				return nextLoad(url, context);
+			}
+			const mod = current.modules[specifier] as Record<string, unknown>;
+			if (context.conditions?.includes("require")) {
+				return {
+					format: "commonjs",
+					shortCircuit: true,
+					source: `module.exports = process[Symbol.for("pi.codingAgent.extensionHookState")].mode.modules[${JSON.stringify(specifier)}];`,
+				};
+			}
+			const namedExports = Object.keys(mod).filter((key) => key !== "default" && JS_IDENTIFIER_RE.test(key));
+			const exportLine = namedExports.length > 0 ? `export const { ${namedExports.join(", ")} } = mod;\n` : "";
+			const defaultLine = "default" in mod ? "export default mod.default;\n" : "export default mod;\n";
+			return {
+				format: "module",
+				shortCircuit: true,
+				source: `import process from "node:process";\nconst mod = process[Symbol.for("pi.codingAgent.extensionHookState")].mode.modules[${JSON.stringify(specifier)}];\n${exportLine}${defaultLine}`,
+			};
+		},
+	});
+}
+
+let cachedJitiLoader: { cacheDir: string; instance: ReturnType<typeof createJiti> } | undefined;
 
 /**
  * Get aliases for jiti (used in built Node.js mode).
@@ -147,6 +237,7 @@ export function clearExtensionCache(): void {
 	extensionCache.clear();
 	extensionCacheCwd = undefined;
 	extensionCacheGeneration++;
+	cachedJitiLoader = undefined;
 }
 
 function useExtensionCacheCwd(cwd: string): ExtensionCacheToken {
@@ -620,6 +711,45 @@ function isCurrentCacheToken(cacheToken: ExtensionCacheToken | undefined): cache
 	);
 }
 
+async function getJitiLoader(): Promise<ReturnType<typeof createJiti>> {
+	const cacheRoot = process.env.XDG_CACHE_HOME?.trim() || path.join(os.homedir(), ".cache");
+	const fsCache = path.join(cacheRoot, "pi", "jiti");
+	if (cachedJitiLoader?.cacheDir === fsCache) {
+		return cachedJitiLoader.instance;
+	}
+
+	const createJitiImpl = await getCreateJiti();
+	// Compiled binaries and the bundled Node distribution use embedded modules.
+	// Source TypeScript reuses host modules and root tsconfig paths. Unbundled
+	// Node builds use dist aliases and do not need the bundled virtual modules.
+	let resolutionOptions: Record<string, unknown>;
+	if (usesEmbeddedModules) {
+		const virtualModules = await getVirtualModules();
+		ensureNodeExtensionHooks({ kind: "virtual", modules: virtualModules });
+		resolutionOptions = { virtualModules, tryNative: false };
+	} else if (isTypeScriptSourceRuntime) {
+		const virtualModules = await getVirtualModules();
+		ensureNodeExtensionHooks({ kind: "virtual", modules: virtualModules });
+		resolutionOptions = { virtualModules, tsconfigPaths: true };
+	} else {
+		const aliases = getAliases();
+		ensureNodeExtensionHooks({
+			kind: "alias",
+			aliases,
+			skipParentUrl: pathToFileURL(aliases["@earendil-works/pi-ai"]).href,
+		});
+		resolutionOptions = { alias: aliases };
+	}
+
+	const instance = createJitiImpl(import.meta.url, {
+		fsCache,
+		moduleCache: false,
+		...resolutionOptions,
+	});
+	cachedJitiLoader = { cacheDir: fsCache, instance };
+	return instance;
+}
+
 async function loadExtensionModule(extensionPath: string, cacheToken?: ExtensionCacheToken) {
 	if (isCurrentCacheToken(cacheToken)) {
 		const cachedFactory = extensionCache.get(extensionPath);
@@ -628,20 +758,7 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 		}
 	}
 
-	const createJitiImpl = await getCreateJiti();
-	// Compiled binaries and the bundled Node distribution use embedded modules.
-	// Source TypeScript reuses host modules and root tsconfig paths. Unbundled
-	// Node builds use dist aliases and do not need the bundled virtual modules.
-	const resolutionOptions = usesEmbeddedModules
-		? { virtualModules: await getVirtualModules(), tryNative: false }
-		: isTypeScriptSourceRuntime
-			? { virtualModules: await getVirtualModules(), tsconfigPaths: true }
-			: { alias: getAliases() };
-	const jiti = createJitiImpl(import.meta.url, {
-		moduleCache: false,
-		...resolutionOptions,
-	});
-
+	const jiti = await getJitiLoader();
 	const module = await jiti.import(canonicalizePath(extensionPath), { default: true });
 	const factory = module as ExtensionFactory;
 	if (typeof factory !== "function") {

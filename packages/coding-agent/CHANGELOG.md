@@ -65,6 +65,7 @@
 
 ### Fixed
 
+- Extension `.mjs`, `"type": "module"` `.js`, and `.cjs` imports now resolve `@earendil-works/*`, `@mariozechner/*`, `typebox`, and `@sinclair/typebox` to the active Pi host runtime instead of failing or loading duplicate `node_modules` copies, and Jiti's transpile cache persists under `${XDG_CACHE_HOME:-~/.cache}/pi/jiti` across `$TMPDIR` cleanups and fork release switches.
 - Fixed a forked session (`/fork`, `/clone`, `--fork`) reading none of the copied conversation from the OpenAI prompt cache on its first request. A fork now sends providers the session id its conversation was cached under, recorded as `cacheSessionId` in its header. See [SessionHeader](docs/session-format.md#sessionheader).
 - Fixed managed restart and native working-session restoration failing when an inactive model in the saved cycling list was removed. Missing cycling entries are omitted; a missing selected model still fails rather than silently switching providers.
 - Fixed failed session replacements sending lifecycle events to extensions already shut down. Recovery and exit now leave the disposed session alone; failures after the new session is created keep that session current. See [Session storage](docs/sdk.md#session-storage).
