@@ -23,18 +23,14 @@ test("artifact packing uses resolved Node/npm, isolated environment and array or
 	const home = join(root, "isolated-home");
 	mkdirSync(home);
 	const node = realpathSync(process.execPath);
-	const npmCli = realpathSync(join(dirname(node),
-		process.platform === "win32" ? "node_modules/npm/bin/npm-cli.js" : "../lib/node_modules/npm/bin/npm-cli.js"));
+	const npmCli = realpathSync(join(dirname(node), "../lib/node_modules/npm/bin/npm-cli.js"));
 	const globalConfig = join(root, "npm-globalconfig");
 	writeFileSync(globalConfig, "");
 	const env = {
-		PATH: `${dirname(node)}${delimiter}${process.env.PATH}`, HOME: home, USERPROFILE: home,
+		PATH: `${dirname(node)}${delimiter}${process.env.PATH}`, HOME: home,
 		npm_config_globalconfig: globalConfig,
 		...(process.platform === "android" ? { PREFIX: process.env.PREFIX, LD_PRELOAD: process.env.LD_PRELOAD } : {}),
 	};
-	for (const name of ["SystemRoot", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"]) {
-		if (process.env[name]) env[name] = process.env[name];
-	}
 	mkdirSync(repoRoot);
 	writeFileSync(join(repoRoot, "package.json"), '{"private":true,"workspaces":["packages/*"]}\n');
 	const names = ["@pi-package-test/shared", "@pi-package-test/target"];

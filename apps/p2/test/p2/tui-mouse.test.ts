@@ -12,9 +12,8 @@ import { defaultMouse } from "../../src/hosts/tui-local-preferences.ts";
 import type { MousePolicy } from "../../src/hosts/tui-modes.ts";
 import { SelectionGesture } from "../../src/hosts/tui-mouse.ts";
 import type { TuiLocalPreferences } from "../../src/tui/preferences.ts";
-import { holdIn, poll, startFixture } from "./helpers.ts";
+import { holdIn, poll, startFixture, TUI_NODE } from "./helpers.ts";
 
-const supported = Number(process.versions.node.split(".")[0]) >= 26;
 const press = (x: number, y: number) => `\x1b[<0;${x};${y}M`;
 const drag = (x: number, y: number) => `\x1b[<32;${x};${y}M`;
 const release = (x: number, y: number) => `\x1b[<0;${x};${y}m`;
@@ -108,7 +107,7 @@ async function fakeLauncher(
 
 test(
 	"launcher: mouse reports reach the worker; pi-tui's copy is accepted only after the launcher saw the release",
-	{ skip: !supported, timeout: 30000 },
+	{ skip: !TUI_NODE, timeout: 30000 },
 	async (t) => {
 		const { client, terminal, writes, copies, seen } = await fakeLauncher(t, "on");
 		const responses = async () =>
@@ -146,7 +145,7 @@ test(
 
 test(
 	"launcher: with the mouse off pi-tui does not capture it and no gesture opens a copy window",
-	{ skip: !supported, timeout: 30000 },
+	{ skip: !TUI_NODE, timeout: 30000 },
 	async (t) => {
 		const all = await fakeLauncher(t, "all");
 		assert(all.writes.join("").includes("\x1b[?1003h"));
@@ -161,7 +160,7 @@ test(
 
 test(
 	"real worker: the wheel scrolls the transcript, a drag selects it, the release copies the selected text once",
-	{ skip: !supported, timeout: 90000 },
+	{ skip: !TUI_NODE, timeout: 90000 },
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());

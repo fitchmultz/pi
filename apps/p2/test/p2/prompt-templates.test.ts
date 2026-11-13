@@ -30,7 +30,7 @@ import { parseSkillBlock } from "../../src/tui/components/skill-invocation.ts";
 import { tuiCoreFacet } from "../../src/tui/core-commands.ts";
 import { ThemeRef } from "../../src/tui/theme/ref.ts";
 import { BUILTIN_THEMES, createTheme } from "../../src/tui/theme/theme.ts";
-import { expectChord, holdIn, poll, startFixture, until } from "./helpers.ts";
+import { expectChord, holdIn, poll, startFixture, TUI_NODE, until } from "./helpers.ts";
 import { topology } from "./tui-fixture.ts";
 
 test("pi's argument parsing and substitution", () => {
@@ -239,7 +239,7 @@ test("TUI: templates and skills join slash completion after commands, and expand
 
 test(
 	"real worker: /template and /skill: typed in the TUI editor are expanded and sent; the skill block shows collapsed",
-	{ skip: Number(process.versions.node.split(".")[0]) < 26, timeout: 60000 },
+	{ skip: !TUI_NODE, timeout: 60000 },
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());

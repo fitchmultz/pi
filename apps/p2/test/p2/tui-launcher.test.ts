@@ -21,14 +21,13 @@ import { TERMINAL_RESET } from "../../src/hosts/tui-modes.ts";
 import { TERMINAL_COLOR_QUERY } from "../../src/hosts/tui-terminal-colors.ts";
 import { cookieTransport, type TuiTransport } from "../../src/hosts/tui-transport.ts";
 import { DARK_THEME } from "../../src/tui/theme/builtin-themes.ts";
-import { holdIn, http, poll, startFixture, tuiBundleServer, until } from "./helpers.ts";
+import { holdIn, http, poll, startFixture, TUI_NODE, tuiBundleServer, until } from "./helpers.ts";
 
-const supported = Number(process.versions.node.split(".")[0]) >= 26;
 type Snapshot = { session?: string; drafts: [string, string][]; screen: string };
 
 test(
 	"server-shipped TUI drives create/send, queues, stop, worker replacement and reconnect",
-	{ skip: !supported, timeout: 60000 },
+	{ skip: !TUI_NODE, timeout: 60000 },
 	async (t) => {
 		const fixture = await startFixture();
 		let restarted: Awaited<ReturnType<typeof startServer>> | undefined;
@@ -160,7 +159,7 @@ test(
 
 test(
 	"a link that went silent without a close (a laptop slept, the relay dropped it) reconnects",
-	{ skip: !supported, timeout: 90000 },
+	{ skip: !TUI_NODE, timeout: 90000 },
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());
@@ -246,7 +245,7 @@ test(
 
 test(
 	"a click on the editor keeps keys on the runtime: Ctrl+C still clears and the screen still switches",
-	{ skip: !supported, timeout: 60000 },
+	{ skip: !TUI_NODE, timeout: 60000 },
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());
@@ -331,7 +330,7 @@ test("TUI admission matches web: strangers refused, associated owners and share 
 
 test(
 	"changed server facet bundle swaps worker after readiness; invalid reload keeps the old version",
-	{ skip: !supported, timeout: 30000 },
+	{ skip: !TUI_NODE, timeout: 30000 },
 	async (t) => {
 		const directory = mkdtempSync(join(tmpdir(), "p2-tui-bundle-"));
 		t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -391,7 +390,7 @@ test(
 
 test(
 	"launcher denies unknown capabilities, hides cookies and closes a preparing worker",
-	{ skip: !supported, timeout: 15000 },
+	{ skip: !TUI_NODE, timeout: 15000 },
 	async (t) => {
 		let source = `export default ({input,send,onMessage})=>onMessage(message=>{
 		if(message.kind==='snapshot')return input;
@@ -518,7 +517,7 @@ function countWorkers(t: { after(fn: () => unknown): void }): { readonly started
 
 test(
 	"a new worker that fails before its swap, also once it is ready, leaves the active worker in place",
-	{ skip: !supported, timeout: 30000 },
+	{ skip: !TUI_NODE, timeout: 30000 },
 	async (t) => {
 		// The active worker answers the swap's snapshot after a second (the launcher waits 3 s); `p` gets an answer.
 		const active = `export default ({send,onMessage})=>onMessage(async message=>{
@@ -551,7 +550,7 @@ test(
 	},
 );
 
-test("closing while a new bundle downloads starts no worker", { skip: !supported, timeout: 30000 }, async (t) => {
+test("closing while a new bundle downloads starts no worker", { skip: !TUI_NODE, timeout: 30000 }, async (t) => {
 	const first =
 		"export default ({send,onMessage})=>onMessage(message=>{if(message.kind==='activate')send({kind:'output',data:'FIRST'})});";
 	let source = first;
@@ -576,7 +575,7 @@ test("closing while a new bundle downloads starts no worker", { skip: !supported
 
 test(
 	"a reload asked for while a version check is in flight starts a fresh worker",
-	{ skip: !supported, timeout: 30000 },
+	{ skip: !TUI_NODE, timeout: 30000 },
 	async (t) => {
 		// `r` asks for a reload, as `/reload` does.
 		const source = `export default ({send,onMessage})=>onMessage(message=>{
@@ -607,7 +606,7 @@ test(
 
 test(
 	"a swap or close while a local program has the terminal leaves it alone, and close waits for it",
-	{ skip: !supported, timeout: 30000 },
+	{ skip: !TUI_NODE, timeout: 30000 },
 	async (t) => {
 		const worker = (name: string) => `export default ({send,onMessage})=>onMessage(message=>{
 			if(message.kind==='snapshot')return null;
@@ -690,7 +689,7 @@ test(
 
 test(
 	"a new worker activates at the terminal's size, also after a resize while it started",
-	{ skip: !supported, timeout: 30000 },
+	{ skip: !TUI_NODE, timeout: 30000 },
 	async (t) => {
 		// Says the size it activates at; `delay` keeps its start busy, as a large bundle does.
 		const worker = (name: string, delay = 0) => `const until=Date.now()+${delay};while(Date.now()<until){}

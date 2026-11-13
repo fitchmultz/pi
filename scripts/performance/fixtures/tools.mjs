@@ -55,7 +55,7 @@ try {
 			if (
 				!(process.env.PATH ?? "").split(delimiter).some((dir) => {
 					try {
-						return statSync(join(dir, process.platform === "win32" ? "rg.exe" : "rg")).isFile();
+						return statSync(join(dir, "rg")).isFile();
 					} catch {
 						return false;
 					}

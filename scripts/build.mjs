@@ -47,7 +47,6 @@ while (pending.size > 0 || running.size > 0) {
 				cwd,
 				env: { ...process.env, PWD: cwd },
 				stdio: "inherit",
-				shell: process.platform === "win32",
 			});
 			child.once("error", (error) => console.error(error.message));
 			child.once("close", (code) => resolve({ name, code: code ?? 1 }));

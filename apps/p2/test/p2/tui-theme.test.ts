@@ -20,7 +20,7 @@ import {
 import { DARK_THEME, LIGHT_THEME } from "../../src/tui/theme/builtin-themes.ts";
 import { ThemeRef } from "../../src/tui/theme/ref.ts";
 import { createSystemTheme, createTheme, resolveTheme, type TerminalState } from "../../src/tui/theme/theme.ts";
-import { poll, testHost } from "./helpers.ts";
+import { poll, TUI_NODE, testHost } from "./helpers.ts";
 
 const local = (patch: Partial<TuiLocalPreferences>): TuiLocalPreferences => ({
 	keybindings: {},
@@ -204,7 +204,7 @@ test("terminal color probe consumes replies, never forwards them, and tracks sch
 
 test(
 	"launcher posts capabilities, preferences and terminal colors as data before activation and on change",
-	{ skip: Number(process.versions.node.split(".")[0]) < 26, timeout: 15000 },
+	{ skip: !TUI_NODE, timeout: 15000 },
 	async (t) => {
 		const source = `const seen=[];export default ({onMessage})=>onMessage(message=>{
 			if(message.kind==='snapshot')return seen;

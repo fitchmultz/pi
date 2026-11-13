@@ -72,7 +72,7 @@ export class MarkdownSource extends SelectionSource {
 						labelStart < 0
 							? new SourceText(token.text, [])
 							: label.slice(labelStart, labelStart + token.text.length);
-					if (token.tokens) this.indexTokens(token.tokens ?? [], content);
+					if (token.tokens) this.indexTokens(token.tokens, content);
 					this.format(raw, content);
 					break;
 				}
@@ -101,7 +101,7 @@ export class MarkdownSource extends SelectionSource {
 				case "paragraph":
 				case "text":
 					content = raw.slice(0, token.text.length);
-					if (token.tokens) this.indexTokens(token.tokens ?? [], content);
+					if (token.tokens) this.indexTokens(token.tokens, content);
 					break;
 			}
 			this.contentSources.set(token, content);

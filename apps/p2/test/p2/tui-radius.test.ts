@@ -6,12 +6,12 @@ import { test } from "node:test";
 import { VirtualTerminal } from "../../../../packages/tui/test/virtual-terminal.ts";
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
 import { radiusTransport } from "../../src/hosts/tui-radius.ts";
-import { poll } from "./helpers.ts";
+import { poll, TUI_NODE } from "./helpers.ts";
 import { radiusFixture as fixture } from "./radius-fixture.ts";
 
 test(
 	"the TUI through Radius loads the server's bundle and opens its chord link",
-	{ skip: Number(process.versions.node.split(".")[0]) < 26, timeout: 60_000 },
+	{ skip: !TUI_NODE, timeout: 60_000 },
 	async (t) => {
 		const f = await fixture(t, undefined, { channels: true });
 		const transport = radiusTransport(

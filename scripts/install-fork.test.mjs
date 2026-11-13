@@ -327,7 +327,7 @@ test("rejects a CI archive for another commit before building or changing the se
 });
 
 // #285: choosing a cache location must not change the permissions of an existing directory.
-test("keeps an existing cache parent unchanged while protecting npm state", { skip: process.platform === "win32" }, async (t) => {
+test("keeps an existing cache parent unchanged while protecting npm state", async (t) => {
 	const f = fixture(t);
 	const cache = join(f.root, "shared");
 	mkdirSync(cache);
@@ -344,7 +344,7 @@ test("keeps an existing cache parent unchanged while protecting npm state", { sk
 });
 
 // #285: an existing shared npm directory must not expose the persisted cache.
-test("refuses a nonprivate existing npm cache without changing its permissions", { skip: process.platform === "win32" }, async (t) => {
+test("refuses a nonprivate existing npm cache without changing its permissions", async (t) => {
 	const f = fixture(t);
 	const cache = join(f.root, "shared");
 	const npmCache = join(cache, "npm-cache");
@@ -360,7 +360,7 @@ test("refuses a nonprivate existing npm cache without changing its permissions",
 
 // #285: an npm log cleanup error must not turn a successful installation into a reported failure.
 test("warns without failing when successful npm logs cannot be removed", {
-	skip: process.platform === "win32" || process.getuid?.() === 0,
+	skip: process.getuid?.() === 0,
 }, (t) => {
 	const root = mkdtempSync(join(tmpdir(), "pi-fork-npm-cleanup-test-"));
 	const logs = join(root, "logs");
@@ -727,7 +727,7 @@ test("isolated npm cannot read registry credentials or settings from the native 
 });
 
 // #284: mise's Node/npm prefix need not contain Termux's native Bash.
-test("isolated Termux npm scripts use PREFIX Bash independently of Node", { skip: process.platform === "win32" }, (t) => {
+test("isolated Termux npm scripts use PREFIX Bash independently of Node", (t) => {
 	const f = fixture(t);
 	const platform = process.platform;
 	const inherited = { PREFIX: process.env.PREFIX, LD_PRELOAD: process.env.LD_PRELOAD };
@@ -785,7 +785,7 @@ test("Termux isolation rejects missing PREFIX or Bash before running npm", (t) =
 
 for (const blocked of [false, true]) {
 	test(`Termux compiler preserves frozen inputs without scripts and allows cleanup (${blocked ? "fanotify rebuild" : "published artifact"})`, {
-		skip: process.platform === "win32" || (blocked && process.platform === "darwin"),
+		skip: blocked && process.platform === "darwin",
 	}, (t) => {
 		const f = fixture(t);
 		const name = `@typescript/typescript-linux-${process.arch}`;

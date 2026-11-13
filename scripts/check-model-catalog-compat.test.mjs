@@ -12,7 +12,7 @@ const checker = join(repoRoot, "scripts/check-model-catalog-compat.mjs");
 
 // Keep registry and git transport offline; exercise the CLI, real tar extraction,
 // release-catalog merging, hydration and the actual TypeScript compiler.
-test("catalog compatibility CLI accepts both npm pack formats and rejects unsupported release APIs", { skip: process.platform === "win32" }, (t) => {
+test("catalog compatibility CLI accepts both npm pack formats and rejects unsupported release APIs", (t) => {
 	const root = mkdtempSync(join(tmpdir(), "pi-catalog-compat-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const bin = join(root, "bin");

@@ -18,9 +18,7 @@ import { tuiCoreFacet } from "../../src/tui/core-commands.ts";
 import { restoreRuntime, snapshotRuntime } from "../../src/tui/snapshot.ts";
 import { LIGHT_THEME } from "../../src/tui/theme/builtin-themes.ts";
 import { createTheme } from "../../src/tui/theme/theme.ts";
-import { holdIn, poll, startFixture, testHost } from "./helpers.ts";
-
-const supported = Number(process.versions.node.split(".")[0]) >= 26;
+import { holdIn, poll, startFixture, TUI_NODE, testHost } from "./helpers.ts";
 
 test("savePrefs patches: privileged bindings, the editor command and launcher-only keys are refused", () => {
 	const refused = (patch: unknown) => "error" in validatePrefsPatch(patch);
@@ -222,7 +220,7 @@ test("/keybindings rebinds through savePrefs; launcher-owned keys are listed but
 
 test(
 	"end to end: the launcher shows the diff, writes prefs.json, and the watcher applies the new theme",
-	{ skip: !supported, timeout: 60000 },
+	{ skip: !TUI_NODE, timeout: 60000 },
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());
