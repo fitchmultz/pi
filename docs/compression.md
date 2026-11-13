@@ -12,18 +12,20 @@ an OpenAI/Anthropic-compatible JSON schema.
 | Adapter / destination | Encoding | Boundary |
 | --- | --- | --- |
 | Anthropic Messages at `https://api.anthropic.com/v1/messages` | gzip | API key, OAuth and header/federation auth; Node/Bun native gzip, or the Web `CompressionStream` when available |
-| OpenAI Responses at `https://api.openai.com/v1/responses` | zstd | Native runtime support required; public Responses endpoint, not Chat Completions, Azure or compatible gateways |
 | Codex SSE at `https://chatgpt.com/backend-api/codex/responses` | zstd | Existing Codex compression, now restricted to the canonical resolved endpoint; WebSocket JSON frames are unchanged |
 
-For the new Anthropic and public OpenAI paths:
+`https://api.openai.com/v1/responses` is deliberately not compressed. A byte-for-byte
+reproduction on 2026-11-13 showed the service returning `400 {"detail":"Bad Request"}`
+for a valid 131,904-byte JSON request sent as a 33,869-byte zstd frame, while the
+identical uncompressed bytes returned `200`. Automatic compression for this endpoint
+was removed rather than retried or detected per-response; set an explicit
+`Content-Encoding` header on custom fetch implementations if a qualified proxy needs one.
+
+For the Anthropic Messages path:
 
 - Only serialized JSON POST bodies of at least 1 KiB are candidates. Compression
   is asynchronous, and the original body is retained if compression fails or does
-  not make it smaller. Native gzip uses level 1; native zstd uses level 3.
-- OpenAI's documented limits are checked before sending compressed bytes: both
-  representations must be at most 128 MiB, and decompression must not expand the
-  compressed body by more than 100 times. Otherwise the ordinary JSON request is
-  sent; normal provider request/context limits still apply.
+  not make it smaller. Native gzip uses level 1.
 - Existing `Content-Encoding` headers are respected. Set `Content-Encoding: identity`
   in provider/model/request headers to disable automatic compression, for example
   for an inspecting proxy or custom fetch implementation that requires plain JSON.
@@ -50,8 +52,10 @@ Audited 2026-10-19 against the fork's pinned SDKs, Anthropic 0.133.0 and OpenAI
   arbitrary proxies. An unauthenticated Messages OPTIONS preflight also allowed
   `content-encoding`; no authenticated live generation was used for qualification.
 - OpenAI's [production best practices](https://developers.openai.com/api/docs/guides/production-best-practices#compress-request-bodies)
-  explicitly show `Content-Encoding: zstd` on public `/v1/responses` and specify
-  the size and expansion-ratio limits above.
+  show `Content-Encoding: zstd` on public `/v1/responses`. Despite that guidance,
+  a byte-for-byte reproduction on 2026-11-13 measured the service rejecting one
+  valid compressed request with `400`; see the removal note above. This evidence
+  is retained as history, not a qualification to re-add compression.
 - The [official Codex client](https://github.com/openai/codex/blob/main/codex-rs/core/src/client.rs)
   selects zstd for its OpenAI Codex backend. That does not establish support for
   arbitrary URLs configured through `baseUrl`.
@@ -79,8 +83,7 @@ verified a lossless gzip round trip. No paid model calls are required.
 
 ```sh
 ./test.sh -- node node_modules/vitest/dist/cli.js --run --root packages/ai \
-  test/anthropic-request-compression.test.ts test/openai-request-compression.test.ts \
-  test/openai-codex-stream.test.ts
+  test/anthropic-request-compression.test.ts test/openai-codex-stream.test.ts
 npm run check
 ./test.sh
 ```

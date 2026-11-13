@@ -8,7 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type AnthropicOptions, stream } from "../src/api/anthropic-messages.ts";
 import type { Model } from "../src/types.ts";
-import { createRequestCompressionFetch } from "../src/utils/request-compression.ts";
+import { createAnthropicRequestCompressionFetch } from "../src/utils/request-compression.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const model: Model<"anthropic-messages"> = {
@@ -225,7 +225,7 @@ describe("gzip eligibility and runtime fallbacks", () => {
 		["not a URL", request()],
 	] as const)("passes ineligible request through unchanged (%s)", async (url, init) => {
 		const fetch = vi.fn<typeof globalThis.fetch>(async () => response());
-		await createRequestCompressionFetch("anthropic-messages", fetch)(url, init);
+		await createAnthropicRequestCompressionFetch(fetch)(url, init);
 		expect(fetch).toHaveBeenCalledExactlyOnceWith(url, init);
 		expect(fetch.mock.calls[0][1]).toBe(init);
 	});
@@ -240,7 +240,7 @@ describe("gzip eligibility and runtime fallbacks", () => {
 		});
 		const init = { ...request(body), headers };
 		const fetch = vi.fn<typeof globalThis.fetch>(async () => response());
-		await createRequestCompressionFetch("anthropic-messages", fetch)(new URL(endpoint), init);
+		await createAnthropicRequestCompressionFetch(fetch)(new URL(endpoint), init);
 		const sent = fetch.mock.calls[0][1]!;
 		expect(new Headers(sent.headers).get("content-encoding")).toBe("gzip");
 		expect(new Headers(sent.headers).has("content-length")).toBe(false);
@@ -265,7 +265,7 @@ describe("gzip eligibility and runtime fallbacks", () => {
 			);
 		const init = request();
 		const fetch = vi.fn<typeof globalThis.fetch>(async () => response());
-		await createRequestCompressionFetch("anthropic-messages", fetch)(endpoint, init);
+		await createAnthropicRequestCompressionFetch(fetch)(endpoint, init);
 		expect(fetch.mock.calls[0][1]).toBe(init);
 	});
 
@@ -273,7 +273,7 @@ describe("gzip eligibility and runtime fallbacks", () => {
 		vi.spyOn(process, "getBuiltinModule").mockReturnValue(undefined);
 		const init = request();
 		const fetch = vi.fn<typeof globalThis.fetch>(async () => response());
-		await createRequestCompressionFetch("anthropic-messages", fetch)(endpoint, init);
+		await createAnthropicRequestCompressionFetch(fetch)(endpoint, init);
 		const sent = fetch.mock.calls[0][1]!;
 		expect(new Headers(sent.headers).get("content-encoding")).toBe("gzip");
 		expect(gunzipSync(sent.body as Uint8Array).toString()).toBe(init.body);
@@ -324,7 +324,7 @@ describe("gzip eligibility and runtime fallbacks", () => {
 		);
 		const controller = new AbortController();
 		const fetch = vi.fn<typeof globalThis.fetch>(async () => response());
-		const result = createRequestCompressionFetch("anthropic-messages", fetch)(endpoint, {
+		const result = createAnthropicRequestCompressionFetch(fetch)(endpoint, {
 			...request(),
 			signal: controller.signal,
 		});

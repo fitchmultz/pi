@@ -14,7 +14,7 @@
 
 - Consolidated the initial pending assistant-message scaffold across streaming transports, delegated provider-retry backoff sleep to the shared helper, and routed Mistral's stream total-token fallback through `calculateContextTokens`.
 - Reused the shared cancellation-aware sleep helper for retry backoff, preserving aborted results, callback ordering and completed-listener cleanup.
-- Added lossless request-body compression for direct Anthropic Messages (gzip) and public OpenAI Responses (zstd), with runtime/size guards and explicit encoding opt-out. Restricted existing Codex SSE zstd to its canonical endpoint rather than arbitrary custom URLs. See [support boundaries and measurement](../../docs/compression.md).
+- Added lossless gzip request-body compression for direct Anthropic Messages, with a runtime guard and explicit encoding opt-out. Restricted existing Codex SSE zstd to its canonical endpoint rather than arbitrary custom URLs. See [support boundaries and measurement](../../docs/compression.md).
 - Reduced repeated work in streaming JSON repair, transcript comparisons, model overlay reads and Codex event queues. See [performance results and reproduction](../../docs/performance.md) for measured workloads and limits.
 - Bedrock Claude requests budget Claude's strict tool limits (20 strict tools, 16 union parameters) before they are sent, as Anthropic requests do: `strict: "require"` tools first, then `strict: "prefer"` tools in declaration order, with the preferred tools that do not fit sent non-strict. This avoids the rejected request and keeps strict mode on the tools that fit; a request whose required tools alone exceed the limits fails before it is sent. Other Bedrock models are unchanged.
 
