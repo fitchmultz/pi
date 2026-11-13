@@ -156,11 +156,22 @@ for (const entry of [
 rmSync(bundleDir, { force: true, recursive: true });
 mkdirSync(bundleDir, { recursive: true });
 
-const mainResult = await build({
+// Build the CLI launcher standalone so the long-lived supervisor process never
+// evaluates shared worker chunks (TypeBox, providers, TUI, or session state).
+const cliResult = await build({
 	...commonBuildOptions(),
 	entryNames: "[name]",
 	entryPoints: {
 		cli: join(codingAgentDistDir, "cli-launcher.js"),
+	},
+	outdir: bundleDir,
+	splitting: false,
+});
+
+const mainResult = await build({
+	...commonBuildOptions(),
+	entryNames: "[name]",
+	entryPoints: {
 		"cli-worker": join(codingAgentDistDir, "cli.js"),
 		index: join(codingAgentDistDir, "index.js"),
 		"rpc-entry": join(codingAgentDistDir, "rpc-entry.js"),
@@ -246,7 +257,25 @@ if (dirname(configOutput) !== dirname(bedrockLoaderOutput)) {
 	throw new Error("config.ts and the codemode worker were emitted into different directories");
 }
 
-const metafiles = [mainResult.metafile, lazyResult.metafile, codemodeWorkerResult.metafile];
+for (const [label, metafile, suffix, maxBytes] of [
+	["CLI launcher", cliResult.metafile, "/cli.js", 128 * 1024],
+	["Background command worker", lazyResult.metafile, "/background-command-worker.js", 64 * 1024],
+]) {
+	const entry = Object.entries(metafile.outputs).find(([outputPath]) => outputPath.replaceAll("\\", "/").endsWith(suffix));
+	if (!entry) throw new Error(`Missing bundled output for ${label}`);
+	const [, output] = entry;
+	if (output.bytes > maxBytes) {
+		throw new Error(`${label} bundle grew to ${output.bytes} bytes (budget ${maxBytes})`);
+	}
+	const typeboxInputs = Object.keys(output.inputs).filter((inputPath) =>
+		inputPath.replaceAll("\\", "/").includes("node_modules/typebox/"),
+	);
+	if (typeboxInputs.length > 0) {
+		throw new Error(`${label} bundle must not include TypeBox: ${typeboxInputs[0]}`);
+	}
+}
+
+const metafiles = [cliResult.metafile, mainResult.metafile, lazyResult.metafile, codemodeWorkerResult.metafile];
 validateExternalImports(metafiles);
 chmodSync(join(bundleDir, "cli.js"), 0o755);
 chmodSync(join(bundleDir, "rpc-entry.js"), 0o755);

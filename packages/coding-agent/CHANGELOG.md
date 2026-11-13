@@ -37,6 +37,7 @@
 
 ### Changed
 
+- Built `dist/bundle/cli.js` standalone and separated CLI tool-modifier validation, fork receipt checks, and local shell execution from TypeBox and `SettingsManager`, trimming the long-lived CLI supervisor and detached `background_command` worker bundles.
 - `read` in a `codemode` script now resolves to all the text from `offset` to the end of a file longer than 2000 lines or 50KB, up to 1 MiB, when the call has no `limit`, so `JSON.parse(await tools.read({ path }))` no longer fails at the continuation notice. Where the script prints that text unchanged, the model still sees the page and notice of a direct `read`. Direct `read` calls are unchanged. See [Read files](docs/codemode.md#read-files).
 - Scoped harness documentation guidance to the affected APIs and behavior, and clarified that independent tool calls can be batched directly or through codemode while dependent calls and shared-state mutations stay ordered.
 - Consolidated duplicated compaction, resource-ignore and sleep helpers: re-exported `calculateContextTokens` and `ContextUsageEstimate` from `@earendil-works/pi-ai`, derived compaction and branch-summary token defaults from `SETTINGS_DEFAULTS`, composed checkpoint summary prompts from a shared builder, extracted `.gitignore`/`.ignore`/`.fdignore` rule loading into `core/resource-ignore.ts`, and replaced the duplicate `utils/sleep.ts` wrapper with `timers/promises`.

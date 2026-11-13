@@ -109,6 +109,34 @@ const BUDGETS = {
 			],
 		},
 	},
+	"packages/coding-agent": {
+		// Standalone supervisor and detached background-job processes must stay off TypeBox, settings, and TUI.
+		"./src/cli-launcher.ts": {
+			maxFiles: 12,
+			forbid: [
+				"core/settings-manager.ts",
+				"core/settings-schema.ts",
+				"core/agent-session.ts",
+				"modes/",
+				"packages/ai/",
+				"packages/tui/",
+				"packages/schema/",
+			],
+			forbidExternal: ["typebox"],
+		},
+		"./src/extensions/background-command/worker.ts": {
+			maxFiles: 9,
+			forbid: [
+				"core/tools/bash.ts",
+				"core/settings-manager.ts",
+				"modes/",
+				"packages/ai/",
+				"packages/tui/",
+				"packages/schema/",
+			],
+			forbidExternal: ["typebox"],
+		},
+	},
 };
 
 const SPEC = /(?:^|\n)\s*(?:import|export)\s+(?!type\s)([^;]*?\sfrom\s*)?["']([^"']+)["']/g;
@@ -136,17 +164,20 @@ function resolveSpec(spec, fromFile) {
 
 function walk(entryFile) {
 	const seen = new Set();
+	const externals = new Set();
 	const queue = [entryFile];
 	while (queue.length > 0) {
 		const file = queue.pop();
 		if (seen.has(file) || file.endsWith(".json")) continue;
 		seen.add(file);
 		for (const match of readFileSync(file, "utf8").matchAll(SPEC)) {
-			const target = resolveSpec(match[2], file);
+			const spec = match[2];
+			const target = resolveSpec(spec, file);
 			if (target) queue.push(target);
+			else if (!spec.startsWith(".") && !spec.startsWith("node:")) externals.add(spec);
 		}
 	}
-	return seen;
+	return { seen, externals };
 }
 
 /** `./dist/harness/context.js` in the exports map is `src/harness/context.ts` on disk. */
@@ -169,23 +200,26 @@ let failures = 0;
 for (const [pkgDir, budgets] of Object.entries(BUDGETS)) {
 	const manifest = JSON.parse(readFileSync(resolve(ROOT, pkgDir, "package.json"), "utf8"));
 	for (const [entry, budget] of Object.entries(budgets)) {
-		const declared = manifest.exports?.[entry];
+		const isInternalSource = entry.startsWith("./src/");
+		const declared = isInternalSource ? entry : manifest.exports?.[entry];
 		if (!declared) {
 			console.error(`${pkgDir} declares no export "${entry}" but a budget exists for it`);
 			failures += 1;
 			continue;
 		}
 		const target = typeof declared === "string" ? declared : declared.import;
-		for (const [name, distPath] of expand(pkgDir, entry, target)) {
+		const entries = isInternalSource ? [[entry, target]] : expand(pkgDir, entry, target);
+		for (const [name, distPath] of entries) {
 			// A wildcard entry's budget applies to every file it exports, unless `overrides` names that file.
 			const limits = budget.overrides?.[name] ?? budget;
-			const source = sourceFor(pkgDir, distPath);
-			if (!source) {
+			const source = isInternalSource ? resolve(ROOT, pkgDir, distPath) : sourceFor(pkgDir, distPath);
+			if (!source || !existsSync(source)) {
 				console.error(`${pkgDir} export "${name}" points at ${distPath}, which has no source file`);
 				failures += 1;
 				continue;
 			}
-			const graph = [...walk(source)].map((file) => relative(ROOT, file).split(sep).join("/"));
+			const { seen, externals } = walk(source);
+			const graph = [...seen].map((file) => relative(ROOT, file).split(sep).join("/"));
 			if (graph.length > limits.maxFiles) {
 				console.error(
 					`${pkgDir} export "${name}" reaches ${graph.length} files, budget ${limits.maxFiles}\n` +
@@ -197,6 +231,13 @@ for (const [pkgDir, budgets] of Object.entries(BUDGETS)) {
 				const hit = graph.filter((file) => file.includes(pattern) && !(limits.allow ?? []).some((allowed) => file.endsWith(allowed)));
 				if (hit.length > 0) {
 					console.error(`${pkgDir} export "${name}" must not reach ${pattern}:\n${hit.map((f) => `    ${f}`).join("\n")}`);
+					failures += 1;
+				}
+			}
+			for (const pkg of limits.forbidExternal ?? []) {
+				const hit = [...externals].filter((spec) => spec === pkg || spec.startsWith(`${pkg}/`));
+				if (hit.length > 0) {
+					console.error(`${pkgDir} entry "${name}" must not import ${pkg}: ${hit.join(", ")}`);
 					failures += 1;
 				}
 			}
