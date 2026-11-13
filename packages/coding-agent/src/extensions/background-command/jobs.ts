@@ -17,7 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { stripVTControlCharacters } from "node:util";
 import { getBackgroundCommandWorker } from "../../config.ts";
 import type { ReadonlySessionManager } from "../../core/session-manager.ts";
-import { type BashSpawnContext, createLocalBashOperations } from "../../core/tools/bash.ts";
+import { type BashSpawnContext, createLocalBashOperations } from "../../core/tools/local-shell.ts";
 import { truncateTail } from "../../core/tools/truncate.ts";
 
 export interface BackgroundCommandJob {

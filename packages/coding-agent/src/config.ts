@@ -2,8 +2,6 @@ import { accessSync, constants, existsSync, openSync, readFileSync, realpathSync
 import { createRequire } from "module";
 import { homedir } from "os";
 import { basename, dirname, join, resolve, sep, win32 } from "path";
-import { Type } from "typebox";
-import { Value } from "typebox/value";
 import { fileURLToPath, pathToFileURL } from "url";
 import { spawnProcessSync } from "./utils/child-process.ts";
 import { normalizePath } from "./utils/paths.ts";
@@ -439,23 +437,39 @@ if (forkReleasePath && existsSync(forkReleasePath)) {
 	openSync(forkReleasePath, "r");
 }
 
-const ForkReleaseReceiptSchema = Type.Object({
-	commit: Type.String(),
-	catalogSha256: Type.String(),
-	archiveSha256: Type.String(),
-	node: Type.String(),
-	npm: Type.String(),
-	platform: Type.String(),
-	arch: Type.String(),
-	validated: Type.Literal(true),
-	ownerSelector: Type.Optional(Type.String()),
-});
+export interface ForkReleaseReceipt {
+	commit: string;
+	catalogSha256: string;
+	archiveSha256: string;
+	node: string;
+	npm: string;
+	platform: string;
+	arch: string;
+	validated: true;
+	ownerSelector?: string;
+}
+
+function isForkReleaseReceipt(value: unknown): value is ForkReleaseReceipt {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const record = value as Record<string, unknown>;
+	return (
+		typeof record.commit === "string" &&
+		typeof record.catalogSha256 === "string" &&
+		typeof record.archiveSha256 === "string" &&
+		typeof record.node === "string" &&
+		typeof record.npm === "string" &&
+		typeof record.platform === "string" &&
+		typeof record.arch === "string" &&
+		record.validated === true &&
+		(record.ownerSelector === undefined || typeof record.ownerSelector === "string")
+	);
+}
 
 /** Read the installer receipt belonging to this runtime, independently of PI_PACKAGE_DIR. */
-export function getForkRelease() {
+export function getForkRelease(): ForkReleaseReceipt | undefined {
 	if (!forkReleasePath || !existsSync(forkReleasePath)) return undefined;
 	const receipt: unknown = JSON.parse(readFileSync(forkReleasePath, "utf8"));
-	if (!Value.Check(ForkReleaseReceiptSchema, receipt)) {
+	if (!isForkReleaseReceipt(receipt)) {
 		throw new Error(`Invalid fork release receipt: ${forkReleasePath}`);
 	}
 	return receipt;
