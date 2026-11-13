@@ -90,7 +90,7 @@ Forty-two paths conflicted.
 | `scripts/build-binaries.sh`, `test.sh` | Adopt upstream's `#12012` Bun compile flags while keeping Apple Silicon macOS and Linux targets only; keep the fork's isolated-home, Node/npm pre-resolution, Termux allowlist, and focused `-- <command>` mode in `test.sh` while removing `OPENAI_ADMIN_KEY` with upstream. |
 | `apps/p2/plugins/{chat/web,terminals/Terminal}.tsx`, `apps/p2/src/hosts/server.ts`, `apps/p2/test/p2/{helpers,plugin-layout,terminal-tool,tui-attach,web,workspace-environment}.test.ts` | Combine upstream's `openExternalUrl` / `SessionSettings` props with the fork's outbox `Message` type and missing-terminal reconnect reset; keep bundle-input retention, failed-start socket cleanup, and startup signal handling in `server.ts`; keep `--use-mock-keychain` in `helpers.ts` and `web.test.ts`, Node 26 TUI skip gate in `tui-attach.test.ts`, `TMPDIR` canonicalization in `workspace-environment.test.ts`, and upstream's equivalent `react-dom` and archive-job polling test updates. |
 
-Five adjustments outside the conflicted files:
+Six adjustments outside the conflicted files:
 
 - `packages/ai/src/api/google-shared.ts`: carried upstream's assistant error timing metadata
   (`065a0b305`) and `httpOptions.fetch` forwarding (`#12103`) into the fork's shared Google adapter
@@ -98,6 +98,8 @@ Five adjustments outside the conflicted files:
 - `packages/ai/test/fetch-option.test.ts`: updated the fork's truncated-turn test for
   `automaticContinuation: false` to expect `stopReason === "length"` instead of `"error"`, matching
   `@google/genai` 2.32.0 and upstream `#12103`.
+- `packages/chord/test/telemetry-ingest/sender.test.ts`: included the shared-work `chord.hold` root
+  span in the fork's in-flight worker batch test, matching upstream's shared wire-hold telemetry.
 - `packages/coding-agent/src/core/tools/read.ts`: removed the duplicate raw-stream `error` listener
   after auto-merge combined the fork's listener with upstream `#11956`.
 - `packages/coding-agent/test/suite/model-unavailability.test.ts`: added `resolveAuth` to the mock

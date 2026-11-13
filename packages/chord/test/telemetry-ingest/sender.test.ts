@@ -126,7 +126,7 @@ describe("a worker's sender", () => {
 			await recorder.startSpan({ name: "worker.first" }, () => {});
 			pending.push(sender.send(false));
 			await transported();
-			expect(batches.map(({ spans }) => spans.map(({ name }) => name))).toEqual([["worker.first"]]);
+			expect(batches.map(({ spans }) => spans.map(({ name }) => name))).toEqual([["chord.hold", "worker.first"]]);
 			await recorder.startSpan({ name: "worker.second" }, () => {});
 			pending.push(sender.send(false));
 			await transported();
@@ -137,7 +137,10 @@ describe("a worker's sender", () => {
 			await Promise.all(pending);
 			sender.stop();
 		}
-		expect(batches.map(({ spans }) => spans.map(({ name }) => name))).toEqual([["worker.first"], ["worker.second"]]);
+		expect(batches.map(({ spans }) => spans.map(({ name }) => name))).toEqual([
+			["chord.hold", "worker.first"],
+			["worker.second"],
+		]);
 	});
 
 	it("stops queued sends and releases the server's object", async () => {
