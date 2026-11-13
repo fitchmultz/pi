@@ -20,7 +20,7 @@ try {
 		join(crate, "src/main.rs"),
 		source.replace(
 			/#\[path = "\/pi-performance-source([^"]+)"\]/g,
-			(_match, suffix) => `#[path = ${JSON.stringify(repo.replaceAll("\\", "/") + suffix)}]`,
+			(_match, suffix) => `#[path = ${JSON.stringify(repo + suffix)}]`,
 		),
 	);
 	// Setup is separate from reported scanner intervals. Reuse only the selected revision's locked deps.
@@ -38,7 +38,7 @@ try {
 	);
 	assert.equal(setup.status, 0, setup.error?.message ?? setup.stderr);
 	const result = spawnSync(
-		join(crate, "target/release", process.platform === "win32" ? "pi-env.exe" : "pi-env"),
+		join(crate, "target/release/pi-env"),
 		process.argv.slice(2),
 		{ encoding: "utf8" },
 	);

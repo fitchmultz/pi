@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import { filterTerminalOutput, MAX_TERMINAL_FRAME } from "../../src/hosts/tui-filter.ts";
-import { requireTuiNode, TuiSandbox } from "../../src/hosts/tui-sandbox.ts";
+import { hasTuiNode, requireTuiNode, TuiSandbox } from "../../src/hosts/tui-sandbox.ts";
 
-const supported = Number(process.versions.node.split(".")[0]) >= 26;
+const supported = hasTuiNode();
 const sandbox = (source: string, input?: unknown) =>
 	new TuiSandbox(source, { input, onMessage: () => {}, onFailure: () => {} });
 

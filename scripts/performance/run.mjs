@@ -259,7 +259,7 @@ function hashes(root, include) {
 				if (!["node_modules", ".git", ".pi", ".artifacts", ".eval", "target", "dist"].includes(entry.name))
 					visit(full);
 			} else if (entry.isFile()) {
-				const name = relative(root, full).replaceAll("\\", "/");
+				const name = relative(root, full);
 				if (include(name)) result[name] = hash(readFileSync(full));
 			}
 		}
@@ -287,16 +287,13 @@ let npmVersion;
 try {
 	const toolEnv = {
 		PATH: process.env.PATH,
-		SystemRoot: process.env.SystemRoot,
 		HOME: npmScratch,
-		USERPROFILE: npmScratch,
 		npm_config_userconfig: join(npmScratch, "user-npmrc"),
 		npm_config_globalconfig: join(npmScratch, "global-npmrc"),
 	};
 	npmVersion = execFileSync("npm", ["--version"], {
 		env: toolEnv,
 		encoding: "utf8",
-		shell: process.platform === "win32",
 	}).trim();
 } finally {
 	rmSync(npmScratch, { recursive: true, force: true });
@@ -336,10 +333,7 @@ for (const benchmark of chosen)
 			// Deliberate allowlist: no auth/provider variables, NODE_OPTIONS, shell startup hooks or user configuration.
 			const env = {
 				PATH: process.env.PATH,
-				SystemRoot: process.env.SystemRoot,
-				WINDIR: process.env.WINDIR,
 				HOME: join(scratch, "home"),
-				USERPROFILE: join(scratch, "home"),
 				TMPDIR: join(scratch, "tmp"),
 				TMP: join(scratch, "tmp"),
 				TEMP: join(scratch, "tmp"),

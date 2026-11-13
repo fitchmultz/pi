@@ -13,9 +13,8 @@ import { launcherActions, localPath, openLocalFile, uploadName } from "../../src
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
 import { Grants, type LauncherAction, type LauncherActionContext } from "../../src/hosts/tui-grants.ts";
 import { TrustedUi } from "../../src/hosts/tui-trusted-ui.ts";
-import { holdIn, poll, startFixture } from "./helpers.ts";
+import { holdIn, poll, startFixture, TUI_NODE } from "./helpers.ts";
 
-const supported = Number(process.versions.node.split(".")[0]) >= 26;
 const C = (action: LauncherAction | undefined) => {
 	assert(action?.kind === "C");
 	return action;
@@ -208,7 +207,7 @@ test("Ctrl+V: an image uploads after confirmation; text is pasted as typed; file
 
 test(
 	"real worker: /attach and Ctrl+V upload after y, chips show them, Backspace removes one, the next send carries them",
-	{ skip: !supported, timeout: 60000 },
+	{ skip: !TUI_NODE, timeout: 60000 },
 	async (t) => {
 		const directory = mkdtempSync(join(tmpdir(), "p2-attach-e2e-"));
 		t.after(() => rmSync(directory, { recursive: true, force: true }));

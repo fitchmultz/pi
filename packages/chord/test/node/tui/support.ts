@@ -6,6 +6,7 @@ import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { expect } from "vitest";
+import { requireSandboxNode } from "../../../src/node/tui/index.ts";
 import { testApp } from "../app/support.ts";
 
 /** The fixture's terminal entry and the launcher driver. */
@@ -21,8 +22,8 @@ function findNode(): string | undefined {
 		if (candidate === undefined) continue;
 		try {
 			const version = execFileSync(candidate, ["--version"], { encoding: "utf8" }).trim().slice(1);
-			const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
-			if (major > 26 || (major === 26 && (minor > 13 || (minor === 13 && patch >= 1)))) return candidate;
+			requireSandboxNode(version);
+			return candidate;
 		} catch {
 			// Not there.
 		}

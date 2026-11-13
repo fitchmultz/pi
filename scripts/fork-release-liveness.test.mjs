@@ -10,7 +10,7 @@ import { buildSync } from "esbuild";
 import { installRelease, pruneReleases } from "./install-fork.mjs";
 
 test("pruning protects JavaScript-only runtimes and fails closed without process inspection", {
-	skip: process.platform === "win32" || spawnSync("lsof", ["-v"]).error?.code === "ENOENT",
+	skip: spawnSync("lsof", ["-v"]).error?.code === "ENOENT",
 	timeout: 60_000,
 }, async (t) => {
 	const root = mkdtempSync(join(tmpdir(), "pi-fork-live-"));

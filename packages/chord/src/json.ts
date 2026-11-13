@@ -94,12 +94,12 @@ function defineData(target: object, key: PropertyKey, value: JsonValue): void {
 export function isJsonValue(value: unknown): value is JsonValue;
 export function isJsonValue(value: unknown, options: CheckJsonOptions): boolean;
 export function isJsonValue(value: unknown, options?: CheckJsonOptions): boolean {
-	return check(value, new Set<object>(), options?.omitUndefinedProperties === true, options?.validateContainer);
+	return check(value, undefined, options?.omitUndefinedProperties === true, options?.validateContainer);
 }
 
 function check(
 	value: unknown,
-	ancestors: Set<object>,
+	ancestors: Set<object> | undefined,
 	omitUndefinedProperties: boolean,
 	validateContainer?: (value: object) => boolean,
 ): boolean {
@@ -111,8 +111,9 @@ function check(
 		if (Object.getPrototypeOf(value) !== Array.prototype) return false;
 		const keys = Reflect.ownKeys(value);
 		if (keys.length !== value.length + 1 || keys.some((key) => typeof key !== "string")) return false;
-		if (ancestors.has(value)) return false;
-		ancestors.add(value);
+		const active = ancestors ?? new Set<object>();
+		if (active.has(value)) return false;
+		active.add(value);
 		try {
 			for (let index = 0; index < value.length; index++) {
 				const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
@@ -120,29 +121,32 @@ function check(
 					descriptor === undefined ||
 					!descriptor.enumerable ||
 					!("value" in descriptor) ||
-					!check(descriptor.value, ancestors, omitUndefinedProperties, validateContainer)
+					!check(descriptor.value, active, omitUndefinedProperties, validateContainer)
 				) {
 					return false;
 				}
 			}
 			return true;
 		} finally {
-			ancestors.delete(value);
+			active.delete(value);
 		}
 	}
 	const prototype = Object.getPrototypeOf(value);
 	if (prototype !== Object.prototype && prototype !== null) return false;
-	if (Reflect.ownKeys(value).some((key) => typeof key !== "string")) return false;
-	if (ancestors.has(value)) return false;
-	ancestors.add(value);
+	const keys = Reflect.ownKeys(value);
+	if (keys.some((key) => typeof key !== "string")) return false;
+	const active = ancestors ?? new Set<object>();
+	if (active.has(value)) return false;
+	active.add(value);
 	try {
-		for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
-			if (!descriptor.enumerable || !("value" in descriptor)) return false;
+		for (const key of keys) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (descriptor === undefined || !descriptor.enumerable || !("value" in descriptor)) return false;
 			if (descriptor.value === undefined && omitUndefinedProperties) continue;
-			if (!check(descriptor.value, ancestors, omitUndefinedProperties, validateContainer)) return false;
+			if (!check(descriptor.value, active, omitUndefinedProperties, validateContainer)) return false;
 		}
 		return true;
 	} finally {
-		ancestors.delete(value);
+		active.delete(value);
 	}
 }

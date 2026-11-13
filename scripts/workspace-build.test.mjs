@@ -97,10 +97,7 @@ setTimeout(() => {
   record("finish");
 }, process.env.FAIL_PACKAGE ? (process.env.FAIL_PACKAGE === name ? 10 : 200) : 40);
 `;
-	await writeFile(join(bin, process.platform === "win32" ? "npm.cjs" : "npm"), npmSource, { mode: 0o755 });
-	if (process.platform === "win32") {
-		await writeFile(join(bin, "npm.cmd"), `@echo off\r\n"${process.execPath}" "${join(bin, "npm.cjs")}" %*\r\n`);
-	}
+	await writeFile(join(bin, "npm"), npmSource, { mode: 0o755 });
 	const events = join(root, "events.jsonl");
 	return { root, events, packages, env: { ...process.env,
 		PATH: `${bin}${delimiter}${process.env.PATH}`, PWD: temporary,

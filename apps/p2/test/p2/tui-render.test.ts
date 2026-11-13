@@ -42,7 +42,7 @@ import { BUILTIN_THEMES, createTheme } from "../../src/tui/theme/theme.ts";
 import { buildTranscript, type ToolView } from "../../src/web/transcript.ts";
 import { PLUGIN_TUI_RENDERERS } from "../fixtures/tui-tools.ts";
 import { wholeView } from "../fixtures/whole-view.ts";
-import { type Cell, holdIn, poll, startFixture } from "./helpers.ts";
+import { type Cell, holdIn, poll, startFixture, TUI_NODE } from "./helpers.ts";
 import { SESSION, type Stub, sessionsStub, topology } from "./tui-fixture.ts";
 
 const plain = (lines: string[]): string => lines.map((line) => stripTerminalSequences(line).trimEnd()).join("\n");
@@ -685,7 +685,7 @@ test("footer provenance: owner sees context against the model window, guests get
 
 test(
 	"the copied components and tool renderers run inside the permission-dropped worker",
-	{ skip: Number(process.versions.node.split(".")[0]) < 26, timeout: 90000 },
+	{ skip: !TUI_NODE, timeout: 90000 },
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());

@@ -23,6 +23,7 @@ import type { NativeWatchable, Watchable } from "@earendil-works/chord/watch";
 import { WebSocket as NodeWebSocket, WebSocketServer } from "ws";
 import type { WebManifest } from "../../src/hosts/bundles.ts";
 import { type P2Server, type ServerOptions, startServer } from "../../src/hosts/server.ts";
+import { hasTuiNode } from "../../src/hosts/tui-sandbox.ts";
 import { WEB_MANIFEST_PATH } from "../../src/hosts/web.ts";
 import {
 	type Ctx,
@@ -78,6 +79,9 @@ const reportTo =
 
 /** The context of test calls made outside any Chord call (a test's own steps). */
 export const TEST = BACKGROUND_CONTEXT;
+
+/** Whether this Node satisfies the TUI sandbox requirement (>=26.13.1). */
+export const TUI_NODE = hasTuiNode();
 
 /** What `clientHost` connects over: a WebSocket to a p2 server's `/chord` (`ws`'s or the global one). */
 export type ClientSocket = NodeWebSocket | WebSocket;

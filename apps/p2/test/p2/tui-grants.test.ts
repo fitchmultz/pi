@@ -9,9 +9,8 @@ import { Grants, type LauncherAction, PrivilegedKeys, parseTarget } from "../../
 import { TERMINAL_RESET, TerminalModes } from "../../src/hosts/tui-modes.ts";
 import { TERMINAL_COLOR_QUERY } from "../../src/hosts/tui-terminal-colors.ts";
 import { TrustedUi, visibleText } from "../../src/hosts/tui-trusted-ui.ts";
-import { holdIn, poll, startFixture, tuiBundleServer } from "./helpers.ts";
+import { holdIn, poll, startFixture, TUI_NODE, tuiBundleServer } from "./helpers.ts";
 
-const supported = Number(process.versions.node.split(".")[0]) >= 26;
 const CTRL_X = "\x18";
 const ESC = "\x1b";
 
@@ -152,7 +151,7 @@ const FAKE_WORKER = `const seen=[];export default ({send,onMessage})=>onMessage(
 
 test(
 	"isolation: C actions need local confirmation, K actions fire only on their key, worker IO is suspended",
-	{ skip: !supported, timeout: 30000 },
+	{ skip: !TUI_NODE, timeout: 30000 },
 	async (t) => {
 		let source = FAKE_WORKER;
 		const url = await tuiBundleServer(t, () => source);
@@ -288,7 +287,7 @@ test(
 
 test(
 	"kitty keyboard: the launcher's negotiated protocol reaches the worker, which decodes keys accordingly",
-	{ skip: !supported, timeout: 60000 },
+	{ skip: !TUI_NODE, timeout: 60000 },
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());
@@ -334,7 +333,7 @@ test(
 
 test(
 	"keyContext: while transcript search has focus the worker suspends interception, so Ctrl+G is search-next",
-	{ skip: !supported, timeout: 60000 },
+	{ skip: !TUI_NODE, timeout: 60000 },
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());

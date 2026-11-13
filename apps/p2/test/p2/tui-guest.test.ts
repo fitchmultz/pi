@@ -20,9 +20,7 @@ import {
 	saveConfig,
 	type TuiConfig,
 } from "../../src/hosts/tui-config.ts";
-import { holdIn, poll, startFixture, until } from "./helpers.ts";
-
-const supported = Number(process.versions.node.split(".")[0]) >= 26;
+import { holdIn, poll, startFixture, TUI_NODE, until } from "./helpers.ts";
 
 /**
  * Plays the TLS-terminating tunnel of a remote origin: forwards HTTP and upgrades to the server as `https://<host>`
@@ -216,7 +214,7 @@ test("loopback stays the local owner: a stored guest cookie never downgrades it"
 
 test(
 	"a guest joins by link with a name, sees its session as a guest, and the launcher ends on revocation",
-	{ skip: !supported, timeout: 60000 },
+	{ skip: !TUI_NODE, timeout: 60000 },
 	async (t) => {
 		const fixture = await startFixture({
 			allowedHosts: ["tui.test"],

@@ -13,9 +13,8 @@ import { editorArgv, launcherActions, originPath, safeFileName } from "../../src
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
 import { Grants, type LauncherAction, type LauncherActionContext } from "../../src/hosts/tui-grants.ts";
 import { TrustedUi } from "../../src/hosts/tui-trusted-ui.ts";
-import { holdIn, poll, startFixture } from "./helpers.ts";
+import { holdIn, poll, startFixture, TUI_NODE } from "./helpers.ts";
 
-const supported = Number(process.versions.node.split(".")[0]) >= 26;
 const SESSION = "11111111-2222-4333-8444-555555555555";
 const OTHER = "99999999-2222-4333-8444-555555555555";
 const FILE = "aaaaaaaa-2222-4333-8444-555555555555";
@@ -313,7 +312,7 @@ const FAKE_WORKER = `const seen=[];export default ({send,onMessage})=>onMessage(
 
 test(
 	"launcher: the clipboard is written only after the copy key or a confirmation; the editor result is dropped after navigation; suspend resets modes",
-	{ skip: !supported, timeout: 30000 },
+	{ skip: !TUI_NODE, timeout: 30000 },
 	async (t) => {
 		const version = createHash("sha256").update(FAKE_WORKER).digest("hex");
 		const server = createServer((request, response) => {
@@ -417,7 +416,7 @@ test(
 
 test(
 	"real worker: Ctrl+X copies the last answer, /copy asks first, Ctrl+G edits the draft in the external editor",
-	{ skip: !supported, timeout: 60000 },
+	{ skip: !TUI_NODE, timeout: 60000 },
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());
