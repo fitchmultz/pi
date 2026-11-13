@@ -14,7 +14,7 @@
 // broken first unless noted: the child may signal processes of the same user (Node has no permission for signals; the
 // launcher ignores SIGUSR1, which would open its inspector), read machine details (`os`), learn whether any path exists
 // (`require.resolve` fails one way for a file that exists, another for one that does not: Opus E13), and allocate
-// memory outside its heap (no limit without a shell's `ulimit`; only the child dies). Needs Node 26.5.1 or later.
+// memory outside its heap (no limit without a shell's `ulimit`; only the child dies). Needs Node 26.13.1 or later.
 
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
@@ -117,11 +117,11 @@ export const BOOTSTRAP_FILE = "bootstrap.cjs";
 /** The most bytes waiting for the sandbox to read them before it counts as stuck: 64 MiB. */
 const MAX_UNREAD = 64 * 1024 * 1024;
 
-/** Throws unless this Node is 26.5.1 or later, the Node the sandbox's permissions were checked on. */
+/** Throws unless this Node is 26.13.1 or later, the Node the sandbox's permissions were checked on. */
 export function requireSandboxNode(version: string = process.versions.node): void {
 	const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
-	if (major > 26 || (major === 26 && (minor > 5 || (minor === 5 && patch >= 1)))) return;
-	throw new Error(`the terminal client needs Node 26.5.1 or later for its sandbox (this is Node ${version})`);
+	if (major > 26 || (major === 26 && (minor > 13 || (minor === 13 && patch >= 1)))) return;
+	throw new Error(`the terminal client needs Node 26.13.1 or later for its sandbox (this is Node ${version})`);
 }
 
 /**

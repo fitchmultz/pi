@@ -38,7 +38,7 @@ states the rule behind it. The app is one directory, `test/examples/61-tutorial/
 node --conditions=source --experimental-strip-types test/examples/61-tutorial/main.ts
 ```
 
-With Node 26.5.1 or later the terminal client of chapter V runs too (its sandbox needs that Node); with an older one,
+With Node 26.13.1 or later the terminal client of chapter V runs too (its sandbox needs that Node); with an older one,
 that step says so and the rest runs.
 
 ## Ten things to know
@@ -961,7 +961,7 @@ if (sandboxAvailable()) {
 	await until(() => screen(frames).includes("butter"));
 	console.log("5. the terminal shows:");
 	for (const line of screen(frames).trim().split("\r\n")) console.log(`   ${line}`);
-} else console.log("5. (the terminal client needs Node 26.5.1 or later for its sandbox)");
+} else console.log("5. (the terminal client needs Node 26.13.1 or later for its sandbox)");
 ```
 
 <!-- output: tui -->

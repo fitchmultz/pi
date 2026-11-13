@@ -91,7 +91,7 @@ if (sandboxAvailable()) {
 	while (!frames.join("").includes("\x1b[38;2;181;137;0mBoard"))
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	console.log("3. the terminal draws the title in Solarized's accent:", JSON.stringify("\x1b[38;2;181;137;0mBoard"));
-} else console.log("3. (a terminal client needs Node 26.5.1 or later: see example 57)");
+} else console.log("3. (a terminal client needs Node 26.13.1 or later: see example 57)");
 
 // 5. Edit the theme plugin and apply: the page's variables change in place, and the terminal redraws.
 const file = join(root, "solarized", "theme.ts");

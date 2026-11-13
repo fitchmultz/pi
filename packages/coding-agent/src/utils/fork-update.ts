@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { satisfies } from "semver";
 import { getPackageDir, isBunRuntime, PACKAGE_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./child-process.ts";
 import { forkNpmEnvironment, removeForkNpmLogs } from "./fork-npm-cache.ts";
@@ -23,9 +24,10 @@ export async function runForkUpdate(): Promise<void> {
 	if (!["darwin", "linux", "android"].includes(process.platform) || !["arm64", "x64"].includes(process.arch)) {
 		throw new Error("pi update --fork supports macOS, Linux and Termux on arm64/x64 only; Windows is not supported.");
 	}
-	const [major, minor] = process.versions.node.split(".").map(Number);
-	if (isBunRuntime || major < 22 || (major === 22 && minor < 19)) {
-		throw new Error("pi update --fork requires Node.js >=22.19 with npm installed alongside Node (not Bun).");
+	if (isBunRuntime || !satisfies(process.versions.node, "^22.23.5 || ^24.22.3 || >=26.13.1")) {
+		throw new Error(
+			"pi update --fork requires patched Node.js 22.23.5+ (22.x), 24.22.3+ (24.x), or >=26.13.1 with npm installed alongside Node (not Bun). Update Node.js first, then retry.",
+		);
 	}
 	const bash = termux ? getTermuxBash() : "bash";
 	const node = realpathSync(process.execPath);

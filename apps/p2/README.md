@@ -11,7 +11,7 @@ locked-down worker on the visitor's machine.
 
 ## Run
 
-Requires Node 22.19+ and the monorepo's installed dependencies and model data. From the repository root:
+Requires Node 22.23.5+, 24.22.3+, or 26.13.1+ on those release lines and the monorepo's installed dependencies and model data. From the repository root:
 
 ```sh
 npm install --ignore-scripts
@@ -132,8 +132,8 @@ changes, then reload the proxy and mint a fresh owner link. Do not run competing
 
 ## TUI sign-in
 
-The TUI launcher requires **Node >=26.5.1**; the server still supports Node 22.19+. On slayer use Node 26.11.1:
-`PATH="$HOME/node-v26.11.1-linux-x64/bin:$PATH" LD_LIBRARY_PATH="$HOME/node26-lib" npm run tui`
+The TUI launcher requires **Node >=26.13.1**. On slayer, update the binary behind `~/.local/bin/node26` before launching:
+`PATH="$HOME/node-v26.13.1-linux-x64/bin:$PATH" LD_LIBRARY_PATH="$HOME/node26-lib" npm run tui`
 (or invoke `~/.local/bin/node26 --import ./src/source.ts src/hosts/tui.ts`).
 
 ```sh

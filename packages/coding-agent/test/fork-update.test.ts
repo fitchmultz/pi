@@ -249,6 +249,22 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		expect(updateExtensions).toHaveBeenCalledTimes(args.includes("--all") ? 1 : 0);
 	});
 
+	it.each(["22.23.4", "24.22.2", "25.9.0", "26.13.0"])(
+		"rejects unpatched Node %s before downloading or changing selection",
+		async (version) => {
+			const originalNode = process.versions.node;
+			try {
+				Object.defineProperty(process.versions, "node", { value: version, configurable: true });
+				await expect(runForkUpdate()).rejects.toThrow(/requires patched Node.js/);
+				expect(childProcess.spawnProcessSync).not.toHaveBeenCalled();
+				expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+				expect(readlinkSync(selector)).toBe(oldPackage);
+			} finally {
+				Object.defineProperty(process.versions, "node", { value: originalNode, configurable: true });
+			}
+		},
+	);
+
 	it("routes --fork without settings writes, pins fetched main, isolates the build, prunes and cleans up", async () => {
 		expect(await handlePackageCommand(["update", "--fork"])).toBe(true);
 		expect(process.exitCode).toBeUndefined();

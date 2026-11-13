@@ -1,5 +1,5 @@
 // Test support for the terminal surface (slice 11 §4): a kit app with the terminal surface and the fixture's entry, a
-// Node new enough for the sandbox (26.5.1 or later: `CHORD_TUI_NODE`, else `node26` on the `PATH`; the tests that need
+// Node new enough for the sandbox (26.13.1 or later: `CHORD_TUI_NODE`, else `node26` on the `PATH`; the tests that need
 // it are skipped without), and launchers run under it with their terminal on pipes or a pseudo-terminal.
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
@@ -13,7 +13,7 @@ const MAIN = fileURLToPath(new URL("../fixtures/tui/main.ts", import.meta.url));
 const DRIVE = fileURLToPath(new URL("../fixtures/tui/drive.ts", import.meta.url));
 const ESCAPES = fileURLToPath(new URL("../fixtures/tui/escapes.ts", import.meta.url));
 
-/** A Node binary of 26.5.1 or later, or `undefined`. */
+/** A Node binary of 26.13.1 or later, or `undefined`. */
 export const TUI_NODE = findNode();
 
 function findNode(): string | undefined {
@@ -22,7 +22,7 @@ function findNode(): string | undefined {
 		try {
 			const version = execFileSync(candidate, ["--version"], { encoding: "utf8" }).trim().slice(1);
 			const [major = 0, minor = 0, patch = 0] = version.split(".").map(Number);
-			if (major > 26 || (major === 26 && (minor > 5 || (minor === 5 && patch >= 1)))) return candidate;
+			if (major > 26 || (major === 26 && (minor > 13 || (minor === 13 && patch >= 1)))) return candidate;
 		} catch {
 			// Not there.
 		}

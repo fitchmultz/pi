@@ -55,7 +55,9 @@ Install the build and validation tools:
 pkg install nodejs git bash tar gzip tmux golang
 ```
 
-Use Node.js >=22.19 with its adjacent npm. Go >=1.26 is needed only if Android
+Use Node.js 22.23.5+ (22.x), 24.22.3+ (24.x), or >=26.13.1 with its adjacent npm.
+Update Node.js before running the fork updater; it does not update Node itself.
+Go >=1.26 is needed only if Android
 blocks the TypeScript compiler's fanotify probe. The installer first tries the
 lockfile-pinned Linux compiler; on that specific failure it rebuilds the package's
 pinned source commit with fanotify disabled. It never changes the root lockfile

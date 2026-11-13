@@ -376,8 +376,9 @@ Builds an exact local commit (default HEAD) with the checkout's ALREADY hydrated
 model-data snapshot using create-source-archive.sh and build:offline. An optional
 --source-archive with its adjacent source.commit reuses an already frozen input.
 No fetch or model generation. npm may download frozen dependencies. Requires macOS,
-Linux or Termux, Node >=22.19 with npm installed alongside it, Git, bash, tar, gzip,
-and tmux. Termux also needs Go >=1.26 when Android blocks the compiler's fanotify probe.
+Linux or Termux, Node 22.23.5+ (22.x), 24.22.3+ (24.x), or >=26.13.1 with npm
+installed alongside it, Git, bash, tar, gzip, and tmux. Termux also needs Go >=1.26
+when Android blocks the compiler's fanotify probe.
 
 --source-archive <file> Use a frozen source archive and adjacent source.commit
 --stage                 Build/install/validate without changing the selector

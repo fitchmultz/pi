@@ -56,7 +56,7 @@ The installer pins all dependencies and updates Pi with `pi update`. Alternative
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 ```
 
-Pi requires Node.js 22.19 or newer. The macOS, Linux, and Windows installers can install it if needed. Pi does not require dependency lifecycle scripts for a normal npm installation.
+Use patched Node.js 22.23.5+, 24.22.3+, or 26.13.1+ on those release lines. The macOS, Linux, and Windows installers can install it if needed. Pi does not require dependency lifecycle scripts for a normal npm installation.
 
 ### Start Pi
 
@@ -79,7 +79,9 @@ nix run github:earendil-works/pi/stable
 
 `stable` points at the latest release. Install it with `nix profile add github:earendil-works/pi/stable` and update with `nix profile upgrade pi`. Use a release tag such as `github:earendil-works/pi/v1.0.0` to pin a version, or `github:earendil-works/pi` for unreleased changes on `main`. Nix builds Pi from source.
 
-Supports ARM64 and x86-64 on Linux and macOS. Use `nix build .` or `nix run .` to build or run your checkout.
+This fork supports Apple Silicon macOS and Linux (ARM64/x86-64). Use `nix build .` or `nix run .` to build or run your checkout.
+
+The Nix build runs Pi on nixpkgs' Node 22. That Node links nixpkgs' own llhttp and SQLite, not the copies bundled with Node releases, so a Node security fix in those libraries reaches the Nix build only when nixpkgs updates them.
 
 Nix builds are offline, so the bundled model data comes from a pi.dev model catalog revision pinned in `nix/model-catalog.json`. At runtime, Pi still overlays newer catalog data from pi.dev as usual. The Nix workflow replaces the pin on `main` when it no longer matches the checkout, for example after a provider is added or gains a new model type. To refresh it by hand:
 

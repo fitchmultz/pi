@@ -1,4 +1,4 @@
-// Runs a sandbox for the TUI tests under Node 26.5.1 or later with the base bundle given as the first argument (a
+// Runs a sandbox for the TUI tests under Node 26.13.1 or later with the base bundle given as the first argument (a
 // CommonJS script's text), printing one JSON line per message it sends (its kind and text) and its end.
 
 import { Sandbox } from "../../../../src/node/tui/sandbox.ts";

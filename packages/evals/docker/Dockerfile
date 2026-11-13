@@ -1,4 +1,4 @@
-FROM node:24-slim AS builder
+FROM node:24.22.3-slim AS builder
 WORKDIR /work
 # Build against an ephemeral repository mount. Only outputs staged under
 # /opt/evaluator persist; node_modules and dist created in /repo are discarded.
@@ -18,7 +18,7 @@ RUN rm -rf \
     /opt/evaluator/install/node_modules/@earendil-works/pi-coding-agent/docs \
     /opt/evaluator/install/node_modules/@earendil-works/pi-coding-agent/examples
 
-FROM node:24-slim AS evaluator
+FROM node:24.22.3-slim AS evaluator
 COPY --from=builder /opt/evaluator/root /repo
 WORKDIR /repo/packages/evals
 # Vitest starts as root so it can load evaluator code. Before prompting the

@@ -12,10 +12,10 @@ const supported = Number(process.versions.node.split(".")[0]) >= 26;
 const sandbox = (source: string, input?: unknown) =>
 	new TuiSandbox(source, { input, onMessage: () => {}, onFailure: () => {} });
 
-test("TUI runtime fails clearly below Node 26.5.1", () => {
-	for (const version of ["22.19.0", "24.4.1", "26.5.0"])
-		assert.throws(() => requireTuiNode(version), /requires Node >=26.5.1/);
-	for (const version of ["26.5.1", "26.11.1", "27.0.0"]) requireTuiNode(version);
+test("TUI runtime fails clearly below patched Node 26.13.1", () => {
+	for (const version of ["22.23.5", "24.22.3", "26.5.1", "26.13.0"])
+		assert.throws(() => requireTuiNode(version), /requires Node >=26.13.1/);
+	for (const version of ["26.13.1", "26.14.0", "27.0.0"]) requireTuiNode(version);
 });
 
 test("terminal output admits only bounded complete allowed sequences", () => {

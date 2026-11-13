@@ -330,8 +330,10 @@ selected update includes Pi. The fork updater reuses validated immutable release
 `--fork` explicitly selects the fork updater for
 [immutable fork installations](quickstart.md#fork-installation), including when
 a custom updater is configured. The fork updater requires macOS/Linux/Termux arm64/x64,
-Node.js >=22.19 (not Bun) with adjacent npm, Git, bash, tar, gzip, tmux, and network
-access. macOS/Linux use the active npm global prefix; Termux uses
+patched Node.js 22.23.5+ (22.x), 24.22.3+ (24.x), or >=26.13.1 (not Bun) with
+adjacent npm, Git, bash, tar, gzip, tmux, and network access. Update Node.js before
+running the fork updater; it does not update Node itself. macOS/Linux use the
+active npm global prefix; Termux uses
 `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` and
 `~/.local/bin/pi`. Ordinary npm directories, Windows, and other install layouts
 are refused before downloading.

@@ -36,7 +36,7 @@ Plain Docker provides the simplest whole-process container boundary.
 Create `Dockerfile.pi`:
 
 ```dockerfile
-FROM node:24-bookworm-slim
+FROM node:24.22.3-bookworm-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \

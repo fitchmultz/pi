@@ -1,4 +1,4 @@
-// Runs a terminal launcher for the TUI tests under Node 26.5.1 or later (the sandbox needs it): `drive.ts <url>
+// Runs a terminal launcher for the TUI tests under Node 26.13.1 or later (the sandbox needs it): `drive.ts <url>
 // token <file>` or `drive.ts <url> pair <label>`; the launcher's terminal is this process's stdin and stdout (pipes),
 // and its exit code this process's.
 

@@ -4,7 +4,7 @@
 // place, a list exported and imported, and a request's trace across the server and a worker, read back from the app's
 // telemetry store. The lists plugin's own test is `plugins/lists/worker.test.ts`; `screenshots.ts` shows the page and
 // the trace viewer in Chromium; `trace.ts` reads a data directory's traces.
-// Run from packages/chord (with Node 26.5.1 or later the terminal client runs too; `--serve` keeps the app running):
+// Run from packages/chord (with Node 26.13.1 or later the terminal client runs too; `--serve` keeps the app running):
 //   node --conditions=source --experimental-strip-types test/examples/61-tutorial/main.ts
 import { execFile } from "node:child_process";
 import { cp, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -109,7 +109,7 @@ await groceries.tick({ id: 2, done: true }, context);
 console.log("   the listener's first call:", done(await changed.promise), "done");
 await watch.stop();
 
-// 5. The terminal client (Node 26.5.1 or later): the launcher signs in with the owner token file, downloads the
+// 5. The terminal client (Node 26.13.1 or later): the launcher signs in with the owner token file, downloads the
 //    terminal's base bundle and the plugins' terminal scripts and runs them in its sandbox, here on a scripted terminal.
 const frames: string[] = [];
 let terminal: RunningTerminal | undefined;
@@ -128,7 +128,7 @@ if (sandboxAvailable()) {
 	await until(() => screen(frames).includes("butter"));
 	console.log("5. the terminal shows:");
 	for (const line of screen(frames).trim().split("\r\n")) console.log(`   ${line}`);
-} else console.log("5. (the terminal client needs Node 26.5.1 or later for its sandbox)");
+} else console.log("5. (the terminal client needs Node 26.13.1 or later for its sandbox)");
 
 // 6. A theme plugin added while the app runs: a new directory in the plugins root marks the set changed, and applying
 //    the changes builds it and rolls it out. Pages and terminals restyle in place.
