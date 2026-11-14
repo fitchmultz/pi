@@ -336,6 +336,11 @@ const OpenAICompletionsCompatProperties = {
 			"Whether system messages declare all tools and tool schema redefinitions inline in place instead of mutating the top-level tools field. Requires supportsMidConvoSystemMessages.",
 		default: false,
 	}),
+	supportsPromptProgress: optionalCompatBoolean({
+		description:
+			"Whether to send return_progress: true so llama.cpp and compatible local servers stream prompt_progress prefill events.",
+		default: false,
+	}),
 	supportsStrictMode: optionalCompatBoolean({
 		description:
 			"Whether the provider supports the strict field in tool definitions. Generated capable models enable it explicitly.",

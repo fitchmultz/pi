@@ -15,6 +15,7 @@ import { createToolNameMatcher } from "./mcp-servers.ts";
 import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
+import { extractPromptProgress } from "./prompt-progress.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
@@ -468,6 +469,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const sessionRef: { current?: AgentSession } = {};
 	const cacheWarmer = new CacheWarmer(
 		modelRuntime,
 		sessionManager,
@@ -526,6 +528,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		data,
 		model,
 	) => {
+		const progress = extractPromptProgress(data);
+		if (progress) {
+			sessionRef.current?.notifyPromptProgress(progress);
+		}
 		const runner = extensionRunnerRef.current;
 		if (!runner?.hasHandlers("provider_stream_event")) return;
 		await runner.emit({
@@ -619,6 +625,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
 	});
+	sessionRef.current = session;
 
 	if (getWorkingSessionResources)
 		session.workingSessionLaunch = { agentDir, ...getWorkingSessionResources.call(resourceLoader) };

@@ -1005,6 +1005,11 @@
           "description": "Whether mid-conversation tool additions and redefinitions are sent inside the conversation instead of mutating the top-level tools field, keeping the prompt cache. Requires supportsMidConvoSystemMessages. Used by the anthropic-messages and openai-completions APIs.",
           "default": false
         },
+        "supportsPromptProgress": {
+          "type": "boolean",
+          "description": "Whether to send return_progress: true so llama.cpp and compatible local servers stream prompt_progress prefill events.",
+          "default": false
+        },
         "supportsStrictMode": {
           "type": "boolean",
           "description": "Whether the provider supports strict tool schemas. Defaults are API-specific."
