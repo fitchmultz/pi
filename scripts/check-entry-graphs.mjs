@@ -12,6 +12,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { isBuiltin } from "node:module";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -142,7 +143,7 @@ const BUDGETS = {
 const SPEC = /(?:^|\n)\s*(?:import|export)\s+(?!type\s)([^;]*?\sfrom\s*)?["']([^"']+)["']/g;
 
 function resolveSpec(spec, fromFile) {
-	if (spec.startsWith("node:")) return null;
+	if (isBuiltin(spec)) return null;
 	if (spec.startsWith(".")) {
 		const base = resolve(dirname(fromFile), spec);
 		for (const candidate of [base, `${base}.ts`, `${base}/index.ts`]) {
@@ -174,7 +175,7 @@ function walk(entryFile) {
 			const spec = match[2];
 			const target = resolveSpec(spec, file);
 			if (target) queue.push(target);
-			else if (!spec.startsWith(".") && !spec.startsWith("node:")) externals.add(spec);
+			else if (!spec.startsWith(".") && !isBuiltin(spec)) externals.add(spec);
 		}
 	}
 	return { seen, externals };

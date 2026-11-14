@@ -4,7 +4,7 @@ import { join } from "node:path";
 import * as hostPiAi from "@earendil-works/pi-ai/compat";
 import * as hostPiTui from "@earendil-works/pi-tui";
 import * as hostTypebox from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearExtensionCache, loadExtensions } from "../src/core/extensions/loader.ts";
 import * as hostPiCodingAgent from "../src/index.ts";
 
@@ -17,6 +17,7 @@ function createTempDir(prefix: string): string {
 }
 
 afterEach(() => {
+	vi.unstubAllEnvs();
 	clearExtensionCache();
 	for (const dir of tempDirs.splice(0)) {
 		rmSync(dir, { recursive: true, force: true });
@@ -84,25 +85,19 @@ describe("extension native ESM and CJS host module fallback", () => {
 	it("persists jiti transpile cache entries under XDG_CACHE_HOME/pi/jiti", async () => {
 		const root = createTempDir("pi-ext-jiti-cache-");
 		const xdgCache = join(root, "xdg-cache");
-		const prevXdgCache = process.env.XDG_CACHE_HOME;
-		process.env.XDG_CACHE_HOME = xdgCache;
-		try {
-			clearExtensionCache();
-			const extensionPath = join(root, "cached-ext.ts");
-			writeFileSync(
-				extensionPath,
-				'export default function (pi: { registerCommand: (n: string, o: unknown) => void }): void { pi.registerCommand("cached", { description: "c", handler: async () => {} }); }\n',
-			);
+		vi.stubEnv("XDG_CACHE_HOME", xdgCache);
+		clearExtensionCache();
+		const extensionPath = join(root, "cached-ext.ts");
+		writeFileSync(
+			extensionPath,
+			'export default function (pi: { registerCommand: (n: string, o: unknown) => void }): void { pi.registerCommand("cached", { description: "c", handler: async () => {} }); }\n',
+		);
 
-			const result = await loadExtensions([extensionPath], root);
-			expect(result.errors).toEqual([]);
+		const result = await loadExtensions([extensionPath], root);
+		expect(result.errors).toEqual([]);
 
-			const jitiCacheDir = join(xdgCache, "pi", "jiti");
-			expect(existsSync(jitiCacheDir)).toBe(true);
-			expect(readdirSync(jitiCacheDir).length).toBeGreaterThan(0);
-		} finally {
-			if (prevXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
-			else process.env.XDG_CACHE_HOME = prevXdgCache;
-		}
+		const jitiCacheDir = join(xdgCache, "pi", "jiti");
+		expect(existsSync(jitiCacheDir)).toBe(true);
+		expect(readdirSync(jitiCacheDir).length).toBeGreaterThan(0);
 	});
 });
