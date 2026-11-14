@@ -24,7 +24,7 @@ import {
 	resetCapabilitiesCache,
 	setCapabilities,
 } from "../src/terminal-image.ts";
-import { CURSOR_MARKER, renderFakeCursor, type TuiMouseEvent } from "../src/tui.ts";
+import { CURSOR_MARKER, renderFakeCursor, type TUI, type TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
@@ -2657,6 +2657,76 @@ describe("TuiAltScreen", () => {
 		} finally {
 			loader.stop();
 			tui.stop();
+		}
+	});
+
+	it("rebinds Loader focus tracking when remounted onto a replacement TUI behind a proxy", async () => {
+		const terminal = new RecordingTerminal(40, 6);
+		let activeTui: TUI = new TuiAltScreen(terminal);
+		const uiProxy = new Proxy({} as TUI, {
+			get: (_target, property) => {
+				const tui = activeTui;
+				const value = Reflect.get(tui, property, tui);
+				if (typeof value !== "function") return value;
+				let methodTui = tui;
+				let method = value;
+				return (...args: unknown[]) => {
+					const currentTui = activeTui;
+					if (currentTui !== methodTui) {
+						const currentMethod = Reflect.get(currentTui, property, currentTui);
+						assert.strictEqual(typeof currentMethod, "function");
+						methodTui = currentTui;
+						method = currentMethod;
+					}
+					return Reflect.apply(method, methodTui, args);
+				};
+			},
+		});
+		const loader = new Loader(
+			uiProxy,
+			(s) => s,
+			(s) => s,
+			"Working",
+			{
+				frames: ["1", "2", "3", "4", "5", "6"],
+				intervalMs: 25,
+			},
+		);
+		activeTui.addChild(loader);
+		activeTui.start();
+		try {
+			await terminal.waitForRender();
+			const previousUi = activeTui;
+			previousUi.stop({ preserveScreen: true });
+			previousUi.clear();
+			const nextUi = new TuiAltScreen(terminal);
+			activeTui = nextUi;
+			nextUi.addChild(loader);
+			nextUi.invalidate();
+			nextUi.start();
+			await terminal.waitForRender();
+
+			terminal.sendInput("\x1b[O");
+			assert.strictEqual(uiProxy.isTerminalFocused?.(), false);
+			await delay(35);
+			const pausedLine = loader.render(40)[1];
+			await delay(120);
+			assert.strictEqual(
+				loader.render(40)[1],
+				pausedLine,
+				"remounted Loader must pause spinner advances after replacement TUI loses focus",
+			);
+
+			terminal.sendInput("\x1b[I");
+			await delay(80);
+			assert.notStrictEqual(
+				loader.render(40)[1],
+				pausedLine,
+				"remounted Loader must resume spinner advances when replacement TUI regains focus",
+			);
+		} finally {
+			loader.stop();
+			activeTui.stop();
 		}
 	});
 });

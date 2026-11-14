@@ -48,15 +48,7 @@ export class Loader extends Text {
 
 	start(): void {
 		this.running = true;
-		if (!this.unsubscribeFocus && this.ui?.onTerminalFocusChange) {
-			this.unsubscribeFocus = this.ui.onTerminalFocusChange((focused) => {
-				if (focused && this.running && this.frames.length > 1) {
-					this.currentFrame = (this.currentFrame + 1) % this.frames.length;
-					this.updateDisplay();
-				}
-				this.syncAnimation();
-			});
-		}
+		this.bindFocusListener();
 		this.updateDisplay();
 		this.syncAnimation();
 	}
@@ -84,7 +76,23 @@ export class Loader extends Text {
 
 	override invalidate(): void {
 		super.invalidate();
+		if (this.running) {
+			this.bindFocusListener();
+			this.syncAnimation();
+		}
 		this.updateDisplay();
+	}
+
+	private bindFocusListener(): void {
+		this.unsubscribeFocus?.();
+		this.unsubscribeFocus =
+			this.ui?.onTerminalFocusChange?.((focused) => {
+				if (focused && this.running && this.frames.length > 1) {
+					this.currentFrame = (this.currentFrame + 1) % this.frames.length;
+					this.updateDisplay();
+				}
+				this.syncAnimation();
+			}) ?? null;
 	}
 
 	setIndicator(indicator?: LoaderIndicatorOptions): void {
