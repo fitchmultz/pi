@@ -25,6 +25,7 @@
 
 ### Fixed
 
+- Fixed Google Generative AI and Google Vertex thinking level mapping rejecting `xhigh` (such as on `gemini-4-hydrogen`) and updated `@google/genai` to 3.3.0.
 - Fixed successful retry backoffs retaining abort listeners ([#10506](https://github.com/earendil-works/pi/issues/10506)).
 - Fixed Kimi K3 fallback, canonical Kimi/Moonshot catalog overlays, and Kimi Coding implied estimates, including `k3-256k`, omitting the default five-minute cache-write price.
 - Fixed Kimi K3.1 Pro and K3.1 Pro Highspeed cache writes costing $0 on Moonshot, Moonshot China and Kimi Coding, in generated data, Kimi Coding implied estimates, offline hydration and pi.dev catalog overlays. They now cost the published five-minute rate, which equals the input rate ($2 and $4 per million tokens).
