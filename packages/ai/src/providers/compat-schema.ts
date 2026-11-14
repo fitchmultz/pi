@@ -331,6 +331,11 @@ const OpenAICompletionsCompatProperties = {
 			default: false,
 		}),
 	),
+	supportsMidConvoToolChanges: optionalCompatBoolean({
+		description:
+			"Whether system messages declare all tools and tool schema redefinitions inline in place instead of mutating the top-level tools field. Requires supportsMidConvoSystemMessages.",
+		default: false,
+	}),
 	supportsStrictMode: optionalCompatBoolean({
 		description:
 			"Whether the provider supports the strict field in tool definitions. Generated capable models enable it explicitly.",
@@ -596,6 +601,11 @@ const ProviderCompatPropertyOverrides = {
 	supportsMidConvoEffort: optionalCompatBoolean({
 		description:
 			"Whether thinking level changes are sent inside the conversation instead of changing the request's effort, so a change keeps the prompt cache. Used by the anthropic-messages and openai-responses APIs.",
+		default: false,
+	}),
+	supportsMidConvoToolChanges: optionalCompatBoolean({
+		description:
+			"Whether mid-conversation tool additions and redefinitions are sent inside the conversation instead of mutating the top-level tools field, keeping the prompt cache. Requires supportsMidConvoSystemMessages. Used by the anthropic-messages and openai-completions APIs.",
 		default: false,
 	}),
 	supportsLongCacheRetention: optionalCompatBoolean({

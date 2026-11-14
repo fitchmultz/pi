@@ -182,6 +182,7 @@ type ResolvedOpenAICompletionsCompat = Omit<
 	| "thinkingTokenBudgetField"
 	| "supportsMidConvoSystemMessages"
 	| "supportsMidConvoToolAdditions"
+	| "supportsMidConvoToolChanges"
 	| "vllmPriority"
 > & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
@@ -190,6 +191,7 @@ type ResolvedOpenAICompletionsCompat = Omit<
 	thinkingTokenBudgetField?: OpenAICompletionsCompat["thinkingTokenBudgetField"];
 	supportsMidConvoSystemMessages?: OpenAICompletionsCompat["supportsMidConvoSystemMessages"];
 	supportsMidConvoToolAdditions?: OpenAICompletionsCompat["supportsMidConvoToolAdditions"];
+	supportsMidConvoToolChanges?: OpenAICompletionsCompat["supportsMidConvoToolChanges"];
 	vllmPriority?: OpenAICompletionsCompat["vllmPriority"];
 };
 
@@ -781,6 +783,13 @@ function createClient(
 	});
 }
 
+function resolveOpenAITranscriptToolSupport(compat: ResolvedOpenAICompletionsCompat): "none" | "additions" | "changes" {
+	if (compat.supportsMidConvoSystemMessages !== true) return "none";
+	if (compat.supportsMidConvoToolChanges === true) return "changes";
+	if (compat.supportsMidConvoToolAdditions === true) return "additions";
+	return "none";
+}
+
 function buildParams(
 	model: Model<"openai-completions">,
 	context: TranscriptContext,
@@ -792,12 +801,7 @@ function buildParams(
 		compat.supportsOpenAIGrammarTools,
 	),
 ) {
-	const transcriptTools = resolveTranscriptTools(
-		context.messages,
-		compat.supportsMidConvoSystemMessages === true && compat.supportsMidConvoToolAdditions === true
-			? "additions"
-			: "none",
-	);
+	const transcriptTools = resolveTranscriptTools(context.messages, resolveOpenAITranscriptToolSupport(compat));
 	const messages = convertMessages(model, context, compat, {
 		grammarToolInputProperties,
 	});
@@ -1216,9 +1220,7 @@ export function convertMessages(
 	const transformedMessages = transformMessages(normalizedContext.messages, model, (id) => normalizeToolCallId(id));
 	const transcriptTools = resolveTranscriptTools(
 		normalizedContext.messages,
-		compat.supportsMidConvoSystemMessages === true && compat.supportsMidConvoToolAdditions === true
-			? "additions"
-			: "none",
+		resolveOpenAITranscriptToolSupport(compat),
 	);
 	const instructionRole = model.reasoning && compat.supportsDeveloperRole ? "developer" : "system";
 
@@ -1634,6 +1636,22 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		isZai;
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
+	const isQwenTokenPlan =
+		provider === "qwen-token-plan" ||
+		provider === "qwen-token-plan-cn" ||
+		provider === "qwen-token-plan-individual" ||
+		provider === "qwen-token-plan-individual-cn";
+	const lowerModelId = model.id.toLowerCase();
+	const isMidConvoCapableOpenAIModel =
+		!isOpenRouter &&
+		!isQwenTokenPlan &&
+		provider !== "github-copilot" &&
+		!isCloudflareWorkersAI &&
+		!isCloudflareAiGateway &&
+		(lowerModelId.includes("deepseek-v4.1") ||
+			lowerModelId.includes("deepseek-v4-pro") ||
+			(isDeepSeek && lowerModelId === "deepseek-flash") ||
+			lowerModelId.includes("glm-5.3"));
 	const isOpenRouterDeveloperRoleModel =
 		isOpenRouter && (model.id.startsWith("anthropic/") || model.id.startsWith("openai/"));
 	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
@@ -1673,8 +1691,9 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		// OpenAI compatibility alone does not imply strict JSON-schema tool support.
 		supportsStrictMode: false,
 		supportsOpenAIGrammarTools: false,
-		supportsMidConvoSystemMessages: false,
+		supportsMidConvoSystemMessages: isMidConvoCapableOpenAIModel,
 		supportsMidConvoToolAdditions: false,
+		supportsMidConvoToolChanges: false,
 		cacheControlFormat,
 		sendSessionAffinityHeaders: isOpenRouter,
 		sessionAffinityFormat: isOpenRouter ? "openrouter" : "openai",
@@ -1727,6 +1746,7 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 			model.compat.supportsMidConvoSystemMessages ?? detected.supportsMidConvoSystemMessages,
 		supportsMidConvoToolAdditions:
 			model.compat.supportsMidConvoToolAdditions ?? detected.supportsMidConvoToolAdditions,
+		supportsMidConvoToolChanges: model.compat.supportsMidConvoToolChanges ?? detected.supportsMidConvoToolChanges,
 		cacheControlFormat: model.compat.cacheControlFormat ?? detected.cacheControlFormat,
 		sendSessionAffinityHeaders: model.compat.sendSessionAffinityHeaders ?? detected.sendSessionAffinityHeaders,
 		sessionAffinityFormat: model.compat.sessionAffinityFormat ?? detected.sessionAffinityFormat,

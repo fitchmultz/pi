@@ -49,8 +49,8 @@ export default defineProvider({
 		},
 	},
 	finalize: (model) => {
-		// DeepSeek V4 Pro accepts plain system text in place mid-conversation.
-		if (model.id === "deepseek-v4-pro") {
+		// DeepSeek V4 Pro and V4.1 Flash accept plain system text in place mid-conversation.
+		if (model.id === "deepseek-v4-pro" || model.id === "deepseek-flash") {
 			mergeCompat(model as Model<"openai-completions">, { supportsMidConvoSystemMessages: true });
 		}
 	},
