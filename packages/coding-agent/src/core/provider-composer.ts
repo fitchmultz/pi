@@ -107,6 +107,7 @@ export interface ProviderConfigInput {
 	classifiers?: Partial<Record<ClassifierApi, ProviderClassifier>>;
 	headers?: Record<string, string>;
 	authHeader?: boolean;
+	preferLocalLoopback?: boolean;
 	oauth?: ExtensionOAuthConfig;
 	models?: ProviderModelConfig[];
 	refreshModels?(context: RefreshModelsContext): Promise<ProviderModelConfig[]>;

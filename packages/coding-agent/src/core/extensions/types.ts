@@ -2114,6 +2114,8 @@ export interface ProviderConfig {
 	headers?: Record<string, string>;
 	/** If true, adds Authorization: Bearer header with the resolved API key. */
 	authHeader?: boolean;
+	/** If true, plain http:// baseUrls resolving to this machine's own interfaces connect via loopback when reachable. */
+	preferLocalLoopback?: boolean;
 	/** Models to register. If provided, replaces all existing models for this provider. */
 	models?: ProviderModelConfig[];
 	/**

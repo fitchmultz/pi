@@ -847,10 +847,15 @@ export class ModelRuntime implements Models {
 		const { transformHeaders, ...rawProviderOptions } = options ?? {};
 		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 		const configuredModel: TModel = resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model;
+		const preferLocalLoopback =
+			this.extensionProviders.get(model.provider)?.preferLocalLoopback ??
+			this.config.getProvider(model.provider)?.preferLocalLoopback ??
+			false;
 		const customFetch = "fetch" in providerOptions && providerOptions.fetch !== undefined;
-		const effectiveBaseUrl = customFetch
-			? configuredModel.baseUrl
-			: await resolveSameHostLoopbackBaseUrl(configuredModel.baseUrl, options?.signal);
+		const effectiveBaseUrl =
+			preferLocalLoopback && !customFetch
+				? await resolveSameHostLoopbackBaseUrl(configuredModel.baseUrl, options?.signal)
+				: configuredModel.baseUrl;
 		const requestModel: TModel =
 			effectiveBaseUrl !== configuredModel.baseUrl
 				? { ...configuredModel, baseUrl: effectiveBaseUrl }

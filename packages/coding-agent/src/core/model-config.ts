@@ -116,6 +116,13 @@ const ProviderConfigSchema = Type.Object({
 	authHeader: Type.Optional(
 		Type.Boolean({ default: false, description: "Whether to send the resolved API key as Authorization: Bearer." }),
 	),
+	preferLocalLoopback: Type.Optional(
+		Type.Boolean({
+			default: false,
+			description:
+				"Whether plain http:// baseUrls resolving to this machine's own interfaces should connect via loopback (127.0.0.1 / [::1]) when reachable.",
+		}),
+	),
 	models: Type.Optional(Type.Array(ModelDefinitionSchema)),
 	modelOverrides: Type.Optional(Type.Record(Type.String(), ModelOverrideSchema)),
 });
