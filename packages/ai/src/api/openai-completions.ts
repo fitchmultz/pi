@@ -50,7 +50,7 @@ import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
-import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
+import { getSystemMessageText, renderSystemMessageUpdate, renderToolRemovalNotice } from "../utils/text.ts";
 import {
 	getDeclaredTools,
 	resolveTranscript,
@@ -1218,10 +1218,8 @@ export function convertMessages(
 	};
 
 	const transformedMessages = transformMessages(normalizedContext.messages, model, (id) => normalizeToolCallId(id));
-	const transcriptTools = resolveTranscriptTools(
-		normalizedContext.messages,
-		resolveOpenAITranscriptToolSupport(compat),
-	);
+	const transcriptToolSupport = resolveOpenAITranscriptToolSupport(compat);
+	const transcriptTools = resolveTranscriptTools(normalizedContext.messages, transcriptToolSupport);
 	const instructionRole = model.reasoning && compat.supportsDeveloperRole ? "developer" : "system";
 
 	let lastRole: string | null = null;
@@ -1240,7 +1238,8 @@ export function convertMessages(
 
 		if (msg.role === "system") {
 			// transformMessages keeps system messages in order, so their position matches the transcript.
-			const addedTools = systemIndex++ >= transcriptTools.foldedSystemMessages ? (msg.toolsAdded ?? []) : [];
+			const anchorsToolChanges = systemIndex++ >= transcriptTools.foldedSystemMessages;
+			const addedTools = anchorsToolChanges ? (msg.toolsAdded ?? []) : [];
 			if (addedTools.length > 0) {
 				const kimiToolMessage: KimiToolSystemMessageParam = {
 					role: "system",
@@ -1248,7 +1247,16 @@ export function convertMessages(
 				};
 				params.push(kimiToolMessage as unknown as ChatCompletionMessageParam);
 			}
-			const text = i === 0 ? getSystemMessageText(msg) : renderSystemMessageUpdate(msg);
+			const parts = [i === 0 ? getSystemMessageText(msg) : renderSystemMessageUpdate(msg)];
+			if (anchorsToolChanges && transcriptToolSupport === "changes") {
+				// A redefinition is a removal plus an addition of the same name; only true removals are announced.
+				const addedNames = new Set(addedTools.map((tool) => tool.name));
+				const removedNames = (msg.toolsRemoved ?? [])
+					.map((tool) => tool.name)
+					.filter((name) => !addedNames.has(name));
+				if (removedNames.length > 0) parts.push(renderToolRemovalNotice(removedNames));
+			}
+			const text = parts.filter((part) => part.length > 0).join("\n\n");
 			if (text.length > 0) {
 				params.push({ role: instructionRole, content: sanitizeSurrogates(text) });
 			}

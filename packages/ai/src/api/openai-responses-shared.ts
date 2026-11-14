@@ -36,7 +36,7 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
-import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
+import { getSystemMessageText, renderSystemMessageUpdate, renderToolRemovalNotice } from "../utils/text.ts";
 import { resolveTranscript, resolveTranscriptTools, type TranscriptToolSupport } from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
@@ -186,10 +186,6 @@ function renderIncrementalToolsNotice(unavailable: ReadonlySet<string>): string 
 	const notice =
 		"This is an incremental tools update. Previously declared tools remain available unless explicitly marked unavailable. A tool declared again here is available again, and its latest definition replaces the earlier one.";
 	return unavailable.size > 0 ? `${notice}\nStill unavailable: ${[...unavailable].join(", ")}.` : notice;
-}
-
-function renderToolRemovalNotice(names: readonly string[]): string {
-	return `The following tools are no longer available. Do not call them:\n${names.map((name) => `- ${name}`).join("\n")}`;
 }
 
 export function convertResponsesMessages<TApi extends Api>(

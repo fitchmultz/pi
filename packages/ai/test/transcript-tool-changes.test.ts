@@ -593,6 +593,14 @@ describe("transcript system messages", () => {
 				?.messages.filter((message) => message.tools)
 				.map((message) => message.tools?.map((tool) => tool.function?.name)),
 		).toEqual([["base_tool", "drop_tool"], ["late_tool"], ["later_tool"]]);
+		const removalNotices =
+			history
+				.at(-1)
+				?.messages.filter(
+					(message) => typeof message.content === "string" && message.content.includes("no longer available"),
+				)
+				.map((message) => message.content) ?? [];
+		expect(removalNotices).toEqual([expect.stringContaining("no longer available. Do not call them:\n- drop_tool")]);
 	});
 
 	test.each([
@@ -625,7 +633,7 @@ describe("transcript system messages", () => {
 
 	type KimiPayload = {
 		tools?: Array<{ function?: { name: string } }>;
-		messages: Array<{ role: string; tools?: Array<{ function?: { name: string } }> }>;
+		messages: Array<{ role: string; content?: string; tools?: Array<{ function?: { name: string } }> }>;
 	};
 
 	// #10940: Kimi tool messages cannot remove tools, so a removal rewrites the prefix once.
