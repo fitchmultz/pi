@@ -1,9 +1,12 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getModel } from "@earendil-works/pi-ai/compat";
 import { Container } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import { formatEmptySessionResumeHint, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -80,32 +83,49 @@ describe("InteractiveMode empty-session /resume hint", () => {
 		tempRoot = mkdtempSync(join(tmpdir(), "pi-resume-hint-"));
 		const cwd = join(tempRoot, "project");
 		const sessionDir = join(tempRoot, "sessions");
+		const agentDir = join(tempRoot, "agent");
 		mkdirSync(cwd, { recursive: true });
 		mkdirSync(sessionDir, { recursive: true });
+		mkdirSync(agentDir, { recursive: true });
 
 		const prior = SessionManager.create(cwd, sessionDir);
 		prior.appendSessionInfo("maya-investigation");
 		prior.appendMessage({ role: "user", content: "Check GPU residency", timestamp: 1 });
 
 		const fresh = SessionManager.create(cwd, sessionDir);
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			settingsManager: SettingsManager.inMemory(),
+			sessionManager: fresh,
+			model: getModel("anthropic", "claude-sonnet-4-5")!,
+			thinkingLevel: "off",
+		});
+		// Real createAgentSession appends setup entries (model_change, thinking_level_change) before InteractiveMode.run().
+		expect(fresh.getEntries().length).toBeGreaterThan(0);
+
 		const chatContainer = new Container();
 		const requestRender = vi.fn();
 
-		await maybeShowEmptySessionResumeHint.call({
-			options: {},
-			sessionManager: fresh,
-			session: { isStreaming: false },
-			isInitialized: true,
-			isShuttingDown: false,
-			pendingUserInputs: [],
-			chatContainer,
-			ui: { requestRender },
-		});
+		try {
+			await maybeShowEmptySessionResumeHint.call({
+				options: {},
+				sessionManager: fresh,
+				session,
+				isInitialized: true,
+				isShuttingDown: false,
+				pendingUserInputs: [],
+				chatContainer,
+				ui: { requestRender },
+			});
 
-		expect(requestRender).toHaveBeenCalledOnce();
-		expect(renderContainer(chatContainer)).toContain(
-			'1 saved session in this directory (latest: "maya-investigation"). Run /resume to continue.',
-		);
+			expect(requestRender).toHaveBeenCalledOnce();
+			expect(renderContainer(chatContainer)).toContain(
+				'1 saved session in this directory (latest: "maya-investigation"). Run /resume to continue.',
+			);
+		} finally {
+			session.dispose();
+		}
 	});
 
 	test("skips hint when startup has initial messages, --no-session, or existing entries", async () => {

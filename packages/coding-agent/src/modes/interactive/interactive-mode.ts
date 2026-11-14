@@ -253,6 +253,19 @@ function addChatActivity(container: Container, component: Component): void {
 	else container.addChild(component);
 }
 
+function hasSessionConversation(sessionManager: SessionManager): boolean {
+	if (sessionManager.buildSessionContext().messages.length > 0) return true;
+	return sessionManager
+		.getEntries()
+		.some(
+			(entry) =>
+				entry.type === "message" ||
+				entry.type === "custom_message" ||
+				entry.type === "branch_summary" ||
+				entry.type === "compaction",
+		);
+}
+
 export function formatEmptySessionResumeHint(sessions: readonly SessionInfo[]): string | undefined {
 	if (sessions.length === 0) return undefined;
 	const latest = sessions[0]!;
@@ -5837,7 +5850,7 @@ export class InteractiveMode {
 		if (this.options.initialMessage !== undefined || (this.options.initialMessages?.length ?? 0) > 0) {
 			return;
 		}
-		if (!this.sessionManager.isPersisted() || this.sessionManager.getEntries().length > 0) {
+		if (!this.sessionManager.isPersisted() || hasSessionConversation(this.sessionManager)) {
 			return;
 		}
 		const initialSessionId = this.sessionManager.getSessionId();
@@ -5853,7 +5866,7 @@ export class InteractiveMode {
 			!this.isInitialized ||
 			this.session.isStreaming ||
 			this.sessionManager.getSessionId() !== initialSessionId ||
-			this.sessionManager.getEntries().length > 0 ||
+			hasSessionConversation(this.sessionManager) ||
 			(this.pendingUserInputs?.length ?? 0) > 0
 		) {
 			return;
