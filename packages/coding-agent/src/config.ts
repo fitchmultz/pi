@@ -475,6 +475,24 @@ export function getForkRelease(): ForkReleaseReceipt | undefined {
 	return receipt;
 }
 
+/**
+ * Return a stable package path suitable for prompt instructions across immutable fork releases.
+ * When a fork release receipt names an existing `ownerSelector` package symlink and `PI_PACKAGE_DIR`
+ * is not set, prefer that stable symlink path so `<docs>` does not churn on every release build.
+ */
+export function getStablePackageDir(
+	packageDir: string = getPackageDir(),
+	release: ForkReleaseReceipt | undefined = getForkRelease(),
+): string {
+	if (!process.env.PI_PACKAGE_DIR && release?.ownerSelector) {
+		const selectorDir = resolve(release.ownerSelector);
+		if (existsSync(join(selectorDir, "package.json"))) {
+			return selectorDir;
+		}
+	}
+	return resolve(packageDir);
+}
+
 /** Describe the running package and its existing fork build receipt without starting a session. */
 export function getBuildInfo() {
 	return {

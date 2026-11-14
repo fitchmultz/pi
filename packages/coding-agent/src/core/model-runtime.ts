@@ -71,6 +71,7 @@ import {
 import { getAgentDir } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
+import { resolveSameHostLoopbackBaseUrl } from "./local-loopback-url.ts";
 import { ModelConfig } from "./model-config.ts";
 import {
 	createModelUnavailability,
@@ -845,7 +846,20 @@ export class ModelRuntime implements Models {
 
 		const { transformHeaders, ...rawProviderOptions } = options ?? {};
 		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
-		const requestModel: TModel = resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model;
+		const configuredModel: TModel = resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model;
+		const preferLocalLoopback =
+			this.extensionProviders.get(model.provider)?.preferLocalLoopback ??
+			this.config.getProvider(model.provider)?.preferLocalLoopback ??
+			false;
+		const customFetch = "fetch" in providerOptions && providerOptions.fetch !== undefined;
+		const effectiveBaseUrl =
+			preferLocalLoopback && !customFetch
+				? await resolveSameHostLoopbackBaseUrl(configuredModel.baseUrl, options?.signal)
+				: configuredModel.baseUrl;
+		const requestModel: TModel =
+			effectiveBaseUrl !== configuredModel.baseUrl
+				? { ...configuredModel, baseUrl: effectiveBaseUrl }
+				: configuredModel;
 		const sessionId =
 			"sessionId" in providerOptions && typeof providerOptions.sessionId === "string"
 				? providerOptions.sessionId

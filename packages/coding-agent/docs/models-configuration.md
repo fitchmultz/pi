@@ -20,6 +20,7 @@ Each key under `providers` is a provider ID. A built-in provider ID changes that
 | `headers` | object |  | Request headers. Values resolve like apiKey. |
 | `compat` | [object](#compatibility) |  | Provider and model compatibility overrides. |
 | `authHeader` | boolean | `false` | Whether to send the resolved API key as Authorization: Bearer. |
+| `preferLocalLoopback` | boolean | `false` | Whether plain http:// baseUrls resolving to this machine's own interfaces should connect via loopback (127.0.0.1 / [::1]) when reachable. |
 | `models` | [`object[]`](#models) |  |  |
 | `modelOverrides` | [object](#model-overrides) |  |  |
 

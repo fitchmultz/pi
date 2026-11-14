@@ -1,7 +1,8 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, test } from "vitest";
-import { getPackageDir } from "../src/config.ts";
+import { type ForkReleaseReceipt, getStablePackageDir } from "../src/config.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { buildSystemPrompt } from "../src/core/system-prompt.ts";
@@ -119,7 +120,7 @@ describe("buildSystemPrompt", () => {
 				skills: [],
 				cwd: "/workspace",
 			});
-			const packageDir = getPackageDir();
+			const packageDir = getStablePackageDir();
 
 			// The folder differs per installed release, so every mention is sent again after an update.
 			expect(prompt.split(packageDir)).toHaveLength(2);
@@ -134,6 +135,55 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain(
 				"Before implementing harness changes, read the documentation sections and examples that cover the APIs and behavior you will change, including the references those sections depend on. Read full documents only when the change spans their scope.",
 			);
+		});
+
+		test("prefers fork-release ownerSelector symlink over immutable release directory unless PI_PACKAGE_DIR is set", () => {
+			const temp = mkdtempSync(join(tmpdir(), "pi-stable-pkg-"));
+			const originalEnv = process.env.PI_PACKAGE_DIR;
+			try {
+				const releaseA = join(temp, "releases", "aaa", "pkg");
+				const releaseB = join(temp, "releases", "bbb", "pkg");
+				const selector = join(temp, "npm-global", "pi-coding-agent");
+				mkdirSync(releaseA, { recursive: true });
+				mkdirSync(releaseB, { recursive: true });
+				mkdirSync(join(temp, "npm-global"), { recursive: true });
+				writeFileSync(join(releaseA, "package.json"), "{}");
+				writeFileSync(join(releaseB, "package.json"), "{}");
+				symlinkSync(releaseA, selector);
+
+				const receipt: ForkReleaseReceipt = {
+					commit: "aaa",
+					catalogSha256: "0",
+					archiveSha256: "0",
+					node: process.versions.node,
+					npm: "10.0.0",
+					platform: process.platform,
+					arch: process.arch,
+					validated: true,
+					ownerSelector: selector,
+				};
+
+				delete process.env.PI_PACKAGE_DIR;
+				expect(getStablePackageDir(releaseA, receipt)).toBe(resolve(selector));
+
+				// Repointing the selector to a newer release keeps the same stable path.
+				rmSync(selector);
+				symlinkSync(releaseB, selector);
+				expect(getStablePackageDir(releaseA, receipt)).toBe(resolve(selector));
+
+				// Missing selector falls back to the concrete package directory.
+				rmSync(selector);
+				expect(getStablePackageDir(releaseA, receipt)).toBe(resolve(releaseA));
+
+				// Explicit PI_PACKAGE_DIR override wins.
+				symlinkSync(releaseB, selector);
+				process.env.PI_PACKAGE_DIR = releaseA;
+				expect(getStablePackageDir(releaseA, receipt)).toBe(resolve(releaseA));
+			} finally {
+				if (originalEnv === undefined) delete process.env.PI_PACKAGE_DIR;
+				else process.env.PI_PACKAGE_DIR = originalEnv;
+				rmSync(temp, { recursive: true, force: true });
+			}
 		});
 	});
 
