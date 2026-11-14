@@ -1,6 +1,8 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { networkInterfaces } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
+import { join } from "node:path";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { clearSameHostLoopbackCache, resolveSameHostLoopbackBaseUrl } from "../src/core/local-loopback-url.ts";
@@ -161,6 +163,67 @@ describe("resolveSameHostLoopbackBaseUrl", () => {
 			expect(capturedCustomFetchUrl).toBe(`${configuredBaseUrl}/chat/completions`);
 		} finally {
 			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	});
+
+	it("accepts standalone preferLocalLoopback overlays in models.json without reporting an empty-provider error", async () => {
+		const localInterface = findNonInternalLocalUrlHost();
+		expect(localInterface).toBeDefined();
+
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-loopback-overlay-"));
+		const modelsPath = join(tempDir, "models.json");
+		const observedHosts: string[] = [];
+		const server = createServer((req, res) => {
+			observedHosts.push(req.headers.host ?? "");
+			res.writeHead(200, { "content-type": "text/event-stream" });
+			res.end(
+				'data: {"id":"1","object":"chat.completion.chunk","created":1,"model":"test-model","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+			);
+		});
+		await new Promise<void>((resolve) => server.listen(0, "0.0.0.0", () => resolve()));
+		const { port } = server.address() as AddressInfo;
+
+		try {
+			writeFileSync(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						anthropic: { preferLocalLoopback: false },
+						"ext-local": { preferLocalLoopback: true },
+					},
+				}),
+			);
+			const runtime = await ModelRuntime.create({
+				credentials: new InMemoryCredentialStore(),
+				modelsPath,
+			});
+			expect(runtime.getError()).toBeUndefined();
+
+			runtime.registerProvider("ext-local", {
+				baseUrl: `http://${localInterface!.host}:${port}/v1`,
+				apiKey: "local",
+				api: "openai-completions",
+				models: [
+					{
+						id: "test-model",
+						name: "Test Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 32768,
+						maxTokens: 1024,
+					},
+				],
+			});
+			const model = runtime.getModel("ext-local", "test-model");
+			expect(model).toBeDefined();
+			await runtime.completeSimple(model!, {
+				messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			});
+			expect(observedHosts).toEqual([`${localInterface!.loopback}:${port}`]);
+		} finally {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 });
