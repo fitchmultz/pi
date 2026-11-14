@@ -510,4 +510,30 @@ process.send({ type: 'pi:ready' });`,
 			expect(f.read()).toHaveLength(1);
 		}
 	});
+	it.skipIf(process.platform === "win32")(
+		"preserves the committed launcher exit code when terminal hangup delivers SIGHUP during exit teardown",
+		async () => {
+			const f = await fixture();
+			const a = f.release("A", "ready();");
+			const entry = join(f.root, "entry.mjs");
+			writeFileSync(
+				entry,
+				`
+process.on("exit", () => {
+	process.kill(process.pid, "SIGHUP");
+});
+process.argv = [process.execPath, ${JSON.stringify(join(a, "dist", "bundle", "cli.js"))}];
+await import(${JSON.stringify(new URL("../src/cli-launcher.ts", import.meta.url).href)});
+`,
+			);
+			const child = spawn(process.execPath, [entry], { stdio: "ignore" });
+			const outcome = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+				(resolve, reject) => {
+					child.once("error", reject);
+					child.once("exit", (code, signal) => resolve({ code, signal }));
+				},
+			);
+			expect(outcome).toEqual({ code: 0, signal: null });
+		},
+	);
 });
