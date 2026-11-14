@@ -115,7 +115,7 @@ describe("InteractiveMode compaction events", () => {
 		expect(messageMeta.get(items[2])).toEqual({ id: "previous", timestamp: "2025-01-01T00:00:00Z" });
 	});
 
-	test("renders retained entries and appends the latest summary cost at the bottom", async () => {
+	test("appends the latest compaction summary and cost without clearing earlier entries", async () => {
 		const usage: Usage = {
 			input: 10,
 			output: 20,
@@ -152,12 +152,14 @@ describe("InteractiveMode compaction events", () => {
 			autoCompactionLoader: undefined,
 			defaultEditor: {},
 			statusContainer: { clear: vi.fn() },
-			chatContainer: { clear: vi.fn() },
-			sessionManager: { buildContextEntries: vi.fn().mockReturnValue([latestCompaction, previousCompaction]) },
+			chatContainer: { clear: vi.fn(), removeChild: vi.fn(), addChild: vi.fn() },
+			sessionManager: { getBranch: vi.fn().mockReturnValue([previousCompaction, latestCompaction]) },
+			bashComponent: undefined,
+			pendingBashComponents: [],
 			renderSessionEntries: vi.fn(),
-			showUnsavedRows: vi.fn(),
 			addMessageToChat: vi.fn(),
 			addCompactionCostNotice: vi.fn(),
+			appendCompactionToChat: Reflect.get(InteractiveMode.prototype, "appendCompactionToChat"),
 			showError: vi.fn(),
 			showStatus: vi.fn(),
 			clearStatusIndicator: vi.fn(),
@@ -190,8 +192,8 @@ describe("InteractiveMode compaction events", () => {
 			willRetry: false,
 		});
 
-		expect(fakeThis.chatContainer.clear).toHaveBeenCalledTimes(1);
-		expect(fakeThis.renderSessionEntries).toHaveBeenCalledWith([previousCompaction]);
+		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
+		expect(fakeThis.renderSessionEntries).not.toHaveBeenCalled();
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(1);
 		expect(fakeThis.addMessageToChat).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -199,6 +201,7 @@ describe("InteractiveMode compaction events", () => {
 				tokensBefore: 123,
 				summary: "summary",
 			}),
+			{ messageId: "latest", timestamp: "2025-01-02T00:00:00Z" },
 		);
 		expect(fakeThis.addCompactionCostNotice).toHaveBeenCalledWith({
 			type: "compaction_cost",
@@ -206,6 +209,80 @@ describe("InteractiveMode compaction events", () => {
 			usage,
 		});
 		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
+	});
+
+	test("appends boundary compactions and subsequent custom messages without clearing earlier entries", async () => {
+		const usage: Usage = {
+			input: 10,
+			output: 20,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 30,
+			cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
+		};
+		const compactionEntry: SessionEntry = {
+			type: "compaction",
+			id: "rollover",
+			parentId: "turn-1",
+			timestamp: "2025-01-02T00:00:00Z",
+			summary: "rollover summary",
+			firstKeptEntryId: "rollover",
+			tokensBefore: 456,
+			usage,
+		};
+		const customEntry: SessionEntry = {
+			type: "custom_message",
+			id: "note-reminder",
+			parentId: "rollover",
+			timestamp: "2025-01-02T00:00:01Z",
+			customType: "posthorse-note",
+			content: "Update task note",
+			display: true,
+		};
+		const fakeThis = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			programStatus: { handleEvent: vi.fn() },
+			chatContainer: { clear: vi.fn(), removeChild: vi.fn(), addChild: vi.fn() },
+			bashComponent: undefined,
+			pendingBashComponents: [],
+			addMessageToChat: vi.fn(),
+			addCompactionCostNotice: vi.fn(),
+			appendCompactionToChat: Reflect.get(InteractiveMode.prototype, "appendCompactionToChat"),
+			ui: { requestRender: vi.fn() },
+		};
+		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
+			this: typeof fakeThis,
+			event: { type: "entry_appended"; entry: SessionEntry },
+		) => Promise<void>;
+
+		await handleEvent.call(fakeThis, { type: "entry_appended", entry: compactionEntry });
+		await handleEvent.call(fakeThis, { type: "entry_appended", entry: customEntry });
+
+		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
+		expect(fakeThis.addMessageToChat).toHaveBeenCalledTimes(2);
+		expect(fakeThis.addMessageToChat).toHaveBeenNthCalledWith(
+			1,
+			expect.objectContaining({
+				role: "compactionSummary",
+				tokensBefore: 456,
+				summary: "rollover summary",
+			}),
+			{ messageId: "rollover", timestamp: "2025-01-02T00:00:00Z" },
+		);
+		expect(fakeThis.addMessageToChat).toHaveBeenNthCalledWith(
+			2,
+			expect.objectContaining({
+				role: "custom",
+				customType: "posthorse-note",
+				content: "Update task note",
+			}),
+		);
+		expect(fakeThis.addCompactionCostNotice).toHaveBeenCalledWith({
+			type: "compaction_cost",
+			kind: "compaction",
+			usage,
+		});
 	});
 
 	test("updates the working state when the same agent run resumes after compaction", async () => {

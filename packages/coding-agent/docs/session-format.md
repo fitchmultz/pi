@@ -280,7 +280,7 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
    - Includes the compaction entry first
    - Includes non-system entries from `firstKeptEntryId` up to, but not including, the compaction entry
    - Includes entries after the compaction entry
-3. Preserves non-message entries in the selected range so interactive mode can render them
+3. Preserves non-message entries in the selected range, such as `context_edit` entries that `buildSessionProjection()` applies
 
 `buildSessionProjection()` then applies the latest `context_edit` for each selected target. It returns the model-visible messages together with their source entries. Omitted targets produce no message; replacements retain the source entry's role and metadata while changing only content. The raw selected entries are not modified.
 
