@@ -5,16 +5,19 @@ import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, onTestFinished, test, vi } from "vitest";
+import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
 import { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import type { SettingsSelectorComponent } from "../../../src/modes/interactive/components/settings-selector.ts";
 import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
+import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { createHarness, type Harness, type HarnessOptions } from "../harness.ts";
 import { createTestInteractiveView } from "../ui-harness.ts";
 
 async function createView(harness: Harness) {
 	const { view, rebind, submit, text } = await createTestInteractiveView(harness, { width: 100 });
 	return {
+		view,
 		rebind,
 		submit,
 		rows: () => view.chatContainer.children.filter((child) => child instanceof ToolExecutionComponent),
@@ -257,5 +260,182 @@ describe("saved tool calls without a result", () => {
 		await rebind();
 		expect(rows().map((row) => row.getActivityStatus())).toEqual(["error"]);
 		expect(text()).toContain("No result provided");
+	});
+});
+
+describe("compaction and boundary rollovers keep scrollback history in the TUI", () => {
+	test("/compact keeps earlier turns in place and places a running ! command after the summary", async () => {
+		const harness = await harnessWith({ settings: { compaction: { enabled: false, keepRecentTokens: 1 } } });
+		const { view, lines, submit, text, toggleCacheMissNotices } = await createView(harness);
+		harness.setResponses([
+			fauxAssistantMessage("First answer"),
+			fauxAssistantMessage("Second answer"),
+			fauxAssistantMessage("History summary"),
+			fauxAssistantMessage("Turn prefix summary"),
+		]);
+		await harness.session.prompt("first question");
+		await harness.session.prompt("second question");
+		const existingChildren = [...view.chatContainer.children];
+
+		const user = heldCommand("user-start", "user-end");
+		const command = submit(`!${user.command}`);
+		try {
+			await vi.waitFor(() => expect(lines()).toContain("user-start"));
+			await submit("/compact");
+
+			// Model context dropped the summarized first turn, while the TUI keeps it in place.
+			const contextText = JSON.stringify(harness.session.messages);
+			expect(contextText).not.toContain("first question");
+			expect(contextText).not.toContain("First answer");
+			for (const [index, child] of existingChildren.entries()) {
+				expect(view.chatContainer.children[index]).toBe(child);
+			}
+
+			const rendered = text();
+			expect(rendered.indexOf("first question")).toBeGreaterThanOrEqual(0);
+			expect(rendered.indexOf("First answer")).toBeGreaterThan(rendered.indexOf("first question"));
+			expect(rendered.indexOf("second question")).toBeGreaterThan(rendered.indexOf("First answer"));
+			expect(rendered.indexOf("[compaction]")).toBeGreaterThan(rendered.indexOf("Second answer"));
+			expect(rendered.indexOf("user-start")).toBeGreaterThan(rendered.indexOf("[compaction]"));
+		} finally {
+			user.release();
+			await command;
+		}
+
+		await toggleCacheMissNotices();
+		const rebuilt = text();
+		expect(rebuilt.indexOf("first question")).toBeGreaterThanOrEqual(0);
+		expect(rebuilt.indexOf("[compaction]")).toBeGreaterThan(rebuilt.indexOf("Second answer"));
+		expect(rebuilt.indexOf("user-end")).toBeGreaterThan(rebuilt.indexOf("[compaction]"));
+	});
+
+	test("fullscreen scrollback keeps pre-rollover history across turn_end rollovers, /reload and resume", async () => {
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-rollover-scrollback-")));
+		onTestFinished(() => rmSync(root, { recursive: true, force: true }));
+		const sessionManager = SessionManager.create(root, join(root, "sessions"));
+		let turnCount = 0;
+		const harness = await harnessWith({
+			sessionManager,
+			settings: {
+				compaction: { enabled: false },
+				quietStartup: true,
+				tuiMode: "fullscreen",
+			},
+			extensionFactories: [
+				(pi) => {
+					pi.on("turn_end", (_event, ctx) => {
+						turnCount += 1;
+						if (turnCount === 2) {
+							const secondUser = ctx.sessionManager
+								.getBranch()
+								.find(
+									(entry) =>
+										entry.type === "message" &&
+										entry.message.role === "user" &&
+										JSON.stringify(entry.message.content).includes("second turn"),
+								);
+							return {
+								entries: [
+									{
+										type: "compaction",
+										summary: "Retained-tail rollover summary",
+										firstKeptEntryId: secondUser!.id,
+									},
+									{
+										type: "custom_message",
+										customType: "posthorse-note",
+										content: "Posthorse note reminder",
+										display: true,
+									},
+								],
+							};
+						}
+						if (turnCount === 3) {
+							return {
+								entries: [
+									{
+										type: "compaction",
+										summary: "Clean context reset summary",
+										firstKeptEntryId: null,
+									},
+								],
+							};
+						}
+						return undefined;
+					});
+				},
+			],
+		});
+
+		const terminal = new VirtualTerminal(80, 12);
+		let rebind = async () => {};
+		const mode = new InteractiveMode(
+			{
+				session: harness.session,
+				services: { agentDir: harness.tempDir },
+				setBeforeSessionInvalidate() {},
+				setRebindSession(callback: () => Promise<void>) {
+					rebind = callback;
+				},
+			} as unknown as AgentSessionRuntime,
+			{ terminal, tuiMode: "fullscreen" },
+		);
+		await mode.init();
+		onTestFinished(() => mode.stop("resume-hint"));
+		await terminal.waitForRender();
+
+		harness.setResponses([
+			fauxAssistantMessage("Alpha earliest reply\n\npad 1\n\npad 2\n\npad 3"),
+			fauxAssistantMessage("Beta reply\n\npad 4\n\npad 5\n\npad 6"),
+			fauxAssistantMessage("Gamma reply\n\npad 7\n\npad 8\n\npad 9"),
+			fauxAssistantMessage("Delta latest reply"),
+		]);
+		await harness.session.prompt("first turn");
+		await harness.session.prompt("second turn");
+		await harness.session.prompt("third turn");
+		await harness.session.prompt("fourth turn");
+		await terminal.waitForRender();
+
+		// Model context kept only the turn after the clean reset, not the earlier history.
+		const projected = JSON.stringify(harness.session.messages);
+		expect(projected).not.toContain("Alpha earliest reply");
+		expect(projected).not.toContain("Beta reply");
+		expect(projected).not.toContain("Gamma reply");
+		expect(projected).toContain("Delta latest reply");
+
+		const scrollToTopAndRead = async (target: VirtualTerminal) => {
+			for (let i = 0; i < 80; i++) target.sendInput("\x1b[<64;5;2M");
+			await target.waitForRender();
+			return target.getViewport().join("\n");
+		};
+
+		expect(terminal.getViewport().join("\n")).toContain("Delta latest reply");
+		expect(await scrollToTopAndRead(terminal)).toContain("Alpha earliest reply");
+
+		// Rebinding/reloading the session preserves full scrollback and both compaction summaries.
+		await rebind();
+		await terminal.waitForRender();
+		expect(await scrollToTopAndRead(terminal)).toContain("Alpha earliest reply");
+
+		// Opening the saved session fresh also renders the full chronological branch.
+		const resumedHarness = await harnessWith({
+			sessionManager: SessionManager.open(sessionManager.getSessionFile()!),
+			settings: { quietStartup: true, tuiMode: "fullscreen" },
+		});
+		const resumedTerminal = new VirtualTerminal(80, 12);
+		const resumedMode = new InteractiveMode(
+			{
+				session: resumedHarness.session,
+				services: { agentDir: resumedHarness.tempDir },
+				setBeforeSessionInvalidate() {},
+				setRebindSession() {},
+			} as unknown as AgentSessionRuntime,
+			{ terminal: resumedTerminal, tuiMode: "fullscreen" },
+		);
+		await resumedMode.init();
+		onTestFinished(() => resumedMode.stop("resume-hint"));
+		await resumedTerminal.waitForRender();
+		expect(resumedTerminal.getViewport().join("\n")).toContain("Delta latest reply");
+		expect(await scrollToTopAndRead(resumedTerminal)).toContain("Alpha earliest reply");
 	});
 });

@@ -111,6 +111,7 @@ import {
 	MissingSessionCwdError,
 } from "../../core/session-cwd.ts";
 import {
+	type CompactionEntry,
 	type SessionEntry,
 	SessionManager,
 	sessionEntryToContextMessages,
@@ -557,7 +558,6 @@ export class InteractiveMode {
 
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
-	private readonly entriesRenderedByBoundaryCompaction = new Set<string>();
 	private streamingMessage: AssistantMessage | undefined = undefined;
 
 	// Rows of the current run whose results are not saved yet, by tool call ID. Transcript rebuilds place these rows
@@ -3774,7 +3774,6 @@ export class InteractiveMode {
 				break;
 
 			case "entry_appended":
-				if (this.entriesRenderedByBoundaryCompaction.delete(event.entry.id)) break;
 				if (event.entry.type === "custom") {
 					this.addCustomEntryToChat(event.entry);
 					this.ui.requestRender();
@@ -3793,28 +3792,7 @@ export class InteractiveMode {
 					);
 					this.ui.requestRender();
 				} else if (event.entry.type === "compaction") {
-					const entries = this.sessionManager.buildContextEntries();
-					if (entries[0]?.id !== event.entry.id) break;
-					this.chatContainer.clear();
-					const branch = this.sessionManager.getBranch();
-					const compactionIndex = branch.findIndex((entry) => entry.id === event.entry.id);
-					const entriesAfterCompaction = new Set(branch.slice(compactionIndex + 1).map((entry) => entry.id));
-					const retainedEntries = entries.slice(1);
-					this.renderSessionEntries(retainedEntries.filter((entry) => !entriesAfterCompaction.has(entry.id)));
-					this.addMessageToChat(
-						createCompactionSummaryMessage(event.entry.summary, event.entry.tokensBefore, event.entry.timestamp),
-					);
-					if (event.entry.usage) {
-						this.addCompactionCostNotice({
-							type: "compaction_cost",
-							kind: "compaction",
-							usage: event.entry.usage,
-						});
-					}
-					this.renderSessionEntries(retainedEntries.filter((entry) => entriesAfterCompaction.has(entry.id)));
-					this.showUnsavedRows();
-					for (const entryId of entriesAfterCompaction) this.entriesRenderedByBoundaryCompaction.add(entryId);
-					this.footer.invalidate();
+					this.appendCompactionToChat(event.entry);
 					this.ui.requestRender();
 				}
 				break;
@@ -4049,29 +4027,19 @@ export class InteractiveMode {
 						this.showStatus("Auto-compaction cancelled");
 					}
 				} else if (event.result) {
-					const entries = this.sessionManager.buildContextEntries();
-					if (entries[0]?.type !== "compaction") {
-						throw new Error("Completed compaction is missing from the session context");
+					const compaction = this.sessionManager
+						.getBranch()
+						.findLast((entry): entry is CompactionEntry => entry.type === "compaction");
+					if (!compaction) {
+						throw new Error("Completed compaction is missing from the session branch");
 					}
-					this.chatContainer.clear();
-					// The latest compaction is prepended for model context; append it below at its chronological position.
-					this.renderSessionEntries(entries.slice(1));
-					this.addMessageToChat(
-						createCompactionSummaryMessage(
-							event.result.summary,
-							event.result.tokensBefore,
-							new Date().toISOString(),
-						),
-					);
-					if (event.result.usage) {
-						this.addCompactionCostNotice({
-							type: "compaction_cost",
-							kind: "compaction",
-							usage: event.result.usage,
-						});
-					}
-					this.showUnsavedRows();
-					this.footer.invalidate();
+					this.appendCompactionToChat({
+						id: compaction.id,
+						timestamp: compaction.timestamp,
+						summary: event.result.summary,
+						tokensBefore: event.result.tokensBefore,
+						usage: event.result.usage,
+					});
 				} else if (event.errorMessage) {
 					if (event.reason === "manual") {
 						this.showError(event.errorMessage);
@@ -4487,8 +4455,8 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Render session entries to chat. Used for initial load and rebuild after compaction.
-	 * @param entries Compaction-aware session entries to render
+	 * Render chronological branch entries to chat. Used for initial load and transcript rebuilds.
+	 * @param entries Session entries on the active branch to render
 	 * @param options.updateFooter Update footer state
 	 * @param options.populateHistory Add user messages to editor history
 	 */
@@ -4513,6 +4481,31 @@ export class InteractiveMode {
 			return messages;
 		});
 		this.renderSessionItems(items, messageMeta, options);
+	}
+
+	/**
+	 * Append a saved compaction summary and its optional billing notice to the live transcript
+	 * without clearing earlier turns, keeping any running idle `!` command after it.
+	 */
+	private appendCompactionToChat(
+		compaction: Pick<CompactionEntry, "id" | "timestamp" | "summary" | "tokensBefore" | "usage">,
+	): void {
+		this.addMessageToChat(
+			createCompactionSummaryMessage(compaction.summary, compaction.tokensBefore, compaction.timestamp),
+			{ messageId: compaction.id, timestamp: compaction.timestamp },
+		);
+		if (compaction.usage) {
+			this.addCompactionCostNotice({
+				type: "compaction_cost",
+				kind: "compaction",
+				usage: compaction.usage,
+			});
+		}
+		if (this.bashComponent && !this.pendingBashComponents.includes(this.bashComponent)) {
+			this.chatContainer.removeChild(this.bashComponent);
+			this.chatContainer.addChild(this.bashComponent);
+		}
+		this.footer.invalidate();
 	}
 
 	private addCacheWarmingUsage(entry: UsageEntry): void {
@@ -4670,7 +4663,7 @@ export class InteractiveMode {
 	}
 
 	renderInitialMessages(): void {
-		const entries = this.sessionManager.buildContextEntries();
+		const entries = this.sessionManager.getBranch();
 		this.renderSessionEntries(entries, {
 			updateFooter: true,
 			populateHistory: true,
@@ -4724,7 +4717,7 @@ export class InteractiveMode {
 
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
-		this.renderSessionEntries(this.sessionManager.buildContextEntries());
+		this.renderSessionEntries(this.sessionManager.getBranch());
 		this.showUnsavedRows();
 	}
 
