@@ -113,6 +113,7 @@ import {
 import {
 	type CompactionEntry,
 	type SessionEntry,
+	type SessionInfo,
 	SessionManager,
 	sessionEntryToContextMessages,
 	type UsageEntry,
@@ -250,6 +251,20 @@ function isExpandable(obj: unknown): obj is Expandable {
 function addChatActivity(container: Container, component: Component): void {
 	if (container instanceof ChatContainer) container.addActivity(component);
 	else container.addChild(component);
+}
+
+export function formatEmptySessionResumeHint(sessions: readonly SessionInfo[]): string | undefined {
+	if (sessions.length === 0) return undefined;
+	const latest = sessions[0]!;
+	const rawLabel = (latest.name ?? latest.firstMessage ?? "").replace(/\s+/g, " ").trim();
+	const codePoints = Array.from(rawLabel);
+	const label = codePoints.length > 60 ? `${codePoints.slice(0, 57).join("")}...` : rawLabel;
+	const countPrefix =
+		sessions.length === 1
+			? "1 saved session in this directory"
+			: `${sessions.length} saved sessions in this directory`;
+	const latestSuffix = label ? ` (latest: "${label}")` : "";
+	return `${countPrefix}${latestSuffix}. Run /resume to continue.`;
 }
 
 class ExpandableText extends ThemedText implements Expandable {
@@ -1341,6 +1356,7 @@ export class InteractiveMode {
 		}
 
 		void this.maybeWarnAboutAnthropicSubscriptionAuth();
+		void this.maybeShowEmptySessionResumeHint();
 
 		// Process initial messages
 		if (!this.pendingUserInputs) {
@@ -5815,6 +5831,42 @@ export class InteractiveMode {
 		} catch {
 			// Ignore auth lookup failures for warning-only checks.
 		}
+	}
+
+	private async maybeShowEmptySessionResumeHint(): Promise<void> {
+		if (this.options.initialMessage !== undefined || (this.options.initialMessages?.length ?? 0) > 0) {
+			return;
+		}
+		if (!this.sessionManager.isPersisted() || this.sessionManager.getEntries().length > 0) {
+			return;
+		}
+		const initialSessionId = this.sessionManager.getSessionId();
+		const initialSessionFile = this.sessionManager.getSessionFile();
+		let sessions: SessionInfo[];
+		try {
+			sessions = await SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir());
+		} catch {
+			return;
+		}
+		if (
+			this.isShuttingDown ||
+			!this.isInitialized ||
+			this.session.isStreaming ||
+			this.sessionManager.getSessionId() !== initialSessionId ||
+			this.sessionManager.getEntries().length > 0 ||
+			(this.pendingUserInputs?.length ?? 0) > 0
+		) {
+			return;
+		}
+		const previousSessions = sessions.filter(
+			(session) =>
+				session.id !== initialSessionId && session.path !== initialSessionFile && session.messageCount > 0,
+		);
+		const hint = formatEmptySessionResumeHint(previousSessions);
+		if (!hint) return;
+		this.chatContainer.addChild(new Spacer(1));
+		addChatActivity(this.chatContainer, new ThemedText(() => theme.fg("dim", hint), 1, 0));
+		this.ui.requestRender();
 	}
 
 	private maybeSaveImplicitProjectTrustAfterReload(): boolean {
