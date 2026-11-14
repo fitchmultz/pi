@@ -1041,11 +1041,13 @@ export class InteractiveMode {
 		nextUi.addInputListener(this.guardWorkingSessionInput);
 		this.mountInteractiveTui(nextUi, components);
 		nextUi.invalidate();
+		this.activeStatusIndicator?.invalidate();
 		nextUi.setFocus(focus);
 		// The regular renderer used only for exit output is not a resumable mode change.
 		if (!startRenderer) return true;
 		this.options.tuiMode = mode;
 		nextUi.start();
+		this.ui.isTerminalFocused?.();
 		this.themeController.rebindTui();
 		this.rebindExtensionTerminalInputListeners();
 		if (

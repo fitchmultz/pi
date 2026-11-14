@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type { Component, Terminal, TUI, WheelScrollLines } from "@earendil-works/pi-tui";
 import { Container, getKeybindings, isViewportTUI, ScrollView, setKeybindings, Text } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -179,6 +180,86 @@ describe("createInteractiveTui", () => {
 
 		expect(stableUi.mode).toBe("fullscreen");
 		expect([terminal.startCount, terminal.stopCount]).toEqual([2, 2]);
+	});
+
+	it("rebinds an unmounted embedded WorkingStatusIndicator across switchTuiMode while /settings replaces the editor", async () => {
+		const terminal = new RecordingTerminal(40, 8);
+		const renderer = createInteractiveTui({
+			tuiMode: "regular",
+			showHardwareCursor: false,
+			logDirectory: "/tmp",
+			terminal,
+		});
+		const settingsSelector: Component = {
+			render: () => ["settings"],
+			invalidate: () => {},
+		};
+		renderer.addChild(settingsSelector);
+
+		type SwitchContext = {
+			runtimeHost: {
+				session: {
+					settingsManager: {
+						getFullscreenCopyOnSelect: () => boolean;
+						getFullscreenWheelScrollLines: () => WheelScrollLines;
+					};
+				};
+			};
+			renderer: ReturnType<typeof createInteractiveTui>;
+			ui: TUI;
+			activeStatusIndicator: StatusIndicator | undefined;
+			fullscreenLayoutRoot: Component;
+			options: { tuiMode?: TuiMode };
+			themeController: { rebindTui: () => void };
+			extensionTerminalInputSubscriptions: Set<never>;
+		};
+		const context = Object.assign(Object.create(InteractiveMode.prototype), {
+			runtimeHost: {
+				session: {
+					settingsManager: { getFullscreenCopyOnSelect: () => true, getFullscreenWheelScrollLines: () => "auto" },
+				},
+			},
+			renderer,
+			ui: undefined as unknown as TUI,
+			activeStatusIndicator: undefined as StatusIndicator | undefined,
+			fullscreenLayoutRoot: settingsSelector,
+			options: { tuiMode: "regular" as TuiMode },
+			themeController: { rebindTui: () => {} },
+			extensionTerminalInputSubscriptions: new Set<never>(),
+		}) as SwitchContext;
+		context.ui = createInteractiveTuiReference(() => context.renderer);
+		const indicator = new WorkingStatusIndicator(
+			context.ui,
+			"Working",
+			{ frames: ["1", "2", "3", "4", "5", "6"], intervalMs: 25 },
+			(text) => text,
+		);
+		context.activeStatusIndicator = indicator;
+
+		const { switchTuiMode } = InteractiveMode.prototype as unknown as {
+			switchTuiMode(this: SwitchContext, mode: TuiMode, restoreProgress?: boolean): boolean;
+		};
+
+		try {
+			renderer.start();
+			await terminal.waitForRender();
+			expect(switchTuiMode.call(context, "fullscreen", false)).toBe(true);
+			await terminal.waitForRender();
+
+			terminal.sendInput("\x1b[O");
+			expect(context.ui.isTerminalFocused?.()).toBe(false);
+			await delay(35);
+			const pausedFrame = indicator.renderInBorder(30);
+			await delay(120);
+			expect(indicator.renderInBorder(30)).toBe(pausedFrame);
+
+			terminal.sendInput("\x1b[I");
+			await delay(80);
+			expect(indicator.renderInBorder(30)).not.toBe(pausedFrame);
+		} finally {
+			indicator.dispose();
+			context.renderer.stop();
+		}
 	});
 });
 
