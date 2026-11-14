@@ -526,6 +526,8 @@ export interface TUI extends Component {
 	dispatchInput(data: string): void;
 	addInputListener(listener: TuiInputListener): () => void;
 	removeInputListener(listener: TuiInputListener): void;
+	isTerminalFocused?(): boolean;
+	onTerminalFocusChange?(listener: (focused: boolean) => void): () => void;
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void;
 	setTerminalColorSchemeNotifications(enabled: boolean): void;
 	queryTerminalColors(options: {
@@ -563,6 +565,10 @@ export abstract class TuiBase extends Container implements TUI {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
+	private static readonly UNFOCUSED_MIN_RENDER_INTERVAL_MS = 250;
+	private terminalFocused = true;
+	private dispatchingInput = false;
+	private terminalFocusListeners = new Set<(focused: boolean) => void>();
 	private showHardwareCursor = false;
 	private clearOnShrink = false;
 	protected fullRedrawCount = 0;
@@ -996,6 +1002,7 @@ export abstract class TuiBase extends Container implements TUI {
 
 	start(): void {
 		this.stopped = false;
+		this.setTerminalFocused(true);
 		process.off("exit", this.exitRestoreHandler);
 		process.on("exit", this.exitRestoreHandler);
 		this.beforeTerminalStart();
@@ -1021,6 +1028,31 @@ export abstract class TuiBase extends Container implements TUI {
 
 	removeInputListener(listener: TuiInputListener): void {
 		this.inputListeners.delete(listener);
+	}
+
+	isTerminalFocused(): boolean {
+		return this.terminalFocused;
+	}
+
+	onTerminalFocusChange(listener: (focused: boolean) => void): () => void {
+		this.terminalFocusListeners.add(listener);
+		return () => {
+			this.terminalFocusListeners.delete(listener);
+		};
+	}
+
+	protected setTerminalFocused(focused: boolean): void {
+		if (this.terminalFocused === focused) {
+			return;
+		}
+		this.terminalFocused = focused;
+		if (focused && this.renderRequested && !this.stopped) {
+			this.cancelRenderTimer();
+			this.scheduleRender();
+		}
+		for (const listener of this.terminalFocusListeners) {
+			listener(focused);
+		}
 	}
 
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void {
@@ -1078,6 +1110,10 @@ export abstract class TuiBase extends Container implements TUI {
 			this.requestImmediateRender();
 			return;
 		}
+		if (this.dispatchingInput && !this.terminalFocused) {
+			this.requestImmediateRender();
+			return;
+		}
 		if (this.stopped || this.renderRequested) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
@@ -1112,8 +1148,11 @@ export abstract class TuiBase extends Container implements TUI {
 		if (this.stopped || this.renderTimer || !this.renderRequested) {
 			return;
 		}
+		const minInterval = this.terminalFocused
+			? TuiBase.MIN_RENDER_INTERVAL_MS
+			: TuiBase.UNFOCUSED_MIN_RENDER_INTERVAL_MS;
 		const elapsed = performance.now() - this.lastRenderAt;
-		const delay = Math.max(0, TuiBase.MIN_RENDER_INTERVAL_MS - elapsed);
+		const delay = Math.max(0, minInterval - elapsed);
 		this.renderTimer = setTimeout(() => {
 			this.renderTimer = undefined;
 			if (this.stopped || !this.renderRequested) {
@@ -1130,6 +1169,16 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Dispatch terminal input through the same listeners and focused component, including held input. */
 	dispatchInput(data: string): void {
+		const wasDispatching = this.dispatchingInput;
+		this.dispatchingInput = true;
+		try {
+			this.dispatchInputInternal(data);
+		} finally {
+			this.dispatchingInput = wasDispatching;
+		}
+	}
+
+	private dispatchInputInternal(data: string): void {
 		if (this.consumeTerminalColorResponse(data)) {
 			return;
 		}

@@ -27,6 +27,8 @@ Use `visibleWidth()`, `truncateToWidth()`, `sliceByColumn()`, and `wrapTextWithA
 
 After changing component state, invalidate the affected component and call the injected `tui.requestRender()`. The TUI coalesces render requests and updates the terminal.
 
+When a fullscreen terminal reports focus loss, non-interactive `tui.requestRender()` calls coalesce at a slower cadence until focus returns or input arrives, and `Loader` pauses its spinner animation while unfocused. Components with their own background animation timers can check `tui.isTerminalFocused?.()` and subscribe via `tui.onTerminalFocusChange?.(listener)` to pause and resume cleanly.
+
 ## Compose built-in components
 
 The package includes components for common layouts and controls:
