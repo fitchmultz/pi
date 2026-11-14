@@ -46,6 +46,45 @@ const OPENAI_MID_CONVO_MODEL_IDS = new Set([
 	...OPENAI_ADDITIONAL_TOOLS_MODEL_IDS,
 ]);
 
+/**
+ * Claude passthrough parity with `catalog/families/anthropic.ts`. Kept in runtime code for the same
+ * reason as the OpenAI lists above: published `pi.dev` catalog overlays can replace generated entries.
+ */
+const CLAUDE_DISABLED_THINKING_MODELS = new Set(["claude-opus-5", "claude-haiku-5-5", "claude-haiku-5.5"]);
+const CLAUDE_TEMPERATURE_UNSUPPORTED_FRAGMENTS = [
+	"opus-4-7",
+	"opus-4.7",
+	"opus-4-8",
+	"opus-4.8",
+	"opus-5",
+	"opus.5",
+	"sonnet-5",
+	"sonnet.5",
+	"haiku-5-5",
+	"haiku-5.5",
+	"fable-5-2",
+	"fable-5.2",
+	"mythos-5-2",
+	"mythos-5.2",
+];
+
+function supportsCloudflareClaudeMidConvoSystemMessages(modelId: string): boolean {
+	return (
+		/^claude-opus-(?:4[.-]8|5(?:[.-]5)?)(?:-\d{8})?$/.test(modelId) ||
+		/^claude-(?:sonnet|haiku)-5[.-]5(?:-\d{8})?$/.test(modelId) ||
+		/^claude-(?:fable|mythos)-5(?:[.-][12])?(?:-\d{8})?$/.test(modelId)
+	);
+}
+
+function supportsCloudflareClaudeMidConvoEffort(modelId: string): boolean {
+	const id = modelId.toLowerCase();
+	return (
+		/^claude-opus-(?:5|5[.-]5)(?:-\d{8})?$/.test(id) ||
+		/^claude-(?:sonnet|haiku)-5[.-]5(?:-\d{8})?$/.test(id) ||
+		/^claude-(?:fable|mythos)-5[.-][12](?:-\d{8})?$/.test(id)
+	);
+}
+
 export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel): TModel {
 	if (!isModelType(model, "chat") || model.provider !== "cloudflare-ai-gateway") return model;
 	if (
@@ -64,23 +103,31 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 	}
 	if (
 		model.api !== "anthropic-messages" ||
-		(model.id !== "claude-opus-5-5" && model.id !== "claude-fable-5-2") ||
+		!supportsCloudflareClaudeMidConvoSystemMessages(model.id) ||
 		model.baseUrl !== CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL
 	) {
 		return model;
 	}
+	const midConvoEffort = supportsCloudflareClaudeMidConvoEffort(model.id);
+	const lowerId = model.id.toLowerCase();
+	const temperatureUnsupported = CLAUDE_TEMPERATURE_UNSUPPORTED_FRAGMENTS.some((fragment) =>
+		lowerId.includes(fragment),
+	);
+	const disablesOff = midConvoEffort && !CLAUDE_DISABLED_THINKING_MODELS.has(lowerId.replace(/-\d{8}$/, ""));
 	const compat = {
 		supportsMidConvoSystemMessages: true,
 		supportsMidConvoToolChanges: true,
-		supportsMidConvoEffort: true,
+		...(midConvoEffort ? { supportsMidConvoEffort: true } : {}),
 		forceAdaptiveThinking: true,
-		...(model.id === "claude-fable-5-2" ? { supportsTemperature: false } : {}),
+		...(temperatureUnsupported ? { supportsTemperature: false } : {}),
 		...model.compat,
 	};
 	return {
 		...model,
 		promptCache: model.promptCache ?? { short: 300, long: 3600 },
 		compat,
-		...(compat.supportsMidConvoEffort ? { thinkingLevelMap: { ...model.thinkingLevelMap, off: null } } : {}),
+		...(compat.supportsMidConvoEffort && disablesOff
+			? { thinkingLevelMap: { ...model.thinkingLevelMap, off: null } }
+			: {}),
 	};
 }

@@ -573,9 +573,67 @@ describe("transcript system messages", () => {
 		);
 	});
 
+	test("emits all initial, added, and redefined tools inline with empty top-level tools when supportsMidConvoToolChanges is enabled", async () => {
+		const model: Model<"openai-completions"> = {
+			...modelBase,
+			id: "deepseek-v4.1-flash",
+			name: "DeepSeek V4.1 Flash",
+			api: "openai-completions",
+			provider: "local-maya",
+			compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true },
+		};
+		const history = await captureToolHistory<KimiPayload>(model);
+		for (const payload of history) {
+			expect(payload.tools).toBeUndefined();
+		}
+		expectGrowingPrefix(history.map((payload) => payload.messages));
+		expect(
+			history
+				.at(-1)
+				?.messages.filter((message) => message.tools)
+				.map((message) => message.tools?.map((tool) => tool.function?.name)),
+		).toEqual([["base_tool", "drop_tool"], ["late_tool"], ["later_tool"]]);
+		const removalNotices =
+			history
+				.at(-1)
+				?.messages.filter(
+					(message) => typeof message.content === "string" && message.content.includes("no longer available"),
+				)
+				.map((message) => message.content) ?? [];
+		expect(removalNotices).toEqual([expect.stringContaining("no longer available. Do not call them:\n- drop_tool")]);
+	});
+
+	test.each([
+		["local-maya", "deepseek-v4.1-flash", true],
+		["local-glm", "glm-5.3-flash", true],
+		["local-glm", "glm-5.2", false],
+	] as const)(
+		"auto-detects mid-conversation system message support for %s/%s as %s",
+		async (provider, id, expectedMidConvo) => {
+			const model: Model<"openai-completions"> = {
+				...modelBase,
+				id,
+				name: id,
+				api: "openai-completions",
+				provider,
+			};
+			const payload = await capturePayload<{
+				messages: Array<{ role: string; content?: string }>;
+			}>(model, additionContext);
+			const systemContents = payload.messages
+				.filter((message) => message.role === "system" || message.role === "developer")
+				.map((message) => message.content);
+			if (expectedMidConvo) {
+				expect(systemContents).toEqual(["base prompt", "updated guidance"]);
+			} else {
+				expect(systemContents).toEqual(["base prompt\n\nupdated guidance"]);
+			}
+		},
+	);
+
 	type KimiPayload = {
 		tools?: Array<{ function?: { name: string } }>;
-		messages: Array<{ role: string; tools?: Array<{ function?: { name: string } }> }>;
+		messages: Array<{ role: string; content?: string; tools?: Array<{ function?: { name: string } }> }>;
 	};
 
 	// #10940: Kimi tool messages cannot remove tools, so a removal rewrites the prefix once.

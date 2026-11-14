@@ -39,6 +39,11 @@ export function renderSystemMessageUpdate(message: SystemMessage): string {
 	return parts.join("\n\n");
 }
 
+/** Render a mid-conversation notice when previously declared tools are removed. */
+export function renderToolRemovalNotice(names: readonly string[]): string {
+	return `The following tools are no longer available. Do not call them:\n${names.map((name) => `- ${name}`).join("\n")}`;
+}
+
 /**
  * `text.slice(start, end)` as a string of its own. V8 represents a slice of 13 or more characters as a view that keeps
  * all of `text` alive, so a short excerpt kept from a large text (a 500-character error message cut from a megabyte

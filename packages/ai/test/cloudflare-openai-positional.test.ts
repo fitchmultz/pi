@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL, normalizeCloudflareModel } from "../src/api/cloudflare.ts";
+import {
+	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
+	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
+	normalizeCloudflareModel,
+} from "../src/api/cloudflare.ts";
 import { getBuiltinModels } from "../src/providers/all.ts";
-import type { OpenAIResponsesCompat } from "../src/types.ts";
+import type { AnthropicMessagesCompat, OpenAIResponsesCompat } from "../src/types.ts";
 
 function positional(model: { compat?: unknown }) {
 	const compat = model.compat as OpenAIResponsesCompat | undefined;
@@ -32,5 +36,43 @@ describe("Cloudflare OpenAI positional defaults", () => {
 		expect(optOut.compat).toEqual({ supportsMidConvoSystemMessages: false, supportsAdditionalTools: true });
 		const custom = { ...astra, baseUrl: "https://proxy.invalid/openai", compat: { supportsStrictMode: true } };
 		expect(normalizeCloudflareModel(custom)).toBe(custom);
+	});
+});
+
+describe("Cloudflare Anthropic passthrough positional defaults", () => {
+	function claudePositional(model: { compat?: unknown }) {
+		const compat = model.compat as AnthropicMessagesCompat | undefined;
+		return {
+			systemMessages: compat?.supportsMidConvoSystemMessages === true,
+			toolChanges: compat?.supportsMidConvoToolChanges === true,
+			effort: compat?.supportsMidConvoEffort === true,
+		};
+	}
+
+	const routedAnthropic = getBuiltinModels("cloudflare-ai-gateway").filter(
+		(model) => model.api === "anthropic-messages" && model.baseUrl === CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
+	);
+
+	it("match direct Anthropic for every Cloudflare /anthropic passthrough model", () => {
+		const direct = new Map(getBuiltinModels("anthropic").map((model) => [model.id, claudePositional(model)]));
+		const actual = routedAnthropic.map((model) => ({
+			id: model.id,
+			...claudePositional(normalizeCloudflareModel(model)),
+		}));
+		expect(actual).toEqual(
+			routedAnthropic.map((model) => ({ id: model.id, ...(direct.get(model.id) ?? claudePositional({})) })),
+		);
+		expect(actual.find((entry) => entry.id === "claude-sonnet-5-5")).toEqual({
+			id: "claude-sonnet-5-5",
+			systemMessages: true,
+			toolChanges: true,
+			effort: true,
+		});
+		expect(actual.find((entry) => entry.id === "claude-haiku-5-5")).toEqual({
+			id: "claude-haiku-5-5",
+			systemMessages: true,
+			toolChanges: true,
+			effort: true,
+		});
 	});
 });

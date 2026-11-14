@@ -1000,6 +1000,11 @@
           "description": "Whether system messages can introduce additional tools mid-conversation. Requires supportsMidConvoSystemMessages. The generated catalog enables this for capable models.",
           "default": false
         },
+        "supportsMidConvoToolChanges": {
+          "type": "boolean",
+          "description": "Whether mid-conversation tool additions and redefinitions are sent inside the conversation instead of mutating the top-level tools field, keeping the prompt cache. Requires supportsMidConvoSystemMessages. Used by the anthropic-messages and openai-completions APIs.",
+          "default": false
+        },
         "supportsStrictMode": {
           "type": "boolean",
           "description": "Whether the provider supports strict tool schemas. Defaults are API-specific."
@@ -1108,11 +1113,6 @@
         "supportsStrictTools": {
           "type": "boolean",
           "description": "Whether the provider supports Anthropic strict tool schemas. Generated Anthropic models enable it explicitly.",
-          "default": false
-        },
-        "supportsMidConvoToolChanges": {
-          "type": "boolean",
-          "description": "Whether the exact model accepts mid-conversation tool_addition and tool_removal blocks. Requires supportsMidConvoSystemMessages.",
           "default": false
         },
         "supportsMessageThreads": {

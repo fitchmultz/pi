@@ -188,7 +188,13 @@ describe("builtin providers", () => {
 			["github-copilot", "claude-opus-5"],
 			["github-copilot", "claude-opus-4.8"],
 			["github-copilot", "kimi-k3"],
+			["deepseek", "deepseek-flash"],
 			["deepseek", "deepseek-v4-pro"],
+			["zai", "glm-5.3"],
+			["zai", "glm-5.3-flash"],
+			["zai-coding-cn", "glm-5.3-flash"],
+			["cloudflare-ai-gateway", "claude-sonnet-5-5"],
+			["cloudflare-ai-gateway", "claude-haiku-5-5"],
 			["openrouter", "openai/gpt-5.6-terra"],
 		] as const;
 		const unsupported = [
@@ -200,7 +206,7 @@ describe("builtin providers", () => {
 			["opencode", "gpt-5.2"],
 			["opencode", "claude-sonnet-4-5"],
 			["github-copilot", "claude-sonnet-4.6"],
-			["deepseek", "deepseek-flash"],
+			["zai", "glm-5.2"],
 			["openrouter", "anthropic/claude-opus-5"],
 			["openrouter", "moonshotai/kimi-k3"],
 			["openrouter", "openai/gpt-5.6-terra:batch"],

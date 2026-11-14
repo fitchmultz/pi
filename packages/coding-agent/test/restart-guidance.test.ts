@@ -147,6 +147,7 @@ interface Payload {
 async function payloads(
 	contexts: TranscriptContext[],
 	api: "openai-completions" | "openai-responses" | "openai-codex-responses",
+	completionsCompatOverride?: Record<string, unknown>,
 ) {
 	const model: Model<typeof api> = {
 		id: api === "openai-completions" ? "glm-5.3" : "gpt-6.1-sol",
@@ -161,7 +162,7 @@ async function payloads(
 		maxTokens: 1000,
 		compat:
 			api === "openai-completions"
-				? { supportsDeveloperRole: false }
+				? { supportsDeveloperRole: false, ...completionsCompatOverride }
 				: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true },
 	};
 	const captures: Payload[] = [];
@@ -418,8 +419,20 @@ describe("actual managed restart guidance", () => {
 			expect(forked.input?.slice(0, parent.input?.length)).toEqual(parent.input);
 			expect(forked.tools).toEqual(parent.tools);
 		}
+		const [parentCompletions, forkedCompletions] = await payloads(
+			[f.requests[0], child.requests[0]],
+			"openai-completions",
+		);
+		expect(forkedCompletions.messages?.slice(0, parentCompletions.messages?.length)).toEqual(
+			parentCompletions.messages,
+		);
+		expect(JSON.stringify(forkedCompletions.messages?.slice(parentCompletions.messages?.length))).toContain(
+			'Removed system prompt section \\"restart\\".',
+		);
 		// An API without them gets every later system message folded into the leading one.
-		const [parent, forked] = await payloads([f.requests[0], child.requests[0]], "openai-completions");
+		const [parent, forked] = await payloads([f.requests[0], child.requests[0]], "openai-completions", {
+			supportsMidConvoSystemMessages: false,
+		});
 		expect(JSON.stringify(parent.messages?.[0])).toContain("<restart>");
 		expect(JSON.stringify(forked.messages?.[0])).not.toContain("<restart>");
 	});

@@ -28,6 +28,8 @@ export function zaiCodingPlanModels(ctx: ProviderContext, source: string, baseUr
 					thinkingFormat: "zai",
 					...(thinkingLevelMap ? { supportsReasoningEffort: true } : {}),
 					...(!TOOL_STREAM_UNSUPPORTED_MODEL_IDS.has(model.id) ? { zaiToolStream: true } : {}),
+					// GLM-5.3 honors mid-conversation <|system|> updates; GLM-5.2 rejects them as user injection.
+					...(model.id.startsWith("glm-5.3") ? { supportsMidConvoSystemMessages: true } : {}),
 				},
 			};
 		},
