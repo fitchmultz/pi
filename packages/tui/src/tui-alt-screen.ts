@@ -715,6 +715,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
+			this.setTerminalFocused(false);
 			// Losing focus cancels the active gesture. A selection still being dragged is dropped, repainting only
 			// if it was visible; a completed selection stays.
 			if (this.gesture.kind === "selection") {
@@ -730,7 +731,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.lastClick = undefined;
 			return { consume: true };
 		}
-		if (data === FOCUS_IN) return { consume: true };
+		if (data === FOCUS_IN) {
+			this.setTerminalFocused(true);
+			return { consume: true };
+		}
 
 		const wheelEvent = this.parseWheelEvent(data);
 		if (wheelEvent) {

@@ -1,5 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import {
 	AltScreenSearchComponent,
 	AltScreenSearchIndex,
@@ -9,6 +10,7 @@ import { Box } from "../src/components/box.ts";
 import { Editor } from "../src/components/editor.ts";
 import { HStack } from "../src/components/h-stack.ts";
 import { Image } from "../src/components/image.ts";
+import { Loader } from "../src/components/loader.ts";
 import { MouseRegion } from "../src/components/mouse-region.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
 import { SelectList } from "../src/components/select-list.ts";
@@ -22,7 +24,7 @@ import {
 	resetCapabilitiesCache,
 	setCapabilities,
 } from "../src/terminal-image.ts";
-import { CURSOR_MARKER, renderFakeCursor, type TuiMouseEvent } from "../src/tui.ts";
+import { CURSOR_MARKER, renderFakeCursor, type TUI, type TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
@@ -2553,5 +2555,178 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 		assert.ok(tui.viewportTop < topWithoutMenu);
 		tui.stop();
+	});
+
+	it("throttles background renders while unfocused and flushes immediately on focus return or input", async () => {
+		const terminal = new RecordingTerminal(40, 6);
+		const tui = new TuiAltScreen(terminal);
+		const status = new Text("frame-0", 0, 0);
+		tui.addChild(status);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			terminal.sendInput("\x1b[O");
+			assert.strictEqual(tui.isTerminalFocused(), false);
+
+			// First background update right after initial render is throttled by the 250ms unfocused interval.
+			const writesBeforeBurst = terminal.events.filter((event) => event.type === "write").length;
+			for (let index = 1; index <= 5; index++) {
+				status.setText(`frame-${index}`);
+				tui.requestRender();
+				await delay(18);
+			}
+			// Under 16ms focused cadence this 90ms burst would render ~5 frames; unfocused renders 0 until 250ms or focus return.
+			assert.strictEqual(terminal.events.filter((event) => event.type === "write").length, writesBeforeBurst);
+
+			// Returning focus immediately flushes the pending background update without waiting out the 250ms timer.
+			terminal.sendInput("\x1b[I");
+			assert.strictEqual(tui.isTerminalFocused(), true);
+			await terminal.waitForRender();
+			assert.strictEqual(terminal.getViewport()[0]?.trimEnd(), "frame-5");
+
+			// Interactive input while unfocused still renders on the interactive frame budget.
+			terminal.sendInput("\x1b[O");
+			const transcript = new Text(Array.from({ length: 20 }, (_, index) => `row ${index + 1}`).join("\n"), 0, 0);
+			tui.clear();
+			tui.addChild(transcript);
+			tui.renderNow();
+			await terminal.flush();
+			// Arm a 250ms background render timer first, then verify wheel input preempts it immediately.
+			transcript.setText(Array.from({ length: 20 }, (_, index) => `updated ${index + 1}`).join("\n"));
+			tui.requestRender();
+			await delay(10);
+			const topBeforeWheel = tui.viewportTop;
+			const wheelStart = performance.now();
+			terminal.sendInput("\x1b[<64;1;1M");
+			await terminal.waitForRender();
+			assert.ok(
+				performance.now() - wheelStart < 120,
+				"interactive wheel input while unfocused must preempt an armed 250ms background timer",
+			);
+			assert.ok(tui.viewportTop < topBeforeWheel);
+		} finally {
+			tui.stop();
+		}
+	});
+
+	it("pauses Loader spinner ticks while unfocused and resumes on focus return without leaking listeners", async () => {
+		const terminal = new RecordingTerminal(40, 6);
+		const tui = new TuiAltScreen(terminal);
+		const loader = new Loader(
+			tui,
+			(s) => s,
+			(s) => s,
+			"Working",
+			{
+				frames: ["1", "2", "3", "4"],
+				intervalMs: 25,
+			},
+		);
+		tui.addChild(loader);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			terminal.sendInput("\x1b[O");
+			await delay(35);
+			const writesWhileUnfocused = terminal.events.filter((event) => event.type === "write").length;
+			await delay(110);
+			assert.strictEqual(
+				terminal.events.filter((event) => event.type === "write").length,
+				writesWhileUnfocused,
+				"unfocused Loader must not emit spinner writes",
+			);
+
+			terminal.sendInput("\x1b[I");
+			await delay(80);
+			await terminal.flush();
+			assert.ok(
+				terminal.events.filter((event) => event.type === "write").length > writesWhileUnfocused,
+				"Loader must resume advancing frames when focus returns",
+			);
+
+			loader.stop();
+			terminal.sendInput("\x1b[O");
+			const writesAfterStop = terminal.events.filter((event) => event.type === "write").length;
+			terminal.sendInput("\x1b[I");
+			await delay(70);
+			assert.strictEqual(
+				terminal.events.filter((event) => event.type === "write").length,
+				writesAfterStop,
+				"stopped Loader must unsubscribe from focus changes",
+			);
+		} finally {
+			loader.stop();
+			tui.stop();
+		}
+	});
+
+	it("rebinds Loader focus tracking when remounted onto a replacement TUI behind a proxy", async () => {
+		const terminal = new RecordingTerminal(40, 6);
+		let activeTui: TUI = new TuiAltScreen(terminal);
+		const uiProxy = new Proxy({} as TUI, {
+			get: (_target, property) => {
+				const tui = activeTui;
+				const value = Reflect.get(tui, property, tui);
+				if (typeof value !== "function") return value;
+				let methodTui = tui;
+				let method = value;
+				return (...args: unknown[]) => {
+					const currentTui = activeTui;
+					if (currentTui !== methodTui) {
+						const currentMethod = Reflect.get(currentTui, property, currentTui);
+						assert.strictEqual(typeof currentMethod, "function");
+						methodTui = currentTui;
+						method = currentMethod;
+					}
+					return Reflect.apply(method, methodTui, args);
+				};
+			},
+		});
+		const loader = new Loader(
+			uiProxy,
+			(s) => s,
+			(s) => s,
+			"Working",
+			{
+				frames: ["1", "2", "3", "4", "5", "6"],
+				intervalMs: 25,
+			},
+		);
+		activeTui.addChild(loader);
+		activeTui.start();
+		try {
+			await terminal.waitForRender();
+			const previousUi = activeTui;
+			previousUi.stop({ preserveScreen: true });
+			previousUi.clear();
+			const nextUi = new TuiAltScreen(terminal);
+			activeTui = nextUi;
+			nextUi.addChild(loader);
+			nextUi.invalidate();
+			nextUi.start();
+			await terminal.waitForRender();
+
+			terminal.sendInput("\x1b[O");
+			assert.strictEqual(uiProxy.isTerminalFocused?.(), false);
+			await delay(35);
+			const pausedLine = loader.render(40)[1];
+			await delay(120);
+			assert.strictEqual(
+				loader.render(40)[1],
+				pausedLine,
+				"remounted Loader must pause spinner advances after replacement TUI loses focus",
+			);
+
+			terminal.sendInput("\x1b[I");
+			await delay(80);
+			assert.notStrictEqual(
+				loader.render(40)[1],
+				pausedLine,
+				"remounted Loader must resume spinner advances when replacement TUI regains focus",
+			);
+		} finally {
+			loader.stop();
+			activeTui.stop();
+		}
 	});
 });

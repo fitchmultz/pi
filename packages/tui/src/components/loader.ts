@@ -19,6 +19,8 @@ export class Loader extends Text {
 	private intervalMs = DEFAULT_INTERVAL_MS;
 	private currentFrame = 0;
 	private intervalId: NodeJS.Timeout | null = null;
+	private unsubscribeFocus: (() => void) | null = null;
+	private running = false;
 	private ui: TUI | null = null;
 	private renderIndicatorVerbatim = false;
 	private spinnerColorFn: (str: string) => string;
@@ -45,11 +47,22 @@ export class Loader extends Text {
 	}
 
 	start(): void {
+		this.running = true;
+		this.bindFocusListener();
 		this.updateDisplay();
-		this.restartAnimation();
+		this.syncAnimation();
 	}
 
 	stop(): void {
+		this.running = false;
+		this.clearAnimationInterval();
+		if (this.unsubscribeFocus) {
+			this.unsubscribeFocus();
+			this.unsubscribeFocus = null;
+		}
+	}
+
+	private clearAnimationInterval(): void {
 		if (this.intervalId) {
 			clearInterval(this.intervalId);
 			this.intervalId = null;
@@ -63,7 +76,23 @@ export class Loader extends Text {
 
 	override invalidate(): void {
 		super.invalidate();
+		if (this.running) {
+			this.bindFocusListener();
+			this.syncAnimation();
+		}
 		this.updateDisplay();
+	}
+
+	private bindFocusListener(): void {
+		this.unsubscribeFocus?.();
+		this.unsubscribeFocus =
+			this.ui?.onTerminalFocusChange?.((focused) => {
+				if (focused && this.running && this.frames.length > 1) {
+					this.currentFrame = (this.currentFrame + 1) % this.frames.length;
+					this.updateDisplay();
+				}
+				this.syncAnimation();
+			}) ?? null;
 	}
 
 	setIndicator(indicator?: LoaderIndicatorOptions): void {
@@ -74,9 +103,9 @@ export class Loader extends Text {
 		this.start();
 	}
 
-	private restartAnimation(): void {
-		this.stop();
-		if (this.frames.length <= 1) {
+	private syncAnimation(): void {
+		this.clearAnimationInterval();
+		if (!this.running || this.frames.length <= 1 || this.ui?.isTerminalFocused?.() === false) {
 			return;
 		}
 		this.intervalId = setInterval(() => {

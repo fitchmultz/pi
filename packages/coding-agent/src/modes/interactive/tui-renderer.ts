@@ -51,9 +51,51 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 
 /** Stable reference for components while InteractiveMode replaces the active renderer. */
 export function createInteractiveTuiReference(getTui: () => TUI): TUI {
+	const focusListeners = new Set<(focused: boolean) => void>();
+	let boundFocusTui: TUI | undefined;
+	let unsubscribeFocusTui: (() => void) | undefined;
+
+	const notifyFocusListeners = (focused: boolean): void => {
+		for (const listener of [...focusListeners]) {
+			listener(focused);
+		}
+	};
+
+	const syncFocusBinding = (tui: TUI): void => {
+		if (boundFocusTui === tui) return;
+		const previousFocused = boundFocusTui?.isTerminalFocused?.() ?? true;
+		unsubscribeFocusTui?.();
+		unsubscribeFocusTui = undefined;
+		boundFocusTui = undefined;
+		if (focusListeners.size === 0 || !tui.onTerminalFocusChange) return;
+		boundFocusTui = tui;
+		unsubscribeFocusTui = tui.onTerminalFocusChange(notifyFocusListeners);
+		const nextFocused = tui.isTerminalFocused?.() ?? true;
+		if (nextFocused !== previousFocused) {
+			notifyFocusListeners(nextFocused);
+		}
+	};
+
+	const onTerminalFocusChange = (listener: (focused: boolean) => void): (() => void) => {
+		focusListeners.add(listener);
+		syncFocusBinding(getTui());
+		return () => {
+			focusListeners.delete(listener);
+			if (focusListeners.size === 0) {
+				unsubscribeFocusTui?.();
+				unsubscribeFocusTui = undefined;
+				boundFocusTui = undefined;
+			}
+		};
+	};
+
 	return new Proxy({} as TUI, {
 		get: (_target, property) => {
 			const tui = getTui();
+			syncFocusBinding(tui);
+			if (property === "onTerminalFocusChange") {
+				return onTerminalFocusChange;
+			}
 			const value = Reflect.get(tui, property, tui);
 			if (typeof value !== "function") return value;
 			let methodTui = tui;
