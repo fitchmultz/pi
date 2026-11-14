@@ -185,6 +185,7 @@ import { SkillInvocationMessageComponent } from "./components/skill-invocation-m
 import {
 	BranchSummaryStatusIndicator,
 	CompactionStatusIndicator,
+	formatPromptProgressMessage,
 	IdleStatus,
 	RetryStatusIndicator,
 	type StatusIndicator,
@@ -563,6 +564,8 @@ export class InteractiveMode {
 	private activeWorkingIndicatorEmbedded = false;
 	private readonly idleStatus = new IdleStatus();
 	private workingMessage: string | undefined = undefined;
+	private prefillProgressMessage: string | undefined = undefined;
+	private turnHasAssistantDelta = false;
 	private workingVisible = true;
 	private workingIndicatorOptions: WorkingIndicatorOptions | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working";
@@ -2687,13 +2690,12 @@ export class InteractiveMode {
 					(this.editor.borderColor ?? theme.getThinkingBorderColor(this.session.thinkingLevel || "off"))(text)
 			: undefined;
 		this.showStatusIndicator(
-			new WorkingStatusIndicator(
-				this.ui,
-				this.workingMessage ?? this.defaultWorkingMessage,
-				this.workingIndicatorOptions,
-				colorFn,
-			),
+			new WorkingStatusIndicator(this.ui, this.getEffectiveWorkingMessage(), this.workingIndicatorOptions, colorFn),
 		);
+	}
+
+	private getEffectiveWorkingMessage(): string {
+		return this.workingMessage ?? this.prefillProgressMessage ?? this.defaultWorkingMessage;
 	}
 
 	private setWorkingVisible(visible: boolean): void {
@@ -2810,6 +2812,8 @@ export class InteractiveMode {
 		this.defaultEditor.onExtensionShortcut = undefined;
 		this.updateTerminalTitle();
 		this.workingMessage = undefined;
+		this.prefillProgressMessage = undefined;
+		this.turnHasAssistantDelta = false;
 		this.workingVisible = true;
 		this.setWorkingIndicator();
 		if (this.activeStatusIndicator?.kind === "working") {
@@ -2979,7 +2983,7 @@ export class InteractiveMode {
 			setWorkingMessage: (message) => {
 				this.workingMessage = message;
 				if (this.activeStatusIndicator?.kind === "working") {
-					this.activeStatusIndicator.setMessage(message ?? this.defaultWorkingMessage);
+					this.activeStatusIndicator.setMessage(this.getEffectiveWorkingMessage());
 				}
 			},
 			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
@@ -3761,9 +3765,20 @@ export class InteractiveMode {
 	}
 
 	private subscribeToAgent(): void {
-		this.unsubscribe = this.session.subscribe(async (event) => {
+		const unsubscribeEvents = this.session.subscribe(async (event) => {
 			await this.handleEvent(event);
 		});
+		const unsubscribeProgress = this.session.subscribePromptProgress?.((progress) => {
+			if (this.turnHasAssistantDelta) return;
+			this.prefillProgressMessage = formatPromptProgressMessage(progress);
+			if (this.activeStatusIndicator?.kind === "working") {
+				this.activeStatusIndicator.setMessage(this.getEffectiveWorkingMessage());
+			}
+		});
+		this.unsubscribe = () => {
+			unsubscribeEvents();
+			unsubscribeProgress?.();
+		};
 	}
 
 	private async handleEvent(event: AgentSessionEvent): Promise<void> {
@@ -3786,12 +3801,16 @@ export class InteractiveMode {
 				break;
 
 			case "turn_start":
+				this.prefillProgressMessage = undefined;
+				this.turnHasAssistantDelta = false;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
 				if (this.workingVisible) {
 					if (this.activeStatusIndicator?.kind !== "working") {
 						this.showWorkingStatusIndicator();
+					} else {
+						this.activeStatusIndicator.setMessage(this.getEffectiveWorkingMessage());
 					}
 				} else {
 					this.clearStatusIndicator();
@@ -3867,6 +3886,15 @@ export class InteractiveMode {
 				break;
 
 			case "message_update":
+				if (event.message.role === "assistant" && !this.turnHasAssistantDelta) {
+					this.turnHasAssistantDelta = true;
+					if (this.prefillProgressMessage !== undefined) {
+						this.prefillProgressMessage = undefined;
+						if (this.activeStatusIndicator?.kind === "working") {
+							this.activeStatusIndicator.setMessage(this.getEffectiveWorkingMessage());
+						}
+					}
+				}
 				if (this.streamingComponent && event.message.role === "assistant") {
 					this.streamingMessage = event.message;
 					this.streamingComponent.updateContent(this.streamingMessage, true);
@@ -4015,6 +4043,8 @@ export class InteractiveMode {
 				break;
 
 			case "agent_settled":
+				this.prefillProgressMessage = undefined;
+				this.turnHasAssistantDelta = false;
 				// The session records deferred user bash results when the run settles; show them there too.
 				this.flushPendingBashComponents();
 				this.ui.requestRender();
@@ -4086,6 +4116,8 @@ export class InteractiveMode {
 			}
 
 			case "auto_retry_start": {
+				this.prefillProgressMessage = undefined;
+				this.turnHasAssistantDelta = false;
 				// Set up escape to abort retry
 				this.retryEscapeHandler = this.defaultEditor.onEscape;
 				this.defaultEditor.onEscape = () => {

@@ -43,6 +43,7 @@ const compat: Omit<
 	supportsMidConvoSystemMessages: false,
 	supportsMidConvoToolAdditions: false,
 	supportsMidConvoToolChanges: false,
+	supportsPromptProgress: false,
 	cacheControlFormat: "anthropic",
 	sendSessionAffinityHeaders: false,
 	sessionAffinityFormat: "openai",

@@ -183,6 +183,7 @@ type ResolvedOpenAICompletionsCompat = Omit<
 	| "supportsMidConvoSystemMessages"
 	| "supportsMidConvoToolAdditions"
 	| "supportsMidConvoToolChanges"
+	| "supportsPromptProgress"
 	| "vllmPriority"
 > & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
@@ -192,6 +193,7 @@ type ResolvedOpenAICompletionsCompat = Omit<
 	supportsMidConvoSystemMessages?: OpenAICompletionsCompat["supportsMidConvoSystemMessages"];
 	supportsMidConvoToolAdditions?: OpenAICompletionsCompat["supportsMidConvoToolAdditions"];
 	supportsMidConvoToolChanges?: OpenAICompletionsCompat["supportsMidConvoToolChanges"];
+	supportsPromptProgress?: OpenAICompletionsCompat["supportsPromptProgress"];
 	vllmPriority?: OpenAICompletionsCompat["vllmPriority"];
 };
 
@@ -830,6 +832,10 @@ function buildParams(
 
 	if (compat.supportsStore) {
 		params.store = false;
+	}
+
+	if (compat.supportsPromptProgress) {
+		(params as unknown as { return_progress?: boolean }).return_progress = true;
 	}
 
 	if (options?.maxTokens) {
@@ -1702,6 +1708,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		supportsMidConvoSystemMessages: isMidConvoCapableOpenAIModel,
 		supportsMidConvoToolAdditions: false,
 		supportsMidConvoToolChanges: false,
+		supportsPromptProgress: provider === "llama.cpp" || provider === "ds4",
 		cacheControlFormat,
 		sendSessionAffinityHeaders: isOpenRouter,
 		sessionAffinityFormat: isOpenRouter ? "openrouter" : "openai",
@@ -1755,6 +1762,7 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 		supportsMidConvoToolAdditions:
 			model.compat.supportsMidConvoToolAdditions ?? detected.supportsMidConvoToolAdditions,
 		supportsMidConvoToolChanges: model.compat.supportsMidConvoToolChanges ?? detected.supportsMidConvoToolChanges,
+		supportsPromptProgress: model.compat.supportsPromptProgress ?? detected.supportsPromptProgress,
 		cacheControlFormat: model.compat.cacheControlFormat ?? detected.cacheControlFormat,
 		sendSessionAffinityHeaders: model.compat.sendSessionAffinityHeaders ?? detected.sendSessionAffinityHeaders,
 		sessionAffinityFormat: model.compat.sessionAffinityFormat ?? detected.sessionAffinityFormat,

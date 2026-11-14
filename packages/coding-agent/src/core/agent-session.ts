@@ -135,6 +135,7 @@ import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./m
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { type NestedCallSummary, NestedToolCallRunner } from "./nested-tool-calls.ts";
+import type { PromptProgress } from "./prompt-progress.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { describeRuntime, RUNTIME_RECORD_ENTRY, type RuntimeRecordData } from "./runtime-record.ts";
@@ -510,6 +511,7 @@ export class AgentSession {
 	// Event subscription state
 	private _unsubscribeAgent?: () => void;
 	private _eventListeners: AgentSessionEventListener[] = [];
+	private _promptProgressListeners: Array<(progress: PromptProgress) => void> = [];
 	/** Covers the whole activity, including recovery and pre-settlement hooks after Agent.signal ends. */
 	private _agentRunAbortController: AbortController | undefined;
 	private get _isAgentRunActive(): boolean {
@@ -2092,6 +2094,23 @@ export class AgentSession {
 		};
 	}
 
+	subscribePromptProgress(listener: (progress: PromptProgress) => void): () => void {
+		this._promptProgressListeners.push(listener);
+		return () => {
+			const index = this._promptProgressListeners.indexOf(listener);
+			if (index !== -1) {
+				this._promptProgressListeners.splice(index, 1);
+			}
+		};
+	}
+
+	notifyPromptProgress(progress: PromptProgress): void {
+		if (this._disposed || !this.agent.state.isStreaming) return;
+		for (const listener of [...this._promptProgressListeners]) {
+			listener(progress);
+		}
+	}
+
 	/** Disconnect from agent events during disposal. */
 	private _disconnectFromAgent(): void {
 		if (this._unsubscribeAgent) {
@@ -2130,6 +2149,7 @@ export class AgentSession {
 		this._extensionRunner.invalidate();
 		this._disconnectFromAgent();
 		this._eventListeners = [];
+		this._promptProgressListeners = [];
 		if (this._cacheWarmer) {
 			this._cacheWarmer.onWarmed = undefined;
 			this._cacheWarmer.cancel();

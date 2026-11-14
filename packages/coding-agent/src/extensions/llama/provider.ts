@@ -151,6 +151,7 @@ function toPiModel(
 			supportsDeveloperRole: false,
 			supportsReasoningEffort: false,
 			supportsUsageInStreaming: true,
+			supportsPromptProgress: true,
 			supportsStrictMode: false,
 			maxTokensField: "max_tokens",
 			...(reasoning && { thinkingFormat: "qwen-chat-template" }),

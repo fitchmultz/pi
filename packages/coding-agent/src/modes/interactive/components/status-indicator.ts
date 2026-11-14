@@ -8,8 +8,10 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { WorkingIndicatorOptions } from "../../../core/extensions/index.ts";
+import type { PromptProgress } from "../../../core/prompt-progress.ts";
 import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
+import { formatTokens } from "./footer.ts";
 import { keyText } from "./keybinding-hints.ts";
 
 export type StatusIndicatorKind = "working" | "retry" | "compaction" | "branchSummary";
@@ -129,4 +131,42 @@ export class IdleStatus implements Component {
 		const emptyLine = " ".repeat(width);
 		return [emptyLine, emptyLine];
 	}
+}
+
+function formatEtaSeconds(totalSeconds: number): string {
+	if (totalSeconds < 60) return `${totalSeconds}s`;
+	if (totalSeconds < 3600) {
+		const minutes = Math.floor(totalSeconds / 60);
+		const seconds = totalSeconds % 60;
+		return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`;
+	}
+	const hours = Math.floor(totalSeconds / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+/**
+ * Format a live prompt prefill status label while prompt tokens are still being evaluated.
+ * Returns undefined once prefill reaches `total` so the indicator reverts to its working message.
+ */
+export function formatPromptProgressMessage(progress: PromptProgress): string | undefined {
+	if (progress.total <= 0 || progress.processed >= progress.total) {
+		return undefined;
+	}
+	const pct = Math.min(99, Math.floor((progress.processed / progress.total) * 100));
+	const computed = Math.max(0, progress.processed - progress.cache);
+	const remaining = Math.max(0, progress.total - progress.processed);
+	let ratePart = "";
+	let etaPart = "";
+	if (computed > 0 && progress.timeMs >= 250) {
+		const tps = (computed * 1000) / progress.timeMs;
+		if (tps >= 1) {
+			ratePart = ` · ${Math.round(tps)} tok/s`;
+		}
+		const etaSeconds = Math.ceil(((remaining / computed) * progress.timeMs) / 1000);
+		if (etaSeconds >= 1) {
+			etaPart = ` · ~${formatEtaSeconds(etaSeconds)} left`;
+		}
+	}
+	return `Prefilling ${formatTokens(progress.processed)}/${formatTokens(progress.total)} (${pct}%${ratePart}${etaPart})`;
 }
