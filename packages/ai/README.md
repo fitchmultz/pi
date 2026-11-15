@@ -974,6 +974,10 @@ The `openai-decisions` API calls OpenAI's [Decisions API](https://developers.ope
 
 The endpoint needs an OpenAI API key; Sign in with ChatGPT credentials are rejected, so the `openai` provider hides `gpt-6-luna` from `getAvailableOfType('classifier')` while it uses OAuth. The API rejects inputs above 922K tokens, but requests that run longer than about five seconds, currently above roughly 600K input tokens, fail with a gateway timeout (504).
 
+### Google Decisions
+
+The `google-decisions` API calls Google's [Gemini Decisions API](https://ai.google.dev/gemini-api/docs/decisions) (`POST /v1beta/decisions`) with `x-goog-api-key` authentication. `gemini-decision-1` is its model (262,144 input tokens, $0.10 per million input tokens, zero output tokens). The state is sent as JSON text; with images, the input is an array starting with `{ type: "text", text }` followed by `{ type: "image", data, mime_type }` parts. `choice` and `score` questions map to the Gemini Decisions types of the same name, and `bool` questions map to `noul` (`true_description` and `false_description`). Question IDs that contain characters outside `[A-Za-z0-9_-]{1,64}` are mapped to safe wire keys and restored in `result.answers`.
+
 ### Chat models on llama.cpp
 
 llama.cpp also serves decision models such as Julia-1 or Kev natively through `/v1/systemone`. Since llama.cpp 0.6.0, `GET /models` lists `decisions` in a model's `architecture.output_modalities` for these models. They use the `typesafe-system-one` API with the server's `/v1` URL as `baseUrl` (for example `http://127.0.0.1:9931/v1`); it needs an `apiKey`, which llama.cpp ignores unless it was started with `--api-key`. The `llama-cpp-classify` API is the fallback for chat models.

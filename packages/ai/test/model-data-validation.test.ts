@@ -458,4 +458,23 @@ describe("generated model data validation", () => {
 		);
 		expect(() => readModelDataStructure(packageRoot)).toThrow("aggregator and provider shards do not match");
 	});
+
+	it("preserves google/gemini-decision-1 when hydrating upstream catalogs without it", () => {
+		const { dataDir, packageRoot, values } = createFixture("google");
+		const catalogPath = join(packageRoot, "models.all.json");
+		const chatEntry = { ...(values["chat:model-a"] as Record<string, unknown>), api: "google-generative-ai" };
+		writeFileSync(catalogPath, JSON.stringify({ google: [chatEntry] }));
+
+		hydrateModelCatalog(packageRoot, catalogPath);
+
+		const hydrated = JSON.parse(readFileSync(join(dataDir, "google.json"), "utf8")) as Record<
+			string,
+			Record<string, unknown>
+		>;
+		expect(hydrated["google-decisions"]?.["classifier:gemini-decision-1"]).toMatchObject({
+			id: "gemini-decision-1",
+			api: "google-decisions",
+			contextWindow: 262144,
+		});
+	});
 });

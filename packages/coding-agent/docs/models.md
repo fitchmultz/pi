@@ -173,7 +173,7 @@ Compatibility settings should describe verified differences in the endpoint's re
 
 ## Use classifier models
 
-Classifier models do not chat. They answer typed questions about JSON state: pick one of several choices, answer yes or no, or give a score, each with probabilities. Pi includes TypeSafe's Jev model from these providers, Cloudflare's Clef, Clef Flash, and Clef Omni models from Workers AI and OpenRouter, OpenAI's GPT-6 Luna through the [Decisions API](https://developers.openai.com/api/docs/guides/decisions), and Microsoft-Decision-1 through GitHub Copilot:
+Classifier models do not chat. They answer typed questions about JSON state: pick one of several choices, answer yes or no, or give a score, each with probabilities. Pi includes TypeSafe's Jev model from these providers, Cloudflare's Clef, Clef Flash, and Clef Omni models from Workers AI and OpenRouter, OpenAI's GPT-6 Luna through the [Decisions API](https://developers.openai.com/api/docs/guides/decisions), Google's Gemini Decision 1 through the [Gemini Decisions API](https://ai.google.dev/gemini-api/docs/decisions), and Microsoft-Decision-1 through GitHub Copilot:
 
 | Provider | Model IDs | Authentication |
 |---|---|---|
@@ -183,6 +183,7 @@ Classifier models do not chat. They answer typed questions about JSON state: pic
 | `vercel-ai-gateway` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` |
 | `opencode` | `jev-1.13`, `jev-1.13-free` | `OPENCODE_API_KEY` |
 | `openai` | `gpt-6-luna` | `OPENAI_API_KEY` |
+| `google` | `gemini-decision-1` | `GEMINI_API_KEY` |
 | `github-copilot` | `microsoft-decision-1` | `COPILOT_GITHUB_TOKEN` or `/login` |
 
 Chat models on a [llama.cpp router](llama-cpp.md#classification) are also listed as classifier models.
@@ -208,7 +209,7 @@ return result.answers;
 
 [Codemode](codemode.md#classify) describes the question and answer types.
 
-Classifier models whose `input` includes `"image"` also judge images passed in `images`; other classifier models return an error for them. Image input works with GPT-6 Luna, with Jev from `typesafe` and `cloudflare-workers-ai`, with Clef from `cloudflare-workers-ai`, and with the OpenRouter models whose catalog lists image input. Jev takes PNG and JPEG images, and image input is experimental on TypeSafe's own API. Clef takes PNG, JPEG, and WebP images, at most four per request. Jev from `vercel-ai-gateway` and `opencode` takes text only.
+Classifier models whose `input` includes `"image"` also judge images passed in `images`; other classifier models return an error for them. Image input works with GPT-6 Luna, with Gemini Decision 1, with Jev from `typesafe` and `cloudflare-workers-ai`, with Clef from `cloudflare-workers-ai`, and with the OpenRouter models whose catalog lists image input. Jev takes PNG and JPEG images, and image input is experimental on TypeSafe's own API. Clef takes PNG, JPEG, and WebP images, at most four per request. Jev from `vercel-ai-gateway` and `opencode` takes text only.
 
 Each System One service takes images in its own request format, set by the model's `compat.imageInput`. Built-in models set it, so overriding a provider's `baseUrl` keeps it. A custom provider that proxies another service's classifiers sets it in its provider-level `compat` in `models.json` (see [System One compatibility](models-configuration.md#typesafe-system-one)). OpenRouter in particular answers requests in TypeSafe's format without an error but drops the images.
 

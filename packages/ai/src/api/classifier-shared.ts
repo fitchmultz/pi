@@ -44,11 +44,12 @@ function requestHeaders(
 	apiKey: string,
 	optionsHeaders?: ProviderHeaders,
 	identity?: ClientIdentity,
+	authHeaders?: Record<string, string>,
 ): Record<string, string> {
 	return (
 		providerHeadersToRecord(
 			getIdentityHeaders(model, identity),
-			{ authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+			{ ...(authHeaders ?? { authorization: `Bearer ${apiKey}` }), "content-type": "application/json" },
 			model.headers,
 			optionsHeaders,
 		) ?? {}
@@ -67,6 +68,7 @@ export async function postClassifierRequest(
 	body: unknown,
 	options: ClassifierOptions | undefined,
 	noRetryStatuses?: readonly number[],
+	authHeaders?: Record<string, string>,
 ): Promise<unknown> {
 	if (!options?.apiKey) throw new Error(`No API key for provider: ${model.provider}`);
 	const apiKey = options.apiKey;
@@ -84,7 +86,7 @@ export async function postClassifierRequest(
 			try {
 				const next = await requestFetch(url, {
 					method: "POST",
-					headers: requestHeaders(model, apiKey, options.headers, options.identity),
+					headers: requestHeaders(model, apiKey, options.headers, options.identity, authHeaders),
 					body: JSON.stringify(payload),
 					signal,
 				});
@@ -111,13 +113,17 @@ function tokenCount(value: unknown): number {
 }
 
 /**
- * Usage from a `{ input_tokens, output_tokens }` object, priced from the model catalog like chat
- * usage. A missing or malformed usage object leaves the result without usage instead of failing it.
+ * Usage from `{ input_tokens, output_tokens }` or `{ total_input_tokens, total_output_tokens }`,
+ * priced from the model catalog like chat usage. A missing or malformed usage object leaves the
+ * result without usage instead of failing it.
  */
 export function parseClassifierUsage(value: unknown, model: ClassifierModel<ClassifierApi>): Usage | undefined {
-	if (!isRecord(value) || (value.input_tokens === undefined && value.output_tokens === undefined)) return undefined;
-	const input = tokenCount(value.input_tokens);
-	const output = tokenCount(value.output_tokens);
+	if (!isRecord(value)) return undefined;
+	const rawInput = value.input_tokens ?? value.total_input_tokens;
+	const rawOutput = value.output_tokens ?? value.total_output_tokens;
+	if (rawInput === undefined && rawOutput === undefined) return undefined;
+	const input = tokenCount(rawInput);
+	const output = tokenCount(rawOutput);
 	const usage: Usage = {
 		input,
 		output,

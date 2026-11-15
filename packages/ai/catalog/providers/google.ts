@@ -1,3 +1,4 @@
+import { GEMINI_DECISION_1_MODEL } from "../../src/api/google-decisions-catalog.ts";
 import { defineProvider, modelsDevModels, withInputLimits } from "../define.ts";
 import { googleThinkingLevels } from "../families/google.ts";
 import { modelsDevChatModels, modelsDevCost } from "../sources/models-dev.ts";
@@ -32,5 +33,6 @@ export default defineProvider({
 			},
 		});
 	},
+	classifiers: () => [{ ...GEMINI_DECISION_1_MODEL }],
 	finalize: (model) => withInputLimits(model, { maxRequestBytes: 20 * 1024 * 1024, images: { maxPerRequest: 3600 } }),
 });
