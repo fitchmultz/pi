@@ -16,9 +16,13 @@ import {
 	encodeITerm2,
 	encodeKitty,
 	getCapabilities,
+	getGifDimensions,
+	getJpegDimensions,
 	getKittyImageMetadata,
 	getKittyImagePlacement,
 	getKittyImagePlacementRows,
+	getPngDimensions,
+	getWebpDimensions,
 	hyperlink,
 	imageFallback,
 	isImageLine,
@@ -939,6 +943,77 @@ describe("Image transcoding", () => {
 		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
 		assert.ok(render(jpeg, "image/jpeg").at(-1)?.endsWith(`:${jpeg}\x07`));
 		assert.deepStrictEqual(calls, []);
+	});
+
+	it("evicts shared PNG cache entries when cumulative character size exceeds 16 MiB before 32 entries", () => {
+		setImageTranscoder((data) => (data.startsWith("large-") ? png : null));
+		const fiveMegChars = "A".repeat(5 * 1024 * 1024);
+		const key0 = `large-0-${fiveMegChars}`;
+		const key1 = `large-1-${fiveMegChars}`;
+		const key2 = `large-2-${fiveMegChars}`;
+		const key3 = `large-3-${fiveMegChars}`;
+		let transcodeCount = 0;
+		setImageTranscoder((data) => {
+			transcodeCount++;
+			return data.startsWith("large-") ? png : null;
+		});
+
+		render(key0, "image/jpeg");
+		render(key0, "image/jpeg"); // Hits cache before byte cap is exceeded.
+		assert.strictEqual(transcodeCount, 1);
+
+		render(key1, "image/jpeg");
+		render(key2, "image/jpeg");
+		render(key3, "image/jpeg"); // Cumulative chars > 16 MiB with only 4 entries -> evicts key0.
+		assert.strictEqual(transcodeCount, 4);
+
+		render(key0, "image/jpeg"); // Evicted by byte budget, so transcoded again.
+		assert.strictEqual(transcodeCount, 5);
+	});
+});
+
+describe("header-only image dimension parsing", () => {
+	it("parses PNG, GIF, WebP, and JPEG headers including MIME whitespace and >48 KiB JPEG APP1 segments", () => {
+		const pngBytes = Buffer.concat([
+			Buffer.from("89504e470d0a1a0a0000000d4948445200000140000000f0", "hex"),
+			Buffer.alloc(4096),
+		]);
+		const wrappedPng = pngBytes.toString("base64").replace(/(.{76})/g, "$1\r\n");
+		assert.deepStrictEqual(getPngDimensions(wrappedPng), { widthPx: 320, heightPx: 240 });
+
+		const gifHeader = Buffer.alloc(128);
+		gifHeader.write("GIF89a", 0, "ascii");
+		gifHeader.writeUInt16LE(640, 6);
+		gifHeader.writeUInt16LE(480, 8);
+		assert.deepStrictEqual(getGifDimensions(gifHeader.toString("base64")), { widthPx: 640, heightPx: 480 });
+
+		const webpVp8x = Buffer.alloc(128);
+		webpVp8x.write("RIFF", 0, "ascii");
+		webpVp8x.write("WEBP", 8, "ascii");
+		webpVp8x.write("VP8X", 12, "ascii");
+		const wMinus1 = 1024 - 1;
+		const hMinus1 = 768 - 1;
+		webpVp8x[24] = wMinus1 & 0xff;
+		webpVp8x[25] = (wMinus1 >> 8) & 0xff;
+		webpVp8x[26] = (wMinus1 >> 16) & 0xff;
+		webpVp8x[27] = hMinus1 & 0xff;
+		webpVp8x[28] = (hMinus1 >> 8) & 0xff;
+		webpVp8x[29] = (hMinus1 >> 16) & 0xff;
+		assert.deepStrictEqual(getWebpDimensions(webpVp8x.toString("base64")), { widthPx: 1024, heightPx: 768 });
+
+		// Build a JPEG with a 56 KiB APP1 segment ahead of SOF0 so the >48 KiB fallback is exercised.
+		const app1PayloadLen = 56 * 1024;
+		const app1 = Buffer.alloc(4 + app1PayloadLen);
+		app1[0] = 0xff;
+		app1[1] = 0xe1;
+		app1.writeUInt16BE(app1PayloadLen + 2, 2);
+		const sof0 = Buffer.from([
+			0xff, 0xc0, 0x00, 0x11, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11,
+			0x01,
+		]);
+		const eoi = Buffer.from([0xff, 0xd9]);
+		const largeHeaderJpeg = Buffer.concat([Buffer.from([0xff, 0xd8]), app1, sof0, eoi]).toString("base64");
+		assert.deepStrictEqual(getJpegDimensions(largeHeaderJpeg), { widthPx: 640, heightPx: 480 });
 	});
 });
 
