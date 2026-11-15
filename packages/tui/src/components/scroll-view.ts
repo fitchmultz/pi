@@ -12,6 +12,16 @@ export interface ScrollViewOptions {
 	scrollbarTrackStyle?: (text: string) => string;
 	scrollbarThumbStyle?: (text: string) => string;
 	scrollbarHideDelayMs?: number;
+	/**
+	 * Called before a relative upward scroll (`scrollBy` with negative lines) so callers with
+	 * unmounted preceding rows can prepend them and keep `scrollTop` anchored across the boundary.
+	 */
+	onBeforeScrollUp?: (targetScrollTop: number, scrollView: ScrollView) => void;
+	/**
+	 * Called before `scrollToStart()` jumps to row 0, allowing callers to materialize all
+	 * remaining preceding rows first.
+	 */
+	onBeforeScrollToStart?: (scrollView: ScrollView) => void;
 }
 
 export interface ScrollViewScrollToOptions {
@@ -31,12 +41,15 @@ export class ScrollView extends Container {
 	private currentScrollTop = 0;
 	private contentHeight = 0;
 	private currentViewportHeight = 0;
+	private currentContentWidth = 0;
 	private followingEnd: boolean;
 	private followSuppressedAtEnd = false;
 	private requestRenderCallback: (() => void) | undefined;
 	private transientScrollbarVisible = false;
 	private scrollbarActive = false;
 	private scrollbarHideTimer: NodeJS.Timeout | undefined;
+	private readonly onBeforeScrollUp?: (targetScrollTop: number, scrollView: ScrollView) => void;
+	private readonly onBeforeScrollToStart?: (scrollView: ScrollView) => void;
 
 	constructor(component: Component, options: ScrollViewOptions = {}) {
 		super();
@@ -53,6 +66,8 @@ export class ScrollView extends Container {
 		this.scrollbarTrackStyle = options.scrollbarTrackStyle ?? ((text) => `\x1b[90m${text}\x1b[39m`);
 		this.scrollbarThumbStyle = options.scrollbarThumbStyle ?? ((text) => `\x1b[37m${text}\x1b[39m`);
 		this.scrollbarHideDelayMs = Math.max(0, Math.floor(options.scrollbarHideDelayMs ?? 1000));
+		this.onBeforeScrollUp = options.onBeforeScrollUp;
+		this.onBeforeScrollToStart = options.onBeforeScrollToStart;
 	}
 
 	get scrollTop(): number {
@@ -65,6 +80,10 @@ export class ScrollView extends Container {
 
 	get viewportHeight(): number {
 		return this.currentViewportHeight;
+	}
+
+	get contentWidth(): number {
+		return this.currentContentWidth;
 	}
 
 	get scrollbar(): ScrollViewScrollbar {
@@ -92,6 +111,22 @@ export class ScrollView extends Container {
 
 	getContentWidth(width: number): number {
 		return this.scrollbar === "always" && width > 1 ? width - 1 : width;
+	}
+
+	renderDocumentLines(): string[] {
+		return this.child.render(Math.max(1, this.currentContentWidth));
+	}
+
+	prependContentRows(addedRows: number, totalContentHeight?: number): void {
+		const delta = Math.max(0, Math.floor(addedRows));
+		if (delta === 0 && totalContentHeight === undefined) return;
+		this.contentHeight =
+			totalContentHeight !== undefined ? Math.max(0, Math.floor(totalContentHeight)) : this.contentHeight + delta;
+		if (this.followingEnd) {
+			this.currentScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
+		} else if (delta > 0) {
+			this.currentScrollTop += delta;
+		}
 	}
 
 	private markScrollbarActivity(): void {
@@ -148,6 +183,11 @@ export class ScrollView extends Container {
 	scrollBy(lines: number): number {
 		const requested = Number.isFinite(lines) ? Math.trunc(lines) : 0;
 		if (requested === 0) return 0;
+		if (requested < 0 && this.onBeforeScrollUp) {
+			const initialMax = Math.max(0, this.contentHeight - this.currentViewportHeight);
+			const initialStart = this.followingEnd ? initialMax : this.currentScrollTop;
+			this.onBeforeScrollUp(initialStart + requested, this);
+		}
 		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
 		const start = this.followingEnd ? maxScrollTop : this.currentScrollTop;
 		const next = Math.max(0, Math.min(maxScrollTop, start + requested));
@@ -162,6 +202,7 @@ export class ScrollView extends Container {
 	}
 
 	scrollToStart(): void {
+		this.onBeforeScrollToStart?.(this);
 		const changed =
 			this.currentScrollTop !== 0 ||
 			this.followingEnd !== (this.followEnd && this.contentHeight <= this.currentViewportHeight);
@@ -186,9 +227,12 @@ export class ScrollView extends Container {
 		}
 	}
 
-	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void, contentWidth?: number): void {
 		this.contentHeight = Math.max(0, Math.floor(contentHeight));
 		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
+		if (contentWidth !== undefined) {
+			this.currentContentWidth = Math.max(0, Math.floor(contentWidth));
+		}
 		this.requestRenderCallback = requestRender;
 		const maxScrollTop = Math.max(0, this.contentHeight - this.currentViewportHeight);
 		if (this.followingEnd) this.currentScrollTop = maxScrollTop;

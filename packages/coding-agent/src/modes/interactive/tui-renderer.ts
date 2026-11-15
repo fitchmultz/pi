@@ -13,6 +13,8 @@ export interface InteractiveTuiOptions {
 	readonly onRightClickPaste?: () => void;
 	readonly fullscreenCopyOnSelect?: boolean;
 	readonly fullscreenWheelScrollLines?: WheelScrollLines;
+	readonly onHydrateOlderContent?: () => boolean;
+	readonly onEnsureFullContent?: () => void;
 }
 
 /** Composition root shared by coding-agent presentations. */
@@ -36,6 +38,8 @@ export function createInteractiveTui(options: InteractiveTuiOptions): TuiMainScr
 			onRightClickPaste: options.onRightClickPaste,
 			copyOnSelect: options.fullscreenCopyOnSelect,
 			wheelScrollLines: options.fullscreenWheelScrollLines ?? "auto",
+			onHydrateOlderContent: options.onHydrateOlderContent,
+			onEnsureFullContent: options.onEnsureFullContent,
 			copySelection: async (text) => {
 				try {
 					await copyToClipboard(text);
