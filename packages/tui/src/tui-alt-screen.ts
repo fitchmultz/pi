@@ -236,6 +236,16 @@ export interface TuiAltScreenOptions {
 	 * via an OSC 52 write.
 	 */
 	copySelection?: (text: string) => Promise<boolean | string>;
+	/**
+	 * Materialize one older chunk above the primary scroll view when backward prompt navigation
+	 * passes the top of the currently mounted rows. Return `true` if older rows were prepended.
+	 */
+	onHydrateOlderContent?: () => boolean;
+	/**
+	 * Materialize all remaining older content above the primary scroll view before full-document
+	 * operations such as transcript search or jumping to the top.
+	 */
+	onEnsureFullContent?: () => void;
 }
 
 /**
@@ -289,6 +299,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly onRightClickPaste?: () => void;
 	private copyOnSelect: boolean;
 	private readonly copySelection?: (text: string) => Promise<boolean | string>;
+	private readonly onHydrateOlderContent?: () => boolean;
+	private readonly onEnsureFullContent?: () => void;
 
 	constructor(
 		terminal: Terminal,
@@ -316,6 +328,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.copyOnSelect = options.copyOnSelect ?? true;
 		this.copySelection = options.copySelection;
+		this.onHydrateOlderContent = options.onHydrateOlderContent;
+		this.onEnsureFullContent = options.onEnsureFullContent;
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -529,12 +543,55 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.currentLayout = undefined;
 	}
 
+	/**
+	 * Run `mutateContent` to prepend older rows into `scrollView` inside the fullscreen selection
+	 * reader context so cached component lines retain selection metadata and row-indexed state stays aligned.
+	 */
+	prependScrollViewContent(scrollView: ScrollView, mutateContent: () => void): number {
+		if (!this.currentLayout || scrollView.viewportHeight <= 0 || scrollView.contentWidth <= 0) {
+			mutateContent();
+			return 0;
+		}
+		return renderForSelectionReader(() => {
+			const beforeLines = scrollView.renderDocumentLines();
+			mutateContent();
+			const nextLines = scrollView.renderDocumentLines();
+			const addedRows = Math.max(0, nextLines.length - beforeLines.length);
+			scrollView.prependContentRows(addedRows, nextLines.length);
+			if (addedRows > 0) {
+				if (this.selectionAnchor?.scrollView === scrollView) this.selectionAnchor.row += addedRows;
+				if (this.selectionFocus?.scrollView === scrollView) this.selectionFocus.row += addedRows;
+				if (this.lastClick?.scrollView === scrollView) this.lastClick.row += addedRows;
+				if (this.gesture.kind === "selection" && this.gesture.unit) {
+					if (this.gesture.unit.range.start.scrollView === scrollView) {
+						this.gesture.unit.range.start.row += addedRows;
+					}
+					if (this.gesture.unit.range.end.scrollView === scrollView) {
+						this.gesture.unit.range.end.row += addedRows;
+					}
+				}
+				if (this.activeSearch && scrollView === this.getPrimaryScrollView()) {
+					this.activeSearch.anchorRow += addedRows;
+				}
+			}
+			const box = this.currentLayout ? getScrollViewBox(this.currentLayout, scrollView) : undefined;
+			if (box) {
+				box.scrollContentLines = nextLines;
+				if (box.children[0]) {
+					box.children[0].rect = { ...box.children[0].rect, height: nextLines.length };
+				}
+			}
+			return addedRows;
+		});
+	}
+
 	scrollBy(lines: number): void {
 		this.getPrimaryScrollView().scrollBy(lines);
 		this.requestRender();
 	}
 
 	scrollToTop(): void {
+		this.onEnsureFullContent?.();
 		this.getPrimaryScrollView().scrollToStart();
 		this.requestRender();
 	}
@@ -547,14 +604,24 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private scrollToPrompt(direction: -1 | 1): void {
 		if (!this.currentLayout) return;
 		const scrollView = this.getPrimaryScrollView();
-		const lines = getScrollViewBox(this.currentLayout, scrollView)?.scrollContentLines;
+		let lines = getScrollViewBox(this.currentLayout, scrollView)?.scrollContentLines;
 		if (!lines) return;
 
-		for (let row = scrollView.scrollTop + direction; row >= 0 && row < lines.length; row += direction) {
-			if (!OSC133_PROMPT_START.test(lines[row] ?? "")) continue;
-			scrollView.scrollTo(row);
-			this.requestRender();
-			return;
+		let searchFrom = scrollView.scrollTop + direction;
+		while (true) {
+			for (let row = searchFrom; row >= 0 && row < lines.length; row += direction) {
+				if (!OSC133_PROMPT_START.test(lines[row] ?? "")) continue;
+				scrollView.scrollTo(row);
+				this.requestRender();
+				return;
+			}
+			if (direction !== -1 || !this.onHydrateOlderContent) return;
+			const previousLength = lines.length;
+			if (!this.onHydrateOlderContent()) return;
+			const nextLines = getScrollViewBox(this.currentLayout, scrollView)?.scrollContentLines;
+			if (!nextLines || nextLines.length <= previousLength) return;
+			searchFrom = nextLines.length - previousLength - 1;
+			lines = nextLines;
 		}
 	}
 
@@ -563,6 +630,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			this.closeSearch();
 			return;
 		}
+		this.onEnsureFullContent?.();
 		const component = new AltScreenSearchComponent(
 			(query) => this.updateSearchQuery(query),
 			this.searchNavigationButtonStyle,
@@ -1142,6 +1210,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const maxThumbOffset = geometry.trackHeight - geometry.thumbHeight;
 		const thumbOffset = Math.max(0, Math.min(maxThumbOffset, pointerY - geometry.trackTop - grabOffset));
 		const scrollTop = maxThumbOffset === 0 ? 0 : Math.round((thumbOffset / maxThumbOffset) * geometry.maxScrollTop);
+		if (scrollTop === 0 && scrollView === this.getPrimaryScrollView()) {
+			this.onEnsureFullContent?.();
+		}
 		scrollView.scrollTo(scrollTop);
 	}
 

@@ -26,6 +26,7 @@ import type {
 	MarkdownTheme,
 	OverlayHandle,
 	OverlayOptions,
+	ScrollView,
 	SlashCommand,
 	TuiMainScreenRenderState,
 } from "@earendil-works/pi-tui";
@@ -340,6 +341,57 @@ function isUsageSessionEntry(item: RenderSessionItem): item is Extract<SessionEn
 	return "type" in item && item.type === "usage";
 }
 
+const INITIAL_FULLSCREEN_TRANSCRIPT_ENTRIES = 250;
+const HYDRATE_FULLSCREEN_TRANSCRIPT_ENTRIES = 250;
+const HYDRATE_SCROLL_THRESHOLD_ROWS = 80;
+const MAX_TURN_BOUNDARY_LOOKBACK_ENTRIES = 64;
+
+function isPreferredTranscriptChunkBoundary(entry: SessionEntry | undefined): boolean {
+	if (!entry) return true;
+	if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "custom_message") {
+		return true;
+	}
+	return entry.type === "message" && entry.message.role === "user";
+}
+
+function isSafeTranscriptChunkBoundary(entry: SessionEntry | undefined): boolean {
+	if (isPreferredTranscriptChunkBoundary(entry)) return true;
+	return entry?.type === "message" && entry.message.role === "assistant";
+}
+
+function alignTranscriptChunkStartIndex(entries: readonly SessionEntry[], targetIndex: number): number {
+	const clamped = Math.max(0, Math.min(entries.length, targetIndex));
+	const minPreferred = Math.max(0, clamped - MAX_TURN_BOUNDARY_LOOKBACK_ENTRIES);
+	for (let index = clamped; index >= minPreferred; index--) {
+		if (isPreferredTranscriptChunkBoundary(entries[index])) return index;
+	}
+	for (let index = clamped; index > 0; index--) {
+		if (isSafeTranscriptChunkBoundary(entries[index])) return index;
+	}
+	return 0;
+}
+
+function projectSessionEntriesToRenderItems(entries: readonly SessionEntry[]): {
+	items: RenderSessionItem[];
+	messageMeta: Map<AgentMessage, { id: string; timestamp: string }>;
+} {
+	const messageMeta = new Map<AgentMessage, { id: string; timestamp: string }>();
+	const items = entries.flatMap((entry): RenderSessionItem[] => {
+		if (entry.type === "custom" || (entry.type === "usage" && entry.kind === "cache_warm")) {
+			return [entry];
+		}
+		const messages = sessionEntryToContextMessages(entry);
+		for (const msg of messages) {
+			messageMeta.set(msg, { id: entry.id, timestamp: entry.timestamp });
+		}
+		if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage && messages.length > 0) {
+			return [...messages, { type: "compaction_cost", kind: entry.type, usage: entry.usage }];
+		}
+		return messages;
+	});
+	return { items, messageMeta };
+}
+
 // EIO: tty reads/ioctls from an orphaned background process group, or writes after hangup.
 // ENOTTY: the tty was revoked (macOS) and stdin is no longer a terminal.
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN", "ENOTTY"]);
@@ -632,6 +684,11 @@ export class InteractiveMode {
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
 
+	// Older branch entries deferred above the mounted fullscreen transcript window
+	private deferredSessionEntries: SessionEntry[] = [];
+	private transcriptPrefixIndex = 0;
+	private hydratingDeferredTranscript = false;
+
 	// Shutdown state
 	private shutdownRequested = false;
 
@@ -740,6 +797,8 @@ export class InteractiveMode {
 			onRightClickPaste: this.onRightClickPaste,
 			fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
 			fullscreenWheelScrollLines: this.settingsManager.getFullscreenWheelScrollLines(),
+			onHydrateOlderContent: () => this.prependNextDeferredTranscriptChunk(),
+			onEnsureFullContent: () => this.ensureFullTranscriptMounted(),
 		});
 		this.ui = createInteractiveTuiReference(() => this.renderer);
 		this.ui.addInputListener(this.guardWorkingSessionInput);
@@ -1038,6 +1097,9 @@ export class InteractiveMode {
 		const previousUi = this.renderer;
 		if (mode === previousUi.mode) return true;
 		if (previousUi.hasOverlayEntries) return false;
+		if (mode === "regular") {
+			this.ensureFullTranscriptMounted();
+		}
 
 		const components = [...previousUi.children];
 		const focus = previousUi.getFocusedComponent();
@@ -1062,6 +1124,8 @@ export class InteractiveMode {
 			onRightClickPaste: this.onRightClickPaste,
 			fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
 			fullscreenWheelScrollLines: this.settingsManager.getFullscreenWheelScrollLines(),
+			onHydrateOlderContent: () => this.prependNextDeferredTranscriptChunk(),
+			onEnsureFullContent: () => this.ensureFullTranscriptMounted(),
 		});
 		nextUi.setClearOnShrink(clearOnShrink);
 		nextUi.onDebug = onDebug;
@@ -1120,6 +1184,9 @@ export class InteractiveMode {
 			scrollbar: this.settingsManager.getFullscreenScrollbar(),
 			scrollbarTrackStyle: (text) => theme.fg("scrollbarTrack", text),
 			scrollbarThumbStyle: (text) => theme.fg("scrollbarThumb", text),
+			onBeforeScrollUp: (targetScrollTop, scrollView) =>
+				this.handleTranscriptBeforeScrollUp(targetScrollTop, scrollView),
+			onBeforeScrollToStart: () => this.ensureFullTranscriptMounted(),
 		});
 		this.transcriptScrollView = viewport.transcript;
 		this.fullscreenLayoutRoot = viewport.root;
@@ -4408,7 +4475,7 @@ export class InteractiveMode {
 	private renderSessionItems(
 		items: readonly RenderSessionItem[],
 		messageMeta?: Map<AgentMessage, { id: string; timestamp: string }>,
-		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
+		options: { updateFooter?: boolean; populateHistory?: boolean; suppressRequestRender?: boolean } = {},
 	): void {
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 		// Cache misses are not persisted, unlike successful cache-warming usage.
@@ -4514,7 +4581,89 @@ export class InteractiveMode {
 		for (const component of renderedPendingTools.values()) {
 			component.updateResult({ content: [{ type: "text", text: "No result provided" }], isError: true });
 		}
-		this.ui.requestRender();
+		if (!options.suppressRequestRender) {
+			this.ui.requestRender();
+		}
+	}
+
+	private appendSessionEntriesSlice(
+		entries: readonly SessionEntry[],
+		options: { updateFooter?: boolean; populateHistory?: boolean; suppressRequestRender?: boolean } = {},
+	): void {
+		const { items, messageMeta } = projectSessionEntriesToRenderItems(entries);
+		this.renderSessionItems(items, messageMeta, options);
+	}
+
+	private prependDeferredTranscriptFrom(chunkStart: number): number {
+		if (this.deferredSessionEntries.length === 0 || this.hydratingDeferredTranscript) return 0;
+		const safeStart = Math.max(0, Math.min(this.deferredSessionEntries.length, chunkStart));
+		if (safeStart >= this.deferredSessionEntries.length) return 0;
+
+		this.hydratingDeferredTranscript = true;
+		try {
+			const chunk = this.deferredSessionEntries.slice(safeStart);
+			this.deferredSessionEntries = this.deferredSessionEntries.slice(0, safeStart);
+			let addedComponents = 0;
+			const mutateContent = () => {
+				const existingTranscript = this.chatContainer.children.splice(this.transcriptPrefixIndex);
+				const previousCacheWarmingNotice = this.cacheWarmingNotice;
+				this.cacheWarmingNotice = undefined;
+				this.appendSessionEntriesSlice(chunk, {
+					populateHistory: false,
+					suppressRequestRender: true,
+				});
+				addedComponents = this.chatContainer.children.length - this.transcriptPrefixIndex;
+				if (this.transcriptPrefixIndex === 0 && addedComponents > 0 && existingTranscript.length > 0) {
+					const firstExisting = existingTranscript[0];
+					if (
+						firstExisting instanceof UserMessageComponent ||
+						firstExisting instanceof SkillInvocationMessageComponent
+					) {
+						this.chatContainer.addChild(new Spacer(1));
+					}
+				}
+				if (existingTranscript.length > 0) {
+					this.cacheWarmingNotice = previousCacheWarmingNotice;
+				}
+				this.chatContainer.children.push(...existingTranscript);
+			};
+
+			if (this.renderer instanceof TuiAltScreen && this.transcriptScrollView) {
+				this.renderer.prependScrollViewContent(this.transcriptScrollView, mutateContent);
+			} else {
+				mutateContent();
+			}
+			this.ui.requestRender();
+			return addedComponents;
+		} finally {
+			this.hydratingDeferredTranscript = false;
+		}
+	}
+
+	private prependNextDeferredTranscriptChunk(): boolean {
+		while (this.deferredSessionEntries.length > 0) {
+			const targetStart = Math.max(0, this.deferredSessionEntries.length - HYDRATE_FULLSCREEN_TRANSCRIPT_ENTRIES);
+			const chunkStart = alignTranscriptChunkStartIndex(this.deferredSessionEntries, targetStart);
+			if (this.prependDeferredTranscriptFrom(chunkStart) > 0) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private ensureFullTranscriptMounted(): void {
+		if (this.deferredSessionEntries.length === 0) return;
+		this.prependDeferredTranscriptFrom(0);
+	}
+
+	private handleTranscriptBeforeScrollUp(targetScrollTop: number, scrollView: ScrollView): void {
+		if (this.deferredSessionEntries.length === 0 || this.hydratingDeferredTranscript) return;
+		let projectedScrollTop = targetScrollTop;
+		while (projectedScrollTop < HYDRATE_SCROLL_THRESHOLD_ROWS && this.deferredSessionEntries.length > 0) {
+			const beforeTop = scrollView.scrollTop;
+			if (!this.prependNextDeferredTranscriptChunk()) break;
+			projectedScrollTop += Math.max(0, scrollView.scrollTop - beforeTop);
+		}
 	}
 
 	/**
@@ -4525,24 +4674,44 @@ export class InteractiveMode {
 	 */
 	private renderSessionEntries(
 		entries: SessionEntry[],
-		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
+		options: { updateFooter?: boolean; populateHistory?: boolean; minInitialEntries?: number } = {},
 	): void {
 		// Selection coordinates point into the transcript being replaced (#9311).
 		if (this.renderer instanceof TuiAltScreen) this.renderer.resetTextSelection();
-		const messageMeta = new Map<AgentMessage, { id: string; timestamp: string }>();
-		const items = entries.flatMap((entry): RenderSessionItem[] => {
-			if (entry.type === "custom" || (entry.type === "usage" && entry.kind === "cache_warm")) {
-				return [entry];
+		this.deferredSessionEntries = [];
+		this.transcriptPrefixIndex = this.chatContainer?.children.length ?? 0;
+
+		const minInitialEntries = Math.max(INITIAL_FULLSCREEN_TRANSCRIPT_ENTRIES, options.minInitialEntries ?? 0);
+		const startIndex =
+			this.renderer instanceof TuiAltScreen && entries.length > minInitialEntries
+				? alignTranscriptChunkStartIndex(entries, entries.length - minInitialEntries)
+				: 0;
+
+		if (startIndex > 0) {
+			if (options.populateHistory) {
+				for (const entry of entries) {
+					for (const message of sessionEntryToContextMessages(entry)) {
+						if (message.role !== "user") continue;
+						const textContent = this.getUserMessageText(message);
+						if (textContent) this.editor.addToHistory?.(textContent);
+					}
+				}
 			}
-			const messages = sessionEntryToContextMessages(entry);
-			for (const msg of messages) {
-				messageMeta.set(msg, { id: entry.id, timestamp: entry.timestamp });
+			this.deferredSessionEntries = entries.slice(0, startIndex);
+			this.appendSessionEntriesSlice(entries.slice(startIndex), {
+				updateFooter: options.updateFooter,
+				populateHistory: false,
+			});
+			while (
+				this.chatContainer.children.length === this.transcriptPrefixIndex &&
+				this.deferredSessionEntries.length > 0
+			) {
+				if (!this.prependNextDeferredTranscriptChunk()) break;
 			}
-			if ((entry.type === "compaction" || entry.type === "branch_summary") && entry.usage && messages.length > 0) {
-				return [...messages, { type: "compaction_cost", kind: entry.type, usage: entry.usage }];
-			}
-			return messages;
-		});
+			return;
+		}
+
+		const { items, messageMeta } = projectSessionEntriesToRenderItems(entries);
 		this.renderSessionItems(items, messageMeta, options);
 	}
 
@@ -4779,8 +4948,12 @@ export class InteractiveMode {
 	}
 
 	private rebuildChatFromMessages(): void {
+		const entries = this.sessionManager.getBranch();
+		const alreadyMountedEntries = entries.length - this.deferredSessionEntries.length;
 		this.chatContainer.clear();
-		this.renderSessionEntries(this.sessionManager.getBranch());
+		this.renderSessionEntries(entries, {
+			minInitialEntries: this.transcriptScrollView?.isFollowingEnd === false ? alreadyMountedEntries : undefined,
+		});
 		this.showUnsavedRows();
 	}
 

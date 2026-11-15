@@ -37,6 +37,7 @@
 
 ### Changed
 
+- Progressively hydrate older fullscreen transcript history for sessions longer than 250 branch entries: initial loads mount the recent turn window while populating full editor prompt history, and scrolling near the top, jumping to previous prompts or the start, opening transcript search, or switching to regular mode prepends earlier branch entries in chronological order without losing compaction scrollback.
 - Run `convertImageBytesToPng()` and `convertToPng()` in the short-lived Photon worker thread with in-process fallback, matching `resizeImage()` so format normalization releases Photon's WASM linear memory after conversion.
 - Capped spawned CLI workers' default V8 semi-space size at 8 MiB (`--max-semi-space-size=8`) unless `execArgv` or `NODE_OPTIONS` already sets `--max-semi-space-size`, preventing Node's 128 MiB nursery growth during large session loads from staying resident in idle sessions.
 - Built `dist/bundle/cli.js` standalone and separated CLI tool-modifier validation, fork receipt checks, and local shell execution from TypeBox and `SettingsManager`, trimming the long-lived CLI supervisor and detached `background_command` worker bundles.

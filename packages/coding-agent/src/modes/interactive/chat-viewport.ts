@@ -1,4 +1,10 @@
-import { type Component, ScrollView, type ScrollViewScrollbar, VStack } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	ScrollView,
+	type ScrollViewOptions,
+	type ScrollViewScrollbar,
+	VStack,
+} from "@earendil-works/pi-tui";
 
 export interface ChatViewportOptions {
 	readonly document: Component;
@@ -11,6 +17,8 @@ export interface ChatViewportOptions {
 	readonly scrollbar?: ScrollViewScrollbar;
 	readonly scrollbarTrackStyle?: (text: string) => string;
 	readonly scrollbarThumbStyle?: (text: string) => string;
+	readonly onBeforeScrollUp?: ScrollViewOptions["onBeforeScrollUp"];
+	readonly onBeforeScrollToStart?: ScrollViewOptions["onBeforeScrollToStart"];
 }
 
 export interface ChatViewport {
@@ -27,6 +35,8 @@ export function createChatViewport(options: ChatViewportOptions): ChatViewport {
 		scrollbar: options.scrollbar ?? "auto",
 		...(options.scrollbarTrackStyle === undefined ? {} : { scrollbarTrackStyle: options.scrollbarTrackStyle }),
 		...(options.scrollbarThumbStyle === undefined ? {} : { scrollbarThumbStyle: options.scrollbarThumbStyle }),
+		...(options.onBeforeScrollUp === undefined ? {} : { onBeforeScrollUp: options.onBeforeScrollUp }),
+		...(options.onBeforeScrollToStart === undefined ? {} : { onBeforeScrollToStart: options.onBeforeScrollToStart }),
 	});
 	const dock = new VStack([
 		{ component: options.pendingMessages, shrink: 1, minSize: 0 },

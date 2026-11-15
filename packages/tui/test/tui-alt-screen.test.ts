@@ -2729,4 +2729,48 @@ describe("TuiAltScreen", () => {
 			activeTui.stop();
 		}
 	});
+
+	it("keeps active text selection anchored when older scrollback rows are prepended", async () => {
+		const terminal = new VirtualTerminal(40, 6);
+		const container = new Box(0, 0);
+		for (let i = 10; i < 20; i++) {
+			container.addChild(new Text(`line-${String(i).padStart(2, "0")}`, 0, 0));
+		}
+		const scrollView = new ScrollView(container, { follow: "end", primary: true });
+		let copied = "";
+		const tui = new TuiAltScreen(terminal, false, undefined, {
+			copySelection: async (text) => {
+				copied = text;
+				return true;
+			},
+		});
+		tui.setLayoutRoot(new VStack([{ component: scrollView, basis: 0, grow: 1, shrink: 1, minSize: 1 }]));
+		tui.addChild(container);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			scrollView.scrollBy(-3);
+			await terminal.waitForRender();
+
+			// Select "line-11" on visible row 0 (col 1..8 in 1-based SGR mouse coordinates).
+			terminal.sendInput("\x1b[<0;1;1M");
+			terminal.sendInput("\x1b[<32;8;1M");
+			await terminal.waitForRender();
+
+			const added = tui.prependScrollViewContent(scrollView, () => {
+				const earlier: Text[] = [];
+				for (let i = 0; i < 10; i++) {
+					earlier.push(new Text(`line-${String(i).padStart(2, "0")}`, 0, 0));
+				}
+				container.children.unshift(...earlier);
+			});
+			assert.strictEqual(added, 10);
+
+			terminal.sendInput("\x1b[<0;8;1m");
+			await terminal.waitForRender();
+			assert.strictEqual(copied, "line-11");
+		} finally {
+			tui.stop();
+		}
+	});
 });
