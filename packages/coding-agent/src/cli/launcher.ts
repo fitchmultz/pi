@@ -30,6 +30,24 @@ interface Launch {
 	pinnedWorker?: string;
 }
 
+// Cap each worker's V8 nursery semi-space at 8 MiB (16 MiB total nursery) unless the caller configured it.
+// Node's default on >=16 GiB 64-bit hosts grows to 64 MiB x 2 = 128 MiB during session JSONL parsing and keeps it resident.
+const DEFAULT_WORKER_MAX_SEMI_SPACE_SIZE_MIB = 8;
+
+function hasMaxSemiSpaceSizeFlag(args: readonly string[], nodeOptions: string | undefined): boolean {
+	for (const arg of args) {
+		if (arg === "--max-semi-space-size" || arg.startsWith("--max-semi-space-size=")) return true;
+	}
+	return nodeOptions !== undefined && /(?:^|\s)--max-semi-space-size(?:=|\s|$)/.test(nodeOptions);
+}
+
+function getWorkerExecArgv(execArgv: readonly string[], nodeOptions: string | undefined): string[] {
+	if (typeof process.versions.bun === "string" || hasMaxSemiSpaceSizeFlag(execArgv, nodeOptions)) {
+		return [...execArgv];
+	}
+	return [`--max-semi-space-size=${DEFAULT_WORKER_MAX_SEMI_SPACE_SIZE_MIB}`, ...execArgv];
+}
+
 // Readiness and timeout exclude each other. Exit intent can arrive in any phase.
 type LaunchAttempt =
 	| { kind: "starting"; deadline?: NodeJS.Timeout }
@@ -162,7 +180,8 @@ export async function superviseCli(
 			let exitIntent = false;
 			const workerId = randomUUID();
 			let completed: CompletedWorkingSession | undefined;
-			child = spawn(process.execPath, [...(options.execArgv ?? process.execArgv), launch.worker, ...launch.args], {
+			const workerExecArgv = getWorkerExecArgv(options.execArgv ?? process.execArgv, env.NODE_OPTIONS);
+			child = spawn(process.execPath, [...workerExecArgv, launch.worker, ...launch.args], {
 				stdio: ["inherit", "inherit", "inherit", "ipc"],
 				env: {
 					...env,
