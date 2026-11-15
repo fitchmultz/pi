@@ -34,11 +34,54 @@ interface Launch {
 // Node's default on >=16 GiB 64-bit hosts grows to 64 MiB x 2 = 128 MiB during session JSONL parsing and keeps it resident.
 const DEFAULT_WORKER_MAX_SEMI_SPACE_SIZE_MIB = 8;
 
+/**
+ * Split `NODE_OPTIONS` as Node splits it: on spaces outside double quotes, with backslash escapes inside double quotes.
+ */
+function splitNodeOptions(text: string): string[] {
+	const args: string[] = [];
+	let current = "";
+	let quoted = false;
+	let started = false;
+	for (let i = 0; i < text.length; i++) {
+		const char = text[i]!;
+		if (quoted && char === "\\" && i + 1 < text.length) current += text[++i];
+		else if (char === '"') quoted = !quoted;
+		else if (char === " " && !quoted) {
+			if (started) args.push(current);
+			current = "";
+			started = false;
+			continue;
+		} else current += char;
+		started = true;
+	}
+	if (started) args.push(current);
+	return args;
+}
+
+function readNodeOptions(env: NodeJS.ProcessEnv): string | undefined {
+	if (env.NODE_OPTIONS !== undefined) return env.NODE_OPTIONS;
+	for (const [key, value] of Object.entries(env)) {
+		if (key.toUpperCase() === "NODE_OPTIONS") return value;
+	}
+	return undefined;
+}
+
+function isMaxSemiSpaceSizeToken(token: string): boolean {
+	const eqIndex = token.indexOf("=");
+	const flag = (eqIndex === -1 ? token : token.slice(0, eqIndex)).replaceAll("_", "-");
+	return flag === "--max-semi-space-size";
+}
+
 function hasMaxSemiSpaceSizeFlag(args: readonly string[], nodeOptions: string | undefined): boolean {
 	for (const arg of args) {
-		if (arg === "--max-semi-space-size" || arg.startsWith("--max-semi-space-size=")) return true;
+		if (arg === "--") break;
+		if (isMaxSemiSpaceSizeToken(arg)) return true;
 	}
-	return nodeOptions !== undefined && /(?:^|\s)--max-semi-space-size(?:=|\s|$)/.test(nodeOptions);
+	if (nodeOptions === undefined) return false;
+	for (const token of splitNodeOptions(nodeOptions)) {
+		if (isMaxSemiSpaceSizeToken(token)) return true;
+	}
+	return false;
 }
 
 function getWorkerExecArgv(execArgv: readonly string[], nodeOptions: string | undefined): string[] {
@@ -180,7 +223,7 @@ export async function superviseCli(
 			let exitIntent = false;
 			const workerId = randomUUID();
 			let completed: CompletedWorkingSession | undefined;
-			const workerExecArgv = getWorkerExecArgv(options.execArgv ?? process.execArgv, env.NODE_OPTIONS);
+			const workerExecArgv = getWorkerExecArgv(options.execArgv ?? process.execArgv, readNodeOptions(env));
 			child = spawn(process.execPath, [...workerExecArgv, launch.worker, ...launch.args], {
 				stdio: ["inherit", "inherit", "inherit", "ipc"],
 				env: {

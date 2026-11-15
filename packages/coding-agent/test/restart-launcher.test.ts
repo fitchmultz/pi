@@ -525,15 +525,29 @@ process.send({ type: 'pi:ready' });`,
 		).toBe(0);
 		expect(
 			await superviseCli(worker, [], {
+				execArgv: ["--max_semi_space_size=24"],
+				env: { ...process.env, NODE_OPTIONS: "" },
+			}),
+		).toBe(0);
+		expect(
+			await superviseCli(worker, [], {
 				execArgv: [],
 				env: { ...process.env, NODE_OPTIONS: "--max-semi-space-size=32" },
+			}),
+		).toBe(0);
+		expect(
+			await superviseCli(worker, [], {
+				execArgv: [],
+				env: { ...process.env, NODE_OPTIONS: '"--max_semi_space_size=64"' },
 			}),
 		).toBe(0);
 
 		const receipts = f.read();
 		expect(receipts[0]?.execArgv).toEqual(["--max-semi-space-size=8"]);
 		expect(receipts[1]?.execArgv).toEqual(["--max-semi-space-size=16"]);
-		expect(receipts[2]?.execArgv).toEqual([]);
+		expect(receipts[2]?.execArgv).toEqual(["--max_semi_space_size=24"]);
+		expect(receipts[3]?.execArgv).toEqual([]);
+		expect(receipts[4]?.execArgv).toEqual([]);
 	});
 	it.skipIf(process.platform === "win32")(
 		"preserves the committed launcher exit code when terminal hangup delivers SIGHUP during exit teardown",
