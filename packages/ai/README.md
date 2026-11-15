@@ -904,7 +904,7 @@ console.log(model.output); // ['image'] or ['image', 'text']
 
 ## Classification
 
-Classifier models consume structured JSON state, and optionally images, and answer one or more typed questions. They do not use chat or image-generation APIs. TypeSafe's Jev model, Cloudflare's Clef models, OpenAI's GPT-6 Luna, and Microsoft-Decision-1 are available from these built-in providers:
+Classifier models consume structured JSON state, and optionally images, and answer one or more typed questions. They do not use chat or image-generation APIs. TypeSafe's Jev model, Cloudflare's Clef models, OpenAI's GPT-6 Luna, Google's Gemini Decision 1, and Microsoft-Decision-1 are available from these built-in providers:
 
 | Provider | Model IDs | Auth |
 | --- | --- | --- |
@@ -914,6 +914,7 @@ Classifier models consume structured JSON state, and optionally images, and answ
 | `vercel-ai-gateway` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` |
 | `opencode` | `jev-1.13`, `jev-1.13-free` | `OPENCODE_API_KEY` |
 | `openai` | `gpt-6-luna` | `OPENAI_API_KEY` |
+| `google` | `gemini-decision-1` | `GEMINI_API_KEY` |
 | `github-copilot` | `microsoft-decision-1` | `COPILOT_GITHUB_TOKEN` or GitHub Copilot OAuth |
 
 ```typescript
@@ -973,6 +974,10 @@ Vercel AI Gateway and OpenCode list their Jev models with text input only.
 The `openai-decisions` API calls OpenAI's [Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`POST /v1/decisions`). GPT-6 Luna is its only model. The state is sent as JSON text; with images, the input is one user message with the state followed by the images as data URLs (at most 128). `choice` and `score` questions map to the Decisions types of the same name. `bool` questions become `predicate` questions; predicates have no criteria field, so the meanings of true and false are appended to the instructions. If OpenAI refuses to answer a question, the whole result is an error. Usage reports input tokens only, priced at the catalog input rate with OpenAI's long-context multiplier.
 
 The endpoint needs an OpenAI API key; Sign in with ChatGPT credentials are rejected, so the `openai` provider hides `gpt-6-luna` from `getAvailableOfType('classifier')` while it uses OAuth. The API rejects inputs above 922K tokens, but requests that run longer than about five seconds, currently above roughly 600K input tokens, fail with a gateway timeout (504).
+
+### Google Decisions
+
+The `google-decisions` API calls Google's [Gemini Decisions API](https://ai.google.dev/gemini-api/docs/decisions) (`POST /v1beta/decisions`) with `x-goog-api-key` authentication. `gemini-decision-1` is its model (262,144 input tokens, $0.10 per million input tokens, zero output tokens). The state is sent as JSON text; with images, the input is an array starting with `{ type: "text", text }` followed by `{ type: "image", data, mime_type }` parts. `choice` and `score` questions map to the Gemini Decisions types of the same name, and `bool` questions map to `noul` (`true_description` and `false_description`). Question IDs that contain characters outside `[A-Za-z0-9_-]{1,64}` are mapped to safe wire keys and restored in `result.answers`.
 
 ### Chat models on llama.cpp
 

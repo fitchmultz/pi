@@ -223,6 +223,34 @@ describe("Models with classifier models", () => {
 		expect(result.answers.approved).toEqual({ type: "bool", probability: 0.8 });
 	});
 
+	it("routes Google Gemini Decision 1 through the Gemini Decisions API with images", async () => {
+		const models = builtinModels();
+		const decision = models.getModelOfType("classifier", "google", "gemini-decision-1");
+		if (!decision) throw new Error("missing Google Decisions model");
+		expect(decision).toMatchObject({ api: "google-decisions", input: ["text", "image"], contextWindow: 262144 });
+
+		const urls: string[] = [];
+		const result = await models.classify(
+			decision,
+			{ ...context, images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }] },
+			{
+				apiKey: "secret",
+				fetch: async (input) => {
+					urls.push(String(input));
+					return Response.json({
+						answers: { approved: { type: "noul", noul: 0.85, confidence: 0.85 } },
+						usage: { total_input_tokens: 120, total_output_tokens: 0, total_tokens: 120 },
+					});
+				},
+			},
+		);
+
+		expect(urls).toEqual(["https://generativelanguage.googleapis.com/v1beta/decisions"]);
+		expect(result.stopReason).toBe("stop");
+		expect(result.answers.approved).toEqual({ type: "bool", probability: 0.85 });
+		expect(result.usage?.input).toBe(120);
+	});
+
 	it("lists OpenAI Decisions models only for API key credentials", async () => {
 		const apiKeyStore = new InMemoryCredentialStore();
 		await apiKeyStore.modify("openai", async () => ({ type: "api_key", key: "secret" }));

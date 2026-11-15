@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { normalizeCloudflareModel } from "../src/api/cloudflare.ts";
+import { withGoogleDecisionsModels } from "../src/api/google-decisions-catalog.ts";
 import { restoreKimiK3CacheWriteCost } from "../src/api/kimi.ts";
 import type { AnyModel } from "../src/types.ts";
 import {
@@ -59,7 +60,7 @@ export function hydrateModelCatalog(
 			const normalized = restoreKimiK3CacheWriteCost(normalizeCloudflareModel(model as CatalogEntry & AnyModel));
 			entries.push({ ...normalized, type: model.type });
 		}
-		const grouped = groupProviderModelData(provider, entries);
+		const grouped = groupProviderModelData(provider, withGoogleDecisionsModels(provider, entries) as CatalogEntry[]);
 		structure[provider] = grouped.structure;
 		files[`${provider}.json`] = `${JSON.stringify(grouped.groups)}\n`;
 	}

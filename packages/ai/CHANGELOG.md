@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the `google-decisions` classifier API for Google's Gemini Decisions API (`POST /v1beta/decisions`), with `gemini-decision-1` as a multimodal classifier model of the `google` provider.
 - Added Claude Fable 5.2 on Cloudflare AI Gateway, including adaptive thinking and mid-conversation system, tool, and effort updates. Fable 5.2 requests on Anthropic and Cloudflare AI Gateway omit `temperature`.
 - Added optional non-secret `AssistantMessage.cacheIdentity` metadata for provider-scoped credential and cache-owner diagnostics.
 - Added an optional `Models.streamSimple()` prepared-request observer, forwarded by `withClientIdentity()`, for effective cache policy and dispatch timing without resolving auth twice.
