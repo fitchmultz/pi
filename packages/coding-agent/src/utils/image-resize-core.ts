@@ -1,6 +1,8 @@
 import { applyExifOrientation } from "./exif-orientation.ts";
 import { loadPhoton } from "./photon.ts";
 
+type Photon = NonNullable<Awaited<ReturnType<typeof loadPhoton>>>;
+
 export interface ImageResizeOptions {
 	maxWidth?: number; // Default: 2000
 	maxHeight?: number; // Default: 2000
@@ -23,10 +25,38 @@ export interface ResizedImage {
  * (for example `{ "watch:require": [...] }` under `node --watch`), so replies must be identifiable.
  */
 export const IMAGE_RESIZE_WORKER_RESPONSE_TYPE = "pi:image-resize-response";
+export const IMAGE_CONVERT_PNG_WORKER_RESPONSE_TYPE = "pi:image-convert-png-response";
 
 export type ResizeImageWorkerResponse =
 	| { type: typeof IMAGE_RESIZE_WORKER_RESPONSE_TYPE; result: ResizedImage | null }
 	| { type: typeof IMAGE_RESIZE_WORKER_RESPONSE_TYPE; error: string };
+
+export type ConvertPngWorkerResponse =
+	| { type: typeof IMAGE_CONVERT_PNG_WORKER_RESPONSE_TYPE; result: Uint8Array<ArrayBuffer> | null }
+	| { type: typeof IMAGE_CONVERT_PNG_WORKER_RESPONSE_TYPE; error: string };
+
+export function encodePngSync(photon: Photon, bytes: Uint8Array): Uint8Array<ArrayBuffer> | null {
+	try {
+		const rawImage = photon.PhotonImage.new_from_byteslice(bytes);
+		const image = applyExifOrientation(photon, rawImage, bytes);
+		if (image !== rawImage) rawImage.free();
+		try {
+			return new Uint8Array(image.get_bytes());
+		} finally {
+			image.free();
+		}
+	} catch {
+		return null;
+	}
+}
+
+export async function convertImageBytesToPngInProcess(bytes: Uint8Array): Promise<Uint8Array<ArrayBuffer> | null> {
+	const photon = await loadPhoton();
+	if (!photon) {
+		return null;
+	}
+	return encodePngSync(photon, bytes);
+}
 
 // 4.5MB of base64 payload. Provides headroom below Anthropic's 5MB limit.
 const DEFAULT_MAX_BYTES = 4.5 * 1024 * 1024;

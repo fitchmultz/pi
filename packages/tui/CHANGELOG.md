@@ -9,6 +9,7 @@
 
 ### Changed
 
+- Decode only header prefixes when reading PNG, GIF, WebP, and common JPEG dimensions, and bound the shared Kitty `pngCache` to 16M characters in addition to its 32-entry limit so multi-megabyte screenshots do not allocate full temporary buffers on dimension checks or stay pinned globally.
 - Fullscreen selection copies source fragments from Markdown and Text without display padding or artificial wraps. Complete Markdown spans retain their syntax; partial spans copy only the selected content. Lines rendered for a `TuiAltScreen` frame carry private zero-width OSC annotations, which it removes before terminal output.
 - Reuse unchanged editor layouts and stream long-token wrapping and grapheme scans without rebuilding intermediate arrays.
 - Reuse unchanged same-index content rows in unstyled Boxes after child changes, preserving native invalidation, mouse geometry and styled-background sampling.

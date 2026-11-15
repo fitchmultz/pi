@@ -599,9 +599,25 @@ export function calculateImageRows(
 	return calculateImageCellSize(imageDimensions, targetWidthCells, undefined, cellDimensions).rows;
 }
 
+function sliceBase64Prefix(base64Data: string, maxDecodedBytes: number): { buffer: Buffer; complete: boolean } {
+	const neededChars = Math.ceil(maxDecodedBytes / 3) * 4;
+	let nonWhitespaceChars = 0;
+	let end = 0;
+	while (end < base64Data.length && nonWhitespaceChars < neededChars) {
+		if (base64Data.charCodeAt(end) > 0x20) {
+			nonWhitespaceChars++;
+		}
+		end++;
+	}
+	return {
+		buffer: Buffer.from(end === base64Data.length ? base64Data : base64Data.slice(0, end), "base64"),
+		complete: end === base64Data.length,
+	};
+}
+
 export function getPngDimensions(base64Data: string): ImageDimensions | null {
 	try {
-		const buffer = Buffer.from(base64Data, "base64");
+		const { buffer } = sliceBase64Prefix(base64Data, 24);
 
 		if (buffer.length < 24) {
 			return null;
@@ -620,44 +636,56 @@ export function getPngDimensions(base64Data: string): ImageDimensions | null {
 	}
 }
 
+function parseJpegDimensions(
+	buffer: Buffer,
+	complete: boolean,
+): { kind: "done"; dimensions: ImageDimensions | null } | { kind: "truncated" } {
+	if (buffer.length < 2) {
+		return complete ? { kind: "done", dimensions: null } : { kind: "truncated" };
+	}
+
+	if (buffer[0] !== 0xff || buffer[1] !== 0xd8) {
+		return { kind: "done", dimensions: null };
+	}
+
+	let offset = 2;
+	while (offset < buffer.length - 9) {
+		if (buffer[offset] !== 0xff) {
+			offset++;
+			continue;
+		}
+
+		const marker = buffer[offset + 1];
+
+		if (marker >= 0xc0 && marker <= 0xc2) {
+			const height = buffer.readUInt16BE(offset + 5);
+			const width = buffer.readUInt16BE(offset + 7);
+			return { kind: "done", dimensions: { widthPx: width, heightPx: height } };
+		}
+
+		if (offset + 3 >= buffer.length) {
+			return complete ? { kind: "done", dimensions: null } : { kind: "truncated" };
+		}
+		const length = buffer.readUInt16BE(offset + 2);
+		if (length < 2) {
+			return { kind: "done", dimensions: null };
+		}
+		offset += 2 + length;
+	}
+
+	return complete ? { kind: "done", dimensions: null } : { kind: "truncated" };
+}
+
 export function getJpegDimensions(base64Data: string): ImageDimensions | null {
 	try {
-		const buffer = Buffer.from(base64Data, "base64");
-
-		if (buffer.length < 2) {
-			return null;
+		// Most JPEG SOF0-SOF2 headers precede image scan data within the first 48 KiB.
+		const prefix = sliceBase64Prefix(base64Data, 48 * 1024);
+		const parsed = parseJpegDimensions(prefix.buffer, prefix.complete);
+		if (parsed.kind === "done") {
+			return parsed.dimensions;
 		}
-
-		if (buffer[0] !== 0xff || buffer[1] !== 0xd8) {
-			return null;
-		}
-
-		let offset = 2;
-		while (offset < buffer.length - 9) {
-			if (buffer[offset] !== 0xff) {
-				offset++;
-				continue;
-			}
-
-			const marker = buffer[offset + 1];
-
-			if (marker >= 0xc0 && marker <= 0xc2) {
-				const height = buffer.readUInt16BE(offset + 5);
-				const width = buffer.readUInt16BE(offset + 7);
-				return { widthPx: width, heightPx: height };
-			}
-
-			if (offset + 3 >= buffer.length) {
-				return null;
-			}
-			const length = buffer.readUInt16BE(offset + 2);
-			if (length < 2) {
-				return null;
-			}
-			offset += 2 + length;
-		}
-
-		return null;
+		const full = parseJpegDimensions(Buffer.from(base64Data, "base64"), true);
+		return full.kind === "done" ? full.dimensions : null;
 	} catch {
 		return null;
 	}
@@ -665,7 +693,7 @@ export function getJpegDimensions(base64Data: string): ImageDimensions | null {
 
 export function getGifDimensions(base64Data: string): ImageDimensions | null {
 	try {
-		const buffer = Buffer.from(base64Data, "base64");
+		const { buffer } = sliceBase64Prefix(base64Data, 10);
 
 		if (buffer.length < 10) {
 			return null;
@@ -687,7 +715,7 @@ export function getGifDimensions(base64Data: string): ImageDimensions | null {
 
 export function getWebpDimensions(base64Data: string): ImageDimensions | null {
 	try {
-		const buffer = Buffer.from(base64Data, "base64");
+		const { buffer } = sliceBase64Prefix(base64Data, 30);
 
 		if (buffer.length < 30) {
 			return null;

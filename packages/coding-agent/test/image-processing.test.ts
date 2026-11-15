@@ -3,7 +3,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { convertToPng, loadPngTranscoder } from "../src/utils/image-convert.ts";
+import { convertImageBytesToPng, convertToPng, loadPngTranscoder } from "../src/utils/image-convert.ts";
 import { formatDimensionNote, resizeImage } from "../src/utils/image-resize.ts";
 import { resizeImageInProcess } from "../src/utils/image-resize-core.ts";
 import { loadPhoton } from "../src/utils/photon.ts";
@@ -106,6 +106,19 @@ describe("convertToPng", () => {
 		const png = Buffer.from(result!.data, "base64");
 		expect(png.readUInt32BE(16)).toBe(1);
 		expect(png.readUInt32BE(20)).toBe(2);
+	});
+
+	it("runs byte conversion without detaching caller input and returns null on invalid bytes", async () => {
+		const input = new Uint8Array(imageBytes(TINY_JPEG));
+		const expectedLength = input.byteLength;
+		const pngBytes = await convertImageBytesToPng(input);
+		expect(pngBytes).not.toBeNull();
+		expect(input.byteLength).toBe(expectedLength);
+		expect(Array.from(pngBytes!.subarray(0, 4))).toEqual([0x89, 0x50, 0x4e, 0x47]);
+
+		const invalid = new Uint8Array([1, 2, 3, 4, 5]);
+		expect(await convertImageBytesToPng(invalid)).toBeNull();
+		expect(invalid.byteLength).toBe(5);
 	});
 });
 
