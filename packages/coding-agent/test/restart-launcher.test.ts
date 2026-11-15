@@ -36,6 +36,7 @@ interface Receipt {
 	runtime: string;
 	pid: number;
 	args: string[];
+	execArgv: string[];
 	handoff?: { sessionId: string; workingSession: string; message?: string; failure?: string };
 }
 
@@ -73,7 +74,7 @@ async function fixture() {
 import { appendFileSync, existsSync, unlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 const handoff = process.env.PI_RESTART_HANDOFF ? JSON.parse(process.env.PI_RESTART_HANDOFF) : undefined;
-appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(name)}, pid: process.pid, args: process.argv.slice(2), handoff }) + '\\n');
+appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(name)}, pid: process.pid, args: process.argv.slice(2), execArgv: process.execArgv, handoff }) + '\\n');
 const select = (name) => { if (existsSync(${JSON.stringify(selector)})) unlinkSync(${JSON.stringify(selector)}); symlinkSync(${JSON.stringify(root)} + '/' + name + '/dist/bundle/cli.js', ${JSON.stringify(selector)}); };
 const session = ${JSON.stringify(session)};
 ${session.workingSession === defaultArtifact ? "session.workingSession += '-' + process.pid;" : ""}
@@ -509,6 +510,44 @@ process.send({ type: 'pi:ready' });`,
 			expect(await f.run(a)).toBe(0);
 			expect(f.read()).toHaveLength(1);
 		}
+	});
+	it("caps worker V8 semi-space size at 8 MiB unless configured in execArgv or NODE_OPTIONS", async () => {
+		const f = await fixture();
+		const runtime = f.release("A", "ready();");
+		const worker = getRestartRuntimeWorker(runtime);
+
+		expect(await superviseCli(worker, [], { execArgv: [], env: { ...process.env, NODE_OPTIONS: "" } })).toBe(0);
+		expect(
+			await superviseCli(worker, [], {
+				execArgv: ["--max-semi-space-size=16"],
+				env: { ...process.env, NODE_OPTIONS: "" },
+			}),
+		).toBe(0);
+		expect(
+			await superviseCli(worker, [], {
+				execArgv: ["--max_semi_space_size=24"],
+				env: { ...process.env, NODE_OPTIONS: "" },
+			}),
+		).toBe(0);
+		expect(
+			await superviseCli(worker, [], {
+				execArgv: [],
+				env: { ...process.env, NODE_OPTIONS: "--max-semi-space-size=32" },
+			}),
+		).toBe(0);
+		expect(
+			await superviseCli(worker, [], {
+				execArgv: [],
+				env: { ...process.env, NODE_OPTIONS: '"--max_semi_space_size=64"' },
+			}),
+		).toBe(0);
+
+		const receipts = f.read();
+		expect(receipts[0]?.execArgv).toEqual(["--max-semi-space-size=8"]);
+		expect(receipts[1]?.execArgv).toEqual(["--max-semi-space-size=16"]);
+		expect(receipts[2]?.execArgv).toEqual(["--max_semi_space_size=24"]);
+		expect(receipts[3]?.execArgv).toEqual([]);
+		expect(receipts[4]?.execArgv).toEqual([]);
 	});
 	it.skipIf(process.platform === "win32")(
 		"preserves the committed launcher exit code when terminal hangup delivers SIGHUP during exit teardown",
