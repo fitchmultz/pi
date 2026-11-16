@@ -130,24 +130,22 @@ export async function runForkUpdate(options: ForkUpdateOptions = {}): Promise<vo
 			GIT_CEILING_DIRECTORIES: temporary,
 			...(termux ? { PREFIX: process.env.PREFIX, LD_PRELOAD: process.env.LD_PRELOAD } : {}),
 		};
-		if (!options.force) {
-			const installed = getForkRelease();
-			const runtimeMatches =
-				installed !== undefined &&
-				installed.node === process.versions.node &&
-				installed.platform === process.platform &&
-				installed.arch === process.arch;
-			if (runtimeMatches) {
-				const remoteCommit = parseLsRemoteCommit(
-					capture("git", ["ls-remote", FORK_REMOTE_URL, FORK_MAIN_REF], source, gitEnv),
-					FORK_MAIN_REF,
+		const installed = getForkRelease();
+		const runtimeMatches =
+			installed !== undefined &&
+			installed.node === process.versions.node &&
+			installed.platform === process.platform &&
+			installed.arch === process.arch;
+		if (!options.force && runtimeMatches) {
+			const remoteCommit = parseLsRemoteCommit(
+				capture("git", ["ls-remote", FORK_REMOTE_URL, FORK_MAIN_REF], source, gitEnv),
+				FORK_MAIN_REF,
+			);
+			if (remoteCommit === installed.commit) {
+				console.log(
+					`fitchmultz/pi main is already up to date (${installed.commit}, Node ${installed.node} ${installed.platform}/${installed.arch}). Pass --force to rebuild.`,
 				);
-				if (remoteCommit === installed.commit) {
-					console.log(
-						`fitchmultz/pi main is already up to date (${installed.commit}, Node ${installed.node} ${installed.platform}/${installed.arch}). Pass --force to rebuild.`,
-					);
-					return;
-				}
+				return;
 			}
 		}
 		const npmEnvironment = forkNpmEnvironment(cacheDir);

@@ -326,7 +326,9 @@ On an immutable fork installation, the fork updater checks remote `main` against
 the active release receipt (`commit`, Node version, platform, and architecture)
 before downloading or building and skips when they match. Add `--force` to
 reinstall an ordinary package-manager installation or force a fork rebuild and
-re-hydration on the same commit.
+re-hydration on the same commit. If `<release>/fork-release.json` is unreadable
+or invalid, updates fail closed; repair or delete that receipt file, then run
+`pi update --fork`.
 
 `--fork` explicitly selects the fork updater for
 [immutable fork installations](quickstart.md#fork-installation), including when

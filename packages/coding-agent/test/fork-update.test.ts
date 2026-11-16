@@ -491,33 +491,45 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		expect(existsSync(`${selector}.lock`)).toBe(false);
 	});
 
-	it("fails on an invalid receipt without --force and bypasses it with --force", async () => {
+	it("fails fast before cloning on an invalid receipt even with --force", async () => {
 		const forkTmp = join(root, "fork-tmp");
 		mkdirSync(forkTmp);
 		vi.stubEnv("TMPDIR", forkTmp);
+		vi.stubEnv("PI_SELF_UPDATE_COMMAND", "");
+		const receiptError =
+			"Invalid fork release receipt: /path/to/fork-release.json. Repair or delete it, then run pi update --fork.";
 		const getForkReleaseSpy = vi.spyOn(config, "getForkRelease").mockImplementation(() => {
-			throw new Error("Invalid fork release receipt: /path/to/fork-release.json");
+			throw new Error(receiptError);
 		});
+
+		for (const args of [[], ["--fork"], ["--fork", "--force"]]) {
+			process.exitCode = undefined;
+			vi.mocked(console.error).mockClear();
+
+			await handlePackageCommand(["update", ...args]);
+
+			expect(process.exitCode).toBe(1);
+			expect(console.error).toHaveBeenCalledWith(expect.stringContaining(receiptError));
+			expect(lsRemote).toBe(0);
+			expect(fetched).toBe(0);
+			expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+			expect(existsSync(invocationsFile)).toBe(false);
+			expect(readdirSync(forkTmp)).toEqual([]);
+			expect(existsSync(`${selector}.lock`)).toBe(false);
+		}
+		expect(getForkReleaseSpy).toHaveBeenCalledTimes(3);
+	});
+
+	it("builds without ls-remote when the active release has no receipt", async () => {
+		const forkTmp = join(root, "fork-tmp");
+		mkdirSync(forkTmp);
+		vi.stubEnv("TMPDIR", forkTmp);
+		const getForkReleaseSpy = vi.spyOn(config, "getForkRelease").mockReturnValue(undefined);
 
 		await handlePackageCommand(["update", "--fork"]);
 
-		expect(process.exitCode).toBe(1);
-		expect(getForkReleaseSpy).toHaveBeenCalledTimes(1);
-		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Invalid fork release receipt"));
-		expect(lsRemote).toBe(0);
-		expect(fetched).toBe(0);
-		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
-		expect(existsSync(invocationsFile)).toBe(false);
-		expect(readdirSync(forkTmp)).toEqual([]);
-		expect(existsSync(`${selector}.lock`)).toBe(false);
-
-		process.exitCode = undefined;
-		getForkReleaseSpy.mockClear();
-
-		await handlePackageCommand(["update", "--fork", "--force"]);
-
 		expect(process.exitCode).toBeUndefined();
-		expect(getForkReleaseSpy).not.toHaveBeenCalled();
+		expect(getForkReleaseSpy).toHaveBeenCalledTimes(1);
 		expect(lsRemote).toBe(0);
 		expect(fetched).toBe(1);
 		expect(readInvocations()[0].commit).toBe(expectedCommit);

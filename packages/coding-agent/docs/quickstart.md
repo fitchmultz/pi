@@ -56,11 +56,14 @@ links in these entries open the fork repository at the installed commit.
 Before cloning or building, the updater checks remote `main` against the active
 release receipt's commit, Node version, platform, and architecture, and skips if
 they already match unless `--force` is passed. When a build is needed, it fetches
-and pins fork main, hydrates model data in an isolated home, then uses the installer
-to build, validate, and atomically select the release under
-`~/.local/share/pi-fork/releases`. It does not edit settings, credentials,
-extensions, or sessions. Running sessions keep their runtime until a full relaunch
-or a [managed restart](restart.md).
+and pins fork main, hydrates model data in an isolated home, then uses the
+installer to build, validate, and atomically select the release under
+`~/.local/share/pi-fork/releases`. If `<release>/fork-release.json` is missing
+(such as a pre-receipt release or after deleting a damaged receipt),
+`pi update --fork` builds and activates a fresh release, whereas an unreadable or
+invalid receipt fails closed until repaired or deleted. It does not edit
+settings, credentials, extensions, or sessions. Running sessions keep their
+runtime until a full relaunch or a [managed restart](restart.md).
 
 After a build and activation, including `--force` rebuilds on the same commit, the
 updater runs the installer's `--prune --keep 5` on the same store. This removes

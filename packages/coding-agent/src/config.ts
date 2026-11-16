@@ -431,10 +431,17 @@ export function getPackageDir(): string {
 
 const runtimePackageDir = isBunBinary ? dirname(process.execPath) : realpathSync(findNodePackageDir(__dirname));
 const forkReleasePath = isBunBinary ? undefined : resolve(runtimePackageDir, "../../../fork-release.json");
-if (forkReleasePath && existsSync(forkReleasePath)) {
-	// JavaScript-only CLI and SDK hosts may have no visible release path.
-	// Keep the receipt open so pruning sees this runtime until the process exits.
-	openSync(forkReleasePath, "r");
+if (forkReleasePath) {
+	try {
+		// JavaScript-only CLI and SDK hosts may have no visible release path.
+		// Keep the receipt open so pruning sees this runtime until the process exits.
+		openSync(forkReleasePath, "r");
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code !== "ENOENT" && code !== "EACCES" && code !== "EPERM" && code !== "EISDIR") {
+			throw error;
+		}
+	}
 }
 
 export interface ForkReleaseReceipt {
@@ -467,10 +474,30 @@ function isForkReleaseReceipt(value: unknown): value is ForkReleaseReceipt {
 
 /** Read the installer receipt belonging to this runtime, independently of PI_PACKAGE_DIR. */
 export function getForkRelease(): ForkReleaseReceipt | undefined {
-	if (!forkReleasePath || !existsSync(forkReleasePath)) return undefined;
-	const receipt: unknown = JSON.parse(readFileSync(forkReleasePath, "utf8"));
+	if (!forkReleasePath) return undefined;
+	let raw: string;
+	try {
+		raw = readFileSync(forkReleasePath, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw new Error(
+			`Invalid fork release receipt: ${forkReleasePath} (${error instanceof Error ? error.message : String(error)}). Repair or delete it, then run pi update --fork.`,
+			{ cause: error },
+		);
+	}
+	let receipt: unknown;
+	try {
+		receipt = JSON.parse(raw);
+	} catch (error) {
+		throw new Error(
+			`Invalid fork release receipt: ${forkReleasePath}. Repair or delete it, then run pi update --fork.`,
+			{ cause: error },
+		);
+	}
 	if (!isForkReleaseReceipt(receipt)) {
-		throw new Error(`Invalid fork release receipt: ${forkReleasePath}`);
+		throw new Error(
+			`Invalid fork release receipt: ${forkReleasePath}. Repair or delete it, then run pi update --fork.`,
+		);
 	}
 	return receipt;
 }

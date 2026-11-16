@@ -1,7 +1,10 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { spawnSync } from "child_process";
+import { buildSync } from "esbuild";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { delimiter, join } from "path";
-import { afterEach, describe, expect, test } from "vitest";
+import { fileURLToPath, pathToFileURL } from "url";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import {
 	detectInstallChange,
 	detectInstallMethod,
@@ -540,5 +543,105 @@ describe("configured self-update command", () => {
 			display:
 				"wrapper install @earendil-works/pi-coding-agent@1.2.3 --name=@earendil-works/pi-coding-agent --version 1.2.3 {unknown}",
 		});
+	});
+});
+
+describe("getForkRelease", () => {
+	let releaseTempDir: string;
+	let receiptPath: string;
+	let bundledConfigUrl: string;
+
+	beforeAll(() => {
+		releaseTempDir = mkdtempSync(join(tmpdir(), "pi-fork-release-"));
+		const releaseDir = join(releaseTempDir, "releases", "r1");
+		const pkgDir = join(releaseDir, "node_modules", "@earendil-works", "pi-coding-agent");
+		mkdirSync(join(pkgDir, "dist"), { recursive: true });
+		writeFileSync(
+			join(pkgDir, "package.json"),
+			JSON.stringify({ name: "@earendil-works/pi-coding-agent", type: "module" }),
+		);
+		const bundledConfigPath = join(pkgDir, "dist", "config.js");
+		buildSync({
+			entryPoints: [fileURLToPath(new URL("../src/config.ts", import.meta.url))],
+			outfile: bundledConfigPath,
+			bundle: true,
+			platform: "node",
+			format: "esm",
+			banner: {
+				js: 'import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url);',
+			},
+		});
+		receiptPath = join(realpathSync(releaseDir), "fork-release.json");
+		bundledConfigUrl = pathToFileURL(bundledConfigPath).href;
+	});
+
+	afterEach(() => {
+		rmSync(receiptPath, { recursive: true, force: true });
+	});
+
+	afterAll(() => {
+		rmSync(releaseTempDir, { recursive: true, force: true });
+	});
+
+	function runGetForkRelease() {
+		return spawnSync(
+			process.execPath,
+			[
+				"--input-type=module",
+				"-e",
+				`import { getForkRelease } from ${JSON.stringify(bundledConfigUrl)}; const value = getForkRelease(); console.log(value === undefined ? "undefined" : JSON.stringify(value));`,
+			],
+			{ encoding: "utf8" },
+		);
+	}
+
+	test("returns undefined when fork-release.json is absent", () => {
+		const result = runGetForkRelease();
+		expect(result.status).toBe(0);
+		expect(result.stdout.trim()).toBe("undefined");
+	});
+
+	test("throws actionable recovery guidance for truncated JSON", () => {
+		writeFileSync(receiptPath, "{");
+		const result = runGetForkRelease();
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain(
+			`Invalid fork release receipt: ${receiptPath}. Repair or delete it, then run pi update --fork.`,
+		);
+	});
+
+	test("throws actionable recovery guidance for schema-invalid JSON", () => {
+		writeFileSync(receiptPath, JSON.stringify({ validated: false }));
+		const result = runGetForkRelease();
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain(
+			`Invalid fork release receipt: ${receiptPath}. Repair or delete it, then run pi update --fork.`,
+		);
+	});
+
+	test("throws actionable recovery guidance when reading fork-release.json fails", () => {
+		mkdirSync(receiptPath);
+		const result = runGetForkRelease();
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain(`Invalid fork release receipt: ${receiptPath} (`);
+		expect(result.stderr).toContain("Repair or delete it, then run pi update --fork.");
+	});
+
+	test("returns the parsed receipt when fork-release.json is valid", () => {
+		const validReceipt = {
+			commit: "a".repeat(40),
+			catalogSha256: "b".repeat(64),
+			archiveSha256: "c".repeat(64),
+			node: process.versions.node,
+			npm: "11.19.1",
+			platform: process.platform,
+			arch: process.arch,
+			validated: true,
+			ownerSelector: "/tmp/selector",
+		};
+		writeFileSync(receiptPath, JSON.stringify(validReceipt));
+		const result = runGetForkRelease();
+		expect(result.status).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual(validReceipt);
 	});
 });
