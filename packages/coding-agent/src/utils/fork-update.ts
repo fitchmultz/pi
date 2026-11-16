@@ -12,14 +12,31 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { satisfies } from "semver";
-import { getPackageDir, isBunRuntime, PACKAGE_NAME } from "../config.ts";
+import { getForkRelease, getPackageDir, isBunRuntime, PACKAGE_NAME } from "../config.ts";
 import { spawnProcess, spawnProcessSync, waitForChildProcess } from "./child-process.ts";
 import { forkNpmEnvironment, removeForkNpmLogs } from "./fork-npm-cache.ts";
 import { claimForkReleaseStore, lockForkSelector } from "./fork-release-store.ts";
 import { getTermuxBash } from "./termux.ts";
 
+const FORK_REMOTE_URL = "https://github.com/fitchmultz/pi.git";
+const FORK_MAIN_REF = "refs/heads/main";
+
+export interface ForkUpdateOptions {
+	force?: boolean;
+}
+
+function parseLsRemoteCommit(output: string, ref: string): string {
+	for (const line of output.split(/\r?\n/)) {
+		const [commit, remoteRef] = line.split("\t");
+		if (remoteRef === ref && commit && /^[0-9a-f]{40}$/.test(commit)) {
+			return commit;
+		}
+	}
+	throw new Error(`Could not resolve ${ref} commit from ${FORK_REMOTE_URL}`);
+}
+
 /** Bootstrap a pinned fork checkout; the fork installer owns validation and atomic selection. */
-export async function runForkUpdate(): Promise<void> {
+export async function runForkUpdate(options: ForkUpdateOptions = {}): Promise<void> {
 	const termux = process.platform === "android";
 	if (!["darwin", "linux", "android"].includes(process.platform) || !["arm64", "x64"].includes(process.arch)) {
 		throw new Error("pi update --fork supports macOS, Linux and Termux on arm64/x64 only; Windows is not supported.");
@@ -96,39 +113,56 @@ export async function runForkUpdate(): Promise<void> {
 	try {
 		validateSelector();
 		claimForkReleaseStore(releases, selector);
-		const npmEnvironment = forkNpmEnvironment(cacheDir);
 		temporary = mkdtempSync(join(tmpdir(), "pi-fork-update-"));
 		const home = join(temporary, "home");
 		const source = join(temporary, "source");
 		mkdirSync(join(home, "tmp"), { recursive: true });
 		mkdirSync(source);
-		const npmGlobalConfig = join(home, "npm-globalconfig");
-		writeFileSync(npmGlobalConfig, "");
 		// Do not expose real settings, credentials, Git hooks/config, or npm lifecycle hooks to the build.
-		const env: NodeJS.ProcessEnv = {
+		const gitEnv: NodeJS.ProcessEnv = {
 			PATH: `${dirname(node)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
 			HOME: home,
 			USERPROFILE: home,
 			TMPDIR: join(home, "tmp"),
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_TERMINAL_PROMPT: "0",
+			GIT_CEILING_DIRECTORIES: temporary,
+			...(termux ? { PREFIX: process.env.PREFIX, LD_PRELOAD: process.env.LD_PRELOAD } : {}),
+		};
+		const installed = getForkRelease();
+		const runtimeMatches =
+			installed !== undefined &&
+			installed.node === process.versions.node &&
+			installed.platform === process.platform &&
+			installed.arch === process.arch;
+		if (!options.force && runtimeMatches) {
+			const remoteCommit = parseLsRemoteCommit(
+				capture("git", ["ls-remote", FORK_REMOTE_URL, FORK_MAIN_REF], source, gitEnv),
+				FORK_MAIN_REF,
+			);
+			if (remoteCommit === installed.commit) {
+				console.log(
+					`fitchmultz/pi main is already up to date (${installed.commit}, Node ${installed.node} ${installed.platform}/${installed.arch}). Pass --force to rebuild.`,
+				);
+				return;
+			}
+		}
+		const npmEnvironment = forkNpmEnvironment(cacheDir);
+		const npmGlobalConfig = join(home, "npm-globalconfig");
+		writeFileSync(npmGlobalConfig, "");
+		const env: NodeJS.ProcessEnv = {
+			...gitEnv,
 			XDG_CONFIG_HOME: join(home, "config"),
 			XDG_CACHE_HOME: join(home, "cache"),
 			XDG_DATA_HOME: join(home, "data"),
 			PI_CODING_AGENT_DIR: join(home, "agent"),
 			PI_TELEMETRY: "0",
 			HUSKY: "0",
-			GIT_CONFIG_NOSYSTEM: "1",
-			GIT_CONFIG_GLOBAL: "/dev/null",
-			GIT_TERMINAL_PROMPT: "0",
 			...npmEnvironment,
 			npm_config_userconfig: join(home, ".npmrc"),
 			npm_config_globalconfig: npmGlobalConfig,
-			...(termux
-				? {
-						PREFIX: process.env.PREFIX,
-						LD_PRELOAD: process.env.LD_PRELOAD,
-						npm_config_script_shell: bash,
-					}
-				: {}),
+			...(termux ? { npm_config_script_shell: bash } : {}),
 		};
 		const run = async (command: string, args: string[]): Promise<void> => {
 			console.log(`$ ${[command, ...args].join(" ")}`);
@@ -136,7 +170,7 @@ export async function runForkUpdate(): Promise<void> {
 			if (code !== 0) throw new Error(`${command} ${args.join(" ")} exited with code ${code ?? "unknown"}`);
 		};
 		await run("git", ["init", "--quiet"]);
-		await run("git", ["fetch", "--depth=1", "https://github.com/fitchmultz/pi.git", "refs/heads/main"]);
+		await run("git", ["fetch", "--depth=1", FORK_REMOTE_URL, FORK_MAIN_REF]);
 		const commit = capture("git", ["rev-parse", "--verify", "FETCH_HEAD^{commit}"], source, env);
 		if (!/^[0-9a-f]{40}$/.test(commit)) throw new Error(`Invalid fork main commit: ${commit}`);
 		console.log(`Installing fitchmultz/pi main at ${commit}`);
@@ -168,7 +202,7 @@ export async function runForkUpdate(): Promise<void> {
 			await run(node, [installer, "--prune", "--keep", "5", ...location]);
 		} catch (error) {
 			console.warn(
-				`Warning: the update succeeded, but old-release cleanup failed: ${error instanceof Error ? error.message : String(error)}. Rerun pi update --fork to retry cleanup.`,
+				`Warning: the update succeeded, but old-release cleanup failed: ${error instanceof Error ? error.message : String(error)}. Rerun pi update --fork --force to retry cleanup.`,
 			);
 		}
 		console.log(

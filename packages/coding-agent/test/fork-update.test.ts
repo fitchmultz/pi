@@ -50,6 +50,8 @@ describe.skipIf(process.platform === "win32").each(platforms)("fork update boots
 	let failPrune: boolean;
 	let realNpm: boolean;
 	let npmOutput: string;
+	let lsRemote: number;
+	let lsRemoteTempRoot: string | undefined;
 	let fetched: number;
 	let originalExitCode: typeof process.exitCode;
 	let invocationsFile: string;
@@ -100,6 +102,8 @@ describe.skipIf(process.platform === "win32").each(platforms)("fork update boots
 		failPrune = false;
 		realNpm = false;
 		npmOutput = "";
+		lsRemote = 0;
+		lsRemoteTempRoot = undefined;
 		fetched = 0;
 		invocationsFile = join(root, "installer-invocations.jsonl");
 
@@ -148,6 +152,29 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		]);
 		expectedCommit = git(["rev-parse", "HEAD"]);
 		vi.spyOn(childProcess, "spawnProcessSync").mockImplementation((command, args, options) => {
+			if (command === "git" && args[0] === "ls-remote") {
+				lsRemote++;
+				lsRemoteTempRoot = dirname(String(options.cwd));
+				expect(args).toEqual(["ls-remote", "https://github.com/fitchmultz/pi.git", "refs/heads/main"]);
+				expect(existsSync(`${selector}.lock`), "the update must hold the shared lock during remote check").toBe(
+					true,
+				);
+				expect(options.env?.HOME).toBe(join(lsRemoteTempRoot, "home"));
+				expect(options.env?.USERPROFILE).toBe(join(lsRemoteTempRoot, "home"));
+				expect(options.env?.TMPDIR).toBe(join(lsRemoteTempRoot, "home", "tmp"));
+				expect(options.env?.GIT_CONFIG_NOSYSTEM).toBe("1");
+				expect(options.env?.GIT_CONFIG_GLOBAL).toBe("/dev/null");
+				expect(options.env?.GIT_TERMINAL_PROMPT).toBe("0");
+				expect(options.env?.GIT_CEILING_DIRECTORIES).toBe(lsRemoteTempRoot);
+				expect(options.env?.ANTHROPIC_API_KEY).toBeUndefined();
+				expect(options.env?.PI_RESTART_SOCKET).toBeUndefined();
+				expect(options.env?.PI_PACKAGE_DIR).toBeUndefined();
+				expect(options.env?.NODE_OPTIONS).toBeUndefined();
+				expect(options.env?.NPM_CONFIG_GLOBALCONFIG).toBeUndefined();
+				expect(options.env?.PREFIX).toBe(platform === "android" ? process.env.PREFIX : undefined);
+				expect(options.env?.LD_PRELOAD).toBe(platform === "android" ? process.env.LD_PRELOAD : undefined);
+				return spawnSync(command, ["ls-remote", source, "refs/heads/main"], options);
+			}
 			if (args.includes("root") && args.includes("-g")) {
 				return spawnSync(process.execPath, ["-e", `console.log(${JSON.stringify(globalRoot)})`], options);
 			}
@@ -156,7 +183,7 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 			return spawnSync(command, args, options);
 		});
 		vi.spyOn(childProcess, "spawnProcess").mockImplementation((command, args, options) => {
-			temporarySource = String(options.cwd);
+			if (options.cwd) temporarySource = String(options.cwd);
 			if (command === "git" && args[0] === "fetch") {
 				fetched++;
 				expect(args).toEqual(["fetch", "--depth=1", "https://github.com/fitchmultz/pi.git", "refs/heads/main"]);
@@ -225,7 +252,7 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		{ name: "--all", args: ["--all"] },
 	])("updates the installed fork through $name when upstream's version is unchanged", async ({ args }) => {
 		vi.spyOn(config, "getForkRelease").mockReturnValue({
-			commit: expectedCommit,
+			commit: "0".repeat(40),
 			catalogSha256: "catalog",
 			archiveSha256: "archive",
 			node: process.versions.node,
@@ -243,10 +270,333 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		await handlePackageCommand(["update", ...args]);
 
 		expect(process.exitCode).toBeUndefined();
+		expect(lsRemote).toBe(1);
 		expect(fetched).toBe(1);
 		expect(readInvocations()[0].commit).toBe(expectedCommit);
 		expect(upstream).not.toHaveBeenCalled();
 		expect(updateExtensions).toHaveBeenCalledTimes(args.includes("--all") ? 1 : 0);
+	});
+
+	it.each([
+		{ name: "--fork", args: ["--fork"] },
+		{ name: "default", args: [] },
+		{ name: "--all", args: ["--all"] },
+	])("skips cloning and building on $name when installed commit and runtime match remote main", async ({ args }) => {
+		vi.spyOn(config, "getForkRelease").mockReturnValue({
+			commit: expectedCommit,
+			catalogSha256: "catalog",
+			archiveSha256: "archive",
+			node: process.versions.node,
+			npm: "11.19.1",
+			platform,
+			arch: process.arch,
+			validated: true,
+			ownerSelector: selector,
+		});
+		const updateExtensions = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue();
+
+		await handlePackageCommand(["update", ...args]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(lsRemote).toBe(1);
+		expect(fetched).toBe(0);
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+		expect(existsSync(invocationsFile)).toBe(false);
+		expect(existsSync(join(root, "real-home/.cache/pi-fork"))).toBe(false);
+		expect(existsSync(lsRemoteTempRoot!)).toBe(false);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+		expect(console.log).toHaveBeenCalledWith(
+			expect.stringContaining(`fitchmultz/pi main is already up to date (${expectedCommit}`),
+		);
+		expect(updateExtensions).toHaveBeenCalledTimes(args.includes("--all") ? 1 : 0);
+	});
+
+	it.each([
+		{ field: "node", override: { node: "24.22.0" } },
+		{ field: "platform", override: { platform: platform === "linux" ? "darwin" : "linux" } },
+		{ field: "arch", override: { arch: process.arch === "arm64" ? "x64" : "arm64" } },
+	])("rebuilds on matching commit when installed $field differs from active runtime", async ({ override }) => {
+		vi.spyOn(config, "getForkRelease").mockReturnValue({
+			commit: expectedCommit,
+			catalogSha256: "catalog",
+			archiveSha256: "archive",
+			node: process.versions.node,
+			npm: "11.19.1",
+			platform,
+			arch: process.arch,
+			validated: true,
+			ownerSelector: selector,
+			...override,
+		});
+
+		await handlePackageCommand(["update", "--fork"]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(lsRemote).toBe(0);
+		expect(fetched).toBe(1);
+		expect(readInvocations()[0].commit).toBe(expectedCommit);
+	});
+
+	it.each([
+		{ name: "--fork --force", args: ["--fork", "--force"] },
+		{ name: "default --force", args: ["--force"] },
+		{ name: "--all --force", args: ["--all", "--force"] },
+	])("rebuilds on $name even when installed commit and runtime match remote main", async ({ args }) => {
+		vi.spyOn(config, "getForkRelease").mockReturnValue({
+			commit: expectedCommit,
+			catalogSha256: "catalog",
+			archiveSha256: "archive",
+			node: process.versions.node,
+			npm: "11.19.1",
+			platform,
+			arch: process.arch,
+			validated: true,
+			ownerSelector: selector,
+		});
+		const updateExtensions = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue();
+
+		await handlePackageCommand(["update", ...args]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(lsRemote).toBe(0);
+		expect(fetched).toBe(1);
+		expect(readInvocations()[0].commit).toBe(expectedCommit);
+		expect(updateExtensions).toHaveBeenCalledTimes(args.includes("--all") ? 1 : 0);
+	});
+
+	it("fails cleanly without cloning when remote main resolution returns no commit", async () => {
+		vi.spyOn(config, "getForkRelease").mockReturnValue({
+			commit: expectedCommit,
+			catalogSha256: "catalog",
+			archiveSha256: "archive",
+			node: process.versions.node,
+			npm: "11.19.1",
+			platform,
+			arch: process.arch,
+			validated: true,
+			ownerSelector: selector,
+		});
+		const baseImpl = vi.mocked(childProcess.spawnProcessSync).getMockImplementation()!;
+		vi.mocked(childProcess.spawnProcessSync).mockImplementation((command, args, options) => {
+			if (command === "git" && args[0] === "ls-remote") {
+				lsRemoteTempRoot = dirname(String(options.cwd));
+				return spawnSync(process.execPath, ["-e", "process.exit(0)"], options);
+			}
+			return baseImpl(command, args, options);
+		});
+
+		await handlePackageCommand(["update", "--fork"]);
+
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Could not resolve refs/heads/main commit"));
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+		expect(existsSync(lsRemoteTempRoot!)).toBe(false);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it("fails cleanly without cloning when git ls-remote exits non-zero", async () => {
+		vi.spyOn(config, "getForkRelease").mockReturnValue({
+			commit: expectedCommit,
+			catalogSha256: "catalog",
+			archiveSha256: "archive",
+			node: process.versions.node,
+			npm: "11.19.1",
+			platform,
+			arch: process.arch,
+			validated: true,
+			ownerSelector: selector,
+		});
+		const baseImpl = vi.mocked(childProcess.spawnProcessSync).getMockImplementation()!;
+		vi.mocked(childProcess.spawnProcessSync).mockImplementation((command, args, options) => {
+			if (command === "git" && args[0] === "ls-remote") {
+				lsRemoteTempRoot = dirname(String(options.cwd));
+				return spawnSync(
+					process.execPath,
+					["-e", "process.stderr.write('fatal: network error\\n'); process.exit(128)"],
+					options,
+				);
+			}
+			return baseImpl(command, args, options);
+		});
+
+		await handlePackageCommand(["update", "--fork"]);
+
+		expect(process.exitCode).toBe(1);
+		expect(console.error).toHaveBeenCalledWith(
+			expect.stringMatching(/git ls-remote .* failed:.*fatal: network error/),
+		);
+		expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+		expect(existsSync(invocationsFile)).toBe(false);
+		expect(existsSync(lsRemoteTempRoot!)).toBe(false);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it("ignores an enclosing repository git config when TMPDIR is inside a Git checkout", async () => {
+		const enclosingRepo = join(root, "enclosing-repo");
+		const badRemote = join(root, "bad-remote");
+		const nestedTmp = join(enclosingRepo, "nested-tmp");
+		mkdirSync(enclosingRepo);
+		mkdirSync(badRemote);
+		mkdirSync(nestedTmp);
+
+		const gitIn = (cwd: string, args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+		gitIn(badRemote, ["init", "--quiet", "--initial-branch=main"]);
+		writeFileSync(join(badRemote, "marker"), "wrong remote");
+		gitIn(badRemote, ["add", "."]);
+		gitIn(badRemote, [
+			"-c",
+			"user.name=Test",
+			"-c",
+			"user.email=test@example.com",
+			"-c",
+			"core.hooksPath=/dev/null",
+			"commit",
+			"--quiet",
+			"-m",
+			"bad-fixture",
+		]);
+		gitIn(enclosingRepo, ["init", "--quiet", "--initial-branch=main"]);
+		// Without GIT_CEILING_DIRECTORIES, git ls-remote in source traverses up and rewrites source to badRemote.
+		gitIn(enclosingRepo, ["config", `url.${badRemote}.insteadOf`, source]);
+
+		vi.stubEnv("TMPDIR", nestedTmp);
+		vi.spyOn(config, "getForkRelease").mockReturnValue({
+			commit: expectedCommit,
+			catalogSha256: "catalog",
+			archiveSha256: "archive",
+			node: process.versions.node,
+			npm: "11.19.1",
+			platform,
+			arch: process.arch,
+			validated: true,
+			ownerSelector: selector,
+		});
+
+		await handlePackageCommand(["update", "--fork"]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(lsRemote).toBe(1);
+		expect(fetched).toBe(0);
+		expect(lsRemoteTempRoot?.startsWith(nestedTmp)).toBe(true);
+		expect(existsSync(lsRemoteTempRoot!)).toBe(false);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+
+		await handlePackageCommand(["update", "--fork", "--force"]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(fetched).toBe(1);
+		expect(readInvocations()[0].commit).toBe(expectedCommit);
+		expect(temporarySource?.startsWith(nestedTmp)).toBe(true);
+		expect(existsSync(temporarySource!)).toBe(false);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it("fails fast before cloning on an invalid receipt even with --force", async () => {
+		const forkTmp = join(root, "fork-tmp");
+		mkdirSync(forkTmp);
+		vi.stubEnv("TMPDIR", forkTmp);
+		vi.stubEnv("PI_SELF_UPDATE_COMMAND", "");
+		const receiptError =
+			"Invalid fork release receipt: /path/to/fork-release.json. Repair or delete it, then run pi update --fork.";
+		const getForkReleaseSpy = vi.spyOn(config, "getForkRelease").mockImplementation(() => {
+			throw new Error(receiptError);
+		});
+
+		for (const args of [[], ["--fork"], ["--fork", "--force"]]) {
+			process.exitCode = undefined;
+			vi.mocked(console.error).mockClear();
+
+			await handlePackageCommand(["update", ...args]);
+
+			expect(process.exitCode).toBe(1);
+			expect(console.error).toHaveBeenCalledWith(expect.stringContaining(receiptError));
+			expect(lsRemote).toBe(0);
+			expect(fetched).toBe(0);
+			expect(childProcess.spawnProcess).not.toHaveBeenCalled();
+			expect(existsSync(invocationsFile)).toBe(false);
+			expect(readdirSync(forkTmp)).toEqual([]);
+			expect(existsSync(`${selector}.lock`)).toBe(false);
+		}
+		expect(getForkReleaseSpy).toHaveBeenCalledTimes(3);
+	});
+
+	it("builds without ls-remote when the active release has no receipt", async () => {
+		const forkTmp = join(root, "fork-tmp");
+		mkdirSync(forkTmp);
+		vi.stubEnv("TMPDIR", forkTmp);
+		const getForkReleaseSpy = vi.spyOn(config, "getForkRelease").mockReturnValue(undefined);
+
+		await handlePackageCommand(["update", "--fork"]);
+
+		expect(process.exitCode).toBeUndefined();
+		expect(getForkReleaseSpy).toHaveBeenCalledTimes(1);
+		expect(lsRemote).toBe(0);
+		expect(fetched).toBe(1);
+		expect(readInvocations()[0].commit).toBe(expectedCommit);
+		expect(readdirSync(forkTmp)).toEqual([]);
+		expect(existsSync(`${selector}.lock`)).toBe(false);
+	});
+
+	it.each([
+		{ name: "--fork --force", args: ["--fork", "--force"], expectedMode: "fork" as const },
+		{ name: "--force", args: ["--force"], expectedMode: "custom" as const },
+		{ name: "--all --force", args: ["--all", "--force"], expectedMode: "custom" as const },
+	])("routes $name correctly when PI_SELF_UPDATE_COMMAND is set on a fork install", async ({ args, expectedMode }) => {
+		vi.spyOn(config, "getForkRelease").mockReturnValue({
+			commit: expectedCommit,
+			catalogSha256: "catalog",
+			archiveSha256: "archive",
+			node: process.versions.node,
+			npm: "11.19.1",
+			platform,
+			arch: process.arch,
+			validated: true,
+			ownerSelector: selector,
+		});
+		const customMarkerFile = join(root, "custom-updater.json");
+		const customUpdaterScript = join(root, "custom-updater.cjs");
+		writeFileSync(
+			customUpdaterScript,
+			`require("node:fs").writeFileSync(${JSON.stringify(customMarkerFile)}, JSON.stringify(process.argv.slice(2)));`,
+		);
+		vi.stubEnv("PI_OFFLINE", "");
+		vi.stubEnv("PI_SELF_UPDATE_COMMAND", "custom-self-update upgrade {installSpec}");
+		const upstream = vi.fn(async () => Response.json({ packageName: PACKAGE_NAME, version: VERSION }));
+		vi.stubGlobal("fetch", upstream);
+		const updateExtensions = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue();
+
+		const baseSync = vi.mocked(childProcess.spawnProcessSync).getMockImplementation()!;
+		vi.mocked(childProcess.spawnProcessSync).mockImplementation((command, cmdArgs, options) => {
+			if (command === config.APP_NAME && cmdArgs[0] === "--version") {
+				return spawnSync(process.execPath, ["-e", `console.log(${JSON.stringify(VERSION)})`], options);
+			}
+			return baseSync(command, cmdArgs, options);
+		});
+		const baseSpawn = vi.mocked(childProcess.spawnProcess).getMockImplementation()!;
+		vi.mocked(childProcess.spawnProcess).mockImplementation((command, cmdArgs, options) => {
+			if (command === "custom-self-update") {
+				return spawn(process.execPath, [customUpdaterScript, ...cmdArgs], options);
+			}
+			return baseSpawn(command, cmdArgs, options);
+		});
+
+		await handlePackageCommand(["update", ...args]);
+
+		expect(process.exitCode).toBeUndefined();
+		if (expectedMode === "fork") {
+			expect(fetched).toBe(1);
+			expect(readInvocations()[0].commit).toBe(expectedCommit);
+			expect(existsSync(customMarkerFile)).toBe(false);
+			expect(upstream).not.toHaveBeenCalled();
+			expect(updateExtensions).not.toHaveBeenCalled();
+		} else {
+			expect(lsRemote).toBe(0);
+			expect(fetched).toBe(0);
+			expect(existsSync(invocationsFile)).toBe(false);
+			expect(upstream).toHaveBeenCalledOnce();
+			expect(JSON.parse(readFileSync(customMarkerFile, "utf8"))).toEqual(["upgrade", `${PACKAGE_NAME}@${VERSION}`]);
+			expect(updateExtensions).toHaveBeenCalledTimes(args.includes("--all") ? 1 : 0);
+		}
 	});
 
 	it.each(["22.23.4", "24.22.2", "25.9.0", "26.13.0"])(
@@ -461,7 +811,9 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		expect(readInvocations().map(({ args }) => args[0])).toEqual(["--ref"]);
 		expect(console.log).toHaveBeenCalledWith(expect.stringContaining(`Fork commit ${expectedCommit} is active`));
 		expect(console.warn).toHaveBeenCalledWith(
-			expect.stringMatching(/update succeeded.*cleanup.*exited with code 42/),
+			expect.stringMatching(
+				/update succeeded.*cleanup.*exited with code 42.*Rerun pi update --fork --force to retry cleanup\./,
+			),
 		);
 		expect(existsSync(temporarySource!)).toBe(false);
 		expect(existsSync(`${selector}.lock`)).toBe(false);
@@ -509,7 +861,6 @@ appendFileSync(${JSON.stringify(invocationsFile)}, JSON.stringify({ script: proc
 		["--all"],
 		["--extensions"],
 		["--models"],
-		["--force"],
 		["pi"],
 		["self"],
 		["npm:example"],

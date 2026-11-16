@@ -53,21 +53,29 @@ releases. The first new session after an update to another fork commit shows the
 once under "What's New", or as a one-line notice with `collapseChangelog`. Relative
 links in these entries open the fork repository at the installed commit.
 
-The updater fetches and pins fork main, hydrates model data in an isolated home,
-then uses the installer to build, validate, and atomically select the release
-under `~/.local/share/pi-fork/releases`. It does not edit settings, credentials,
-extensions, or sessions. Running sessions keep their runtime until a full relaunch
-or a [managed restart](restart.md).
+Before cloning or building, the updater checks remote `main` against the active
+release receipt's commit, Node version, platform, and architecture, and skips if
+they already match unless `--force` is passed. When a build is needed, it fetches
+and pins fork main, hydrates model data in an isolated home, then uses the
+installer to build, validate, and atomically select the release under
+`~/.local/share/pi-fork/releases`. If `<release>/fork-release.json` is missing
+(such as a pre-receipt release or after deleting a damaged receipt),
+`pi update --fork` builds and activates a fresh release, whereas an unreadable or
+invalid receipt fails closed until repaired or deleted. It does not edit
+settings, credentials, extensions, or sessions. Running sessions keep their
+runtime until a full relaunch or a [managed restart](restart.md).
 
-After activation, including when the latest commit is already installed, the updater
-runs the installer's `--prune --keep 5` on the same store. This removes owned
-releases older than the newest five validated releases. It keeps the selected
+After a build and activation, including `--force` rebuilds on the same commit, the
+updater runs the installer's `--prune --keep 5` on the same store. This removes
+owned releases older than the newest five validated releases. It keeps the selected
 release, `<selector>.previous`, legacy releases and releases that `lsof` or `ps` show
 in use. Fork CLI and SDK processes keep their release receipt open so `lsof` detects
 JavaScript-only runtimes. Relaunch or restart sessions from older releases to gain
 this protection. Avoid directly launching an old release while pruning is in progress.
 Cleanup requires working `lsof` and `ps` commands. Missing tools or cleanup failures
-print a warning without failing the update. The next `pi update --fork` retries cleanup.
+print a warning without failing the update. Rerun `pi update --fork --force` to
+retry cleanup on the same commit, or the next `pi update --fork` that builds a new
+commit retries cleanup.
 
 `pi update --fork` accepts upstream catalog removals and prints every removed model
 ID. Older fork installations may still refuse them: use the printed

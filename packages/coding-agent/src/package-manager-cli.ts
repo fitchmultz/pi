@@ -397,7 +397,7 @@ Options:
   --extension <source>    Update one package only
   -a, --approve           Trust project-local files for this command
   -na, --no-approve       Ignore project-local files for this command
-  --force                 Reinstall pi even if the current version is latest
+  --force                 Reinstall pi or rebuild the fork even if already current
 
 Short forms:
   ${APP_NAME} update                Update pi only
@@ -416,7 +416,9 @@ PI_SELF_UPDATE_COMMAND or selfUpdateCommand selects a custom updater.
 gzip, tmux, and network access. Update Node first; the updater does not update it.
 Supports macOS/Linux/Termux arm64/x64, not Windows, ordinary npm directories, or other
 install methods. No existing checkout needed. Does not update extensions/settings
-or restart running sessions. Cannot combine with other targets or --force.
+or restart running sessions. Cannot combine with other targets. Skips
+rebuilding when the installed release already matches fork main and the active
+Node, platform, and arch unless --force is passed.
 After activation, removes this updater's older releases beyond the newest 5; selected,
 .previous, legacy and detected running releases are kept. Cleanup needs lsof and ps;
 failures only warn. Relaunch older sessions to enable their release protection.
@@ -587,8 +589,8 @@ function parsePackageCommand(args: string[]): PackageCommandOptions | undefined 
 		}
 
 		if (forkFlag) {
-			if (selfFlag || extensionsFlag || modelsFlag || allFlag || extensionFlagSource || source || force) {
-				conflictingOptions = conflictingOptions ?? "--fork cannot be combined with other update targets or --force";
+			if (selfFlag || extensionsFlag || modelsFlag || allFlag || extensionFlagSource || source) {
+				conflictingOptions = conflictingOptions ?? "--fork cannot be combined with other update targets";
 			}
 			updateTarget = { type: "fork" };
 		} else if (modelsFlag) {
@@ -1061,7 +1063,7 @@ export async function handlePackageCommand(
 
 	if (options.command === "update" && options.updateTarget?.type === "fork") {
 		try {
-			await runForkUpdate();
+			await runForkUpdate({ force: options.force });
 		} catch (error: unknown) {
 			console.error(chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`));
 			process.exitCode = 1;
@@ -1210,7 +1212,7 @@ export async function handlePackageCommand(
 						settingsManager.getGlobalSettings().selfUpdateCommand,
 					);
 					if (!configuredSelfUpdateArgv && getForkRelease()) {
-						await runForkUpdate();
+						await runForkUpdate({ force: options.force });
 						return true;
 					}
 					// A configured command is explicit user intent, so it replaces the managed install path too.

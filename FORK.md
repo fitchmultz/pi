@@ -523,14 +523,16 @@ Running sessions keep their runtime. To load a newly selected release, fully rel
 `pi restart` from a session that follows the selector. `pi restart --runtime <package dir>` tries
 a staged release without selecting it. See [restart.md](packages/coding-agent/docs/restart.md).
 
-The fork updater does the fetch, build, stage and activate steps for you from the latest
-`fitchmultz/pi` main. It only updates an existing selector installation and leaves the previous
-release selectable at `<selector>.previous`. Unlike the manual installer's default, this
-owner-authorized updater accepts routine catalog removals and prints every removed ID;
+The fork updater checks remote `main` against the active receipt (`commit`, Node version,
+platform and architecture) and skips cloning or building when they match unless `--force`
+is passed; otherwise it does the fetch, build, stage and activate steps for you from the
+latest `fitchmultz/pi` main. It only updates an existing selector installation and leaves the
+previous release selectable at `<selector>.previous`. Unlike the manual installer's default,
+this owner-authorized updater accepts routine catalog removals and prints every removed ID;
 malformed or empty catalogs still fail closed. Its selector is
 `$(npm root -g)/@earendil-works/pi-coding-agent`; on Termux it is
 `~/.local/share/npm-global/lib/node_modules/@earendil-works/pi-coding-agent` with `~/.local/bin/pi`.
-After a successful activation, including a same-commit reuse, it runs the pinned installer's
+After a successful activation, including a `--force` same-commit rebuild or reuse, it runs the pinned installer's
 `--prune --keep 5` with the same `--selector` and `--releases`. The installer's ownership,
 selected, `.previous` and `lsof`/`ps` checks still apply; legacy releases count toward the five
 but are never removed. Fork CLI and SDK processes keep their release receipt open so `lsof`
