@@ -309,10 +309,9 @@ Add `--local` or `-l` to `install`, `remove`, `uninstall`, or `config` to use pr
 ### Update Pi or packages
 
 Running `pi update` without a target updates Pi itself. On an immutable fork
-installation, it fetches, builds, validates, and selects fork main through the
-existing fork updater. This also applies to `--self`, positional `self` or `pi`,
-and the Pi update in `--all`. An explicitly configured custom updater takes
-precedence.
+installation, it updates from fork main through the existing fork updater. This
+also applies to `--self`, positional `self` or `pi`, and the Pi update in `--all`.
+An explicitly configured custom updater takes precedence.
 
 | Task | Command |
 |---|---|
@@ -323,9 +322,11 @@ precedence.
 | Refresh model catalogs | `pi update --models` |
 | Update Pi and all installed packages | `pi update --all` |
 
-Add `--force` to reinstall an ordinary package-manager installation when the
-selected update includes Pi. The fork updater reuses validated immutable releases;
-`--force` does not rebuild them.
+On an immutable fork installation, the fork updater checks remote `main` against
+the active release receipt (`commit`, Node version, platform, and architecture)
+before downloading or building and skips when they match. Add `--force` to
+reinstall an ordinary package-manager installation or force a fork rebuild and
+re-hydration on the same commit.
 
 `--fork` explicitly selects the fork updater for
 [immutable fork installations](quickstart.md#fork-installation), including when
@@ -342,7 +343,7 @@ The fetched commit is pinned before building. Builds use an isolated home, and
 selection changes only after validation succeeds. Extensions, settings,
 credentials, and running sessions are unchanged. Relaunch Pi or use a managed
 restart to load the selected release. `--fork` cannot combine with another update
-target, a source, `--extension`, or `--force`. Exit status is `0` on success/help
+target, a source, or `--extension`. Exit status is `0` on success/help
 and `1` for invalid options or a failed update.
 
 `pi update` cannot update Pi when another package manager provides it, such as Nix. Update Pi with that package manager, for example `nix profile upgrade pi`. Package and model catalog updates still work.
