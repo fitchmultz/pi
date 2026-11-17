@@ -10,6 +10,7 @@ import {
 	type createBashTool,
 	createLocalShellOperations,
 	createShellToolDefinition,
+	DEFAULT_TIMEOUT_SECONDS,
 	type ShellToolConfig,
 } from "./bash.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -26,7 +27,10 @@ const WINDOWS_POWERSHELL_EXIT_SUFFIX =
 
 export const powershellToolSystemPromptContribution = {
 	snippet: "Execute PowerShell commands",
-	guidelines: ["You can inspect PI_* environment variables for current model and session details."],
+	guidelines: [
+		"You can inspect PI_* environment variables for current model and session details.",
+		`A command without an explicit timeout stops after ${DEFAULT_TIMEOUT_SECONDS} seconds; pass a timeout for longer foreground work, and use background_command for long builds, tests, and watches.`,
+	],
 } as const;
 
 export type PowerShellOperations = BashOperations;

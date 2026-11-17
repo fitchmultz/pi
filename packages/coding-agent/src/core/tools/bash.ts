@@ -20,14 +20,25 @@ import {
 	type TruncationResult,
 } from "./truncate.ts";
 
+/**
+ * Foreground commands without an explicit timeout stop after this long, so a silent hang cannot block a
+ * session until someone aborts it; longer work belongs in background_command.
+ */
+export const DEFAULT_TIMEOUT_SECONDS = 300;
+
 const bashSchema = Type.Object({
 	command: Type.String({ description: "Shell command to execute" }),
-	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (optional, no default timeout)" })),
+	timeout: Type.Optional(
+		Type.Number({ description: `Timeout in seconds (optional, default ${DEFAULT_TIMEOUT_SECONDS})` }),
+	),
 });
 
 export const bashToolSystemPromptContribution = {
 	snippet: "Execute bash commands (ls, grep, find, etc.)",
-	guidelines: ["You can inspect PI_* environment variables for current model and session details."],
+	guidelines: [
+		"You can inspect PI_* environment variables for current model and session details.",
+		`A command without an explicit timeout stops after ${DEFAULT_TIMEOUT_SECONDS} seconds; pass a timeout for longer foreground work, and use background_command for long builds, tests, and watches.`,
+	],
 } as const;
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -129,7 +140,7 @@ export function createShellToolDefinition(
 	return {
 		name: config.name,
 		label: config.label,
-		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
+		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Commands run without an explicit timeout stop after ${DEFAULT_TIMEOUT_SECONDS} seconds.`,
 		promptSnippet: config.promptSnippet,
 		promptGuidelines: exposeSessionEnvironment && config.promptGuidelines ? [...config.promptGuidelines] : undefined,
 		parameters: bashSchema,
@@ -242,7 +253,7 @@ export function createShellToolDefinition(
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
-						timeout,
+						timeout: timeout ?? DEFAULT_TIMEOUT_SECONDS,
 						env: spawnContext.env,
 					});
 					exitCode = result.exitCode;
@@ -255,6 +266,9 @@ export function createShellToolDefinition(
 					if (err instanceof Error && err.message.startsWith("timeout:")) {
 						const timeoutSecs = err.message.split(":")[1];
 						let status = `Command timed out after ${timeoutSecs} seconds`;
+						if (timeout === undefined) {
+							status += " (the default limit; pass an explicit timeout for longer commands)";
+						}
 						if (err instanceof ShellTimeoutError && err.shellExit) {
 							// Both facts matter: the command's real result, and that its background processes
 							// were still writing output when the timeout hit (#11613).
