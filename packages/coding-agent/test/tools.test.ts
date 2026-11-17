@@ -751,7 +751,7 @@ describe("Coding Agent Tools", () => {
 
 				let error: unknown;
 				try {
-					await bash.execute(`test-call-${testCase.error}`, { command: "chatty-fail" });
+					await bash.execute(`test-call-${testCase.error}`, { command: "chatty-fail", timeout: 5 });
 				} catch (err) {
 					error = err;
 				}
@@ -768,6 +768,35 @@ describe("Coding Agent Tools", () => {
 				expect(fullOutput).toContain("1\n2\n3");
 				expect(fullOutput).toContain("2998\n2999\n3000");
 			}
+		});
+
+		// Foreground commands without an explicit timeout used to run unbounded (PIF-201).
+		it("should stop commands without an explicit timeout at the default limit", async () => {
+			const seen: (number | undefined)[] = [];
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, options) => {
+					seen.push(options.timeout);
+					return { exitCode: 0 };
+				},
+			};
+			const bash = createBashTool(testDir, { operations });
+
+			await bash.execute("test-call-default-timeout", { command: "anything" });
+			await bash.execute("test-call-explicit-timeout", { command: "anything", timeout: 12 });
+			expect(seen).toEqual([300, 12]);
+		});
+
+		it("should name the default limit when a timeout the caller never set expires", async () => {
+			const operations: BashOperations = {
+				exec: async () => {
+					throw new Error("timeout:300");
+				},
+			};
+			const bash = createBashTool(testDir, { operations });
+
+			await expect(bash.execute("test-call-default-timeout-expired", { command: "hang" })).rejects.toThrow(
+				"Command timed out after 300 seconds (the default limit; pass an explicit timeout for longer commands)",
+			);
 		});
 
 		it("should throw error when cwd does not exist", async () => {

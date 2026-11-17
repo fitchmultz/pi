@@ -40,5 +40,8 @@ describe("built-in tool system prompt contributions", () => {
 		const definition = createDefinition("/workspace", { exposeSessionEnvironment: false });
 
 		expect(definition.promptGuidelines).toBeUndefined();
+		expect(definition.description).toContain("without an explicit timeout stop after 300 seconds");
+		expect(definition.description).toContain("pass a timeout for longer foreground work");
+		expect(definition.description).toContain("use background_command for long builds, tests, and watches");
 	});
 });
