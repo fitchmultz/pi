@@ -40,7 +40,7 @@ export interface StaleSource extends CodeSource {
 }
 
 /** Identity of each source right before its code was first imported, for as long as the extension cache keeps that code. */
-const loadedSources = new Map<string, Promise<SourceIdentity>>();
+const loadedSources = new Map<string, SourceIdentity>();
 
 /** The code source of an extension entry file with `sourceInfo`; without source info no package supplied it. */
 export function getCodeSource(sourceInfo: SourceInfo | undefined, entryPath: string): CodeSource {
@@ -50,13 +50,21 @@ export function getCodeSource(sourceInfo: SourceInfo | undefined, entryPath: str
 }
 
 /**
- * Remember what `source` looks like on disk. The extension loader calls this right before it imports code
- * of the source, so a change that lands in between is reported as stale instead of being missed. The
- * first call per source wins: a package's later entry files load next to the code already imported.
+ * Run `importCode`, which imports code of `source`, and remember what the source looked like on disk right
+ * before. Reading first means that a change which lands in between is reported as stale instead of being
+ * missed. An import that fails or yields no code remembers nothing, so the repaired source is not compared
+ * with the broken one later. The first import per source wins: a package's later entry files load next to
+ * the code already imported.
  */
-export async function rememberLoadedSource(source: CodeSource): Promise<void> {
-	if (!loadedSources.has(source.path)) loadedSources.set(source.path, readSourceIdentity(source));
-	await loadedSources.get(source.path);
+export async function importRemembered<T>(
+	source: CodeSource,
+	importCode: () => Promise<T | undefined>,
+): Promise<T | undefined> {
+	if (loadedSources.has(source.path)) return importCode();
+	const identity = await readSourceIdentity(source);
+	const code = await importCode();
+	if (code !== undefined && !loadedSources.has(source.path)) loadedSources.set(source.path, identity);
+	return code;
 }
 
 /** Forget every remembered source. The extension cache was cleared, so the next load imports the code again. */
@@ -65,7 +73,7 @@ export function forgetLoadedSources(): void {
 }
 
 /** The identity of `source` as this process loaded it, or as it is on disk now when it imported no code of it. */
-export function describeLoadedSource(source: CodeSource): Promise<SourceIdentity> {
+export async function describeLoadedSource(source: CodeSource): Promise<SourceIdentity> {
 	return loadedSources.get(source.path) ?? readSourceIdentity(source);
 }
 
@@ -75,12 +83,12 @@ export async function findStaleSources(extensions: Extension[]): Promise<StaleSo
 	const compared = new Map<string, Promise<StaleSource[]>>();
 	for (const { resolvedPath, sourceInfo } of extensions) {
 		const source = getCodeSource(sourceInfo, resolvedPath);
-		const remembered = loadedSources.get(source.path);
+		const loaded = loadedSources.get(source.path);
 		// Extensions built from a factory were never imported from disk.
-		if (!remembered || compared.has(source.path)) continue;
+		if (!loaded || compared.has(source.path)) continue;
 		compared.set(
 			source.path,
-			Promise.all([remembered, readSourceIdentity(source)]).then(([loaded, current]) =>
+			readSourceIdentity(source).then((current) =>
 				loaded.version === current.version && loaded.commit === current.commit && loaded.sha256 === current.sha256
 					? []
 					: [{ ...source, source: sourceInfo.source, scope: sourceInfo.scope, loaded, current }],

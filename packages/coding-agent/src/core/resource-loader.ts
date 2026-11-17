@@ -14,6 +14,7 @@ import { createEventBus, type EventBus } from "./event-bus.ts";
 import {
 	clearExtensionCache,
 	createExtensionRuntime,
+	type ImportWrapper,
 	loadExtensionFromFactory,
 	loadExtensionsCached,
 } from "./extensions/loader.ts";
@@ -25,7 +26,7 @@ import type {
 	LoadExtensionsResult,
 } from "./extensions/types.ts";
 import { findGitPaths } from "./footer-data-provider.ts";
-import { getCodeSource, rememberLoadedSource } from "./loaded-sources.ts";
+import { getCodeSource, importRemembered } from "./loaded-sources.ts";
 import {
 	DefaultPackageManager,
 	type PackageInstallFailure,
@@ -796,7 +797,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			this.cwd,
 			this.eventBus,
 			undefined,
-			this.rememberBeforeImport(settingsMetadata),
+			this.rememberImports(settingsMetadata),
 		);
 		mergeExtensionWarnings(extensionsResult, [...installWarnings, ...packageWarnings]);
 		if (!options.includeInlineFactories) {
@@ -820,11 +821,12 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return getResourcePathKey(this.resolveExtensionLoadPath(path));
 	}
 
-	/** Remember an extension's package or entry file as it is on disk right before the extension is imported. */
-	private rememberBeforeImport(metadataByPath: Map<string, PathMetadata>): (extensionPath: string) => Promise<void> {
-		return (extensionPath) =>
-			rememberLoadedSource(
+	/** An import wrapper that remembers each imported extension's package or entry file as it is on disk right before the import. */
+	private rememberImports(metadataByPath: Map<string, PathMetadata>): ImportWrapper {
+		return (extensionPath, importFactory) =>
+			importRemembered(
 				getCodeSource(this.findSourceInfoForPath(extensionPath, undefined, metadataByPath), extensionPath),
+				importFactory,
 			);
 	}
 
@@ -836,7 +838,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			this.cwd,
 			this.eventBus,
 			runtime,
-			this.rememberBeforeImport(this.resourceMetadataByPath),
+			this.rememberImports(this.resourceMetadataByPath),
 		);
 		for (const path of paths.filter(isBuiltinPath)) {
 			const builtin = this.builtinExtensions.get(path.slice(BUILTIN_PATH_PREFIX.length));
