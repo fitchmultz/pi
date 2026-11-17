@@ -121,6 +121,21 @@ New input is anything the list does not cover: a prompt or message from the host
 
 After `abort()`, and in a session without a model, a job's notice is recorded without starting a run. The job is listed until then.
 
+### Stale extension code
+
+A process imports each extension once and keeps that code across new, resumed and forked sessions. `getStaleSources()` lists the loaded packages and extensions whose code on disk has changed since:
+
+```typescript
+const stale = await session.getStaleSources();
+for (const { kind, source, loaded, current } of stale) {
+  console.log(`${kind} ${source}: loaded ${JSON.stringify(loaded)}, on disk ${JSON.stringify(current)}`);
+}
+```
+
+Each item has `kind` (`package` or `extension`), `source`, `scope` and `path` as in the [runtime record](session-format.md#runtime-record-piruntime), and the identities `loaded` and `current`: `version` and `commit` for a package, `sha256` of the entry file for an extension. The list is empty after `session.reload()`, which imports the extensions again, and for extensions passed as factories. Asking reads the disk and starts one `git` process per loaded git package; it changes nothing. [Extension code that changed on disk](restart.md#extension-code-that-changed-on-disk) lists what the comparison misses.
+
+A custom `ResourceLoader` that does not load extensions through `DefaultResourceLoader` reports nothing.
+
 ## Subscribing to events
 
 Subscribe before prompting when the host needs streamed output:

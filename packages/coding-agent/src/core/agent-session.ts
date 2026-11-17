@@ -130,6 +130,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { type BeforeAgentStartTrigger, emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { findStaleSources, type StaleSource } from "./loaded-sources.ts";
 import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
 import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -3402,6 +3403,15 @@ export class AgentSession {
 			}),
 		);
 		return [...runs, ...reported];
+	}
+
+	/**
+	 * The loaded packages and extensions whose code on disk is no longer the code this process imported.
+	 * The process keeps the imported code across `/new`, `/resume` and `/fork`; `reload()` imports again.
+	 * Asking reads the disk and changes nothing.
+	 */
+	getStaleSources(): Promise<StaleSource[]> {
+		return findStaleSources(this._resourceLoader.getExtensions().extensions);
 	}
 
 	// =========================================================================

@@ -16,13 +16,15 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MANAGED_CLI_ENV, RESTART_SOCKET_ENV } from "../src/cli/restart-protocol.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import type { ExtensionFactory } from "../src/core/extensions/types.ts";
+import { clearExtensionCache } from "../src/core/extensions/loader.ts";
+import type { ExtensionFactory, ExtensionUIContext } from "../src/core/extensions/types.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import restartExtension, { createManagedRestart } from "../src/extensions/restart/index.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createTestUiContext } from "./suite/harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -33,7 +35,14 @@ afterEach(async () => {
 // Vitest's fork supplies real IPC admission; the actual owner creates/cleans its native socket.
 // No launcher replacement or installed runtime is involved in this source-level regression.
 async function managedFixture(
-	options: { sessionFile?: string; extensions?: ExtensionFactory[]; mode?: "tui" | "print" } = {},
+	options: {
+		sessionFile?: string;
+		extensions?: ExtensionFactory[];
+		/** Extension files loaded from disk, as `-e` loads them. */
+		extensionPaths?: string[];
+		mode?: "tui" | "print";
+		ui?: Partial<ExtensionUIContext>;
+	} = {},
 ) {
 	const root = mkdtempSync(join(tmpdir(), "pi-restart-guidance-"));
 	const disconnectHandlers = new Set(process.listeners("disconnect"));
@@ -42,6 +51,10 @@ async function managedFixture(
 	vi.stubEnv(MANAGED_CLI_ENV, "1");
 	const managed = createManagedRestart();
 	expect(managed).toBeDefined();
+	// The managed owner unrefs IPC, but Vitest loads modules for this worker over that channel. Without
+	// the reference, the worker exits when such a load is all it waits for, as the lazy imports of the
+	// first extension loaded from disk are.
+	process.channel?.ref();
 	const faux = fauxProvider();
 	const sessionManager = options.sessionFile
 		? SessionManager.open(options.sessionFile)
@@ -57,6 +70,7 @@ async function managedFixture(
 		noPromptTemplates: true,
 		noThemes: true,
 		noContextFiles: true,
+		additionalExtensionPaths: options.extensionPaths,
 		extensionFactories: [
 			(pi) => {
 				pi.registerProvider("faux", {
@@ -101,17 +115,17 @@ async function managedFixture(
 		for (const handler of process.listeners("disconnect")) {
 			if (!disconnectHandlers.has(handler)) process.removeListener("disconnect", handler);
 		}
-		// The managed owner unrefs IPC; Vitest still needs its worker channel after this fixture.
-		process.channel?.ref();
 	};
 	cleanups.push(async () => {
 		await close();
 		rmSync(root, { recursive: true, force: true });
 	});
 	let shutdownRequested = false;
+	// As the CLI does before the mode binds the extensions.
+	managed!.bindSession(() => h.session);
 	await h.session.bindExtensions({
 		mode: options.mode ?? "tui",
-		uiContext: createTestUiContext(),
+		uiContext: createTestUiContext(options.ui),
 		shutdownHandler: () => {
 			shutdownRequested = true;
 		},
@@ -459,5 +473,54 @@ describe("actual managed restart guidance", () => {
 			});
 		}
 		await expectStableRequests(managed.requests);
+	});
+});
+
+describe("stale extension code in a managed session", () => {
+	/** A managed session that loaded one extension file from disk, and the latest `restart` footer status it set. */
+	async function staleFixture() {
+		// The status is colored, as the interactive mode's theme colors it.
+		initTheme("dark");
+		const root = mkdtempSync(join(tmpdir(), "pi-restart-stale-"));
+		cleanups.push(async () => {
+			clearExtensionCache();
+			rmSync(root, { recursive: true, force: true });
+		});
+		const extension = join(root, "loose.ts");
+		writeFileSync(extension, "export default function () {}\n");
+		let status: string | undefined = "never set";
+		const f = await managedFixture({
+			extensionPaths: [extension],
+			ui: {
+				setStatus: (key, text) => {
+					if (key === "restart") status = text;
+				},
+			},
+		});
+		const prompt = async (text: string) => {
+			f.faux.setResponses([f.response()]);
+			await f.h.session.prompt(text);
+		};
+		const change = () => writeFileSync(extension, "export default function () {}\n// changed\n");
+		return { ...f, prompt, change, status: () => status };
+	}
+
+	it("shows a footer status once loaded code changed on disk, clears it on reload, and sends the model nothing", async () => {
+		const f = await staleFixture();
+		await f.prompt("Before the change");
+		await vi.waitFor(() => expect(f.status()).toBeUndefined());
+
+		f.change();
+		await f.prompt("After the change");
+		await vi.waitFor(() => expect(f.status()).toContain("extensions changed on disk: /restart"));
+		await f.prompt("With the status shown");
+
+		// Same tools and system prompt, and each request only extends the one before it.
+		expect(f.requests).toHaveLength(3);
+		await expectStableRequests(f.requests);
+		expect(JSON.stringify(f.requests)).not.toContain("changed on disk");
+
+		await f.h.session.reload();
+		await vi.waitFor(() => expect(f.status()).toBeUndefined());
 	});
 });

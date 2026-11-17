@@ -27,6 +27,14 @@ import { writeWorkingSession } from "../../core/working-session.ts";
 const guidance =
 	'Use /reload to apply changed extension source and resources. For core/runtime or clean-process changes, use bash: pi restart --message "what to continue after restarting". Keep the working runtime and extension files intact; activate staged paths for rollback. Run pi restart --help for options. Restart waits for final idle and does not replay completed commands.';
 
+/**
+ * How long a session waits between comparing its loaded extension code with the disk. Each comparison
+ * starts one `git` process per loaded git package; with 26 installed packages it took 0.1 s of CPU when
+ * measured. Once a minute, that is about 0.17% of one core for each open session, and an idle session
+ * notices a change within a minute. A session that is used also checks after every agent run.
+ */
+const STALE_CHECK_INTERVAL_MS = 60_000;
+
 export interface RestartInputState {
 	busy: boolean;
 	pendingInput: boolean;
@@ -41,6 +49,8 @@ export interface ManagedRestart {
 	/** Present only under a launcher that acknowledges readiness. */
 	readonly host: ManagedHost | undefined;
 	bindInput(check: () => RestartInputState): void;
+	/** Supplies the session whose loaded extension code is compared with the disk; it changes on `/new`, `/resume` and `/fork`. */
+	bindSession(current: () => AgentSession): void;
 	ready(): Promise<void>;
 	start(): void;
 	interrupt(reason?: string): void;
@@ -125,6 +135,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	process.once("disconnect", () => process.kill(process.pid, "SIGTERM"));
 	process.channel?.unref();
 	let input = (): RestartInputState => ({ busy: true, pendingInput: false });
+	let session: (() => AgentSession) | undefined;
 	let ctx: ExtensionContext | undefined;
 	let api: ExtensionAPI | undefined;
 	let started = false;
@@ -132,6 +143,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	let pending: RestartRequest | undefined;
 	let workingSession: string | undefined;
 	let timer: NodeJS.Timeout | undefined;
+	let staleTimer: NodeJS.Timeout | undefined;
 	let server: Server | undefined;
 	let directory: string | undefined;
 	let socketPath: string | undefined;
@@ -152,6 +164,7 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	const cleanup = () => {
 		startupWarning = undefined;
 		clearTimeout(timer);
+		clearTimeout(staleTimer);
 		for (const socket of sockets) socket.destroy();
 		sockets.clear();
 		server?.close();
@@ -159,6 +172,22 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		if (process.env[RESTART_SOCKET_ENV] === socketPath) delete process.env[RESTART_SOCKET_ENV];
 		if (directory) rmSync(directory, { recursive: true, force: true });
 		ctx = undefined;
+	};
+	/** Show in the footer whether loaded extension code has changed on disk, and look again later. */
+	const checkStale = async () => {
+		const context = ctx;
+		if (!context || !session) return;
+		const stale = await session().getStaleSources();
+		// The session was replaced or shut down meanwhile; its successor runs its own check.
+		if (ctx !== context) return;
+		context.ui.setStatus(
+			"restart",
+			stale.length > 0 ? context.ui.theme.fg("warning", "extensions changed on disk: /restart") : undefined,
+		);
+		clearTimeout(staleTimer);
+		staleTimer = setTimeout(checkStale, STALE_CHECK_INTERVAL_MS);
+		// The check must not keep a process alive that is otherwise done.
+		staleTimer.unref();
 	};
 	const attempt = () => {
 		if (!pending || !ctx || closing) return;
@@ -264,6 +293,11 @@ export function createManagedRestart(): ManagedRestart | undefined {
 				if (started) warn();
 				else startupWarning = warn;
 			}
+			// A new session's footer starts without statuses, also when this process already ran stale code.
+			void checkStale();
+		});
+		pi.on("agent_settled", () => {
+			void checkStale();
 		});
 		pi.on("message_end", (event) => {
 			if (event.message.role === "assistant" && event.message.stopReason === "aborted")
@@ -316,6 +350,9 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		host,
 		bindInput(check) {
 			input = check;
+		},
+		bindSession(current) {
+			session = current;
 		},
 		async ready() {
 			if (handoff && !ctx) throw new Error("Managed restart extension did not initialize");

@@ -14,6 +14,7 @@ import { createEventBus, type EventBus } from "./event-bus.ts";
 import {
 	clearExtensionCache,
 	createExtensionRuntime,
+	type ImportWrapper,
 	loadExtensionFromFactory,
 	loadExtensionsCached,
 } from "./extensions/loader.ts";
@@ -25,6 +26,7 @@ import type {
 	LoadExtensionsResult,
 } from "./extensions/types.ts";
 import { findGitPaths } from "./footer-data-provider.ts";
+import { getCodeSource, importRemembered } from "./loaded-sources.ts";
 import {
 	DefaultPackageManager,
 	type PackageInstallFailure,
@@ -788,7 +790,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 			resolvedPaths.installFailures,
 			cliExtensionPaths.installFailures,
 		);
-		const extensionsResult = await loadExtensionsCached(extensionPaths, this.cwd, this.eventBus);
+		// The final pass reports `-e` sources as extensions of their own, so only settings packages are packages here.
+		const settingsMetadata = new Map(resolvedPaths.extensions.map((resource) => [resource.path, resource.metadata]));
+		const extensionsResult = await loadExtensionsCached(
+			extensionPaths,
+			this.cwd,
+			this.eventBus,
+			undefined,
+			this.rememberImports(settingsMetadata),
+		);
 		mergeExtensionWarnings(extensionsResult, [...installWarnings, ...packageWarnings]);
 		if (!options.includeInlineFactories) {
 			return extensionsResult;
@@ -811,6 +821,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 		return getResourcePathKey(this.resolveExtensionLoadPath(path));
 	}
 
+	/** An import wrapper that remembers each imported extension's package or entry file as it is on disk right before the import. */
+	private rememberImports(metadataByPath: Map<string, PathMetadata>): ImportWrapper {
+		return (extensionPath, importFactory) =>
+			importRemembered(
+				getCodeSource(this.findSourceInfoForPath(extensionPath, undefined, metadataByPath), extensionPath),
+				importFactory,
+			);
+	}
+
 	/** Load extension paths: files from disk and `builtin:<name>` paths from the built-in extensions. */
 	private async loadExtensionPaths(paths: string[], runtime?: ExtensionRuntime): Promise<LoadExtensionsResult> {
 		const isBuiltinPath = (path: string) => path.startsWith(BUILTIN_PATH_PREFIX);
@@ -819,6 +838,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 			this.cwd,
 			this.eventBus,
 			runtime,
+			this.rememberImports(this.resourceMetadataByPath),
 		);
 		for (const path of paths.filter(isBuiltinPath)) {
 			const builtin = this.builtinExtensions.get(path.slice(BUILTIN_PATH_PREFIX.length));

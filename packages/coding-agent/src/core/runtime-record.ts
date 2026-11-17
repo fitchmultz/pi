@@ -4,15 +4,12 @@
  * when. It is a plain custom entry, so it never enters model context.
  */
 
-import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { getBuildInfo } from "../config.ts";
 import type { Extension, ExtensionMode, SessionStartEvent } from "./extensions/types.ts";
+import { describeLoadedSource } from "./loaded-sources.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import { getSourcePackageKey, isSyntheticPath, type SourceInfo, type SourceScope } from "./source-info.ts";
+import { getSourcePackageKey, type SourceInfo, type SourceScope } from "./source-info.ts";
 
 /** Custom entry type of the runtime record. */
 export const RUNTIME_RECORD_ENTRY = "pi.runtime";
@@ -24,9 +21,9 @@ export interface RuntimeRecordPackage {
 	scope: SourceScope;
 	/** Directory the package's resources were loaded from. */
 	path: string;
-	/** `version` of the `package.json` in `path`, if there is one. */
+	/** `version` of the `package.json` in `path`, if there is one, when the package's extension code was imported. */
 	version?: string;
-	/** Checked-out commit, if `path` is the root of a git checkout. */
+	/** Checked-out commit, if `path` is the root of a git checkout, when the package's extension code was imported. */
 	commit?: string;
 }
 
@@ -37,7 +34,7 @@ export interface RuntimeRecordExtension {
 	/** Where it was found: `auto` (extension directories), `local` (settings), `cli` (`-e`), `builtin` or `inline`. */
 	source: string;
 	scope: SourceScope;
-	/** SHA-256 of the entry file's bytes. Absent for names without a file. */
+	/** SHA-256 of the entry file's bytes when it was imported. Absent for names without a file. */
 	sha256?: string;
 }
 
@@ -104,59 +101,27 @@ export async function describeRuntime(
 		contextFiles: resourceLoader.getAgentsFiles().agentsFiles.map(({ path, content }) => ({
 			path,
 			bytes: Buffer.byteLength(content),
-			sha256: sha256(content),
+			sha256: createHash("sha256").update(content).digest("hex"),
 		})),
 	};
 }
 
+/** A package as its extension code was imported, or as it is on disk now when it supplied no extension. */
 async function describePackage({
 	source,
 	scope,
 	baseDir,
 }: SourceInfo & { baseDir: string }): Promise<RuntimeRecordPackage> {
-	const [version, commit] = await Promise.all([readPackageVersion(baseDir), readGitHead(baseDir)]);
+	return { source, scope, path: baseDir, ...(await describeLoadedSource({ kind: "package", path: baseDir })) };
+}
+
+/** An extension that no package supplied, as its entry file was imported. */
+async function describeExtension({ resolvedPath, sourceInfo }: Extension): Promise<RuntimeRecordExtension> {
+	const { source, scope } = sourceInfo;
 	return {
+		path: resolvedPath,
 		source,
 		scope,
-		path: baseDir,
-		...(version === undefined ? {} : { version }),
-		...(commit === undefined ? {} : { commit }),
+		...(await describeLoadedSource({ kind: "extension", path: resolvedPath })),
 	};
-}
-
-async function readPackageVersion(packageDir: string): Promise<string | undefined> {
-	try {
-		const manifest: unknown = JSON.parse(await readFile(join(packageDir, "package.json"), "utf8"));
-		const version = (manifest as { version?: unknown } | null)?.version;
-		return typeof version === "string" ? version : undefined;
-	} catch {
-		// No manifest, or one that does not parse: the package has no version to record.
-		return undefined;
-	}
-}
-
-/** The commit `git` reports for a checkout rooted at `dir`, as the package manager reads it. */
-function readGitHead(dir: string): Promise<string | undefined> {
-	// Packages inside another checkout, such as npm installs, are not asked: its commit is not theirs.
-	if (!existsSync(join(dir, ".git"))) return Promise.resolve(undefined);
-	return new Promise((resolve) => {
-		execFile("git", ["rev-parse", "HEAD"], { cwd: dir }, (error, stdout) => {
-			resolve(error ? undefined : stdout.trim() || undefined);
-		});
-	});
-}
-
-async function describeExtension(extension: Extension): Promise<RuntimeRecordExtension> {
-	const { source, scope } = extension.sourceInfo;
-	if (isSyntheticPath(extension.path)) return { path: extension.path, source, scope };
-	try {
-		return { path: extension.resolvedPath, source, scope, sha256: sha256(await readFile(extension.resolvedPath)) };
-	} catch {
-		// An extension built from a factory can carry a path that is no file, as SDK hosts and tests do.
-		return { path: extension.resolvedPath, source, scope };
-	}
-}
-
-function sha256(content: string | Buffer): string {
-	return createHash("sha256").update(content).digest("hex");
 }
