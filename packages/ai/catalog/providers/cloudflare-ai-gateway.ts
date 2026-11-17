@@ -65,6 +65,17 @@ export default defineProvider({
 				baseUrl: CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 				compat: { sendSessionAffinityHeaders: true },
 			}));
+		// GPT-6.2 Astra and Sol are available on the /openai passthrough before models.dev
+		// lists them for the gateway. Reuse OpenAI's limits and pricing, without its
+		// host-specific defaults.
+		const gpt62 = ctx
+			.providerModels("openai")
+			.filter((model) => (model.id === "gpt-6.2-astra" || model.id === "gpt-6.2-sol") && !ids.has(model.id))
+			.map((model) => ({
+				...model,
+				provider: "cloudflare-ai-gateway",
+				baseUrl: CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
+			}));
 		// The gateway proxies Workers AI through its OpenAI-compatible /compat endpoint,
 		// but models.dev may omit or intermittently drop those `workers-ai/*` entries
 		// from the AI Gateway catalog. Mirror the Workers AI catalog under the documented
@@ -76,7 +87,7 @@ export default defineProvider({
 			include: (source) => !ids.has(`workers-ai/${source.id}`),
 			map: (model) => ({ ...model, id: `workers-ai/${model.id}` }),
 		});
-		return [...models, ...fable, ...mirrored];
+		return [...models, ...fable, ...gpt62, ...mirrored];
 	},
 	compat: {
 		"openai-completions": {

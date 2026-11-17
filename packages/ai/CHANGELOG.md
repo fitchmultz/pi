@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `google-decisions` classifier API for Google's Gemini Decisions API (`POST /v1beta/decisions`), with `gemini-decision-1` as a multimodal classifier model of the `google` provider.
+- Added GPT-6.2 Astra and GPT-6.2 Sol on Cloudflare AI Gateway's `/openai` passthrough, with OpenAI's limits and pricing and the mid-conversation system message and additional-tools defaults of the other GPT-6 models.
 - Added Claude Fable 5.2 on Cloudflare AI Gateway, including adaptive thinking and mid-conversation system, tool, and effort updates. Fable 5.2 requests on Anthropic and Cloudflare AI Gateway omit `temperature`.
 - Added optional non-secret `AssistantMessage.cacheIdentity` metadata for provider-scoped credential and cache-owner diagnostics.
 - Added an optional `Models.streamSimple()` prepared-request observer, forwarded by `withClientIdentity()`, for effective cache policy and dispatch timing without resolving auth twice.
