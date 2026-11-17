@@ -38,9 +38,10 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 
 const RETRYABLE_RAW_STOP_REASONS = new Set([
 	// Gemini ends an HTTP 200 stream with these finish reasons when a generated
-	// tool call cannot be parsed or validated; retrying the turn recovers transient
-	// malformed tool-call generations.
+	// tool call or reply cannot be parsed or validated; retrying the turn recovers
+	// transient malformed generations.
 	"malformed_function_call",
+	"malformed_response",
 	"unexpected_tool_call",
 ]);
 
@@ -144,9 +145,9 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"subscription_sharing_usage_unavailable",
 	"subscription_sharing_user_unavailable",
 
-	// Gemini tool-call generation failures relayed through formatted error text
-	// or OpenAI-compatible gateways without `rawStopReason`.
-	"(?<![a-z0-9_])(?:malformed_function_call|unexpected_tool_call)(?![a-z0-9_])",
+	// Gemini generation failures relayed through formatted error text or
+	// OpenAI-compatible gateways without `rawStopReason`.
+	"(?<![a-z0-9_])(?:malformed_function_call|malformed_response|unexpected_tool_call)(?![a-z0-9_])",
 ]);
 
 /**
