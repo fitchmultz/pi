@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -270,7 +271,7 @@ describe("AgentSession dynamic tool registration", () => {
 			});
 			await unloadedLoader.reload();
 
-			const { session } = await createAgentSession({
+			const created = await createAgentSession({
 				cwd: tempDir,
 				agentDir,
 				model,
@@ -288,13 +289,15 @@ describe("AgentSession dynamic tool registration", () => {
 					"__proto__",
 				],
 			});
-			expect(session.getActiveToolNames()).toEqual(["bash"]);
-			expect(warnSpy.mock.calls.map(([msg]) => String(msg))).toEqual([
+			const expectedMessages = [
 				'Tool "codemode" was requested in tools, but its built-in extension is not loaded (SDK hosts add createCodemodeExtension() to DefaultResourceLoader extensionFactories).',
 				'Tool "background_command" was requested in tools, but its built-in extension is not loaded (SDK hosts add createBackgroundCommandExtension() to DefaultResourceLoader extensionFactories).',
 				'Tool "mcp__docs__search" was requested in tools, but its built-in extension is not loaded (SDK hosts add createMcpExtension() to DefaultResourceLoader extensionFactories).',
-			]);
-			session.dispose();
+			];
+			expect(created.session.getActiveToolNames()).toEqual(["bash"]);
+			expect(created.diagnostics).toEqual(expectedMessages.map((message) => ({ type: "warning", message })));
+			expect(warnSpy.mock.calls.map(([msg]) => String(msg))).toEqual(expectedMessages);
+			created.session.dispose();
 
 			warnSpy.mockClear();
 			const modifierSession = await createAgentSession({
@@ -306,11 +309,48 @@ describe("AgentSession dynamic tool registration", () => {
 				resourceLoader: unloadedLoader,
 				tools: ["+tool_search", "+list_mcp_resources", "+mcp", "-codemode"],
 			});
-			expect(warnSpy.mock.calls.map(([msg]) => String(msg))).toEqual([
+			const expectedModifierMessages = [
 				'Tool "tool_search" was requested in tools, but its built-in extension is not loaded (SDK hosts add createToolSearchExtension() to DefaultResourceLoader extensionFactories).',
 				'Tool "list_mcp_resources" was requested in tools, but its built-in extension is not loaded (SDK hosts add createMcpExtension() to DefaultResourceLoader extensionFactories).',
-			]);
+			];
+			expect(modifierSession.diagnostics).toEqual(
+				expectedModifierMessages.map((message) => ({ type: "warning", message })),
+			);
+			expect(warnSpy.mock.calls.map(([msg]) => String(msg))).toEqual(expectedModifierMessages);
 			modifierSession.session.dispose();
+
+			warnSpy.mockClear();
+			const services = await createAgentSessionServices({
+				cwd: tempDir,
+				agentDir,
+				settingsManager,
+				resourceLoaderOptions: { noExtensions: true },
+			});
+			const fromServices = await createAgentSessionFromServices({
+				services,
+				sessionManager: SessionManager.inMemory(),
+				model,
+				tools: ["bash", "codemode"],
+			});
+			const secondFromServices = await createAgentSessionFromServices({
+				services,
+				sessionManager: SessionManager.inMemory(),
+				model,
+				tools: ["bash", "codemode"],
+			});
+			const expectedServiceDiagnostic = [
+				{
+					type: "warning" as const,
+					message:
+						'Tool "codemode" was requested in tools, but its built-in extension is not loaded (SDK hosts add createCodemodeExtension() to DefaultResourceLoader extensionFactories).',
+				},
+			];
+			expect(warnSpy).not.toHaveBeenCalled();
+			expect(fromServices.diagnostics).toEqual(expectedServiceDiagnostic);
+			expect(secondFromServices.diagnostics).toEqual(expectedServiceDiagnostic);
+			expect(services.diagnostics).toEqual(expectedServiceDiagnostic);
+			fromServices.session.dispose();
+			secondFromServices.session.dispose();
 
 			warnSpy.mockClear();
 			const excludedSession = await createAgentSession({
@@ -323,6 +363,7 @@ describe("AgentSession dynamic tool registration", () => {
 				tools: ["bash", "codemode"],
 				excludeTools: ["codemode"],
 			});
+			expect(excludedSession.diagnostics).toEqual([]);
 			expect(warnSpy).not.toHaveBeenCalled();
 			excludedSession.session.dispose();
 
@@ -345,6 +386,7 @@ describe("AgentSession dynamic tool registration", () => {
 				tools: ["bash", "codemode", "mcp__docs__search", "list_mcp_resources"],
 			});
 			expect(loadedSession.session.getActiveToolNames()).toEqual(["bash", "codemode"]);
+			expect(loadedSession.diagnostics).toEqual([]);
 			expect(warnSpy).not.toHaveBeenCalled();
 			loadedSession.session.dispose();
 		} finally {

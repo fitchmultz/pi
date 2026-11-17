@@ -13,7 +13,11 @@ import {
 	type ResourceLoaderReloadOptions,
 } from "./resource-loader.ts";
 import type { RuntimeRecordData } from "./runtime-record.ts";
-import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
+import {
+	type CreateAgentSessionOptions,
+	type CreateAgentSessionResult,
+	createAgentSessionWithDiagnostics,
+} from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { resolveWorkingSession } from "./working-session.ts";
@@ -214,7 +218,7 @@ export async function createAgentSessionServices(
 export async function createAgentSessionFromServices(
 	options: CreateAgentSessionFromServicesOptions,
 ): Promise<CreateAgentSessionResult> {
-	return createAgentSession({
+	const created = await createAgentSessionWithDiagnostics({
 		cwd: options.services.cwd,
 		agentDir: options.services.agentDir,
 		modelRuntime: options.services.modelRuntime,
@@ -233,4 +237,14 @@ export async function createAgentSessionFromServices(
 		workingSession: options.workingSession,
 		workingSessionResourcesPrepared: options.services.workingSessionResourcesPrepared,
 	});
+	for (const diagnostic of created.diagnostics) {
+		if (
+			!options.services.diagnostics.some(
+				(existing) => existing.type === diagnostic.type && existing.message === diagnostic.message,
+			)
+		) {
+			options.services.diagnostics.push(diagnostic);
+		}
+	}
+	return created;
 }

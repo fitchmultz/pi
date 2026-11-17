@@ -5,6 +5,7 @@ import { clampThinkingLevel, type Message, type Model, streamSimple } from "@ear
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession, markRuntimeStreamFunction } from "./agent-session.ts";
+import type { AgentSessionRuntimeDiagnostic } from "./agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { CacheWarmer } from "./cache-warmer.ts";
 import { getClientIdentity } from "./client-identity.ts";
@@ -70,12 +71,13 @@ function getBuiltinExtensionFactoryForTool(name: string): string | undefined {
 	return undefined;
 }
 
-function warnUnloadedBuiltinExtensionTools(
+function collectUnloadedBuiltinExtensionToolDiagnostics(
 	requestedTools: readonly string[],
 	isExcludedTool: ((name: string) => boolean) | undefined,
 	extensionsResult: LoadExtensionsResult,
 	customTools: readonly ToolDefinition[] | undefined,
-): void {
+): AgentSessionRuntimeDiagnostic[] {
+	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	for (const name of requestedTools) {
 		const factory = getBuiltinExtensionFactoryForTool(name);
 		if (!factory || isExcludedTool?.(name)) continue;
@@ -84,11 +86,13 @@ function warnUnloadedBuiltinExtensionTools(
 				(ext) => ext.tools.has(name) || (factory === "createMcpExtension()" && ext.commands.has("mcp")),
 			) || customTools?.some((tool) => tool.name === name);
 		if (!isRegistered) {
-			console.warn(
-				`Tool "${name}" was requested in tools, but its built-in extension is not loaded (SDK hosts add ${factory} to DefaultResourceLoader extensionFactories).`,
-			);
+			diagnostics.push({
+				type: "warning",
+				message: `Tool "${name}" was requested in tools, but its built-in extension is not loaded (SDK hosts add ${factory} to DefaultResourceLoader extensionFactories).`,
+			});
 		}
 	}
+	return diagnostics;
 }
 
 export interface CreateAgentSessionOptions {
@@ -164,6 +168,8 @@ export interface CreateAgentSessionResult {
 	session: AgentSession;
 	/** Extensions result (for UI context setup in interactive mode) */
 	extensionsResult: LoadExtensionsResult;
+	/** Non-fatal setup diagnostics collected while creating the session */
+	diagnostics: AgentSessionRuntimeDiagnostic[];
 	/** Warning if session was restored with a different model than saved */
 	modelFallbackMessage?: string;
 }
@@ -242,6 +248,18 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	const result = await createAgentSessionWithDiagnostics(options);
+	for (const diagnostic of result.diagnostics) {
+		if (diagnostic.type === "warning") {
+			console.warn(diagnostic.message);
+		}
+	}
+	return result;
+}
+
+export async function createAgentSessionWithDiagnostics(
+	options: CreateAgentSessionOptions = {},
+): Promise<CreateAgentSessionResult> {
 	let resourceLoader = options.resourceLoader;
 	const explicitAgentDir = options.agentDir;
 	let getWorkingSessionResources = resourceLoader?.getWorkingSessionResources;
@@ -467,10 +485,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const initialActiveToolNames = (saved?.activeTools ?? selectedToolNames ?? defaultToolNames).filter(
 		(name) => !isExcludedTool?.(name),
 	);
-	if (!saved && options.tools) {
-		const requestedTools = toolModifiers ? applyToolModifiers([], toolModifiers) : [...new Set(options.tools)];
-		warnUnloadedBuiltinExtensionTools(requestedTools, isExcludedTool, extensions, options.customTools);
-	}
+	const diagnostics =
+		!saved && options.tools
+			? collectUnloadedBuiltinExtensionToolDiagnostics(
+					toolModifiers ? applyToolModifiers([], toolModifiers) : [...new Set(options.tools)],
+					isExcludedTool,
+					extensions,
+					options.customTools,
+				)
+			: [];
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
@@ -677,6 +700,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	return {
 		session,
 		extensionsResult,
+		diagnostics,
 		modelFallbackMessage,
 	};
 }
