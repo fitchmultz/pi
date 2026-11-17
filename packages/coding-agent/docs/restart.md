@@ -24,7 +24,7 @@ Requests require a saved session. Ephemeral sessions, stale session IDs, invalid
 
 A Pi process imports each extension once. `/new`, `/resume` and `/fork` in the same directory keep that code. So an update does not reach a running session: not `pi update`, not a `git pull` in a package checkout, not an edited extension file.
 
-A managed interactive session compares the code it imported with the disk when the session starts, after every agent run and every five minutes. While they differ, the footer shows:
+A managed interactive session compares the code it imported with the disk when the session starts, after every agent run and every minute. While they differ, the footer shows:
 
 ```text
 extensions changed on disk: /restart
