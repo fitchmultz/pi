@@ -600,8 +600,8 @@ describe("stale extension code in a managed session", () => {
 			const handoff = send.mock.calls
 				.map(([message]) => message as { type?: string; request?: object; session?: { workingSession: string } })
 				.find((message) => message.type === "pi:restart");
+			expect(handoff?.request).toEqual({});
 			expect(handoff).toMatchObject({
-				request: {},
 				session: { sessionId: f.h.session.sessionId, sessionFile: f.h.session.sessionFile },
 			});
 			rmSync(dirname(handoff!.session!.workingSession), { recursive: true });
