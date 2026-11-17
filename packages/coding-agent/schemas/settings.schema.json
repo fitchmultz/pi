@@ -734,6 +734,11 @@
       "description": "Cache-warming profile. \"idle\" also warms between agent runs. Global only because each refresh costs money.",
       "default": "idle"
     },
+    "restartWhenStale": {
+      "type": "boolean",
+      "description": "Restart an idle managed interactive session on the same saved session when its loaded extension code has changed on disk.",
+      "default": false
+    },
     "websocketConnectTimeoutMs": {
       "anyOf": [
         {

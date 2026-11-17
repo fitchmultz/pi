@@ -22,6 +22,8 @@ import {
 } from "../../cli/restart-protocol.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { ExtensionAPI, ExtensionContext, ManagedHost, ShutdownDisposition } from "../../core/extensions/types.ts";
+import type { StaleSource } from "../../core/loaded-sources.ts";
+import { getGitUpdateMarkerPath } from "../../core/package-manager.ts";
 import { writeWorkingSession } from "../../core/working-session.ts";
 
 const guidance =
@@ -34,10 +36,23 @@ const guidance =
  */
 const STALE_CHECK_INTERVAL_MS = 5 * 60_000;
 
+/**
+ * How long loaded code must have been stale, with nothing changing further, before a session restarts
+ * itself for it (`restartWhenStale`), and how long it waits to look again while something postpones the
+ * restart. A package update moves the commit first and installs dependencies after. `pi update` marks
+ * that span and the marker postpones the restart; a `git pull` and an install by hand have only this wait.
+ * Measured on the installed packages: an install of their dependencies took 0.2 to 4.0 s, and the commits
+ * that one update run moved were at most 14 s apart (943 moves in 116 days of reflogs).
+ */
+const STALE_QUIET_MS = 30_000;
+
 export interface RestartInputState {
 	busy: boolean;
 	pendingInput: boolean;
 }
+
+/** Whether a session can hand over to a replacement worker now. */
+type Readiness = { kind: "ready"; sessionFile: string } | { kind: "wait" } | { kind: "refuse"; reason: string };
 
 type WorkerPhase =
 	| { kind: "starting"; inherited: boolean }
@@ -143,6 +158,8 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	let workingSession: string | undefined;
 	let timer: NodeJS.Timeout | undefined;
 	let staleTimer: NodeJS.Timeout | undefined;
+	/** The stale code on disk as last seen, and since when it has been the same. */
+	let staleSince: { key: string; at: number } | undefined;
 	let server: Server | undefined;
 	let directory: string | undefined;
 	let socketPath: string | undefined;
@@ -172,46 +189,89 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		if (directory) rmSync(directory, { recursive: true, force: true });
 		ctx = undefined;
 	};
-	/** Show in the footer whether loaded extension code has changed on disk, and look again later. */
+	const readiness = (context: ExtensionContext): Readiness => {
+		const state = input();
+		if (state.pendingInput || context.ui.getEditorText().length > 0)
+			return { kind: "refuse", reason: "handle unsent editor text or pending input first." };
+		if (!started || !context.isIdle() || context.hasPendingMessages() || state.busy) return { kind: "wait" };
+		const sessionFile = context.sessionManager.getSessionFile();
+		if (!sessionFile || !existsSync(sessionFile)) return { kind: "refuse", reason: "the session is not saved." };
+		return { kind: "ready", sessionFile };
+	};
+	const commit = (context: ExtensionContext, request: RestartRequest, sessionFile: string, notice: string) => {
+		phase = {
+			kind: "committed",
+			request,
+			session: { sessionFile, sessionId: context.sessionManager.getSessionId() },
+		};
+		context.ui.notify(notice, "info");
+		context.shutdown();
+	};
+	const attempt = () => {
+		if (!pending || !ctx || closing) return;
+		const ready = readiness(ctx);
+		if (ready.kind === "refuse") {
+			cancel(ready.reason);
+			return;
+		}
+		if (ready.kind === "wait") {
+			timer = setTimeout(attempt, 100);
+			return;
+		}
+		const request = pending;
+		pending = undefined;
+		commit(ctx, request, ready.sessionFile, "Restarting Pi; resuming the same saved session.");
+	};
+	/**
+	 * Restart for `stale` code when it has been quiet on disk and nothing of the user's or the agent's
+	 * would be lost. Otherwise do nothing and say nothing; the next look decides again.
+	 * Returns how long to wait before that look.
+	 */
+	const restartWhenQuiet = async (
+		context: ExtensionContext,
+		current: AgentSession,
+		stale: StaleSource[],
+	): Promise<number> => {
+		const key = JSON.stringify(stale.map((source) => [source.path, source.current]));
+		if (staleSince?.key !== key) staleSince = { key, at: Date.now() };
+		const quietFor = Date.now() - staleSince.at;
+		if (quietFor < STALE_QUIET_MS) return STALE_QUIET_MS - quietFor;
+		// `pi update` moved a package's commit and has not finished its files and dependencies.
+		if (stale.some(({ kind, path }) => kind === "package" && existsSync(getGitUpdateMarkerPath(path))))
+			return STALE_QUIET_MS;
+		// A restart aborts background tool runs, and the idle test does not see them.
+		if ((await current.getBackgroundWork()).length > 0) return STALE_QUIET_MS;
+		if (ctx !== context || closing || pending || phase.kind === "committed") return STALE_QUIET_MS;
+		const ready = readiness(context);
+		if (ready.kind === "ready")
+			commit(context, {}, ready.sessionFile, "Extensions changed on disk; restarting Pi on the same saved session.");
+		return STALE_QUIET_MS;
+	};
+	/**
+	 * Show in the footer whether loaded extension code has changed on disk, restart for it when the
+	 * user's `restartWhenStale` setting asks for that, and look again later.
+	 */
 	const checkStale = async () => {
 		const context = ctx;
 		if (!context || !session) return;
-		const stale = await session().getStaleSources();
+		const current = session();
+		const stale = await current.getStaleSources();
 		// The session was replaced or shut down meanwhile; its successor runs its own check.
 		if (ctx !== context) return;
 		context.ui.setStatus(
 			"restart",
 			stale.length > 0 ? context.ui.theme.fg("warning", "extensions changed on disk: /restart") : undefined,
 		);
+		if (stale.length === 0) staleSince = undefined;
+		const wait =
+			stale.length > 0 && current.settingsManager.getRestartWhenStale()
+				? await restartWhenQuiet(context, current, stale)
+				: STALE_CHECK_INTERVAL_MS;
+		if (ctx !== context) return;
 		clearTimeout(staleTimer);
-		staleTimer = setTimeout(checkStale, STALE_CHECK_INTERVAL_MS);
+		staleTimer = setTimeout(checkStale, wait);
 		// The check must not keep a process alive that is otherwise done.
 		staleTimer.unref();
-	};
-	const attempt = () => {
-		if (!pending || !ctx || closing) return;
-		const state = input();
-		if (state.pendingInput || ctx.ui.getEditorText().length > 0) {
-			cancel("handle unsent editor text or pending input first.");
-			return;
-		}
-		if (!started || !ctx.isIdle() || ctx.hasPendingMessages() || state.busy) {
-			timer = setTimeout(attempt, 100);
-			return;
-		}
-		const sessionFile = ctx.sessionManager.getSessionFile();
-		if (!sessionFile || !existsSync(sessionFile)) {
-			cancel("the session is not saved.");
-			return;
-		}
-		phase = {
-			kind: "committed",
-			request: pending,
-			session: { sessionFile, sessionId: ctx.sessionManager.getSessionId() },
-		};
-		pending = undefined;
-		ctx.ui.notify("Restarting Pi; resuming the same saved session.", "info");
-		ctx.shutdown();
 	};
 	const queue = (value: unknown): string => {
 		const request = parseRestartRequest(value);

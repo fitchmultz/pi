@@ -48,6 +48,30 @@ These are the values of the [runtime record](session-format.md#runtime-record-pi
 
 Print, JSON, RPC and SDK sessions show no status. An SDK host can ask its session; see [Stale extension code](sdk.md#stale-extension-code).
 
+### Restart automatically
+
+With [`restartWhenStale`](settings.md#updates-telemetry-and-warnings) set to `true`, a managed interactive session does the `/restart` itself. The setting is off by default.
+
+```json
+{
+  "restartWhenStale": true
+}
+```
+
+The session restarts when all of the following are true:
+
+- The changed code has been the same on disk for 30 seconds. Each further change starts the 30 seconds again.
+- No changed package has an unfinished `pi update`. An update of a git package is unfinished from the moment before its commit moves until its files are cleaned and its dependencies are installed.
+- The session is at final idle, as for `/restart`.
+- The editor is empty and no input is pending.
+- The session has no background work: no background tool run and no work that an extension reports, such as a `background_command` job.
+
+If one of them is not true, nothing happens and nothing is shown except the footer status. The session looks again every 30 seconds and after every agent run. A draft is never discarded and a running agent is never interrupted.
+
+The restart is the same managed restart as `/restart` without text: the same saved session, no continuation message and no model request. The session shows `Extensions changed on disk; restarting Pi on the same saved session.` before the worker is replaced. [Startup recovery](#startup-recovery) applies if the replacement does not start.
+
+A restarted worker compares against the code it imported, so it restarts again only after the disk changes again. The 30 seconds cover an update made by hand, such as `git pull` and then `npm install` in a package checkout. If the install takes longer, the session can restart before the install is finished; `/restart` afterwards loads the finished package.
+
 ## Stage changes without overwriting the working version
 
 ```bash
@@ -122,7 +146,7 @@ The source-level guidance regression needs no build or installed CLI. From the r
 ./test.sh -- bash -c 'cd packages/coding-agent && node ../../node_modules/vitest/dist/cli.js --run test/restart-guidance.test.ts --maxWorkers=1'
 ```
 
-It uses the actual restart factory, native SDK harness, fork IPC and private control socket, with a faux provider. GLM, Responses and Codex payloads are captured before transport to verify unchanged leading instructions and submitted prefixes; this is not a measured provider cache-hit guarantee. It also checks forced-run scope and unrelated system content/tool updates. It does not replace the process-replacement terminal smoke test.
+It uses the actual restart factory, native SDK harness, fork IPC and private control socket, with a faux provider. It also covers the stale-code footer status and the automatic restart, with a package that changes on disk and a fake clock for the waits. GLM, Responses and Codex payloads are captured before transport to verify unchanged leading instructions and submitted prefixes; this is not a measured provider cache-hit guarantee. It also checks forced-run scope and unrelated system content/tool updates. It does not replace the process-replacement terminal smoke test.
 
 After building the runtime packages, from `packages/coding-agent`:
 

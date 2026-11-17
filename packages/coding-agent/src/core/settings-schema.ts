@@ -443,6 +443,13 @@ export const SettingsSchema = Type.Object(
 				default: SETTINGS_DEFAULTS.cacheWarming,
 			}),
 		),
+		restartWhenStale: Type.Optional(
+			Type.Boolean({
+				description:
+					"Restart an idle managed interactive session on the same saved session when its loaded extension code has changed on disk.",
+				default: SETTINGS_DEFAULTS.restartWhenStale,
+			}),
+		),
 		websocketConnectTimeoutMs: Type.Optional(
 			timeoutSetting({
 				description: 'WebSocket connect or open handshake timeout in milliseconds; 0 or "disabled" disables it.',

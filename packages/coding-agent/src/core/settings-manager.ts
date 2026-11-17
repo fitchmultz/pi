@@ -1049,6 +1049,11 @@ export class SettingsManager {
 		this.save();
 	}
 
+	/** Whether an idle managed interactive session restarts itself when its loaded extension code has changed on disk. */
+	getRestartWhenStale(): boolean {
+		return this.settings.restartWhenStale ?? SETTINGS_DEFAULTS.restartWhenStale;
+	}
+
 	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
 		return {
 			timeoutMs: this.settings.retry?.provider?.timeoutMs,
