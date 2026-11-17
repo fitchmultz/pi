@@ -51,6 +51,10 @@ async function managedFixture(
 	vi.stubEnv(MANAGED_CLI_ENV, "1");
 	const managed = createManagedRestart();
 	expect(managed).toBeDefined();
+	// The managed owner unrefs IPC, but Vitest loads modules for this worker over that channel. Without
+	// the reference, the worker exits when such a load is all it waits for, as the lazy imports of the
+	// first extension loaded from disk are.
+	process.channel?.ref();
 	const faux = fauxProvider();
 	const sessionManager = options.sessionFile
 		? SessionManager.open(options.sessionFile)
@@ -111,8 +115,6 @@ async function managedFixture(
 		for (const handler of process.listeners("disconnect")) {
 			if (!disconnectHandlers.has(handler)) process.removeListener("disconnect", handler);
 		}
-		// The managed owner unrefs IPC; Vitest still needs its worker channel after this fixture.
-		process.channel?.ref();
 	};
 	cleanups.push(async () => {
 		await close();
