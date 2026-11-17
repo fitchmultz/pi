@@ -13,14 +13,9 @@ import { raceWithAbortSignal } from "../utils/abort.ts";
 import { atomicWriteFileSync, resolveFileTarget } from "../utils/atomic-file.ts";
 import { getFileRevision, normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
-import { invalidateConfigValueCache, isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
+import { isCommandConfigValue, refreshConfigValueCache, resolveConfigValue } from "./resolve-config-value.ts";
 
 type AuthStorageData = Record<string, Credential>;
-
-export interface StoredCommandInvalidation {
-	hasStored: boolean;
-	invalidated: boolean;
-}
 
 // On Windows, a just-removed lock directory can stay "delete pending" while another process
 // (antivirus, indexer, another pi checking the lock) still has it open. mkdir then fails with
@@ -455,19 +450,17 @@ export class AuthStorage implements CredentialStore {
 		return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
 	}
 
-	/** Evict a stored `!command` API key from the command cache so the next read re-executes it. */
-	async invalidateCachedCredential(
-		provider: string,
-		options?: AuthOperationOptions,
-	): Promise<StoredCommandInvalidation> {
+	/**
+	 * Re-run a stored `!command` API key and update the cache only when the command succeeds
+	 * with a non-empty value, leaving any previously cached value intact on transient failure.
+	 */
+	async refreshCachedCredential(provider: string, options?: AuthOperationOptions): Promise<boolean> {
 		const credential = (await this.readLatestData(options))[provider];
 		options?.signal?.throwIfAborted();
-		if (!credential) return { hasStored: false, invalidated: false };
-		if (credential.type !== "api_key" || credential.key === undefined || !isCommandConfigValue(credential.key)) {
-			return { hasStored: true, invalidated: false };
+		if (credential?.type !== "api_key" || credential.key === undefined || !isCommandConfigValue(credential.key)) {
+			return false;
 		}
-		invalidateConfigValueCache(credential.key);
-		return { hasStored: true, invalidated: true };
+		return refreshConfigValueCache(credential.key) !== undefined;
 	}
 
 	async modify(

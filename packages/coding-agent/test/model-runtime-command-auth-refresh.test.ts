@@ -391,4 +391,79 @@ describe("ModelRuntime and AgentSession command credential refresh", () => {
 		expect(failedImage.stopReason).toBe("error");
 		expect(unchangedCalls).toEqual(["Bearer key-3"]);
 	});
+
+	it("preserves the cached key and configured status when the !command transiently fails during a 401 refresh", async () => {
+		const fixture = createCommandFixture("cf-token-a");
+		writeFileSync(
+			fixture.authPath,
+			JSON.stringify({
+				"cloudflare-ai-gateway": {
+					type: "api_key",
+					key: fixture.command,
+					env: {
+						CLOUDFLARE_ACCOUNT_ID: "acct-test",
+						CLOUDFLARE_GATEWAY_ID: "gw-test",
+					},
+				},
+			}),
+		);
+
+		const runtime = await ModelRuntime.create({
+			credentials: AuthStorage.create(fixture.authPath),
+			modelsStore: new InMemoryModelsStore(),
+			modelsPath: null,
+			allowModelNetwork: false,
+		});
+		const model = runtime.getModels("cloudflare-ai-gateway").find((entry) => entry.api === "openai-responses")!;
+		const chatContext = {
+			messages: [{ role: "user" as const, content: "ping", timestamp: Date.now() }],
+		};
+
+		let activeServerToken = "cf-token-a";
+		const seenTokens: string[] = [];
+		const mockFetch: typeof globalThis.fetch = async (input, init) => {
+			const req = new Request(input, init);
+			const cfAuth = req.headers.get("cf-aig-authorization") ?? "";
+			const token = cfAuth.replace(/^Bearer\s+/iu, "");
+			seenTokens.push(token);
+			if (token !== activeServerToken) {
+				return new Response(JSON.stringify({ error: { message: "AiGatewayError: 2009 Unauthorized" } }), {
+					status: 401,
+					headers: { "content-type": "application/json" },
+				});
+			}
+			return openAiResponsesSseResponse(`ok:${token}`);
+		};
+
+		// Turn 1: caches cf-token-a.
+		const first = await runtime.streamSimple(model, chatContext, { fetch: mockFetch }).result();
+		expect(first.stopReason).toBe("stop");
+		expect(seenTokens).toEqual(["cf-token-a"]);
+
+		// Server rotates to cf-token-b while secret manager transiently returns empty output.
+		activeServerToken = "cf-token-b";
+		writeFileSync(fixture.keyFile, "");
+		seenTokens.length = 0;
+		const countBeforeTransientFailure = fixture.readCount();
+
+		const transientFail = await runtime.streamSimple(model, chatContext, { fetch: mockFetch }).result();
+		expect(transientFail.stopReason).toBe("error");
+		expect(transientFail.errorMessage).toContain("AiGatewayError: 2009 Unauthorized");
+		expect(seenTokens).toEqual(["cf-token-a"]);
+		expect(fixture.readCount()).toBe(countBeforeTransientFailure + 1);
+
+		// Provider stays configured with cf-token-a rather than caching undefined.
+		expect((await runtime.getAuth("cloudflare-ai-gateway"))?.auth.headers?.["cf-aig-authorization"]).toBe(
+			"Bearer cf-token-a",
+		);
+		expect(runtime.hasConfiguredAuth("cloudflare-ai-gateway")).toBe(true);
+
+		// Once secret manager recovers with cf-token-b, the next call refreshes on 401 and succeeds without /reload.
+		writeFileSync(fixture.keyFile, "cf-token-b");
+		seenTokens.length = 0;
+		const recovered = await runtime.streamSimple(model, chatContext, { fetch: mockFetch }).result();
+		expect(recovered.stopReason).toBe("stop");
+		expect(contentText(recovered.content)).toBe("ok:cf-token-b");
+		expect(seenTokens).toEqual(["cf-token-a", "cf-token-b"]);
+	});
 });

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
 	clearConfigValueCache,
-	invalidateConfigValueCache,
+	refreshConfigValueCache,
 	resolveConfigValue,
 	resolveConfigValueUncached,
 } from "../src/core/resolve-config-value.ts";
@@ -81,11 +81,17 @@ describe("resolveConfigValue", () => {
 		expect(resolveConfigValue(failure)).toBeUndefined();
 		expect(readFileSync(counterFile, "utf-8").trim()).toBe("3");
 
-		invalidateConfigValueCache(success);
-		expect(resolveConfigValue(failure)).toBeUndefined();
-		expect(readFileSync(counterFile, "utf-8").trim()).toBe("3");
-		expect(resolveConfigValue(success)).toBe("value");
-		expect(readFileSync(counterFile, "utf-8").trim()).toBe("4");
+		const keyFile = join(tempDir, "key");
+		writeFileSync(keyFile, "initial");
+		const escapedKeyPath = keyFile.replace(/\\/g, "/").replace(/"/g, '\\"');
+		const refreshable = `!sh -c 'cat "${escapedKeyPath}"'`;
+		expect(resolveConfigValue(refreshable)).toBe("initial");
+		writeFileSync(keyFile, "");
+		expect(refreshConfigValueCache(refreshable)).toBeUndefined();
+		expect(resolveConfigValue(refreshable)).toBe("initial");
+		writeFileSync(keyFile, "rotated");
+		expect(refreshConfigValueCache(refreshable)).toBe("rotated");
+		expect(resolveConfigValue(refreshable)).toBe("rotated");
 	});
 
 	test("does not cache environment values", () => {

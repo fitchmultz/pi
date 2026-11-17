@@ -1,11 +1,7 @@
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
-import type { StoredCommandInvalidation } from "./auth-storage.ts";
 
 type CommandCacheableCredentialStore = CredentialStore & {
-	invalidateCachedCredential?: (
-		provider: string,
-		options?: AuthOperationOptions,
-	) => Promise<StoredCommandInvalidation>;
+	refreshCachedCredential?: (provider: string, options?: AuthOperationOptions) => Promise<boolean>;
 };
 
 /** Async credential store overlay for non-persistent runtime API keys. */
@@ -37,18 +33,10 @@ export class RuntimeCredentials implements CredentialStore {
 		return override ? { type: "api_key", key: override } : this.store.read(providerId, options);
 	}
 
-	async invalidateCachedCredential(
-		providerId: string,
-		options?: AuthOperationOptions,
-	): Promise<StoredCommandInvalidation> {
+	async refreshCachedCredential(providerId: string, options?: AuthOperationOptions): Promise<boolean> {
 		options?.signal?.throwIfAborted();
-		if (this.overrides.has(providerId)) return { hasStored: true, invalidated: false };
-		if (this.store.invalidateCachedCredential) {
-			return this.store.invalidateCachedCredential(providerId, options);
-		}
-		const entries = await this.store.list(options);
-		options?.signal?.throwIfAborted();
-		return { hasStored: entries.some((entry) => entry.providerId === providerId), invalidated: false };
+		if (this.overrides.has(providerId)) return false;
+		return (await this.store.refreshCachedCredential?.(providerId, options)) ?? false;
 	}
 
 	async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {

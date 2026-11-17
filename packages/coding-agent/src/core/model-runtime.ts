@@ -87,7 +87,6 @@ import {
 	type CompatibilityRequestConfig,
 	composeModelProvider,
 	configuredRequestAuthStatus,
-	invalidateConfiguredCommandAuth,
 	type ProviderAuthFallback,
 	type ProviderConfigInput,
 	resolveCompatibilityRequestConfig,
@@ -202,68 +201,8 @@ type PreparedRequest<
 	resolution: AuthResult;
 };
 
-const HTTP_AUTH_STATUSES = new Set([401, 403]);
-const LEADING_HTTP_STATUS_RE = /^(?:([1-5]\d\d)(?=\s|:|$)|[^\n:(]{1,80}\(([1-5]\d\d)\):)/;
-const AUTH_ERROR_MESSAGE_RE = new RegExp(
-	[
-		"(?<![a-z0-9])(?:401|403)(?![a-z0-9])",
-		"\\bunauthorized\\b",
-		"\\bunauthenticated\\b",
-		"\\bauthentication_error\\b",
-		"\\bpermission_error\\b",
-		"\\binvalid[_ -]?api[_ -]?key\\b",
-		"\\bincorrect api key\\b",
-		"\\binvalid x-api-key\\b",
-		"\\bapi_key_invalid\\b",
-		"\\bunrecognizedclientexception\\b",
-		"\\baccessdeniedexception\\b",
-	].join("|"),
-	"i",
-);
-
-function isAuthStatus(status: number): boolean {
-	return HTTP_AUTH_STATUSES.has(status);
-}
-
-function extractDiagnosticStatus(message: AssistantMessage): number | undefined {
-	for (const diagnostic of message.diagnostics ?? []) {
-		const status = diagnostic.details?.status;
-		if (typeof status === "number") return status;
-	}
-	return undefined;
-}
-
-function extractThrownStatus(error: unknown): number | undefined {
-	if (!(error instanceof Error)) return undefined;
-	const candidate = error as Error & {
-		status?: unknown;
-		statusCode?: unknown;
-		$metadata?: { httpStatusCode?: unknown };
-		$response?: { statusCode?: unknown };
-	};
-	if (typeof candidate.statusCode === "number") return candidate.statusCode;
-	if (typeof candidate.status === "number") return candidate.status;
-	if (typeof candidate.$metadata?.httpStatusCode === "number") return candidate.$metadata.httpStatusCode;
-	if (typeof candidate.$response?.statusCode === "number") return candidate.$response.statusCode;
-	return undefined;
-}
-
-function isAuthErrorMessage(errorMessage: string | undefined, observedStatus?: number): boolean {
-	if (observedStatus !== undefined) return isAuthStatus(observedStatus);
-	if (!errorMessage) return false;
-	const leadingStatus = LEADING_HTTP_STATUS_RE.exec(errorMessage.trimStart());
-	if (leadingStatus) return isAuthStatus(Number(leadingStatus[1] ?? leadingStatus[2]));
-	return AUTH_ERROR_MESSAGE_RE.test(errorMessage);
-}
-
-function isAssistantAuthError(message: AssistantMessage, observedStatus?: number): boolean {
-	return isAuthErrorMessage(message.errorMessage, observedStatus ?? extractDiagnosticStatus(message));
-}
-
-function isThrownAuthError(error: unknown, observedStatus?: number): boolean {
-	const status = observedStatus ?? extractThrownStatus(error);
-	const message = error instanceof Error ? error.message : String(error);
-	return isAuthErrorMessage(message, status);
+function isAuthStatus(status: number | undefined): boolean {
+	return status === 401 || status === 403;
 }
 
 function recordsEqual(
@@ -276,8 +215,8 @@ function recordsEqual(
 	return leftEntries.every(([key, value]) => Object.hasOwn(right ?? {}, key) && right?.[key] === value);
 }
 
-function hasResolvedAuthChanged(previous: AuthResult, next: AuthResult, explicitApiKey: boolean): boolean {
-	if (!explicitApiKey && previous.auth.apiKey !== next.auth.apiKey) return true;
+function hasResolvedAuthChanged(previous: AuthResult, next: AuthResult): boolean {
+	if (previous.auth.apiKey !== next.auth.apiKey) return true;
 	if (previous.auth.baseUrl !== next.auth.baseUrl) return true;
 	if (!recordsEqual(previous.auth.headers, next.auth.headers)) return true;
 	return !recordsEqual(previous.env, next.env);
@@ -285,11 +224,20 @@ function hasResolvedAuthChanged(previous: AuthResult, next: AuthResult, explicit
 
 function withStatusObserver<
 	TModel extends AnyModel,
-	TOptions extends { onResponse?: ProviderRequestOptions<TModel>["onResponse"] },
+	TOptions extends {
+		fetch?: ProviderRequestOptions<TModel>["fetch"];
+		onResponse?: ProviderRequestOptions<TModel>["onResponse"];
+	},
 >(_model: TModel, options: TOptions, onStatus: (status: number) => void): TOptions {
 	const callerOnResponse = options.onResponse;
+	const baseFetch = options.fetch ?? globalThis.fetch;
 	return {
 		...options,
+		fetch: async (input, init) => {
+			const response = await baseFetch(input, init);
+			onStatus(response.status);
+			return response;
+		},
 		onResponse: async (response: ProviderResponse, responseModel: TModel) => {
 			onStatus(response.status);
 			await callerOnResponse?.(response, responseModel);
@@ -1029,19 +977,9 @@ export class ModelRuntime implements Models {
 		options: TOptions | undefined,
 		first: PreparedRequest<TModel, TOptions>,
 	): Promise<PreparedRequest<TModel, TOptions> | undefined> {
-		const stored =
-			options?.apiKey !== undefined
-				? { hasStored: true, invalidated: false }
-				: this.ignoresStoredCredentials(model.provider)
-					? { hasStored: this.credentials.hasRuntimeApiKey(model.provider), invalidated: false }
-					: await this.credentials.invalidateCachedCredential(model.provider, { signal: options?.signal });
-		const configuredInvalidated = invalidateConfiguredCommandAuth(
-			model,
-			this.config.getProvider(model.provider),
-			this.extensionProviders.get(model.provider),
-			options?.apiKey === undefined && !stored.hasStored,
-		);
-		if (!stored.invalidated && !configuredInvalidated) return undefined;
+		if (options?.apiKey !== undefined || this.ignoresStoredCredentials(model.provider)) return undefined;
+		const refreshed = await this.credentials.refreshCachedCredential(model.provider, { signal: options?.signal });
+		if (!refreshed) return undefined;
 
 		const provider = this.models.getProvider(model.provider);
 		if (!provider) return undefined;
@@ -1057,7 +995,7 @@ export class ModelRuntime implements Models {
 			if (options?.signal?.aborted) throw error;
 			return undefined;
 		}
-		if (!resolution || !hasResolvedAuthChanged(first.resolution, resolution, options?.apiKey !== undefined)) {
+		if (!resolution || !hasResolvedAuthChanged(first.resolution, resolution)) {
 			return undefined;
 		}
 		return this.buildPreparedRequest(provider, model, resolution, options);
@@ -1079,7 +1017,7 @@ export class ModelRuntime implements Models {
 		onPrepared?.(prepared.model, prepared.options);
 		let observedStatus: number | undefined;
 		const onStatus = (status: number): void => {
-			observedStatus ??= status;
+			observedStatus = status;
 		};
 
 		let firstStream: AssistantMessageEventStream;
@@ -1090,7 +1028,7 @@ export class ModelRuntime implements Models {
 			iterator = firstStream[Symbol.asyncIterator]();
 			first = await iterator.next();
 		} catch (error) {
-			if (!options?.signal?.aborted && isThrownAuthError(error, observedStatus)) {
+			if (!options?.signal?.aborted && isAuthStatus(observedStatus)) {
 				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
 				if (refreshed) {
 					onPrepared?.(refreshed.model, refreshed.options);
@@ -1106,7 +1044,7 @@ export class ModelRuntime implements Models {
 			first.value.reason === "error" &&
 			first.value.error.content.length === 0 &&
 			!options?.signal?.aborted &&
-			isAssistantAuthError(first.value.error, observedStatus)
+			isAuthStatus(observedStatus)
 		) {
 			while (!(await iterator.next()).done) {}
 			const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
@@ -1267,11 +1205,11 @@ export class ModelRuntime implements Models {
 				prepared.model,
 				handle,
 				withStatusObserver(prepared.model, prepared.options, (status) => {
-					observedStatus ??= status;
+					observedStatus = status;
 				}) as DeferredCancelOptions,
 			);
 		} catch (error) {
-			if (!options?.signal?.aborted && isThrownAuthError(error, observedStatus)) {
+			if (!options?.signal?.aborted && isAuthStatus(observedStatus)) {
 				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
 				if (refreshed?.provider.cancelDeferred) {
 					await refreshed.provider.cancelDeferred(
@@ -1302,14 +1240,14 @@ export class ModelRuntime implements Models {
 				prepared.model,
 				context,
 				withStatusObserver(prepared.model, prepared.options, (status) => {
-					observedStatus ??= status;
+					observedStatus = status;
 				}) as ImagesOptions,
 			);
 			if (
 				result.stopReason === "error" &&
 				result.output.length === 0 &&
 				!options?.signal?.aborted &&
-				isAuthErrorMessage(result.errorMessage, observedStatus)
+				isAuthStatus(observedStatus)
 			) {
 				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
 				if (refreshed?.provider.generateImages) {
@@ -1343,14 +1281,14 @@ export class ModelRuntime implements Models {
 				prepared.model,
 				context,
 				withStatusObserver(prepared.model, prepared.options, (status) => {
-					observedStatus ??= status;
+					observedStatus = status;
 				}) as ClassifierOptions,
 			);
 			if (
 				result.stopReason === "error" &&
 				Object.keys(result.answers).length === 0 &&
 				!options?.signal?.aborted &&
-				isAuthErrorMessage(result.errorMessage, observedStatus)
+				isAuthStatus(observedStatus)
 			) {
 				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
 				if (refreshed?.provider.classify) {

@@ -281,11 +281,17 @@ export function resolveHeadersOrThrow(
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
 }
 
-/** Clear a single command entry from the config value cache. */
-export function invalidateConfigValueCache(config: string): void {
-	if (isCommandConfigValue(config)) {
-		commandResultCache.delete(config);
+/**
+ * Re-execute a `!command` config value without evicting an existing cached value when the
+ * refresh command fails or returns empty output.
+ */
+export function refreshConfigValueCache(config: string): string | undefined {
+	if (!isCommandConfigValue(config)) return undefined;
+	const refreshed = executeCommandUncached(config);
+	if (refreshed !== undefined) {
+		commandResultCache.set(config, refreshed);
 	}
+	return refreshed;
 }
 
 /** Clear the config value command cache. */
