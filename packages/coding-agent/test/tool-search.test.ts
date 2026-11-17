@@ -255,6 +255,33 @@ describe("Bm25Ranker", () => {
 			]);
 		});
 
+		// PIF-203
+		it("reads the name of a tool it does not rank as a name, not as a description", () => {
+			const other = "mcp__board__issue_list";
+			const strongWith = (query: string) =>
+				ranker
+					.rank(query, documents, 8, [other])
+					.filter((match) => match.strong)
+					.map((match) => match.name);
+			// `list_issues` has both words of `issue_list` in its name.
+			for (const query of [
+				"issue_list",
+				"issue list",
+				"+issue_list",
+				"board_issue_list",
+				"mcp__board__issue_list",
+			]) {
+				// A name that no tool has is a description.
+				expect(strong(query)).toEqual(["mcp__tracker__list_issues"]);
+				expect(strongWith(query)).toEqual([]);
+			}
+			// Named next to a ranked tool, it still leaves the query nothing but names.
+			expect(strong("save_issue issue_list")).toEqual(["mcp__tracker__save_issue", "mcp__tracker__list_issues"]);
+			expect(strongWith("save_issue issue_list")).toEqual(["mcp__tracker__save_issue"]);
+			// Other words still describe a tool.
+			expect(strongWith("issue_list project")).toEqual(["mcp__tracker__list_issues"]);
+		});
+
 		it("ranks good matches first", () => {
 			// `get_metric` matches four terms, two of them through its server's instructions; `list_issues` three.
 			expect(all("tracker list issues query start")).toEqual([
