@@ -37,6 +37,7 @@
 
 ### Changed
 
+- Foreground `bash` and `powershell` tool calls without an explicit `timeout` now stop after 300 seconds instead of running unbounded, and the timeout message says when the default limit was the cause; an explicit `timeout` still overrides it up to the existing per-command maximum. Long work belongs in `background_command`.
 - Progressively hydrate older fullscreen transcript history for sessions longer than 250 branch entries: initial loads mount the recent turn window while populating full editor prompt history, and scrolling near the top, jumping to previous prompts or the start, opening transcript search, or switching to regular mode prepends earlier branch entries in chronological order without losing compaction scrollback.
 - Run `convertImageBytesToPng()` and `convertToPng()` in the short-lived Photon worker thread with in-process fallback, matching `resizeImage()` so format normalization releases Photon's WASM linear memory after conversion.
 - Capped spawned CLI workers' default V8 semi-space size at 8 MiB (`--max-semi-space-size=8`) unless `execArgv` or `NODE_OPTIONS` already sets `--max-semi-space-size`, preventing Node's 128 MiB nursery growth during large session loads from staying resident in idle sessions.
