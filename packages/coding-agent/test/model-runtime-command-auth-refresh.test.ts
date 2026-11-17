@@ -1,8 +1,13 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { contentText, InMemoryModelsStore } from "@earendil-works/pi-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	contentText,
+	createAssistantMessageEventStream,
+	type FetchFunction,
+	InMemoryModelsStore,
+} from "@earendil-works/pi-ai";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import { clearConfigValueCache } from "../src/core/resolve-config-value.ts";
@@ -114,6 +119,7 @@ describe("ModelRuntime and AgentSession command credential refresh", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		clearConfigValueCache();
 		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
@@ -465,5 +471,166 @@ describe("ModelRuntime and AgentSession command credential refresh", () => {
 		expect(recovered.stopReason).toBe("stop");
 		expect(contentText(recovered.content)).toBe("ok:cf-token-b");
 		expect(seenTokens).toEqual(["cf-token-a", "cf-token-b"]);
+	});
+
+	it("preserves the Anthropic workload identity federation token cache across ModelRuntime.streamSimple turns", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-federation-auth-"));
+		tempDirs.push(dir);
+		const identityTokenFile = join(dir, "identity.jwt");
+		writeFileSync(identityTokenFile, "header.payload.signature");
+		const federationEnv = {
+			ANTHROPIC_FEDERATION_RULE_ID: "fdrl_test",
+			ANTHROPIC_ORGANIZATION_ID: "org-test",
+			ANTHROPIC_IDENTITY_TOKEN_FILE: identityTokenFile,
+		};
+
+		const runtime = await ModelRuntime.create({
+			credentials: AuthStorage.inMemory({}),
+			modelsStore: new InMemoryModelsStore(),
+			modelsPath: null,
+			allowModelNetwork: false,
+		});
+		const model = runtime.getModels("anthropic").find((entry) => entry.api === "anthropic-messages")!;
+		const chatContext = {
+			messages: [{ role: "user" as const, content: "ping", timestamp: Date.now() }],
+		};
+
+		let tokenCounter = 0;
+		const paths: string[] = [];
+		const messageAuthHeaders: Array<string | null> = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+			const req = new Request(input, init);
+			const path = new URL(req.url).pathname;
+			paths.push(path);
+			if (path === "/v1/oauth/token") {
+				tokenCounter += 1;
+				return Response.json({ access_token: `tok-${tokenCounter}`, expires_in: 3600 });
+			}
+			messageAuthHeaders.push(req.headers.get("authorization"));
+			return anthropicTextSseResponse("ok");
+		});
+
+		for (let i = 0; i < 3; i++) {
+			const result = await runtime.streamSimple(model, chatContext, { env: federationEnv }).result();
+			expect(result.stopReason).toBe("stop");
+		}
+
+		expect(paths).toEqual(["/v1/oauth/token", "/v1/messages", "/v1/messages", "/v1/messages"]);
+		expect(messageAuthHeaders).toEqual(["Bearer tok-1", "Bearer tok-1", "Bearer tok-1"]);
+	});
+
+	it("keeps options.fetch reference-identical across consecutive calls and 401 retries for !command providers", async () => {
+		const fixture = createCommandFixture("cmd-key-1");
+		writeFileSync(
+			fixture.authPath,
+			JSON.stringify({
+				"custom-cmd": { type: "api_key", key: fixture.command },
+			}),
+		);
+
+		const runtime = await ModelRuntime.create({
+			credentials: AuthStorage.create(fixture.authPath),
+			modelsStore: new InMemoryModelsStore(),
+			modelsPath: null,
+			allowModelNetwork: false,
+		});
+
+		const seenFetches: Array<FetchFunction | undefined> = [];
+		runtime.registerProvider("custom-cmd", {
+			baseUrl: "https://custom.example.test/v1",
+			api: "openai-responses",
+			models: [
+				{
+					id: "cmd-model",
+					name: "Cmd Model",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 8192,
+					maxTokens: 1024,
+				},
+			],
+			streamSimple: (model, _context, options) => {
+				seenFetches.push(options?.fetch);
+				const stream = createAssistantMessageEventStream();
+				void (async () => {
+					const response = await (options?.fetch ?? globalThis.fetch)("https://custom.example.test/v1/responses", {
+						headers: { authorization: `Bearer ${options?.apiKey ?? ""}` },
+					});
+					const usage = {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					};
+					if (!response.ok) {
+						const errMsg = {
+							role: "assistant" as const,
+							content: [],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage,
+							stopReason: "error" as const,
+							errorMessage: `HTTP ${response.status}`,
+							timestamp: Date.now(),
+						};
+						stream.push({ type: "error", reason: "error", error: errMsg });
+						stream.end(errMsg);
+						return;
+					}
+					const text = await response.text();
+					const msg = {
+						role: "assistant" as const,
+						content: [{ type: "text" as const, text }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage,
+						stopReason: "stop" as const,
+						timestamp: Date.now(),
+					};
+					stream.push({ type: "done", reason: "stop", message: msg });
+					stream.end(msg);
+				})();
+				return stream;
+			},
+		});
+
+		const model = runtime.getModel("custom-cmd", "cmd-model")!;
+		const chatContext = {
+			messages: [{ role: "user" as const, content: "ping", timestamp: Date.now() }],
+		};
+
+		let activeKey = "cmd-key-1";
+		const mockFetch: FetchFunction = async (input, init) => {
+			const auth = new Request(input, init).headers.get("authorization");
+			if (auth !== `Bearer ${activeKey}`) {
+				return new Response("Unauthorized", { status: 401 });
+			}
+			return new Response(`ok:${activeKey}`, { status: 200 });
+		};
+
+		const first = await runtime.streamSimple(model, chatContext, { fetch: mockFetch }).result();
+		expect(first.stopReason).toBe("stop");
+		expect(contentText(first.content)).toBe("ok:cmd-key-1");
+
+		activeKey = "cmd-key-2";
+		writeFileSync(fixture.keyFile, "cmd-key-2");
+		const second = await runtime.streamSimple(model, chatContext, { fetch: mockFetch }).result();
+		expect(second.stopReason).toBe("stop");
+		expect(contentText(second.content)).toBe("ok:cmd-key-2");
+
+		const third = await runtime.streamSimple(model, chatContext, { fetch: mockFetch }).result();
+		expect(third.stopReason).toBe("stop");
+		expect(contentText(third.content)).toBe("ok:cmd-key-2");
+
+		expect(seenFetches).toHaveLength(4);
+		expect(seenFetches[0]).toBeDefined();
+		expect(seenFetches[1]).toBe(seenFetches[0]);
+		expect(seenFetches[2]).toBe(seenFetches[0]);
+		expect(seenFetches[3]).toBe(seenFetches[0]);
 	});
 });

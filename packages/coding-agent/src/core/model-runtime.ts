@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, join } from "node:path";
 import {
 	type AnyModel,
@@ -26,6 +27,7 @@ import {
 	type DeferredCancelOptions,
 	type DeferredFetchOptions,
 	type DeferredHandle,
+	type FetchFunction,
 	getOpenCodeSessionHeaders,
 	type ImageApi,
 	type ImageModel,
@@ -222,6 +224,28 @@ function hasResolvedAuthChanged(previous: AuthResult, next: AuthResult): boolean
 	return !recordsEqual(previous.env, next.env);
 }
 
+const statusObserverStorage = new AsyncLocalStorage<(status: number) => void>();
+const observedFetchCache = new WeakMap<FetchFunction, FetchFunction>();
+const observedDefaultFetch: FetchFunction = async (input, init) => {
+	const response = await globalThis.fetch(input, init);
+	statusObserverStorage.getStore()?.(response.status);
+	return response;
+};
+
+function getObservedFetch(fetch: FetchFunction | undefined): FetchFunction {
+	if (!fetch) return observedDefaultFetch;
+	let wrapped = observedFetchCache.get(fetch);
+	if (!wrapped) {
+		wrapped = async (input, init) => {
+			const response = await fetch(input, init);
+			statusObserverStorage.getStore()?.(response.status);
+			return response;
+		};
+		observedFetchCache.set(fetch, wrapped);
+	}
+	return wrapped;
+}
+
 function withStatusObserver<
 	TModel extends AnyModel,
 	TOptions extends {
@@ -230,14 +254,9 @@ function withStatusObserver<
 	},
 >(_model: TModel, options: TOptions, onStatus: (status: number) => void): TOptions {
 	const callerOnResponse = options.onResponse;
-	const baseFetch = options.fetch ?? globalThis.fetch;
 	return {
 		...options,
-		fetch: async (input, init) => {
-			const response = await baseFetch(input, init);
-			onStatus(response.status);
-			return response;
-		},
+		fetch: getObservedFetch(options.fetch),
 		onResponse: async (response: ProviderResponse, responseModel: TModel) => {
 			onStatus(response.status);
 			await callerOnResponse?.(response, responseModel);
@@ -969,6 +988,11 @@ export class ModelRuntime implements Models {
 		return this.buildPreparedRequest(provider, model, resolution, options);
 	}
 
+	private canObserveCommandAuth(providerId: string, explicitApiKey: string | undefined): boolean {
+		if (explicitApiKey !== undefined || this.ignoresStoredCredentials(providerId)) return false;
+		return this.credentials.hasCachedCommandCredential(providerId);
+	}
+
 	private async prepareRefreshedCommandRequest<
 		TModel extends AnyModel,
 		TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
@@ -1006,7 +1030,7 @@ export class ModelRuntime implements Models {
 		options: TOptions | undefined,
 		dispatch: (
 			prepared: PreparedRequest<Model<Api>, TOptions>,
-			onStatus: (status: number) => void,
+			onStatus?: (status: number) => void,
 		) => AssistantMessageEventStream,
 		onPrepared?: (
 			model: Model<Api>,
@@ -1015,6 +1039,9 @@ export class ModelRuntime implements Models {
 	): Promise<AsyncIterable<AssistantMessageEvent>> {
 		const prepared = await this.prepareRequest(model, options);
 		onPrepared?.(prepared.model, prepared.options);
+		if (!this.canObserveCommandAuth(model.provider, options?.apiKey)) {
+			return dispatch(prepared);
+		}
 		let observedStatus: number | undefined;
 		const onStatus = (status: number): void => {
 			observedStatus = status;
@@ -1024,7 +1051,7 @@ export class ModelRuntime implements Models {
 		let iterator: AsyncIterator<AssistantMessageEvent>;
 		let first: IteratorResult<AssistantMessageEvent>;
 		try {
-			firstStream = dispatch(prepared, onStatus);
+			firstStream = statusObserverStorage.run(onStatus, () => dispatch(prepared, onStatus));
 			iterator = firstStream[Symbol.asyncIterator]();
 			first = await iterator.next();
 		} catch (error) {
@@ -1074,7 +1101,9 @@ export class ModelRuntime implements Models {
 						prepared.provider.stream(
 							prepared.model,
 							resolveProviderSummary(prepared.model, transcript),
-							withStatusObserver(prepared.model, prepared.options, onStatus) as ApiStreamOptions<TApi>,
+							(onStatus
+								? withStatusObserver(prepared.model, prepared.options, onStatus)
+								: prepared.options) as ApiStreamOptions<TApi>,
 						),
 				);
 			},
@@ -1140,7 +1169,9 @@ export class ModelRuntime implements Models {
 							prepared.model,
 							// Session requests and cache warming pass here with the model that will answer.
 							resolveProviderSummary(prepared.model, transcript),
-							withStatusObserver(prepared.model, prepared.options, onStatus) as SimpleStreamOptions,
+							(onStatus
+								? withStatusObserver(prepared.model, prepared.options, onStatus)
+								: prepared.options) as SimpleStreamOptions,
 						),
 					onPrepared,
 				);
@@ -1172,7 +1203,9 @@ export class ModelRuntime implements Models {
 					prepared.provider.fetchDeferred!(
 						prepared.model,
 						handle,
-						withStatusObserver(prepared.model, prepared.options, onStatus) as DeferredFetchOptions,
+						(onStatus
+							? withStatusObserver(prepared.model, prepared.options, onStatus)
+							: prepared.options) as DeferredFetchOptions,
 					),
 				);
 			},
@@ -1199,14 +1232,21 @@ export class ModelRuntime implements Models {
 		if (!prepared.provider.cancelDeferred) {
 			throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
 		}
+		if (!this.canObserveCommandAuth(model.provider, options?.apiKey)) {
+			await prepared.provider.cancelDeferred(prepared.model, handle, prepared.options as DeferredCancelOptions);
+			return;
+		}
 		let observedStatus: number | undefined;
+		const onStatus = (status: number): void => {
+			observedStatus = status;
+		};
 		try {
-			await prepared.provider.cancelDeferred(
-				prepared.model,
-				handle,
-				withStatusObserver(prepared.model, prepared.options, (status) => {
-					observedStatus = status;
-				}) as DeferredCancelOptions,
+			await statusObserverStorage.run(onStatus, () =>
+				prepared.provider.cancelDeferred!(
+					prepared.model,
+					handle,
+					withStatusObserver(prepared.model, prepared.options, onStatus) as DeferredCancelOptions,
+				),
 			);
 		} catch (error) {
 			if (!options?.signal?.aborted && isAuthStatus(observedStatus)) {
@@ -1215,7 +1255,7 @@ export class ModelRuntime implements Models {
 					await refreshed.provider.cancelDeferred(
 						refreshed.model,
 						handle,
-						refreshed.options as DeferredCancelOptions,
+						withStatusObserver(refreshed.model, refreshed.options, () => {}) as DeferredCancelOptions,
 					);
 					return;
 				}
@@ -1235,13 +1275,19 @@ export class ModelRuntime implements Models {
 			if (!prepared.provider.generateImages) {
 				throw new ModelsError("provider", `Provider ${model.provider} does not support image generation`);
 			}
+			if (!this.canObserveCommandAuth(model.provider, options?.apiKey)) {
+				return await prepared.provider.generateImages(prepared.model, context, prepared.options as ImagesOptions);
+			}
 			let observedStatus: number | undefined;
-			const result = await prepared.provider.generateImages(
-				prepared.model,
-				context,
-				withStatusObserver(prepared.model, prepared.options, (status) => {
-					observedStatus = status;
-				}) as ImagesOptions,
+			const onStatus = (status: number): void => {
+				observedStatus = status;
+			};
+			const result = await statusObserverStorage.run(onStatus, () =>
+				prepared.provider.generateImages!(
+					prepared.model,
+					context,
+					withStatusObserver(prepared.model, prepared.options, onStatus) as ImagesOptions,
+				),
 			);
 			if (
 				result.stopReason === "error" &&
@@ -1254,7 +1300,7 @@ export class ModelRuntime implements Models {
 					return await refreshed.provider.generateImages(
 						refreshed.model,
 						context,
-						refreshed.options as ImagesOptions,
+						withStatusObserver(refreshed.model, refreshed.options, () => {}) as ImagesOptions,
 					);
 				}
 			}
@@ -1276,13 +1322,19 @@ export class ModelRuntime implements Models {
 			if (!prepared.provider.classify) {
 				throw new ModelsError("provider", `Provider ${model.provider} does not support classification`);
 			}
+			if (!this.canObserveCommandAuth(model.provider, options?.apiKey)) {
+				return await prepared.provider.classify(prepared.model, context, prepared.options as ClassifierOptions);
+			}
 			let observedStatus: number | undefined;
-			const result = await prepared.provider.classify(
-				prepared.model,
-				context,
-				withStatusObserver(prepared.model, prepared.options, (status) => {
-					observedStatus = status;
-				}) as ClassifierOptions,
+			const onStatus = (status: number): void => {
+				observedStatus = status;
+			};
+			const result = await statusObserverStorage.run(onStatus, () =>
+				prepared.provider.classify!(
+					prepared.model,
+					context,
+					withStatusObserver(prepared.model, prepared.options, onStatus) as ClassifierOptions,
+				),
 			);
 			if (
 				result.stopReason === "error" &&
@@ -1295,7 +1347,7 @@ export class ModelRuntime implements Models {
 					return await refreshed.provider.classify(
 						refreshed.model,
 						context,
-						refreshed.options as ClassifierOptions,
+						withStatusObserver(refreshed.model, refreshed.options, () => {}) as ClassifierOptions,
 					);
 				}
 			}

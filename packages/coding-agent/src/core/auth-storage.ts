@@ -450,6 +450,11 @@ export class AuthStorage implements CredentialStore {
 		return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
 	}
 
+	hasCachedCommandCredential(provider: string): boolean {
+		const credential = this.readState.data[provider];
+		return credential?.type === "api_key" && credential.key !== undefined && isCommandConfigValue(credential.key);
+	}
+
 	/**
 	 * Re-run a stored `!command` API key and update the cache only when the command succeeds
 	 * with a non-empty value, leaving any previously cached value intact on transient failure.

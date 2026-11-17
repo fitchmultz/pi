@@ -1,6 +1,7 @@
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 
 type CommandCacheableCredentialStore = CredentialStore & {
+	hasCachedCommandCredential?: (provider: string) => boolean;
 	refreshCachedCredential?: (provider: string, options?: AuthOperationOptions) => Promise<boolean>;
 };
 
@@ -31,6 +32,11 @@ export class RuntimeCredentials implements CredentialStore {
 		options?.signal?.throwIfAborted();
 		const override = this.overrides.get(providerId);
 		return override ? { type: "api_key", key: override } : this.store.read(providerId, options);
+	}
+
+	hasCachedCommandCredential(providerId: string): boolean {
+		if (this.overrides.has(providerId)) return false;
+		return this.store.hasCachedCommandCredential?.(providerId) ?? false;
 	}
 
 	async refreshCachedCredential(providerId: string, options?: AuthOperationOptions): Promise<boolean> {
