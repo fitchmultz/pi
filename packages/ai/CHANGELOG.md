@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Fixed `gpt-6.2-astra` and `gpt-6.2-sol` Ultrafast estimates in OpenAI and Codex Responses staying at the standard rate: terminal-confirmed `ultrafast` costs 3x standard through February 28, 2027 and 6x from March 1, 2027 (Pacific time).
 - Fixed Google Generative AI and Google Vertex thinking level mapping rejecting `xhigh` (such as on `gemini-4-hydrogen`) and updated `@google/genai` to 3.3.0.
 - Fixed successful retry backoffs retaining abort listeners ([#10506](https://github.com/earendil-works/pi/issues/10506)).
 - Fixed Kimi K3 fallback, canonical Kimi/Moonshot catalog overlays, and Kimi Coding implied estimates, including `k3-256k`, omitting the default five-minute cache-write price.

@@ -908,13 +908,21 @@ export function applyServiceTierPricing(
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }
 
+// GPT-6.2 Ultrafast costs 3x the standard rate through February 28, 2027 and 6x from
+// March 1, 2027 (Pacific time). https://developers.openai.com/api/docs/pricing
+const GPT_6_2_ULTRAFAST_LIST_PRICE_START_MS = Date.UTC(2027, 2, 1, 8);
+
 function getServiceTierCostMultiplier(
 	model: Pick<Model<Api>, "id">,
 	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 ): number {
 	switch (serviceTier) {
 		case "ultrafast":
-			return model.id === "gpt-6-astra" ? 6 : 1;
+			if (model.id === "gpt-6-astra") return 6;
+			if (model.id === "gpt-6.2-astra" || model.id === "gpt-6.2-sol") {
+				return Date.now() < GPT_6_2_ULTRAFAST_LIST_PRICE_START_MS ? 3 : 6;
+			}
+			return 1;
 		case "flex":
 			return 0.5;
 		case "priority":

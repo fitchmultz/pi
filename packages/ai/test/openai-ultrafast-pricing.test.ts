@@ -6,7 +6,12 @@ import { normalizeContext } from "../src/utils/transcript.ts";
 
 const token = `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "offline" } })).toString("base64url")}.test`;
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+	vi.unstubAllGlobals();
+	vi.useRealTimers();
+});
+
+const CASE_TITLE = "prices %s with returned tier %s at %sx (requested %s)";
 
 // #155: the terminal response, not the request or an earlier event, confirms Ultrafast.
 describe.each(["responses", "codex-sse", "codex-websocket"] as const)("Ultrafast pricing (%s)", (transport) => {
@@ -16,6 +21,12 @@ describe.each(["responses", "codex-sse", "codex-websocket"] as const)("Ultrafast
 		["gpt-6-astra", "default", 1, "ultrafast"],
 		["gpt-6-astra", "unknown", 1, "ultrafast"],
 		["gpt-6-sol-preview", "ultrafast", 1, "ultrafast"],
+		// 3x through February 28, 2027 and 6x from March 1, 2027, Pacific time.
+		["gpt-6.2-astra", "ultrafast", 3, "ultrafast", "2027-03-01T07:59:59Z"],
+		["gpt-6.2-sol", "ultrafast", 3, "ultrafast", "2027-03-01T07:59:59Z"],
+		["gpt-6.2-astra", "ultrafast", 6, "ultrafast", "2027-03-01T08:00:00Z"],
+		["gpt-6.2-sol", "ultrafast", 6, "ultrafast", "2027-03-01T08:00:00Z"],
+		["gpt-6.2-astra", "default", 1, "ultrafast", "2027-03-01T07:59:59Z"],
 		["gpt-6-astra", "fast", 2, "ultrafast"],
 		["gpt-5.5", "fast", 2.5, "ultrafast"],
 		...(transport === "responses"
@@ -24,7 +35,11 @@ describe.each(["responses", "codex-sse", "codex-websocket"] as const)("Ultrafast
 					["gpt-6-astra", "default", 2, "fast"],
 					["gpt-6-astra", undefined, 2, "fast"],
 				] as const)),
-	] as const)("prices %s with returned tier %s at %sx (requested %s)", async (id, tier, multiplier, requestTier) => {
+	] as const)(CASE_TITLE, async (id, tier, multiplier, requestTier, now?: string) => {
+		if (now) {
+			vi.useFakeTimers({ toFake: ["Date"] });
+			vi.setSystemTime(new Date(now));
+		}
 		const events = [
 			{ type: "response.created", response: { id: "offline", service_tier: "ultrafast" } },
 			{
