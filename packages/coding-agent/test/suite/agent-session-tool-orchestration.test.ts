@@ -158,6 +158,9 @@ function searchCatalogExtension(pi: ExtensionAPI): void {
 	register("tracker_list_issues", "List the issues of a project.\nSupports paging.", "deferred");
 	register("tracker_save_issue", "Create or update an issue.", "deferred");
 	register("metrics_query", "Query metrics. Set start and end to choose the command interval.", "deferred");
+	// Their descriptions hold the words of names they do not have: `board_status`, and the built-in `write`.
+	register("sprint_report", "Write the status of each board to a report.", "deferred");
+	register("team_digest", "Summarize the board status of a team.", "deferred");
 	register("board_status", "Show the board.");
 	register("fleet_runs", "Inspect runs.", "hidden");
 }
@@ -241,6 +244,29 @@ describe("tool_search", () => {
 			details: { loaded: [], active: ["board_status"] },
 		});
 		expect(active).toEqual(["tool_search", "board_status", "tracker_save_issue"]);
+	});
+
+	// PIF-203
+	it("loads no other tool when the query is the name of a tool it does not search", async () => {
+		const { results, active } = await search(
+			// An active tool that is declared from the start.
+			{ query: "board_status" },
+			// A built-in tool that this session does not select.
+			{ query: "write" },
+		);
+		expect(results[0]).toEqual({
+			text: "board_status is already active; call it directly.",
+			details: { loaded: [], active: ["board_status"] },
+		});
+		expect(results[1]).toEqual({
+			text: [
+				"write is not available in this session; tool_search cannot load it.",
+				"No tool is a close match, so none was loaded. Closest matches; search for an exact name to load one:",
+				"- sprint_report: Write the status of each board to a report.",
+			].join("\n"),
+			details: { loaded: [], listed: ["sprint_report"], unavailable: ["write"] },
+		});
+		expect(active).toEqual(["tool_search", "board_status"]);
 	});
 
 	it("says when the query names a tool it cannot load or that is not registered", async () => {
