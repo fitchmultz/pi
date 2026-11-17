@@ -12,6 +12,7 @@ import {
 	type ResourceLoader,
 	type ResourceLoaderReloadOptions,
 } from "./resource-loader.ts";
+import type { RuntimeRecordData } from "./runtime-record.ts";
 import { type CreateAgentSessionOptions, type CreateAgentSessionResult, createAgentSession } from "./sdk.ts";
 import type { SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
@@ -58,6 +59,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	services: AgentSessionServices;
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
+	runtimeTrigger?: RuntimeRecordData["trigger"];
 	workingSession?: CreateAgentSessionOptions["workingSession"];
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
@@ -227,6 +229,7 @@ export async function createAgentSessionFromServices(
 		noTools: options.noTools,
 		customTools: options.customTools,
 		sessionStartEvent: options.sessionStartEvent,
+		runtimeTrigger: options.runtimeTrigger,
 		workingSession: options.workingSession,
 		workingSessionResourcesPrepared: options.services.workingSessionResourcesPrepared,
 	});

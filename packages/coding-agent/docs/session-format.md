@@ -197,7 +197,7 @@ Pi appends one custom entry with `customType` `pi.runtime` each time it starts a
 
 When it is written:
 
-- Every start writes a complete record, also when nothing changed since the previous one. `trigger` is the `session_start` reason: `startup`, `new`, `resume`, `fork` or `reload`.
+- Every start writes a complete record, also when nothing changed since the previous one. `trigger` is the `session_start` reason (`startup`, `new`, `resume`, `fork` or `reload`), except on a [managed restart](restart.md) handoff, which records `restart` while emitting `session_start` with reason `startup`.
 - Sessions without a file (`--no-session`, `SessionManager.inMemory()`) get no record.
 - A new session keeps its record in memory until its first message creates the file, so a session that ends unused leaves no file. A resumed or reloaded session gets its record written at once.
 - A fork or clone copies the records of the path it copies, then gets its own with `trigger` `fork`.
@@ -210,10 +210,10 @@ A record does not count as activity: the session selector's order, message count
 | Field | Content |
 | --- | --- |
 | `version` | Format version of the record. Currently `1` |
-| `trigger` | Reason of the `session_start` event that follows |
+| `trigger` | Reason of the `session_start` event that follows (`startup`, `new`, `resume`, `fork` or `reload`), or `restart` when resuming from a [managed restart](restart.md) handoff |
 | `process.pid` | Process ID of the Pi process |
 | `process.mode` | Run mode, as extensions see it in `ctx.mode`: `tui`, `print`, `json` or `rpc` |
-| `process.launcherPid` | Process ID of the [managed launcher](restart.md) that owns this process. Absent without one. `pi restart` and `/restart` replace the process and keep the launcher, so a record with the same `launcherPid` as the one before it and another `pid` marks a restart |
+| `process.launcherPid` | Process ID of the [managed launcher](restart.md) that owns this process. Absent without one. `pi restart` and `/restart` replace the process, keep the launcher and record `trigger` `restart` |
 | `build` | What `pi --build-info` prints: `package` (`name`, `version`, `path`), `runtime` (`node`, `platform`, `arch`) and `fork`, the fork installer's receipt with the built `commit`, or `null` for other installs |
 | `packages` | Every package that supplied a loaded extension, skill, prompt template or theme: `source` as configured, `scope` (`user`, `project` or `temporary`), `path` of the installed package, `version` from its `package.json` if it has one, and `commit` if `path` is the root of a git checkout. A configured package with all of its resources disabled is not listed |
 | `extensions` | Every loaded extension that no package supplied: `path` of the entry file, `source` (`auto` for extension directories, `local` for settings entries, `cli` for `-e`, `builtin`, `inline`), `scope`, and `sha256` of the entry file. Built-in and inline extensions have a name instead of a file and no hash. Packages given with `-e` appear here |

@@ -73,7 +73,7 @@ describe("pi.runtime session record", () => {
 	 * A runtime with file-backed sessions and the real resource loader. Its extension appends a probe entry
 	 * in `session_start` unless `probe` is `"off"`.
 	 */
-	async function createRuntimeForTest(probe: "on" | "off" = "on") {
+	async function createRuntimeForTest(probe: "on" | "off" = "on", onSessionStart?: (reason: string) => void) {
 		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-runtime-record-")));
 		const agentDir = join(root, "agent");
 		const cwd = join(root, "project");
@@ -109,6 +109,7 @@ describe("pi.runtime session record", () => {
 									}),
 								),
 							});
+							pi.on("session_start", (event) => onSessionStart?.(event.reason));
 							if (probe === "on") pi.on("session_start", (event) => pi.appendEntry(PROBE_ENTRY, event.reason));
 						},
 					],
@@ -279,6 +280,46 @@ describe("pi.runtime session record", () => {
 		const added = readJournal(file).slice(hold.state.entries.length);
 		expect(added.map((entry) => (entry.type === "custom" ? entry.data : entry.type))).toEqual([
 			expect.objectContaining({ trigger: "startup", process: { pid: process.pid, mode: "print" } }),
+			"message",
+			"message",
+		]);
+	});
+
+	it("records trigger restart on a managed restart handoff while emitting session_start startup and holding until first run", async () => {
+		const observedStartReasons: string[] = [];
+		const { start } = await createRuntimeForTest("off", (reason) => observedStartReasons.push(reason));
+		const runtime = await start();
+		await runtime.session.bindExtensions({});
+		await runtime.session.prompt("before restart");
+		const hold = await runtime.session.acquireWorkingSession();
+		await hold.release();
+		const file = hold.state.sessionFile!;
+		const saved = readFileSync(file, "utf8");
+		observedStartReasons.length = 0;
+
+		const { session } = await createAgentSession({
+			workingSession: hold.state,
+			runtimeTrigger: "restart",
+			modelRuntime: runtime.services.modelRuntime,
+			resourceLoader: runtime.services.resourceLoader,
+		});
+		cleanups.push(() => session.dispose());
+		await session.bindExtensions({
+			mode: "tui",
+			managedHost: { owner: { pid: 5150 }, ready: Promise.resolve(true) },
+		});
+
+		expect(observedStartReasons).toEqual(["startup"]);
+		expect(readFileSync(file, "utf8")).toBe(saved);
+		expect(() => resolveWorkingSession(hold.state)).not.toThrow();
+
+		await session.prompt("after restart");
+		const added = readJournal(file).slice(hold.state.entries.length);
+		expect(added.map((entry) => (entry.type === "custom" ? entry.data : entry.type))).toEqual([
+			expect.objectContaining({
+				trigger: "restart",
+				process: { pid: process.pid, mode: "tui", launcherPid: 5150 },
+			}),
 			"message",
 			"message",
 		]);

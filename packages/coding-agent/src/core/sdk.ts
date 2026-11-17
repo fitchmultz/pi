@@ -18,6 +18,7 @@ import { ModelRuntime } from "./model-runtime.ts";
 import { extractPromptProgress } from "./prompt-progress.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
+import type { RuntimeRecordData } from "./runtime-record.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import {
 	applyToolModifiers,
@@ -119,6 +120,8 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Override the initial `pi.runtime` trigger while keeping `sessionStartEvent.reason` unchanged. */
+	runtimeTrigger?: RuntimeRecordData["trigger"];
 }
 
 /** Result from createAgentSession */
@@ -624,6 +627,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		runtimeTrigger: options.runtimeTrigger,
 	});
 	sessionRef.current = session;
 
