@@ -1031,6 +1031,7 @@ export async function main(args: string[], options?: MainOptions) {
 			noTools: sessionOptions.noTools,
 			customTools: sessionOptions.customTools,
 		});
+		diagnostics.push(...created.diagnostics);
 		created.session.setWorkingSessionReady(false);
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (!saved && created.session.model && cliThinkingOverride) {
