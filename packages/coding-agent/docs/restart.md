@@ -42,6 +42,7 @@ What is compared:
 These are the values of the [runtime record](session-format.md#runtime-record-piruntime). The following changes are not detected:
 
 - Uncommitted edits in a package checkout.
+- Any change in a package that has neither a `version` in its `package.json` nor a git checkout of its own. Examples are a single extension file listed in `packages` and a package directory inside a larger repository.
 - An npm package that is installed again at the same version.
 - A changed file that an extension outside a package imports, when its entry file is unchanged.
 - A new Pi runtime. Only extension code is compared.

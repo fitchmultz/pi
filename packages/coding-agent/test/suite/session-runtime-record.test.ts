@@ -495,4 +495,29 @@ describe("pi.runtime session record", () => {
 			extension: { path: looseExtension, source: "auto", scope: "user", ...current.extension },
 		});
 	});
+
+	it("compares a repaired extension with the code that was imported, not with the import that failed", async () => {
+		const { start, agentDir } = await createRuntimeForTest();
+		const extension = join(agentDir, "extensions", "repaired.ts");
+		mkdirSync(join(agentDir, "extensions"));
+		writeFileSync(extension, "export default function () {\n");
+		const runtime = await start();
+		const bind = () => runtime.session.bindExtensions({ shutdownHandler: () => {} });
+		await bind();
+		const recordedPaths = () =>
+			runtimeRecords(runtime.session.sessionManager.getEntries())
+				.at(-1)!
+				.data!.extensions.map(({ path, sha256 }) => ({ path, sha256 }));
+		expect(recordedPaths()).toEqual([{ path: "<inline:1>" }]);
+
+		// A new session in the same process imports the file again, because no code of it was kept.
+		writeFileSync(extension, "export default function () {}\n// repaired\n");
+		await runtime.newSession();
+		await bind();
+		expect(recordedPaths()).toEqual([
+			{ path: extension, sha256: sha256(readFileSync(extension)) },
+			{ path: "<inline:1>" },
+		]);
+		expect(await runtime.session.getStaleSources()).toEqual([]);
+	});
 });
