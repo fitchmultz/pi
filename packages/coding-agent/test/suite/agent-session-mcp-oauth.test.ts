@@ -171,19 +171,25 @@ describe("AgentSession MCP OAuth", () => {
 		expect(server.deletes).toEqual(["access-1"]);
 	});
 
-	async function freePort(): Promise<number> {
-		return new Promise<number>((resolve) => {
-			const probe = createServer().listen(0, "127.0.0.1", () => {
-				const address = probe.address() as AddressInfo;
-				probe.close(() => resolve(address.port));
-			});
-		});
+	/**
+	 * Hold a free loopback port for a sign-in that must listen on it. Release it right before that sign-in:
+	 * Linux gives a released port to the next server that asks for any port about once in 7,000 times, and
+	 * `setup` starts such a server.
+	 */
+	async function holdFreePort(): Promise<{ port: number; release: () => Promise<void> }> {
+		const holder = createServer();
+		await new Promise<void>((resolve) => holder.listen(0, "127.0.0.1", resolve));
+		const release = () => new Promise<void>((resolve) => holder.close(() => resolve()));
+		cleanups.push(release);
+		return { port: (holder.address() as AddressInfo).port, release };
 	}
 
 	it("uses the configured callback URL and scope", async () => {
-		const callbackUrl = `http://localhost:${await freePort()}/callback`;
+		const callbackPort = await holdFreePort();
+		const callbackUrl = `http://localhost:${callbackPort.port}/callback`;
 		const { harness, notifications, opened } = await setup("follow", { callbackUrl, scope: "issues:read" });
 
+		await callbackPort.release();
 		await harness.session.prompt("/mcp login issues");
 		expect(notifications.at(-1)).toBe('Signed in to MCP server "issues" (1 tools).');
 		expect(opened[0].searchParams.get("redirect_uri")).toBe(callbackUrl);
@@ -211,9 +217,11 @@ describe("AgentSession MCP OAuth", () => {
 		expect(notifications.at(-1)).toBe('Signed in to MCP server "issues" (1 tools).');
 		expect(opened[0].searchParams.get("redirect_uri")).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/oauth\/done$/);
 
-		const port = await freePort();
+		const { port, release } = await holdFreePort();
 		const fixed = await setup("follow", { callbackUrl: "http://127.0.0.1/oauth/done", callbackPort: port });
+		await release();
 		await fixed.harness.session.prompt("/mcp login issues");
+		expect(fixed.notifications.at(-1)).toBe('Signed in to MCP server "issues" (1 tools).');
 		expect(fixed.opened[0].searchParams.get("redirect_uri")).toBe(`http://127.0.0.1:${port}/oauth/done`);
 	});
 
