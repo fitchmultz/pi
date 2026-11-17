@@ -33,6 +33,7 @@ import type { ModelConfig, ModelsJsonModel, ModelsJsonModelOverride, ModelsJsonP
 import {
 	clearConfigValueCache,
 	getConfigValueEnvVarNames,
+	invalidateConfigValueCache,
 	isCommandConfigValue,
 	isConfigValueConfigured,
 	resolveConfigValueOrThrow,
@@ -749,6 +750,31 @@ export function resolveCompatibilityRequestConfig(
 		headers: model.headers || configured ? { ...model.headers, ...configured } : undefined,
 		authHeader: extension?.authHeader ?? config?.authHeader ?? false,
 	};
+}
+
+export function invalidateConfiguredCommandAuth(
+	model: AnyModel,
+	config: ModelsJsonProvider | undefined,
+	extension: ProviderConfigInput | undefined,
+	includeApiKey: boolean,
+): boolean {
+	let invalidated = false;
+	if (includeApiKey) {
+		const rawKey = configuredApiKey(config, extension);
+		if (rawKey !== undefined && isCommandConfigValue(rawKey)) {
+			invalidateConfigValueCache(rawKey);
+			invalidated = true;
+		}
+	}
+	for (const headers of [configuredHeaders(config, extension), rawModelHeaders(model, config, extension)]) {
+		for (const value of Object.values(headers ?? {})) {
+			if (isCommandConfigValue(value)) {
+				invalidateConfigValueCache(value);
+				invalidated = true;
+			}
+		}
+	}
+	return invalidated;
 }
 
 export function configuredRequestAuthStatus(

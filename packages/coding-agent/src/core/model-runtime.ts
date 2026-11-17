@@ -5,6 +5,7 @@ import {
 	type ApiStreamOptions,
 	type AssistantImages,
 	type AssistantMessage,
+	type AssistantMessageEvent,
 	type AssistantMessageEventStream,
 	type AuthCheck,
 	type AuthInteraction,
@@ -54,6 +55,7 @@ import {
 	type Provider,
 	type ProviderHeaders,
 	type ProviderRequestOptions,
+	type ProviderResponse,
 	resolveProviderSummary,
 	type SimpleStreamOptions,
 	type StreamOptions,
@@ -85,6 +87,7 @@ import {
 	type CompatibilityRequestConfig,
 	composeModelProvider,
 	configuredRequestAuthStatus,
+	invalidateConfiguredCommandAuth,
 	type ProviderAuthFallback,
 	type ProviderConfigInput,
 	resolveCompatibilityRequestConfig,
@@ -187,6 +190,134 @@ function mergeHeaders(
 		merged[name] = value;
 	}
 	return merged;
+}
+
+type PreparedRequest<
+	TModel extends AnyModel,
+	TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
+> = {
+	provider: Provider;
+	model: TModel;
+	options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
+	resolution: AuthResult;
+};
+
+const HTTP_AUTH_STATUSES = new Set([401, 403]);
+const LEADING_HTTP_STATUS_RE = /^(?:([1-5]\d\d)(?=\s|:|$)|[^\n:(]{1,80}\(([1-5]\d\d)\):)/;
+const AUTH_ERROR_MESSAGE_RE = new RegExp(
+	[
+		"(?<![a-z0-9])(?:401|403)(?![a-z0-9])",
+		"\\bunauthorized\\b",
+		"\\bunauthenticated\\b",
+		"\\bauthentication_error\\b",
+		"\\bpermission_error\\b",
+		"\\binvalid[_ -]?api[_ -]?key\\b",
+		"\\bincorrect api key\\b",
+		"\\binvalid x-api-key\\b",
+		"\\bapi_key_invalid\\b",
+		"\\bunrecognizedclientexception\\b",
+		"\\baccessdeniedexception\\b",
+	].join("|"),
+	"i",
+);
+
+function isAuthStatus(status: number): boolean {
+	return HTTP_AUTH_STATUSES.has(status);
+}
+
+function extractDiagnosticStatus(message: AssistantMessage): number | undefined {
+	for (const diagnostic of message.diagnostics ?? []) {
+		const status = diagnostic.details?.status;
+		if (typeof status === "number") return status;
+	}
+	return undefined;
+}
+
+function extractThrownStatus(error: unknown): number | undefined {
+	if (!(error instanceof Error)) return undefined;
+	const candidate = error as Error & {
+		status?: unknown;
+		statusCode?: unknown;
+		$metadata?: { httpStatusCode?: unknown };
+		$response?: { statusCode?: unknown };
+	};
+	if (typeof candidate.statusCode === "number") return candidate.statusCode;
+	if (typeof candidate.status === "number") return candidate.status;
+	if (typeof candidate.$metadata?.httpStatusCode === "number") return candidate.$metadata.httpStatusCode;
+	if (typeof candidate.$response?.statusCode === "number") return candidate.$response.statusCode;
+	return undefined;
+}
+
+function isAuthErrorMessage(errorMessage: string | undefined, observedStatus?: number): boolean {
+	if (observedStatus !== undefined) return isAuthStatus(observedStatus);
+	if (!errorMessage) return false;
+	const leadingStatus = LEADING_HTTP_STATUS_RE.exec(errorMessage.trimStart());
+	if (leadingStatus) return isAuthStatus(Number(leadingStatus[1] ?? leadingStatus[2]));
+	return AUTH_ERROR_MESSAGE_RE.test(errorMessage);
+}
+
+function isAssistantAuthError(message: AssistantMessage, observedStatus?: number): boolean {
+	return isAuthErrorMessage(message.errorMessage, observedStatus ?? extractDiagnosticStatus(message));
+}
+
+function isThrownAuthError(error: unknown, observedStatus?: number): boolean {
+	const status = observedStatus ?? extractThrownStatus(error);
+	const message = error instanceof Error ? error.message : String(error);
+	return isAuthErrorMessage(message, status);
+}
+
+function recordsEqual(
+	left: Readonly<Record<string, string | null>> | undefined,
+	right: Readonly<Record<string, string | null>> | undefined,
+): boolean {
+	const leftEntries = Object.entries(left ?? {});
+	const rightEntries = Object.entries(right ?? {});
+	if (leftEntries.length !== rightEntries.length) return false;
+	return leftEntries.every(([key, value]) => Object.hasOwn(right ?? {}, key) && right?.[key] === value);
+}
+
+function hasResolvedAuthChanged(previous: AuthResult, next: AuthResult, explicitApiKey: boolean): boolean {
+	if (!explicitApiKey && previous.auth.apiKey !== next.auth.apiKey) return true;
+	if (previous.auth.baseUrl !== next.auth.baseUrl) return true;
+	if (!recordsEqual(previous.auth.headers, next.auth.headers)) return true;
+	return !recordsEqual(previous.env, next.env);
+}
+
+function withStatusObserver<
+	TModel extends AnyModel,
+	TOptions extends { onResponse?: ProviderRequestOptions<TModel>["onResponse"] },
+>(_model: TModel, options: TOptions, onStatus: (status: number) => void): TOptions {
+	const callerOnResponse = options.onResponse;
+	return {
+		...options,
+		onResponse: async (response: ProviderResponse, responseModel: TModel) => {
+			onStatus(response.status);
+			await callerOnResponse?.(response, responseModel);
+		},
+	};
+}
+
+function replayCheckedStream(
+	stream: AssistantMessageEventStream,
+	first: IteratorResult<AssistantMessageEvent>,
+	iterator: AsyncIterator<AssistantMessageEvent>,
+): AsyncIterable<AssistantMessageEvent> & { result(): Promise<AssistantMessage> } {
+	return {
+		async *[Symbol.asyncIterator]() {
+			if (first.done) return;
+			try {
+				yield first.value;
+				for (;;) {
+					const next = await iterator.next();
+					if (next.done) return;
+					yield next.value;
+				}
+			} finally {
+				await iterator.return?.();
+			}
+		},
+		result: () => stream.result(),
+	};
 }
 
 /** Configured pi-ai Models collection used by coding-agent and SDK consumers. */
@@ -824,26 +955,15 @@ export class ModelRuntime implements Models {
 		return check ? { configured: true, source: "environment", label: check.source } : { configured: false };
 	}
 
-	private async prepareRequest<
+	private async buildPreparedRequest<
 		TModel extends AnyModel,
 		TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
 	>(
+		provider: Provider,
 		model: TModel,
+		resolution: AuthResult,
 		options: TOptions | undefined,
-	): Promise<{
-		provider: Provider;
-		model: TModel;
-		options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
-	}> {
-		const provider = this.models.getProvider(model.provider);
-		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
-		const resolution = await this.getAuth(model, {
-			apiKey: options?.apiKey,
-			env: options?.env,
-			signal: options?.signal,
-		});
-		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
-
+	): Promise<PreparedRequest<TModel, TOptions>> {
 		const { transformHeaders, ...rawProviderOptions } = options ?? {};
 		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 		const configuredModel: TModel = resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model;
@@ -882,7 +1002,121 @@ export class ModelRuntime implements Models {
 				headers,
 				env,
 			} as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>,
+			resolution,
 		};
+	}
+
+	private async prepareRequest<
+		TModel extends AnyModel,
+		TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
+	>(model: TModel, options: TOptions | undefined): Promise<PreparedRequest<TModel, TOptions>> {
+		const provider = this.models.getProvider(model.provider);
+		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
+		const resolution = await this.getAuth(model, {
+			apiKey: options?.apiKey,
+			env: options?.env,
+			signal: options?.signal,
+		});
+		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
+		return this.buildPreparedRequest(provider, model, resolution, options);
+	}
+
+	private async prepareRefreshedCommandRequest<
+		TModel extends AnyModel,
+		TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
+	>(
+		model: TModel,
+		options: TOptions | undefined,
+		first: PreparedRequest<TModel, TOptions>,
+	): Promise<PreparedRequest<TModel, TOptions> | undefined> {
+		const stored =
+			options?.apiKey !== undefined
+				? { hasStored: true, invalidated: false }
+				: this.ignoresStoredCredentials(model.provider)
+					? { hasStored: this.credentials.hasRuntimeApiKey(model.provider), invalidated: false }
+					: await this.credentials.invalidateCachedCredential(model.provider, { signal: options?.signal });
+		const configuredInvalidated = invalidateConfiguredCommandAuth(
+			model,
+			this.config.getProvider(model.provider),
+			this.extensionProviders.get(model.provider),
+			options?.apiKey === undefined && !stored.hasStored,
+		);
+		if (!stored.invalidated && !configuredInvalidated) return undefined;
+
+		const provider = this.models.getProvider(model.provider);
+		if (!provider) return undefined;
+
+		let resolution: AuthResult | undefined;
+		try {
+			resolution = await this.getAuth(model, {
+				apiKey: options?.apiKey,
+				env: options?.env,
+				signal: options?.signal,
+			});
+		} catch (error) {
+			if (options?.signal?.aborted) throw error;
+			return undefined;
+		}
+		if (!resolution || !hasResolvedAuthChanged(first.resolution, resolution, options?.apiKey !== undefined)) {
+			return undefined;
+		}
+		return this.buildPreparedRequest(provider, model, resolution, options);
+	}
+
+	private async runStreamWithCommandAuthRefresh<TOptions extends StreamOptions & ModelsRequestTransforms>(
+		model: Model<Api>,
+		options: TOptions | undefined,
+		dispatch: (
+			prepared: PreparedRequest<Model<Api>, TOptions>,
+			onStatus: (status: number) => void,
+		) => AssistantMessageEventStream,
+		onPrepared?: (
+			model: Model<Api>,
+			options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<Model<Api>>,
+		) => void,
+	): Promise<AsyncIterable<AssistantMessageEvent>> {
+		const prepared = await this.prepareRequest(model, options);
+		onPrepared?.(prepared.model, prepared.options);
+		let observedStatus: number | undefined;
+		const onStatus = (status: number): void => {
+			observedStatus ??= status;
+		};
+
+		let firstStream: AssistantMessageEventStream;
+		let iterator: AsyncIterator<AssistantMessageEvent>;
+		let first: IteratorResult<AssistantMessageEvent>;
+		try {
+			firstStream = dispatch(prepared, onStatus);
+			iterator = firstStream[Symbol.asyncIterator]();
+			first = await iterator.next();
+		} catch (error) {
+			if (!options?.signal?.aborted && isThrownAuthError(error, observedStatus)) {
+				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
+				if (refreshed) {
+					onPrepared?.(refreshed.model, refreshed.options);
+					return dispatch(refreshed, () => {});
+				}
+			}
+			throw error;
+		}
+
+		if (
+			!first.done &&
+			first.value.type === "error" &&
+			first.value.reason === "error" &&
+			first.value.error.content.length === 0 &&
+			!options?.signal?.aborted &&
+			isAssistantAuthError(first.value.error, observedStatus)
+		) {
+			while (!(await iterator.next()).done) {}
+			const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
+			if (refreshed) {
+				onPrepared?.(refreshed.model, refreshed.options);
+				return dispatch(refreshed, () => {});
+			}
+		}
+
+		return replayCheckedStream(firstStream, first, iterator);
 	}
 
 	stream<TApi extends Api>(
@@ -895,14 +1129,15 @@ export class ModelRuntime implements Models {
 			model,
 			async () => {
 				assertChatModel(model);
-				const prepared = await this.prepareRequest(
+				return this.runStreamWithCommandAuthRefresh(
 					model,
 					options as (StreamOptions & ModelsRequestTransforms) | undefined,
-				);
-				return prepared.provider.stream(
-					prepared.model,
-					resolveProviderSummary(prepared.model, transcript),
-					prepared.options as ApiStreamOptions<TApi>,
+					(prepared, onStatus) =>
+						prepared.provider.stream(
+							prepared.model,
+							resolveProviderSummary(prepared.model, transcript),
+							withStatusObserver(prepared.model, prepared.options, onStatus) as ApiStreamOptions<TApi>,
+						),
 				);
 			},
 			undefined,
@@ -959,13 +1194,17 @@ export class ModelRuntime implements Models {
 			model,
 			async () => {
 				assertChatModel(model);
-				const prepared = await this.prepareRequest(model, options);
-				onPrepared?.(prepared.model, prepared.options);
-				return prepared.provider.streamSimple(
-					prepared.model,
-					// Session requests and cache warming pass here with the model that will answer.
-					resolveProviderSummary(prepared.model, transcript),
-					prepared.options as SimpleStreamOptions,
+				return this.runStreamWithCommandAuthRefresh(
+					model,
+					options,
+					(prepared, onStatus) =>
+						prepared.provider.streamSimple(
+							prepared.model,
+							// Session requests and cache warming pass here with the model that will answer.
+							resolveProviderSummary(prepared.model, transcript),
+							withStatusObserver(prepared.model, prepared.options, onStatus) as SimpleStreamOptions,
+						),
+					onPrepared,
 				);
 			},
 			undefined,
@@ -986,11 +1225,18 @@ export class ModelRuntime implements Models {
 			model,
 			async () => {
 				assertChatModel(model);
-				const prepared = await this.prepareRequest(model, options);
-				if (!prepared.provider.fetchDeferred) {
+				const provider = this.models.getProvider(model.provider);
+				if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
+				if (!provider.fetchDeferred) {
 					throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
 				}
-				return prepared.provider.fetchDeferred(prepared.model, handle, prepared.options as DeferredFetchOptions);
+				return this.runStreamWithCommandAuthRefresh(model, options, (prepared, onStatus) =>
+					prepared.provider.fetchDeferred!(
+						prepared.model,
+						handle,
+						withStatusObserver(prepared.model, prepared.options, onStatus) as DeferredFetchOptions,
+					),
+				);
 			},
 			undefined,
 			options?.signal,
@@ -1015,7 +1261,29 @@ export class ModelRuntime implements Models {
 		if (!prepared.provider.cancelDeferred) {
 			throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
 		}
-		await prepared.provider.cancelDeferred(prepared.model, handle, prepared.options as DeferredCancelOptions);
+		let observedStatus: number | undefined;
+		try {
+			await prepared.provider.cancelDeferred(
+				prepared.model,
+				handle,
+				withStatusObserver(prepared.model, prepared.options, (status) => {
+					observedStatus ??= status;
+				}) as DeferredCancelOptions,
+			);
+		} catch (error) {
+			if (!options?.signal?.aborted && isThrownAuthError(error, observedStatus)) {
+				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
+				if (refreshed?.provider.cancelDeferred) {
+					await refreshed.provider.cancelDeferred(
+						refreshed.model,
+						handle,
+						refreshed.options as DeferredCancelOptions,
+					);
+					return;
+				}
+			}
+			throw error;
+		}
 	}
 
 	async generateImages(
@@ -1029,7 +1297,30 @@ export class ModelRuntime implements Models {
 			if (!prepared.provider.generateImages) {
 				throw new ModelsError("provider", `Provider ${model.provider} does not support image generation`);
 			}
-			return await prepared.provider.generateImages(prepared.model, context, prepared.options as ImagesOptions);
+			let observedStatus: number | undefined;
+			const result = await prepared.provider.generateImages(
+				prepared.model,
+				context,
+				withStatusObserver(prepared.model, prepared.options, (status) => {
+					observedStatus ??= status;
+				}) as ImagesOptions,
+			);
+			if (
+				result.stopReason === "error" &&
+				result.output.length === 0 &&
+				!options?.signal?.aborted &&
+				isAuthErrorMessage(result.errorMessage, observedStatus)
+			) {
+				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
+				if (refreshed?.provider.generateImages) {
+					return await refreshed.provider.generateImages(
+						refreshed.model,
+						context,
+						refreshed.options as ImagesOptions,
+					);
+				}
+			}
+			return result;
 		} catch (error) {
 			return imageErrorResult(model, error, options?.signal?.aborted);
 		}
@@ -1047,7 +1338,30 @@ export class ModelRuntime implements Models {
 			if (!prepared.provider.classify) {
 				throw new ModelsError("provider", `Provider ${model.provider} does not support classification`);
 			}
-			return await prepared.provider.classify(prepared.model, context, prepared.options as ClassifierOptions);
+			let observedStatus: number | undefined;
+			const result = await prepared.provider.classify(
+				prepared.model,
+				context,
+				withStatusObserver(prepared.model, prepared.options, (status) => {
+					observedStatus ??= status;
+				}) as ClassifierOptions,
+			);
+			if (
+				result.stopReason === "error" &&
+				Object.keys(result.answers).length === 0 &&
+				!options?.signal?.aborted &&
+				isAuthErrorMessage(result.errorMessage, observedStatus)
+			) {
+				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
+				if (refreshed?.provider.classify) {
+					return await refreshed.provider.classify(
+						refreshed.model,
+						context,
+						refreshed.options as ClassifierOptions,
+					);
+				}
+			}
+			return result;
 		} catch (error) {
 			return classifierErrorResult(model, error, options?.signal?.aborted);
 		}

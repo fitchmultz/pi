@@ -13,9 +13,14 @@ import { raceWithAbortSignal } from "../utils/abort.ts";
 import { atomicWriteFileSync, resolveFileTarget } from "../utils/atomic-file.ts";
 import { getFileRevision, normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
-import { isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
+import { invalidateConfigValueCache, isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
 
 type AuthStorageData = Record<string, Credential>;
+
+export interface StoredCommandInvalidation {
+	hasStored: boolean;
+	invalidated: boolean;
+}
 
 // On Windows, a just-removed lock directory can stay "delete pending" while another process
 // (antivirus, indexer, another pi checking the lock) still has it open. mkdir then fails with
@@ -448,6 +453,21 @@ export class AuthStorage implements CredentialStore {
 		if (credential?.type !== "api_key") return credential;
 		if (credential.key === undefined) return credential;
 		return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
+	}
+
+	/** Evict a stored `!command` API key from the command cache so the next read re-executes it. */
+	async invalidateCachedCredential(
+		provider: string,
+		options?: AuthOperationOptions,
+	): Promise<StoredCommandInvalidation> {
+		const credential = (await this.readLatestData(options))[provider];
+		options?.signal?.throwIfAborted();
+		if (!credential) return { hasStored: false, invalidated: false };
+		if (credential.type !== "api_key" || credential.key === undefined || !isCommandConfigValue(credential.key)) {
+			return { hasStored: true, invalidated: false };
+		}
+		invalidateConfigValueCache(credential.key);
+		return { hasStored: true, invalidated: true };
 	}
 
 	async modify(

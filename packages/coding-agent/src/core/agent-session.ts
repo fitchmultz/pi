@@ -137,6 +137,7 @@ import type { ModelRuntime } from "./model-runtime.ts";
 import { type NestedCallSummary, NestedToolCallRunner } from "./nested-tool-calls.ts";
 import type { PromptProgress } from "./prompt-progress.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { clearConfigValueCache } from "./resolve-config-value.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { describeRuntime, RUNTIME_RECORD_ENTRY, type RuntimeRecordData } from "./runtime-record.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
@@ -4815,6 +4816,7 @@ export class AgentSession {
 		const previouslyUndeclared = [...this._toolRegistry.keys()].filter((name) => !isDeclaredByDefault(name));
 		await this.settingsManager.reload();
 		this.syncQueueModesFromSettings();
+		clearConfigValueCache();
 		resetApiProviders();
 		await this._resourceLoader.reload();
 		// Activate tools newly added to defaultTools. Removed ones stay active, and tools disabled

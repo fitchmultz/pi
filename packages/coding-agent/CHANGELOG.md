@@ -69,6 +69,7 @@
 
 ### Fixed
 
+- Fixed cached `!command` credentials and headers staying stale for the entire process lifetime when secret-manager tokens rotate. `/reload` now clears cached command values, and when a provider rejects a request with HTTP 401 or 403 before streaming any output, `ModelRuntime` invalidates the provider's cached command, re-resolves authentication once, and retries the request once if the resolved API key or headers changed. See [Load an API key from a command](docs/providers.md#load-an-api-key-from-a-command).
 - Fixed the standalone CLI supervisor (`cli.js`) losing its committed exit status to `SIGHUP` when the controlling terminal closes during process exit teardown after `superviseCli()` removes its active supervision signal handlers.
 - Compiled ESM (`.mjs` and `"type": "module"` `.js`) and dynamic `import()` extension modules without physical peer copies now fall back to Pi's host `@earendil-works/*`, `@mariozechner/*`, `typebox`, and `@sinclair/typebox` runtime modules instead of failing with `ERR_MODULE_NOT_FOUND`, and Jiti's transpile cache persists under `${XDG_CACHE_HOME:-~/.cache}/pi/jiti` across `$TMPDIR` cleanups and fork release switches.
 - Fixed a forked session (`/fork`, `/clone`, `--fork`) reading none of the copied conversation from the OpenAI prompt cache on its first request. A fork now sends providers the session id its conversation was cached under, recorded as `cacheSessionId` in its header. See [SessionHeader](docs/session-format.md#sessionheader).

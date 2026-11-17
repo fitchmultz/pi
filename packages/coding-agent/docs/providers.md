@@ -83,7 +83,7 @@ To use a secret manager without writing the resolved key to disk, set a provider
 }
 ```
 
-Pi runs the command when the key is first needed and caches its standard output for the process lifetime. Empty output, a timeout, or a nonzero exit leaves the key unresolved until Pi restarts.
+Pi runs the command when the key is first needed and caches its standard output. `/reload` clears cached command values so the next check or request runs the command again, including after empty output, a timeout, or a nonzero exit. If a provider rejects a request with HTTP 401 or 403 before streaming any output, Pi re-runs the provider's command once and retries the request once when the resolved credential or headers changed.
 
 ## Provider Specific Config
 
