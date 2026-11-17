@@ -17,6 +17,7 @@ import { canonicalizePath, pathsEqual, resolvePath } from "../../utils/paths.ts"
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
+import { forgetLoadedSources } from "../loaded-sources.ts";
 import { type McpServerConfig, McpServerRegistry, validateMcpServerConfig } from "../mcp-servers.ts";
 import { readPiManifest } from "../pi-manifest.ts";
 import type { ProviderAuthFallback } from "../provider-composer.ts";
@@ -245,6 +246,7 @@ interface ExtensionCacheToken {
 
 export function clearExtensionCache(): void {
 	extensionCache.clear();
+	forgetLoadedSources();
 	extensionCacheCwd = undefined;
 	extensionCacheGeneration++;
 	cachedJitiLoader = undefined;
@@ -756,7 +758,11 @@ async function getJitiLoader(): Promise<ReturnType<typeof createJiti>> {
 	return instance;
 }
 
-async function loadExtensionModule(extensionPath: string, cacheToken?: ExtensionCacheToken) {
+async function loadExtensionModule(
+	extensionPath: string,
+	cacheToken?: ExtensionCacheToken,
+	beforeImport?: (extensionPath: string) => Promise<void>,
+) {
 	if (isCurrentCacheToken(cacheToken)) {
 		const cachedFactory = extensionCache.get(extensionPath);
 		if (cachedFactory) {
@@ -765,6 +771,7 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 	}
 
 	const jiti = await getJitiLoader();
+	await beforeImport?.(extensionPath);
 	const module = await jiti.import(canonicalizePath(extensionPath), { default: true });
 	const factory = module as ExtensionFactory;
 	if (typeof factory !== "function") {
@@ -824,11 +831,12 @@ async function loadExtension(
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
 	cacheToken?: ExtensionCacheToken,
+	beforeImport?: (extensionPath: string) => Promise<void>,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
 
 	try {
-		const factory = await loadExtensionModule(resolvedPath, cacheToken);
+		const factory = await loadExtensionModule(resolvedPath, cacheToken, beforeImport);
 		time(`${extensionPath} module import`, "extensions");
 		if (!factory) {
 			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
@@ -866,6 +874,7 @@ async function loadExtensionsInternal(
 	eventBus?: EventBus,
 	runtime?: ExtensionRuntime,
 	useCache = false,
+	beforeImport?: (extensionPath: string) => Promise<void>,
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
@@ -882,6 +891,7 @@ async function loadExtensionsInternal(
 			resolvedEventBus,
 			resolvedRuntime,
 			cacheToken,
+			beforeImport,
 		);
 
 		if (error) {
@@ -911,13 +921,19 @@ export async function loadExtensions(
 	return loadExtensionsInternal(paths, cwd, eventBus, runtime);
 }
 
+/**
+ * Load extensions and keep their imported code for later loads in this process, until
+ * `clearExtensionCache()`. `beforeImport` is awaited with an extension's resolved path right before
+ * its code is imported, so not when the code comes from the cache.
+ */
 export async function loadExtensionsCached(
 	paths: string[],
 	cwd: string,
 	eventBus?: EventBus,
 	runtime?: ExtensionRuntime,
+	beforeImport?: (extensionPath: string) => Promise<void>,
 ): Promise<LoadExtensionsResult> {
-	return loadExtensionsInternal(paths, cwd, eventBus, runtime, true);
+	return loadExtensionsInternal(paths, cwd, eventBus, runtime, true, beforeImport);
 }
 
 function isExtensionFile(name: string): boolean {

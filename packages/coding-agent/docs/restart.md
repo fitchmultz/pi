@@ -20,6 +20,34 @@ Requests require a saved session. Ephemeral sessions, stale session IDs, invalid
 
 `pi restart --help` lists options, examples and exit codes. Exit 0 means queued (or help); exit 1 means invalid options, unavailable control endpoint, or a refused request. Outside a managed interactive Pi shell, the command fails with a clear error.
 
+## Extension code that changed on disk
+
+A Pi process imports each extension once. `/new`, `/resume` and `/fork` in the same directory keep that code. So an update does not reach a running session: not `pi update`, not a `git pull` in a package checkout, not an edited extension file.
+
+A managed interactive session compares the code it imported with the disk when the session starts, after every agent run and every five minutes. While they differ, the footer shows:
+
+```text
+extensions changed on disk: /restart
+```
+
+The status is for the user. The system prompt, the tools and the messages the model gets do not change. `/restart` loads the current code and keeps the session. `/reload` also imports the extensions again and clears the status, but the modules that Node loads natively keep their first version until a restart: a package's dependencies in `node_modules`, and `.mjs` files.
+
+What is compared:
+
+| Loaded source | Compared |
+| --- | --- |
+| A package from settings that supplied an extension | `version` of its `package.json` and, if the package directory is the root of a git checkout, the checked-out commit |
+| Any other extension file, including `-e` sources | SHA-256 of the entry file |
+
+These are the values of the [runtime record](session-format.md#runtime-record-piruntime). The following changes are not detected:
+
+- Uncommitted edits in a package checkout.
+- An npm package that is installed again at the same version.
+- A changed file that an extension outside a package imports, when its entry file is unchanged.
+- A new Pi runtime. Only extension code is compared.
+
+Print, JSON, RPC and SDK sessions show no status. An SDK host can ask its session; see [Stale extension code](sdk.md#stale-extension-code).
+
 ## Stage changes without overwriting the working version
 
 ```bash

@@ -145,6 +145,31 @@ describe("pi.runtime session record", () => {
 		return { start, faux, agentDir, cwd, sessionDir, root };
 	}
 
+	/** A git package with one extension, enabled in the user settings, and a loose extension in the agent directory. */
+	function installSources(root: string, agentDir: string) {
+		const packageDir = join(root, "fixture-package");
+		mkdirSync(packageDir);
+		writeFileSync(
+			join(packageDir, "package.json"),
+			JSON.stringify({ name: "fixture-package", version: "1.2.3", pi: { extensions: ["./extension.ts"] } }),
+		);
+		writeFileSync(join(packageDir, "extension.ts"), "export default function () {}\n");
+		const git = (...args: string[]) =>
+			execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", ...args], {
+				cwd: packageDir,
+				encoding: "utf8",
+			}).trim();
+		git("init", "--quiet");
+		git("add", ".");
+		git("commit", "--quiet", "-m", "fixture");
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [packageDir] }));
+
+		const looseExtension = join(agentDir, "extensions", "loose.ts");
+		mkdirSync(join(agentDir, "extensions"));
+		writeFileSync(looseExtension, "export default function () {}\n// loose\n");
+		return { packageDir, looseExtension, git };
+	}
+
 	it("writes one record ahead of the handlers' entries at startup, new, resume, fork and reload", async () => {
 		const { start } = await createRuntimeForTest();
 		const runtime = await start();
@@ -364,28 +389,7 @@ describe("pi.runtime session record", () => {
 
 	it("describes the process, the loaded package, the loose extension and the context files", async () => {
 		const { start, agentDir, cwd, root } = await createRuntimeForTest();
-		const extensionSource = "export default function () {}\n";
-
-		const packageDir = join(root, "fixture-package");
-		mkdirSync(packageDir);
-		writeFileSync(
-			join(packageDir, "package.json"),
-			JSON.stringify({ name: "fixture-package", version: "1.2.3", pi: { extensions: ["./extension.ts"] } }),
-		);
-		writeFileSync(join(packageDir, "extension.ts"), extensionSource);
-		const git = (...args: string[]) =>
-			execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", ...args], {
-				cwd: packageDir,
-				encoding: "utf8",
-			}).trim();
-		git("init", "--quiet");
-		git("add", ".");
-		git("commit", "--quiet", "-m", "fixture");
-		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [packageDir] }));
-
-		const looseExtension = join(agentDir, "extensions", "loose.ts");
-		mkdirSync(join(agentDir, "extensions"));
-		writeFileSync(looseExtension, `${extensionSource}// loose\n`);
+		const { packageDir, looseExtension, git } = installSources(root, agentDir);
 
 		// A non-ASCII character makes the byte length differ from the character count.
 		const userContext = "User context: café\n";
@@ -424,5 +428,71 @@ describe("pi.runtime session record", () => {
 			{ path: join(cwd, "AGENTS.md"), bytes: Buffer.byteLength(projectContext), sha256: sha256(projectContext) },
 		]);
 		expect(existsSync(runtime.session.sessionFile!)).toBe(false);
+	});
+
+	it("reports loaded sources that changed on disk, and records what was loaded, until a reload imports them again", async () => {
+		const { start, agentDir, root } = await createRuntimeForTest();
+		const { packageDir, looseExtension, git } = installSources(root, agentDir);
+		const runtime = await start();
+		// Reload starts the session again only for a bound host, which any binding makes.
+		const bind = () => runtime.session.bindExtensions({ shutdownHandler: () => {} });
+		await bind();
+		const loaded = {
+			package: { version: "1.2.3", commit: git("rev-parse", "HEAD") },
+			extension: { sha256: sha256(readFileSync(looseExtension)) },
+		};
+		expect(await runtime.session.getStaleSources()).toEqual([]);
+
+		writeFileSync(
+			join(packageDir, "package.json"),
+			JSON.stringify({ name: "fixture-package", version: "1.2.4", pi: { extensions: ["./extension.ts"] } }),
+		);
+		git("commit", "--quiet", "-am", "update");
+		writeFileSync(looseExtension, "export default function () {}\n// edited\n");
+		const current = {
+			package: { version: "1.2.4", commit: git("rev-parse", "HEAD") },
+			extension: { sha256: sha256(readFileSync(looseExtension)) },
+		};
+		const stale = [
+			{
+				kind: "extension",
+				path: looseExtension,
+				source: "auto",
+				scope: "user",
+				loaded: loaded.extension,
+				current: current.extension,
+			},
+			{
+				kind: "package",
+				path: packageDir,
+				source: packageDir,
+				scope: "user",
+				loaded: loaded.package,
+				current: current.package,
+			},
+		];
+		const staleSources = async () =>
+			(await runtime.session.getStaleSources()).sort((a, b) => a.kind.localeCompare(b.kind));
+		const recorded = () => {
+			const data = runtimeRecords(runtime.session.sessionManager.getEntries()).at(-1)!.data!;
+			return { package: data.packages[0], extension: data.extensions[0] };
+		};
+		expect(await staleSources()).toEqual(stale);
+
+		// A new session in the same process runs the code that is already imported.
+		await runtime.newSession();
+		await bind();
+		expect(await staleSources()).toEqual(stale);
+		expect(recorded()).toEqual({
+			package: { source: packageDir, scope: "user", path: packageDir, ...loaded.package },
+			extension: { path: looseExtension, source: "auto", scope: "user", ...loaded.extension },
+		});
+
+		await runtime.session.reload();
+		expect(await staleSources()).toEqual([]);
+		expect(recorded()).toEqual({
+			package: { source: packageDir, scope: "user", path: packageDir, ...current.package },
+			extension: { path: looseExtension, source: "auto", scope: "user", ...current.extension },
+		});
 	});
 });
