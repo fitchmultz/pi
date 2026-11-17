@@ -171,8 +171,8 @@ describe("provider retry classification", () => {
 		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
 	});
 
-	it.each(["MALFORMED_FUNCTION_CALL", "UNEXPECTED_TOOL_CALL"])(
-		"retries Gemini tool-call generation finish reason %s",
+	it.each(["MALFORMED_FUNCTION_CALL", "MALFORMED_RESPONSE", "UNEXPECTED_TOOL_CALL"])(
+		"retries Gemini malformed generation finish reason %s",
 		(rawStopReason) => {
 			expect(
 				isRetryableAssistantError({
