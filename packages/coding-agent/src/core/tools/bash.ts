@@ -38,10 +38,7 @@ const bashSchema = Type.Object({
 
 export const bashToolSystemPromptContribution = {
 	snippet: "Execute bash commands (ls, grep, find, etc.)",
-	guidelines: [
-		"You can inspect PI_* environment variables for current model and session details.",
-		`A command without an explicit timeout stops after ${DEFAULT_TIMEOUT_SECONDS} seconds; pass a timeout for longer foreground work, and use background_command for long builds, tests, and watches.`,
-	],
+	guidelines: ["You can inspect PI_* environment variables for current model and session details."],
 } as const;
 
 export type BashToolInput = Static<typeof bashSchema>;
@@ -143,7 +140,7 @@ export function createShellToolDefinition(
 	return {
 		name: config.name,
 		label: config.label,
-		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Commands run without an explicit timeout stop after ${DEFAULT_TIMEOUT_SECONDS} seconds.`,
+		description: `Execute a ${config.shellName} command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Commands run without an explicit timeout stop after ${DEFAULT_TIMEOUT_SECONDS} seconds; pass a timeout for longer foreground work, and use background_command for long builds, tests, and watches.`,
 		promptSnippet: config.promptSnippet,
 		promptGuidelines: exposeSessionEnvironment && config.promptGuidelines ? [...config.promptGuidelines] : undefined,
 		parameters: bashSchema,
