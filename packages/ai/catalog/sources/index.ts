@@ -54,14 +54,22 @@ async function fetchRadiusModels(): Promise<Model<"pi-messages">[]> {
 }
 
 /**
- * Fetch every upstream source. In strict mode any failure aborts generation;
- * otherwise a failed source contributes nothing.
+ * Fetch every upstream source. A source whose connection failed is fetched
+ * once more. In strict mode any failure aborts generation; otherwise a failed
+ * source contributes nothing.
  */
 export async function loadCatalogSources(strict: boolean): Promise<CatalogSources> {
 	async function load<T>(label: string, fetcher: () => Promise<T>, fallback: T): Promise<T> {
 		try {
 			console.log(`Fetching ${label}...`);
-			return await fetcher();
+			return await fetcher().catch((error: unknown) => {
+				// fetch() rejects with a TypeError when the connection cannot be made or drops while the body is
+				// read. That failure belongs to one connection: other requests to the same host succeed at the
+				// same moment. An HTTP error status or an unusable body is not fetched again.
+				if (!(error instanceof TypeError)) throw error;
+				console.warn(`Fetching ${label} failed (${error.message}), trying once more...`);
+				return fetcher();
+			});
 		} catch (error) {
 			console.error(`Failed to fetch ${label}:`, error);
 			if (strict) throw error;
