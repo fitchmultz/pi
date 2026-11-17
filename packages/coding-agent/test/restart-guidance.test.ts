@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -16,13 +16,15 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MANAGED_CLI_ENV, RESTART_SOCKET_ENV } from "../src/cli/restart-protocol.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { BackgroundWork } from "../src/core/background-work.ts";
 import { clearExtensionCache } from "../src/core/extensions/loader.ts";
 import type { ExtensionFactory, ExtensionUIContext } from "../src/core/extensions/types.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
+import { getGitUpdateMarkerPath } from "../src/core/package-manager.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 import restartExtension, { createManagedRestart } from "../src/extensions/restart/index.ts";
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createTestUiContext } from "./suite/harness.ts";
@@ -38,8 +40,8 @@ async function managedFixture(
 	options: {
 		sessionFile?: string;
 		extensions?: ExtensionFactory[];
-		/** Extension files loaded from disk, as `-e` loads them. */
-		extensionPaths?: string[];
+		/** Settings on top of the fixture's. With `packages`, the loader loads their extensions from disk. */
+		settings?: Partial<Settings>;
 		mode?: "tui" | "print";
 		ui?: Partial<ExtensionUIContext>;
 	} = {},
@@ -60,17 +62,16 @@ async function managedFixture(
 		? SessionManager.open(options.sessionFile)
 		: SessionManager.create(root, root);
 	const cwd = sessionManager.getCwd();
-	const settingsManager = SettingsManager.inMemory({ cacheWarming: "off" });
+	const settingsManager = SettingsManager.inMemory({ cacheWarming: "off", ...options.settings });
 	const loader = new DefaultResourceLoader({
 		cwd,
 		agentDir: join(root, "agent"),
 		settingsManager,
-		noExtensions: true,
+		noExtensions: options.settings?.packages === undefined,
 		noSkills: true,
 		noPromptTemplates: true,
 		noThemes: true,
 		noContextFiles: true,
-		additionalExtensionPaths: options.extensionPaths,
 		extensionFactories: [
 			(pi) => {
 				pi.registerProvider("faux", {
@@ -477,42 +478,86 @@ describe("actual managed restart guidance", () => {
 });
 
 describe("stale extension code in a managed session", () => {
-	/** A managed session that loaded one extension file from disk, and the latest `restart` footer status it set. */
-	async function staleFixture() {
+	/**
+	 * A managed, idle session that loaded one package from disk. The clock is fake but runs, so the
+	 * session works as usual and a test can skip the waits between two looks at the disk.
+	 */
+	async function staleFixture(settings: Partial<Settings> = {}) {
 		// The status is colored, as the interactive mode's theme colors it.
 		initTheme("dark");
+		vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout", "clearTimeout", "Date"] });
 		const root = mkdtempSync(join(tmpdir(), "pi-restart-stale-"));
 		cleanups.push(async () => {
+			vi.useRealTimers();
 			clearExtensionCache();
 			rmSync(root, { recursive: true, force: true });
 		});
-		const extension = join(root, "loose.ts");
-		writeFileSync(extension, "export default function () {}\n");
-		let status: string | undefined = "never set";
+		const packageDir = join(root, "fixture-package");
+		mkdirSync(packageDir);
+		const setVersion = (version: string) =>
+			writeFileSync(
+				join(packageDir, "package.json"),
+				JSON.stringify({ name: "fixture-package", version, pi: { extensions: ["./extension.ts"] } }),
+			);
+		setVersion("1.0.0");
+		writeFileSync(join(packageDir, "extension.ts"), "export default function () {}\n");
+		const seen = {
+			/** Latest `restart` footer status, and how often it was set: once per look at the disk. */
+			status: "never set" as string | undefined,
+			looks: 0,
+			/** How often the editor was read: once per idle test. */
+			editorReads: 0,
+			/** How often the session's background work was asked for. */
+			workAsks: 0,
+			notices: [] as string[],
+		};
+		const state = { draft: "", work: [] as BackgroundWork[] };
 		const f = await managedFixture({
-			extensionPaths: [extension],
+			settings: { packages: [packageDir], ...settings },
+			extensions: [
+				(pi) => {
+					pi.on("background_work", () => {
+						seen.workAsks++;
+						return { work: state.work };
+					});
+				},
+			],
 			ui: {
 				setStatus: (key, text) => {
-					if (key === "restart") status = text;
+					if (key !== "restart") return;
+					seen.status = text;
+					seen.looks++;
+				},
+				getEditorText: () => {
+					seen.editorReads++;
+					return state.draft;
+				},
+				notify: (message) => {
+					seen.notices.push(message);
 				},
 			},
 		});
+		f.managed.bindInput(() => ({ busy: false, pendingInput: false }));
+		f.managed.start();
 		const prompt = async (text: string) => {
 			f.faux.setResponses([f.response()]);
 			await f.h.session.prompt(text);
 		};
-		const change = () => writeFileSync(extension, "export default function () {}\n// changed\n");
-		return { ...f, prompt, change, status: () => status };
+		/** Change the package on disk and let the session notice it, as it does after every agent run. */
+		const makeStale = async () => {
+			setVersion("1.0.1");
+			await prompt("After the change");
+			await vi.waitFor(() => expect(seen.status).toContain("extensions changed on disk: /restart"));
+		};
+		return { ...f, prompt, makeStale, seen, state, packageDir };
 	}
 
 	it("shows a footer status once loaded code changed on disk, clears it on reload, and sends the model nothing", async () => {
 		const f = await staleFixture();
 		await f.prompt("Before the change");
-		await vi.waitFor(() => expect(f.status()).toBeUndefined());
+		await vi.waitFor(() => expect(f.seen.status).toBeUndefined());
 
-		f.change();
-		await f.prompt("After the change");
-		await vi.waitFor(() => expect(f.status()).toContain("extensions changed on disk: /restart"));
+		await f.makeStale();
 		await f.prompt("With the status shown");
 
 		// Same tools and system prompt, and each request only extends the one before it.
@@ -521,6 +566,93 @@ describe("stale extension code in a managed session", () => {
 		expect(JSON.stringify(f.requests)).not.toContain("changed on disk");
 
 		await f.h.session.reload();
-		await vi.waitFor(() => expect(f.status()).toBeUndefined());
+		await vi.waitFor(() => expect(f.seen.status).toBeUndefined());
+	});
+
+	it("leaves a stale session alone unless restartWhenStale is on", async () => {
+		const f = await staleFixture();
+		await f.makeStale();
+		const looks = f.seen.looks;
+		// Past the quiet period and the next regular look at the disk.
+		await vi.advanceTimersByTimeAsync(2 * 60_000);
+		await vi.waitFor(() => expect(f.seen.looks).toBeGreaterThan(looks));
+		expect(f.seen).toMatchObject({ editorReads: 0, workAsks: 0, notices: [] });
+		expect(f.shutdownRequested()).toBe(false);
+	});
+
+	it("restarts an idle stale session through the managed restart, after the quiet period", async () => {
+		const f = await staleFixture({ restartWhenStale: true });
+		await f.makeStale();
+		const looks = f.seen.looks;
+		await vi.advanceTimersByTimeAsync(29_000);
+		expect(f.seen.looks).toBe(looks);
+		expect(f.shutdownRequested()).toBe(false);
+
+		await vi.advanceTimersByTimeAsync(1_000);
+		await vi.waitFor(() => expect(f.shutdownRequested()).toBe(true));
+		expect(f.seen.notices).toEqual(["Extensions changed on disk; restarting Pi on the same saved session."]);
+		// The same handoff as `/restart` without a continuation: the session, and no message to run.
+		expect(f.managed.beginShutdown("extension")).toBe(true);
+		const send = vi.spyOn(process, "send");
+		try {
+			expect(await f.managed.captureFinal(f.h.session)).toBe(true);
+			await f.managed.completeShutdown();
+			const handoff = send.mock.calls
+				.map(([message]) => message as { type?: string; request?: object; session?: { workingSession: string } })
+				.find((message) => message.type === "pi:restart");
+			expect(handoff?.request).toEqual({});
+			expect(handoff).toMatchObject({
+				session: { sessionId: f.h.session.sessionId, sessionFile: f.h.session.sessionFile },
+			});
+			rmSync(dirname(handoff!.session!.workingSession), { recursive: true });
+		} finally {
+			send.mockRestore();
+		}
+	});
+
+	it.each([
+		{
+			blocker: "an unsent draft",
+			block: (f: Awaited<ReturnType<typeof staleFixture>>) => {
+				f.state.draft = "half a thought";
+				return () => {
+					f.state.draft = "";
+				};
+			},
+			decided: (f: Awaited<ReturnType<typeof staleFixture>>) => f.seen.editorReads,
+		},
+		{
+			blocker: "an unfinished package update",
+			block: (f: Awaited<ReturnType<typeof staleFixture>>) => {
+				// As `pi update` leaves it between moving the commit and finishing the install.
+				const marker = getGitUpdateMarkerPath(f.packageDir);
+				writeFileSync(marker, "");
+				return () => rmSync(marker);
+			},
+			decided: (f: Awaited<ReturnType<typeof staleFixture>>) => f.seen.looks,
+		},
+		{
+			blocker: "background work",
+			block: (f: Awaited<ReturnType<typeof staleFixture>>) => {
+				f.state.work = [{ id: "run-1", description: "run is active", cancel: async () => {} }];
+				return () => {
+					f.state.work = [];
+				};
+			},
+			decided: (f: Awaited<ReturnType<typeof staleFixture>>) => f.seen.workAsks,
+		},
+	])("postpones the restart silently during $blocker, then restarts", async ({ block, decided }) => {
+		const f = await staleFixture({ restartWhenStale: true });
+		await f.makeStale();
+		const unblock = block(f);
+		const before = decided(f);
+		await vi.advanceTimersByTimeAsync(30_000);
+		await vi.waitFor(() => expect(decided(f)).toBeGreaterThan(before));
+		expect(f.seen.notices).toEqual([]);
+		expect(f.shutdownRequested()).toBe(false);
+
+		unblock();
+		await vi.advanceTimersByTimeAsync(30_000);
+		await vi.waitFor(() => expect(f.shutdownRequested()).toBe(true));
 	});
 });

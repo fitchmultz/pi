@@ -829,6 +829,14 @@ function applyAutoloadDisabledPatterns(allPaths: string[], patterns: string[], b
 	return result;
 }
 
+/**
+ * The file that exists next to the git package checkout `targetDir` while an update of it is incomplete:
+ * from before its commit moves until its untracked files are cleaned and its dependencies are installed.
+ */
+export function getGitUpdateMarkerPath(targetDir: string): string {
+	return join(dirname(targetDir), `.${basename(targetDir)}.pi-update-incomplete`);
+}
+
 export class DefaultPackageManager implements PackageManager {
 	private cwd: string;
 	private agentDir: string;
@@ -2031,7 +2039,7 @@ export class DefaultPackageManager implements PackageManager {
 			this.ensureGitIgnore(gitRoot);
 		}
 		mkdirSync(dirname(targetDir), { recursive: true });
-		rmSync(this.getGitUpdateMarkerPath(targetDir), { force: true });
+		rmSync(getGitUpdateMarkerPath(targetDir), { force: true });
 
 		try {
 			await this.runCommand("git", ["clone", source.repo, targetDir]);
@@ -2095,10 +2103,6 @@ export class DefaultPackageManager implements PackageManager {
 		await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir });
 	}
 
-	private getGitUpdateMarkerPath(targetDir: string): string {
-		return join(dirname(targetDir), `.${basename(targetDir)}.pi-update-incomplete`);
-	}
-
 	private async cleanAndInstallGitDependencies(targetDir: string, markerPath: string): Promise<void> {
 		// Clean untracked files (extensions should be pristine). On Windows, files loaded by
 		// another process (e.g. a native module of this extension in another pi session) cannot
@@ -2140,7 +2144,7 @@ export class DefaultPackageManager implements PackageManager {
 			cwd: targetDir,
 			timeoutMs: NETWORK_TIMEOUT_MS,
 		});
-		const markerPath = this.getGitUpdateMarkerPath(targetDir);
+		const markerPath = getGitUpdateMarkerPath(targetDir);
 		if (localHead.trim() === targetHead.trim()) {
 			if (existsSync(markerPath)) {
 				await this.cleanAndInstallGitDependencies(targetDir, markerPath);
@@ -2182,7 +2186,7 @@ export class DefaultPackageManager implements PackageManager {
 	private async removeGit(source: GitSource, scope: SourceScope): Promise<void> {
 		const targetDir = this.getGitInstallPath(source, scope);
 		rmSync(targetDir, { recursive: true, force: true });
-		rmSync(this.getGitUpdateMarkerPath(targetDir), { force: true });
+		rmSync(getGitUpdateMarkerPath(targetDir), { force: true });
 		this.pruneEmptyGitParents(targetDir, this.getGitInstallRoot(scope));
 	}
 
