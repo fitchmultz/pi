@@ -137,6 +137,7 @@ import type { ModelRuntime } from "./model-runtime.ts";
 import { type NestedCallSummary, NestedToolCallRunner } from "./nested-tool-calls.ts";
 import type { PromptProgress } from "./prompt-progress.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
+import { clearConfigValueCache } from "./resolve-config-value.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { describeRuntime, RUNTIME_RECORD_ENTRY, type RuntimeRecordData } from "./runtime-record.ts";
 import { exportSessionToJsonl } from "./session-export.ts";
@@ -343,6 +344,8 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Override the initial `pi.runtime` trigger while keeping `sessionStartEvent.reason` unchanged. */
+	runtimeTrigger?: RuntimeRecordData["trigger"];
 }
 
 export interface ExtensionBindings {
@@ -598,6 +601,7 @@ export class AgentSession {
 	private _excludedTools?: (name: string) => boolean;
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private _sessionStartEvent: SessionStartEvent;
+	private _runtimeTrigger?: RuntimeRecordData["trigger"];
 	private _extensionUIContext?: ExtensionUIContext;
 	private _extensionMode: ExtensionMode = "print";
 	private _managedHost: ManagedHost | undefined;
@@ -654,6 +658,7 @@ export class AgentSession {
 		this._setToolFilters(config.allowedToolNames, config.excludedToolNames);
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+		this._runtimeTrigger = config.runtimeTrigger;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -4346,7 +4351,7 @@ export class AgentSession {
 		}
 
 		this._applyExtensionBindings(this._extensionRunner);
-		await this._recordRuntime(this._sessionStartEvent.reason);
+		await this._recordRuntime(this._runtimeTrigger ?? this._sessionStartEvent.reason);
 		await this._extensionRunner.emit(this._sessionStartEvent);
 		this._extensionRunner.reportUnhandledMcpServers();
 		this._extensionRunner.reportUnreachableTools();
@@ -4359,7 +4364,7 @@ export class AgentSession {
 	 * setup entries until the first message creates the file, and a restored working session's until its
 	 * first agent run.
 	 */
-	private async _recordRuntime(trigger: SessionStartEvent["reason"]): Promise<void> {
+	private async _recordRuntime(trigger: RuntimeRecordData["trigger"]): Promise<void> {
 		if (!this.sessionManager.isPersisted()) return;
 		const launcherPid = this._managedHost?.owner.pid;
 		const data = await describeRuntime(
@@ -4815,6 +4820,7 @@ export class AgentSession {
 		const previouslyUndeclared = [...this._toolRegistry.keys()].filter((name) => !isDeclaredByDefault(name));
 		await this.settingsManager.reload();
 		this.syncQueueModesFromSettings();
+		clearConfigValueCache();
 		resetApiProviders();
 		await this._resourceLoader.reload();
 		// Activate tools newly added to defaultTools. Removed ones stay active, and tools disabled

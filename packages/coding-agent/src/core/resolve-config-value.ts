@@ -281,7 +281,20 @@ export function resolveHeadersOrThrow(
 	return Object.keys(resolved).length > 0 ? resolved : undefined;
 }
 
-/** Clear the config value command cache. Exported for testing. */
+/**
+ * Re-execute a `!command` config value without evicting an existing cached value when the
+ * refresh command fails or returns empty output.
+ */
+export function refreshConfigValueCache(config: string): string | undefined {
+	if (!isCommandConfigValue(config)) return undefined;
+	const refreshed = executeCommandUncached(config);
+	if (refreshed !== undefined) {
+		commandResultCache.set(config, refreshed);
+	}
+	return refreshed;
+}
+
+/** Clear the config value command cache. */
 export function clearConfigValueCache(): void {
 	commandResultCache.clear();
 }

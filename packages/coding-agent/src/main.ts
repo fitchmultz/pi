@@ -1021,6 +1021,7 @@ export async function main(args: string[], options?: MainOptions) {
 			services,
 			sessionManager,
 			sessionStartEvent,
+			runtimeTrigger: isInitialRuntime && saved && managedRestart && handoff ? "restart" : undefined,
 			workingSession: isInitialRuntime ? saved : undefined,
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { dirname, join } from "node:path";
 import {
 	type AnyModel,
@@ -5,6 +6,7 @@ import {
 	type ApiStreamOptions,
 	type AssistantImages,
 	type AssistantMessage,
+	type AssistantMessageEvent,
 	type AssistantMessageEventStream,
 	type AuthCheck,
 	type AuthInteraction,
@@ -25,6 +27,7 @@ import {
 	type DeferredCancelOptions,
 	type DeferredFetchOptions,
 	type DeferredHandle,
+	type FetchFunction,
 	getOpenCodeSessionHeaders,
 	type ImageApi,
 	type ImageModel,
@@ -54,6 +57,7 @@ import {
 	type Provider,
 	type ProviderHeaders,
 	type ProviderRequestOptions,
+	type ProviderResponse,
 	resolveProviderSummary,
 	type SimpleStreamOptions,
 	type StreamOptions,
@@ -187,6 +191,100 @@ function mergeHeaders(
 		merged[name] = value;
 	}
 	return merged;
+}
+
+type PreparedRequest<
+	TModel extends AnyModel,
+	TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
+> = {
+	provider: Provider;
+	model: TModel;
+	options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
+	resolution: AuthResult;
+};
+
+function isAuthStatus(status: number | undefined): boolean {
+	return status === 401 || status === 403;
+}
+
+function recordsEqual(
+	left: Readonly<Record<string, string | null>> | undefined,
+	right: Readonly<Record<string, string | null>> | undefined,
+): boolean {
+	const leftEntries = Object.entries(left ?? {});
+	const rightEntries = Object.entries(right ?? {});
+	if (leftEntries.length !== rightEntries.length) return false;
+	return leftEntries.every(([key, value]) => Object.hasOwn(right ?? {}, key) && right?.[key] === value);
+}
+
+function hasResolvedAuthChanged(previous: AuthResult, next: AuthResult): boolean {
+	if (previous.auth.apiKey !== next.auth.apiKey) return true;
+	if (previous.auth.baseUrl !== next.auth.baseUrl) return true;
+	if (!recordsEqual(previous.auth.headers, next.auth.headers)) return true;
+	return !recordsEqual(previous.env, next.env);
+}
+
+const statusObserverStorage = new AsyncLocalStorage<(status: number) => void>();
+const observedFetchCache = new WeakMap<FetchFunction, FetchFunction>();
+const observedDefaultFetch: FetchFunction = async (input, init) => {
+	const response = await globalThis.fetch(input, init);
+	statusObserverStorage.getStore()?.(response.status);
+	return response;
+};
+
+function getObservedFetch(fetch: FetchFunction | undefined): FetchFunction {
+	if (!fetch) return observedDefaultFetch;
+	let wrapped = observedFetchCache.get(fetch);
+	if (!wrapped) {
+		wrapped = async (input, init) => {
+			const response = await fetch(input, init);
+			statusObserverStorage.getStore()?.(response.status);
+			return response;
+		};
+		observedFetchCache.set(fetch, wrapped);
+	}
+	return wrapped;
+}
+
+function withStatusObserver<
+	TModel extends AnyModel,
+	TOptions extends {
+		fetch?: ProviderRequestOptions<TModel>["fetch"];
+		onResponse?: ProviderRequestOptions<TModel>["onResponse"];
+	},
+>(_model: TModel, options: TOptions, onStatus: (status: number) => void): TOptions {
+	const callerOnResponse = options.onResponse;
+	return {
+		...options,
+		fetch: getObservedFetch(options.fetch),
+		onResponse: async (response: ProviderResponse, responseModel: TModel) => {
+			onStatus(response.status);
+			await callerOnResponse?.(response, responseModel);
+		},
+	};
+}
+
+function replayCheckedStream(
+	stream: AssistantMessageEventStream,
+	first: IteratorResult<AssistantMessageEvent>,
+	iterator: AsyncIterator<AssistantMessageEvent>,
+): AsyncIterable<AssistantMessageEvent> & { result(): Promise<AssistantMessage> } {
+	return {
+		async *[Symbol.asyncIterator]() {
+			if (first.done) return;
+			try {
+				yield first.value;
+				for (;;) {
+					const next = await iterator.next();
+					if (next.done) return;
+					yield next.value;
+				}
+			} finally {
+				await iterator.return?.();
+			}
+		},
+		result: () => stream.result(),
+	};
 }
 
 /** Configured pi-ai Models collection used by coding-agent and SDK consumers. */
@@ -824,26 +922,15 @@ export class ModelRuntime implements Models {
 		return check ? { configured: true, source: "environment", label: check.source } : { configured: false };
 	}
 
-	private async prepareRequest<
+	private async buildPreparedRequest<
 		TModel extends AnyModel,
 		TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
 	>(
+		provider: Provider,
 		model: TModel,
+		resolution: AuthResult,
 		options: TOptions | undefined,
-	): Promise<{
-		provider: Provider;
-		model: TModel;
-		options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
-	}> {
-		const provider = this.models.getProvider(model.provider);
-		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
-		const resolution = await this.getAuth(model, {
-			apiKey: options?.apiKey,
-			env: options?.env,
-			signal: options?.signal,
-		});
-		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
-
+	): Promise<PreparedRequest<TModel, TOptions>> {
 		const { transformHeaders, ...rawProviderOptions } = options ?? {};
 		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>;
 		const configuredModel: TModel = resolution.auth.baseUrl ? { ...model, baseUrl: resolution.auth.baseUrl } : model;
@@ -882,7 +969,119 @@ export class ModelRuntime implements Models {
 				headers,
 				env,
 			} as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<TModel>,
+			resolution,
 		};
+	}
+
+	private async prepareRequest<
+		TModel extends AnyModel,
+		TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
+	>(model: TModel, options: TOptions | undefined): Promise<PreparedRequest<TModel, TOptions>> {
+		const provider = this.models.getProvider(model.provider);
+		if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
+		const resolution = await this.getAuth(model, {
+			apiKey: options?.apiKey,
+			env: options?.env,
+			signal: options?.signal,
+		});
+		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
+		return this.buildPreparedRequest(provider, model, resolution, options);
+	}
+
+	private canObserveCommandAuth(providerId: string, explicitApiKey: string | undefined): boolean {
+		if (explicitApiKey !== undefined || this.ignoresStoredCredentials(providerId)) return false;
+		return this.credentials.hasCachedCommandCredential(providerId);
+	}
+
+	private async prepareRefreshedCommandRequest<
+		TModel extends AnyModel,
+		TOptions extends ProviderRequestOptions<TModel> & ModelsRequestTransforms,
+	>(
+		model: TModel,
+		options: TOptions | undefined,
+		first: PreparedRequest<TModel, TOptions>,
+	): Promise<PreparedRequest<TModel, TOptions> | undefined> {
+		if (options?.apiKey !== undefined || this.ignoresStoredCredentials(model.provider)) return undefined;
+		const refreshed = await this.credentials.refreshCachedCredential(model.provider, { signal: options?.signal });
+		if (!refreshed) return undefined;
+
+		const provider = this.models.getProvider(model.provider);
+		if (!provider) return undefined;
+
+		let resolution: AuthResult | undefined;
+		try {
+			resolution = await this.getAuth(model, {
+				apiKey: options?.apiKey,
+				env: options?.env,
+				signal: options?.signal,
+			});
+		} catch (error) {
+			if (options?.signal?.aborted) throw error;
+			return undefined;
+		}
+		if (!resolution || !hasResolvedAuthChanged(first.resolution, resolution)) {
+			return undefined;
+		}
+		return this.buildPreparedRequest(provider, model, resolution, options);
+	}
+
+	private async runStreamWithCommandAuthRefresh<TOptions extends StreamOptions & ModelsRequestTransforms>(
+		model: Model<Api>,
+		options: TOptions | undefined,
+		dispatch: (
+			prepared: PreparedRequest<Model<Api>, TOptions>,
+			onStatus?: (status: number) => void,
+		) => AssistantMessageEventStream,
+		onPrepared?: (
+			model: Model<Api>,
+			options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<Model<Api>>,
+		) => void,
+	): Promise<AsyncIterable<AssistantMessageEvent>> {
+		const prepared = await this.prepareRequest(model, options);
+		onPrepared?.(prepared.model, prepared.options);
+		if (!this.canObserveCommandAuth(model.provider, options?.apiKey)) {
+			return dispatch(prepared);
+		}
+		let observedStatus: number | undefined;
+		const onStatus = (status: number): void => {
+			observedStatus = status;
+		};
+
+		let firstStream: AssistantMessageEventStream;
+		let iterator: AsyncIterator<AssistantMessageEvent>;
+		let first: IteratorResult<AssistantMessageEvent>;
+		try {
+			firstStream = statusObserverStorage.run(onStatus, () => dispatch(prepared, onStatus));
+			iterator = firstStream[Symbol.asyncIterator]();
+			first = await iterator.next();
+		} catch (error) {
+			if (!options?.signal?.aborted && isAuthStatus(observedStatus)) {
+				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
+				if (refreshed) {
+					onPrepared?.(refreshed.model, refreshed.options);
+					return dispatch(refreshed, () => {});
+				}
+			}
+			throw error;
+		}
+
+		if (
+			!first.done &&
+			first.value.type === "error" &&
+			first.value.reason === "error" &&
+			first.value.error.content.length === 0 &&
+			!options?.signal?.aborted &&
+			isAuthStatus(observedStatus)
+		) {
+			while (!(await iterator.next()).done) {}
+			const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
+			if (refreshed) {
+				onPrepared?.(refreshed.model, refreshed.options);
+				return dispatch(refreshed, () => {});
+			}
+		}
+
+		return replayCheckedStream(firstStream, first, iterator);
 	}
 
 	stream<TApi extends Api>(
@@ -895,14 +1094,17 @@ export class ModelRuntime implements Models {
 			model,
 			async () => {
 				assertChatModel(model);
-				const prepared = await this.prepareRequest(
+				return this.runStreamWithCommandAuthRefresh(
 					model,
 					options as (StreamOptions & ModelsRequestTransforms) | undefined,
-				);
-				return prepared.provider.stream(
-					prepared.model,
-					resolveProviderSummary(prepared.model, transcript),
-					prepared.options as ApiStreamOptions<TApi>,
+					(prepared, onStatus) =>
+						prepared.provider.stream(
+							prepared.model,
+							resolveProviderSummary(prepared.model, transcript),
+							(onStatus
+								? withStatusObserver(prepared.model, prepared.options, onStatus)
+								: prepared.options) as ApiStreamOptions<TApi>,
+						),
 				);
 			},
 			undefined,
@@ -959,13 +1161,19 @@ export class ModelRuntime implements Models {
 			model,
 			async () => {
 				assertChatModel(model);
-				const prepared = await this.prepareRequest(model, options);
-				onPrepared?.(prepared.model, prepared.options);
-				return prepared.provider.streamSimple(
-					prepared.model,
-					// Session requests and cache warming pass here with the model that will answer.
-					resolveProviderSummary(prepared.model, transcript),
-					prepared.options as SimpleStreamOptions,
+				return this.runStreamWithCommandAuthRefresh(
+					model,
+					options,
+					(prepared, onStatus) =>
+						prepared.provider.streamSimple(
+							prepared.model,
+							// Session requests and cache warming pass here with the model that will answer.
+							resolveProviderSummary(prepared.model, transcript),
+							(onStatus
+								? withStatusObserver(prepared.model, prepared.options, onStatus)
+								: prepared.options) as SimpleStreamOptions,
+						),
+					onPrepared,
 				);
 			},
 			undefined,
@@ -986,11 +1194,20 @@ export class ModelRuntime implements Models {
 			model,
 			async () => {
 				assertChatModel(model);
-				const prepared = await this.prepareRequest(model, options);
-				if (!prepared.provider.fetchDeferred) {
+				const provider = this.models.getProvider(model.provider);
+				if (!provider) throw new ModelsError("provider", `Unknown provider: ${model.provider}`);
+				if (!provider.fetchDeferred) {
 					throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
 				}
-				return prepared.provider.fetchDeferred(prepared.model, handle, prepared.options as DeferredFetchOptions);
+				return this.runStreamWithCommandAuthRefresh(model, options, (prepared, onStatus) =>
+					prepared.provider.fetchDeferred!(
+						prepared.model,
+						handle,
+						(onStatus
+							? withStatusObserver(prepared.model, prepared.options, onStatus)
+							: prepared.options) as DeferredFetchOptions,
+					),
+				);
 			},
 			undefined,
 			options?.signal,
@@ -1015,7 +1232,36 @@ export class ModelRuntime implements Models {
 		if (!prepared.provider.cancelDeferred) {
 			throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
 		}
-		await prepared.provider.cancelDeferred(prepared.model, handle, prepared.options as DeferredCancelOptions);
+		if (!this.canObserveCommandAuth(model.provider, options?.apiKey)) {
+			await prepared.provider.cancelDeferred(prepared.model, handle, prepared.options as DeferredCancelOptions);
+			return;
+		}
+		let observedStatus: number | undefined;
+		const onStatus = (status: number): void => {
+			observedStatus = status;
+		};
+		try {
+			await statusObserverStorage.run(onStatus, () =>
+				prepared.provider.cancelDeferred!(
+					prepared.model,
+					handle,
+					withStatusObserver(prepared.model, prepared.options, onStatus) as DeferredCancelOptions,
+				),
+			);
+		} catch (error) {
+			if (!options?.signal?.aborted && isAuthStatus(observedStatus)) {
+				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
+				if (refreshed?.provider.cancelDeferred) {
+					await refreshed.provider.cancelDeferred(
+						refreshed.model,
+						handle,
+						withStatusObserver(refreshed.model, refreshed.options, () => {}) as DeferredCancelOptions,
+					);
+					return;
+				}
+			}
+			throw error;
+		}
 	}
 
 	async generateImages(
@@ -1029,7 +1275,36 @@ export class ModelRuntime implements Models {
 			if (!prepared.provider.generateImages) {
 				throw new ModelsError("provider", `Provider ${model.provider} does not support image generation`);
 			}
-			return await prepared.provider.generateImages(prepared.model, context, prepared.options as ImagesOptions);
+			if (!this.canObserveCommandAuth(model.provider, options?.apiKey)) {
+				return await prepared.provider.generateImages(prepared.model, context, prepared.options as ImagesOptions);
+			}
+			let observedStatus: number | undefined;
+			const onStatus = (status: number): void => {
+				observedStatus = status;
+			};
+			const result = await statusObserverStorage.run(onStatus, () =>
+				prepared.provider.generateImages!(
+					prepared.model,
+					context,
+					withStatusObserver(prepared.model, prepared.options, onStatus) as ImagesOptions,
+				),
+			);
+			if (
+				result.stopReason === "error" &&
+				result.output.length === 0 &&
+				!options?.signal?.aborted &&
+				isAuthStatus(observedStatus)
+			) {
+				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
+				if (refreshed?.provider.generateImages) {
+					return await refreshed.provider.generateImages(
+						refreshed.model,
+						context,
+						withStatusObserver(refreshed.model, refreshed.options, () => {}) as ImagesOptions,
+					);
+				}
+			}
+			return result;
 		} catch (error) {
 			return imageErrorResult(model, error, options?.signal?.aborted);
 		}
@@ -1047,7 +1322,36 @@ export class ModelRuntime implements Models {
 			if (!prepared.provider.classify) {
 				throw new ModelsError("provider", `Provider ${model.provider} does not support classification`);
 			}
-			return await prepared.provider.classify(prepared.model, context, prepared.options as ClassifierOptions);
+			if (!this.canObserveCommandAuth(model.provider, options?.apiKey)) {
+				return await prepared.provider.classify(prepared.model, context, prepared.options as ClassifierOptions);
+			}
+			let observedStatus: number | undefined;
+			const onStatus = (status: number): void => {
+				observedStatus = status;
+			};
+			const result = await statusObserverStorage.run(onStatus, () =>
+				prepared.provider.classify!(
+					prepared.model,
+					context,
+					withStatusObserver(prepared.model, prepared.options, onStatus) as ClassifierOptions,
+				),
+			);
+			if (
+				result.stopReason === "error" &&
+				Object.keys(result.answers).length === 0 &&
+				!options?.signal?.aborted &&
+				isAuthStatus(observedStatus)
+			) {
+				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
+				if (refreshed?.provider.classify) {
+					return await refreshed.provider.classify(
+						refreshed.model,
+						context,
+						withStatusObserver(refreshed.model, refreshed.options, () => {}) as ClassifierOptions,
+					);
+				}
+			}
+			return result;
 		} catch (error) {
 			return classifierErrorResult(model, error, options?.signal?.aborted);
 		}

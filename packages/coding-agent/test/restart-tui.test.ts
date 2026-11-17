@@ -468,15 +468,18 @@ export default function(pi) {
 		expect(existsSync(`${socketPath}.guard`)).toBe(false);
 		// The journal records both workers' starts: one launcher, two processes, the replacement's
 		// record ahead of the continuation it ran.
-		const entries: Array<{ customType?: string; data?: { process: object }; message?: { role: string } }> =
-			readFileSync(first.sessionFile, "utf8")
-				.split("\n")
-				.filter(Boolean)
-				.map((line) => JSON.parse(line));
+		const entries: Array<{
+			customType?: string;
+			data?: { trigger?: string; process: object };
+			message?: { role: string };
+		}> = readFileSync(first.sessionFile, "utf8")
+			.split("\n")
+			.filter(Boolean)
+			.map((line) => JSON.parse(line));
 		const records = entries.filter((entry) => entry.customType === "pi.runtime");
-		expect(records.map((entry) => entry.data?.process)).toEqual([
-			{ pid: first.pid, mode: "tui", launcherPid: first.owner },
-			{ pid: second.pid, mode: "tui", launcherPid: first.owner },
+		expect(records.map((entry) => ({ trigger: entry.data?.trigger, process: entry.data?.process }))).toEqual([
+			{ trigger: "startup", process: { pid: first.pid, mode: "tui", launcherPid: first.owner } },
+			{ trigger: "restart", process: { pid: second.pid, mode: "tui", launcherPid: first.owner } },
 		]);
 		const continuation = entries.findIndex(
 			(entry) => entry.message?.role === "user" && JSON.stringify(entry).includes("Continue after nested workers"),
@@ -536,6 +539,13 @@ export default function(pi) {
 				expect(prompts[1].text).toContain("exited before becoming ready");
 				expect(readFileSync(join(f.root, "candidate-starts"), "utf8").trim().split("\n")).toHaveLength(1);
 			}
+			const runtimeTriggers = journal
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line) as { customType?: string; data?: { trigger?: string } })
+				.filter((entry) => entry.customType === "pi.runtime")
+				.map((entry) => entry.data?.trigger);
+			expect(runtimeTriggers).toEqual(["startup", "restart"]);
 			f.keys("/quit", "Enter");
 			await f.wait(() => existsSync(f.status));
 			expect(readFileSync(f.status, "utf8").trim()).toBe("0");
