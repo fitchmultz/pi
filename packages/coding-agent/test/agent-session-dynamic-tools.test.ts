@@ -3,12 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createBashTool } from "../src/core/tools/bash.ts";
+import { createCodemodeExtension } from "../src/extensions/codemode/index.ts";
+import { createMcpExtension } from "../src/extensions/mcp/index.ts";
 
 describe("AgentSession dynamic tool registration", () => {
 	let tempDir: string;
@@ -252,5 +254,91 @@ describe("AgentSession dynamic tool registration", () => {
 		expect(session.systemPrompt).not.toContain("Description should not appear in available tools");
 
 		session.dispose();
+	});
+
+	it("keeps SDK tools allowlists permissive and warns when unloaded CLI built-in extension tools are requested", async () => {
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const settingsManager = SettingsManager.inMemory();
+			const model = getModel("anthropic", "claude-sonnet-4-5")!;
+
+			const unloadedLoader = new DefaultResourceLoader({
+				cwd: tempDir,
+				agentDir,
+				settingsManager,
+				noExtensions: true,
+			});
+			await unloadedLoader.reload();
+
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir,
+				model,
+				settingsManager,
+				sessionManager: SessionManager.inMemory(),
+				resourceLoader: unloadedLoader,
+				tools: ["bash", "codemode", "background_command", "nonexistent_tool"],
+			});
+			expect(session.getActiveToolNames()).toEqual(["bash"]);
+			expect(warnSpy.mock.calls.map(([msg]) => String(msg))).toEqual([
+				'Tool "codemode" was requested in CreateAgentSessionOptions.tools, but its CLI built-in extension is not loaded. SDK sessions do not load CLI built-in extensions automatically; add createCodemodeExtension() to DefaultResourceLoader extensionFactories.',
+				'Tool "background_command" was requested in CreateAgentSessionOptions.tools, but its CLI built-in extension is not loaded. SDK sessions do not load CLI built-in extensions automatically; add createBackgroundCommandExtension() to DefaultResourceLoader extensionFactories.',
+			]);
+			session.dispose();
+
+			warnSpy.mockClear();
+			const modifierSession = await createAgentSession({
+				cwd: tempDir,
+				agentDir,
+				model,
+				settingsManager,
+				sessionManager: SessionManager.inMemory(),
+				resourceLoader: unloadedLoader,
+				tools: ["+tool_search", "+mcp", "-codemode"],
+			});
+			expect(warnSpy.mock.calls.map(([msg]) => String(msg))).toEqual([
+				'Tool "tool_search" was requested in CreateAgentSessionOptions.tools, but its CLI built-in extension is not loaded. SDK sessions do not load CLI built-in extensions automatically; add createToolSearchExtension() to DefaultResourceLoader extensionFactories.',
+				'Tool "mcp" was requested in CreateAgentSessionOptions.tools, but its CLI built-in extension is not loaded. SDK sessions do not load CLI built-in extensions automatically; add createMcpExtension() to DefaultResourceLoader extensionFactories.',
+			]);
+			modifierSession.session.dispose();
+
+			warnSpy.mockClear();
+			const excludedSession = await createAgentSession({
+				cwd: tempDir,
+				agentDir,
+				model,
+				settingsManager,
+				sessionManager: SessionManager.inMemory(),
+				resourceLoader: unloadedLoader,
+				tools: ["bash", "codemode"],
+				excludeTools: ["codemode"],
+			});
+			expect(warnSpy).not.toHaveBeenCalled();
+			excludedSession.session.dispose();
+
+			warnSpy.mockClear();
+			const loadedLoader = new DefaultResourceLoader({
+				cwd: tempDir,
+				agentDir,
+				settingsManager,
+				noExtensions: true,
+				extensionFactories: [createCodemodeExtension(), createMcpExtension()],
+			});
+			await loadedLoader.reload();
+			const loadedSession = await createAgentSession({
+				cwd: tempDir,
+				agentDir,
+				model,
+				settingsManager,
+				sessionManager: SessionManager.inMemory(),
+				resourceLoader: loadedLoader,
+				tools: ["bash", "codemode", "mcp"],
+			});
+			expect(loadedSession.session.getActiveToolNames()).toEqual(["bash", "codemode"]);
+			expect(warnSpy).not.toHaveBeenCalled();
+			loadedSession.session.dispose();
+		} finally {
+			warnSpy.mockRestore();
+		}
 	});
 });

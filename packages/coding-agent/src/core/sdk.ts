@@ -57,6 +57,34 @@ setDefaultStreamFn(streamSimple);
 const nativeResourceLoaderReload = DefaultResourceLoader.prototype.reload;
 const nativeWorkingSessionResources = DefaultResourceLoader.prototype.getWorkingSessionResources;
 
+const SDK_BUILTIN_EXTENSION_TOOL_FACTORIES: Readonly<Record<string, string>> = {
+	codemode: "createCodemodeExtension()",
+	tool_search: "createToolSearchExtension()",
+	mcp: "createMcpExtension()",
+	background_command: "createBackgroundCommandExtension()",
+};
+
+function warnUnloadedBuiltinExtensionTools(
+	requestedTools: readonly string[],
+	isExcludedTool: ((name: string) => boolean) | undefined,
+	extensionsResult: LoadExtensionsResult,
+	customTools: readonly ToolDefinition[] | undefined,
+): void {
+	for (const name of requestedTools) {
+		const factory = SDK_BUILTIN_EXTENSION_TOOL_FACTORIES[name];
+		if (!factory || isExcludedTool?.(name)) continue;
+		const isRegistered =
+			extensionsResult.extensions.some(
+				(ext) => ext.tools.has(name) || (name === "mcp" && ext.commands.has("mcp")),
+			) || customTools?.some((tool) => tool.name === name);
+		if (!isRegistered) {
+			console.warn(
+				`Tool "${name}" was requested in CreateAgentSessionOptions.tools, but its CLI built-in extension is not loaded. SDK sessions do not load CLI built-in extensions automatically; add ${factory} to DefaultResourceLoader extensionFactories.`,
+			);
+		}
+	}
+}
+
 export interface CreateAgentSessionOptions {
 	/** Native complete-state resume, validated before services or resource construction. */
 	workingSession?: WorkingSession | string;
@@ -433,6 +461,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const initialActiveToolNames = (saved?.activeTools ?? selectedToolNames ?? defaultToolNames).filter(
 		(name) => !isExcludedTool?.(name),
 	);
+	if (!saved && options.tools) {
+		const requestedTools = toolModifiers ? applyToolModifiers([], toolModifiers) : [...new Set(options.tools)];
+		warnUnloadedBuiltinExtensionTools(requestedTools, isExcludedTool, extensions, options.customTools);
+	}
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
