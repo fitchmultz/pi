@@ -193,7 +193,7 @@ A tool is a good match when one of these holds:
 
 The description and instructions of an MCP server rank its tools but do not make one a good match, because every tool of the server shares them. A query that only names tools loads only those tools.
 
-A `+word` is a requirement: only tools whose name or server name contains the word are matches. `+linear create issue` searches the `linear` server's tools only.
+A `+word` is a requirement: only tools whose name or server name contains the word are matches. `+linear create issue` searches the `linear` server's tools only. The description of the `query` parameter tells the model so, because a query without it can load the tools of two servers that offer the same tools, such as two Slack workspaces.
 
 The result tells the model what to do next:
 

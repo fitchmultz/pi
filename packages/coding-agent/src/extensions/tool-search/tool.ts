@@ -48,7 +48,17 @@ export interface ToolSearchMatch {
 
 /** Ranks tools for a query. BM25 today; a hybrid ranker with embeddings can replace it. */
 export interface ToolRanker {
-	rank(query: string, documents: readonly ToolSearchDocument[], limit: number): ToolSearchMatch[];
+	/**
+	 * `otherNames` are tools that the query may name but that are not ranked, such as the tools that
+	 * `tool_search` does not load. A query that only names tools has no good match that it does not
+	 * name, whether the tools it names are ranked or not.
+	 */
+	rank(
+		query: string,
+		documents: readonly ToolSearchDocument[],
+		limit: number,
+		otherNames?: readonly string[],
+	): ToolSearchMatch[];
 }
 
 const wordSegmenter = new Intl.Segmenter(undefined, { granularity: "word" });
@@ -283,7 +293,12 @@ export class Bm25Ranker implements ToolRanker {
 		this.b = options.b ?? 0.75;
 	}
 
-	rank(query: string, documents: readonly ToolSearchDocument[], limit: number): ToolSearchMatch[] {
+	rank(
+		query: string,
+		documents: readonly ToolSearchDocument[],
+		limit: number,
+		otherNames: readonly string[] = [],
+	): ToolSearchMatch[] {
 		const queryTerms = new Set(tokenize(query));
 		if (queryTerms.size === 0 || documents.length === 0 || limit <= 0) return [];
 		const names = nameWords(query);
@@ -301,9 +316,14 @@ export class Bm25Ranker implements ToolRanker {
 		);
 		const fullNameBonus = [...idf.values()].reduce((sum, value) => sum + value, 0);
 		const named = indexed.filter((document) => namesTool(query, names, document.name));
+		// Name terms of every tool the query names, ranked or not.
+		const namedTerms = [
+			...named.map((document) => document.nameTerms),
+			...otherNames.filter((name) => namesTool(query, names, name)).map((name) => new Set(tokenize(name))),
+		];
 		// Every term belongs to the name of a tool the query names: the query names tools and describes none.
 		const onlyNames =
-			named.length > 0 && [...queryTerms].every((term) => named.some((document) => document.nameTerms.has(term)));
+			namedTerms.length > 0 && [...queryTerms].every((term) => namedTerms.some((terms) => terms.has(term)));
 		const matches: (ToolSearchMatch & { covered: number; exact: boolean })[] = [];
 		for (const document of indexed) {
 			const inName = (term: string) => document.nameTerms.has(term) || document.namespaceNameTerms.has(term);
@@ -346,7 +366,10 @@ export class Bm25Ranker implements ToolRanker {
 }
 
 export const toolSearchSchema = Type.Object({
-	query: Type.String({ description: "Search query for deferred tools." }),
+	query: Type.String({
+		description:
+			'Search query for deferred tools. Prefix a server or tool name with + to search only there, for example "+github create issue".',
+	}),
 	limit: Type.Optional(
 		Type.Number({ description: `Maximum number of tools to return. Defaults to ${DEFAULT_TOOL_SEARCH_LIMIT}.` }),
 	),
@@ -397,7 +420,9 @@ function isSearchable(exposure: ToolExposure): boolean {
  * call declares them. Activation is recorded in the transcript like any tool change.
  *
  * Active tools are ranked too. Otherwise a search for a tool that is already loaded would find the
- * next best tool instead and load it.
+ * next best tool instead and load it. For the same reason the ranker gets the names of the tools that
+ * are not searched: without them, the name of a tool that was declared from the start would be read as
+ * a description, and every tool that mentions its words would be loaded.
  */
 function searchAndLoad(
 	tools: NonNullable<ToolSearchToolOptions["tools"]>,
@@ -408,8 +433,10 @@ function searchAndLoad(
 	const isActive = (tool: ToolInfo) => activeNames.includes(tool.name);
 	const all = tools.getAllTools();
 	const searchable = all.filter((tool) => isSearchable(tool.exposure));
+	const others = all.filter((tool) => !isSearchable(tool.exposure));
 	const documents = searchable.map((tool) => createToolSearchDocument(tool, tool.namespace));
-	const matches = new Bm25Ranker().rank(query, documents, documents.length).flatMap((match) => {
+	const otherNames = others.map((tool) => tool.name);
+	const matches = new Bm25Ranker().rank(query, documents, documents.length, otherNames).flatMap((match) => {
 		const tool = searchable.find((candidate) => candidate.name === match.name);
 		return tool ? [{ tool, strong: match.strong }] : [];
 	});
@@ -436,9 +463,8 @@ function searchAndLoad(
 	const notOffered: string[] = [];
 	const unknown: string[] = [];
 	const names = nameWords(query);
-	for (const tool of all) {
-		if (isSearchable(tool.exposure) || !namesTool(query, names, tool.name)) continue;
-		(isActive(tool) ? active : notOffered).push(tool.name);
+	for (const tool of others) {
+		if (namesTool(query, names, tool.name)) (isActive(tool) ? active : notOffered).push(tool.name);
 	}
 	for (const word of names) {
 		const known = all.some((tool) => {
