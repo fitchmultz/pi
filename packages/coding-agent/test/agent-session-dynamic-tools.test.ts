@@ -277,12 +277,22 @@ describe("AgentSession dynamic tool registration", () => {
 				settingsManager,
 				sessionManager: SessionManager.inMemory(),
 				resourceLoader: unloadedLoader,
-				tools: ["bash", "codemode", "background_command", "nonexistent_tool"],
+				tools: [
+					"bash",
+					"codemode",
+					"background_command",
+					"mcp",
+					"mcp__docs__search",
+					"nonexistent_tool",
+					"constructor",
+					"__proto__",
+				],
 			});
 			expect(session.getActiveToolNames()).toEqual(["bash"]);
 			expect(warnSpy.mock.calls.map(([msg]) => String(msg))).toEqual([
-				'Tool "codemode" was requested in CreateAgentSessionOptions.tools, but its CLI built-in extension is not loaded. SDK sessions do not load CLI built-in extensions automatically; add createCodemodeExtension() to DefaultResourceLoader extensionFactories.',
-				'Tool "background_command" was requested in CreateAgentSessionOptions.tools, but its CLI built-in extension is not loaded. SDK sessions do not load CLI built-in extensions automatically; add createBackgroundCommandExtension() to DefaultResourceLoader extensionFactories.',
+				'Tool "codemode" was requested in tools, but its built-in extension is not loaded (SDK hosts add createCodemodeExtension() to DefaultResourceLoader extensionFactories).',
+				'Tool "background_command" was requested in tools, but its built-in extension is not loaded (SDK hosts add createBackgroundCommandExtension() to DefaultResourceLoader extensionFactories).',
+				'Tool "mcp__docs__search" was requested in tools, but its built-in extension is not loaded (SDK hosts add createMcpExtension() to DefaultResourceLoader extensionFactories).',
 			]);
 			session.dispose();
 
@@ -294,11 +304,11 @@ describe("AgentSession dynamic tool registration", () => {
 				settingsManager,
 				sessionManager: SessionManager.inMemory(),
 				resourceLoader: unloadedLoader,
-				tools: ["+tool_search", "+mcp", "-codemode"],
+				tools: ["+tool_search", "+list_mcp_resources", "+mcp", "-codemode"],
 			});
 			expect(warnSpy.mock.calls.map(([msg]) => String(msg))).toEqual([
-				'Tool "tool_search" was requested in CreateAgentSessionOptions.tools, but its CLI built-in extension is not loaded. SDK sessions do not load CLI built-in extensions automatically; add createToolSearchExtension() to DefaultResourceLoader extensionFactories.',
-				'Tool "mcp" was requested in CreateAgentSessionOptions.tools, but its CLI built-in extension is not loaded. SDK sessions do not load CLI built-in extensions automatically; add createMcpExtension() to DefaultResourceLoader extensionFactories.',
+				'Tool "tool_search" was requested in tools, but its built-in extension is not loaded (SDK hosts add createToolSearchExtension() to DefaultResourceLoader extensionFactories).',
+				'Tool "list_mcp_resources" was requested in tools, but its built-in extension is not loaded (SDK hosts add createMcpExtension() to DefaultResourceLoader extensionFactories).',
 			]);
 			modifierSession.session.dispose();
 
@@ -332,7 +342,7 @@ describe("AgentSession dynamic tool registration", () => {
 				settingsManager,
 				sessionManager: SessionManager.inMemory(),
 				resourceLoader: loadedLoader,
-				tools: ["bash", "codemode", "mcp"],
+				tools: ["bash", "codemode", "mcp__docs__search", "list_mcp_resources"],
 			});
 			expect(loadedSession.session.getActiveToolNames()).toEqual(["bash", "codemode"]);
 			expect(warnSpy).not.toHaveBeenCalled();

@@ -11,7 +11,7 @@ import { getClientIdentity } from "./client-identity.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { applyProviderRegistrations } from "./extensions/provider-registrations.ts";
-import { createToolNameMatcher } from "./mcp-servers.ts";
+import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
 import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
@@ -57,12 +57,18 @@ setDefaultStreamFn(streamSimple);
 const nativeResourceLoaderReload = DefaultResourceLoader.prototype.reload;
 const nativeWorkingSessionResources = DefaultResourceLoader.prototype.getWorkingSessionResources;
 
-const SDK_BUILTIN_EXTENSION_TOOL_FACTORIES: Readonly<Record<string, string>> = {
-	codemode: "createCodemodeExtension()",
-	tool_search: "createToolSearchExtension()",
-	mcp: "createMcpExtension()",
-	background_command: "createBackgroundCommandExtension()",
-};
+const BUILTIN_EXTENSION_TOOL_FACTORIES = new Map<string, string>([
+	["codemode", "createCodemodeExtension()"],
+	["tool_search", "createToolSearchExtension()"],
+	["background_command", "createBackgroundCommandExtension()"],
+]);
+
+function getBuiltinExtensionFactoryForTool(name: string): string | undefined {
+	const direct = BUILTIN_EXTENSION_TOOL_FACTORIES.get(name);
+	if (direct) return direct;
+	if (!name.includes("*") && isMcpToolName(name)) return "createMcpExtension()";
+	return undefined;
+}
 
 function warnUnloadedBuiltinExtensionTools(
 	requestedTools: readonly string[],
@@ -71,15 +77,15 @@ function warnUnloadedBuiltinExtensionTools(
 	customTools: readonly ToolDefinition[] | undefined,
 ): void {
 	for (const name of requestedTools) {
-		const factory = SDK_BUILTIN_EXTENSION_TOOL_FACTORIES[name];
+		const factory = getBuiltinExtensionFactoryForTool(name);
 		if (!factory || isExcludedTool?.(name)) continue;
 		const isRegistered =
 			extensionsResult.extensions.some(
-				(ext) => ext.tools.has(name) || (name === "mcp" && ext.commands.has("mcp")),
+				(ext) => ext.tools.has(name) || (factory === "createMcpExtension()" && ext.commands.has("mcp")),
 			) || customTools?.some((tool) => tool.name === name);
 		if (!isRegistered) {
 			console.warn(
-				`Tool "${name}" was requested in CreateAgentSessionOptions.tools, but its CLI built-in extension is not loaded. SDK sessions do not load CLI built-in extensions automatically; add ${factory} to DefaultResourceLoader extensionFactories.`,
+				`Tool "${name}" was requested in tools, but its built-in extension is not loaded (SDK hosts add ${factory} to DefaultResourceLoader extensionFactories).`,
 			);
 		}
 	}
