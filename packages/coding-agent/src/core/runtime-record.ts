@@ -54,8 +54,8 @@ export interface RuntimeRecordContextFile {
 export interface RuntimeRecordData {
 	/** Format version of this record. */
 	version: 1;
-	/** Reason of the `session_start` event this record precedes. */
-	trigger: SessionStartEvent["reason"];
+	/** Reason of the `session_start` event this record precedes, or `"restart"` when resuming from a managed restart handoff. */
+	trigger: SessionStartEvent["reason"] | "restart";
 	process: {
 		pid: number;
 		/** Run mode, as extensions see it in `ctx.mode`. */
