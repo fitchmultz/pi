@@ -56,6 +56,7 @@
 - Fixed provider errors reading "Connection closed." not being retried ([#12064](https://github.com/earendil-works/pi/issues/12064))
 - Fixed Gemini `MALFORMED_FUNCTION_CALL` and `UNEXPECTED_TOOL_CALL` finish reasons ending the turn instead of retrying within the configured retry budget.
 - Fixed non-strict Anthropic tool schemas dropping the root `additionalProperties`, so the model was not told that extra arguments are forbidden ([#12067](https://github.com/earendil-works/pi/issues/12067))
+- Fixed model catalog generation aborting when one connection to a catalog source cannot be made or drops while the response is read; the source is now fetched once more.
 
 ### Removed
 
