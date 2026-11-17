@@ -13,7 +13,7 @@ import { raceWithAbortSignal } from "../utils/abort.ts";
 import { atomicWriteFileSync, resolveFileTarget } from "../utils/atomic-file.ts";
 import { getFileRevision, normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
-import { isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
+import { isCommandConfigValue, refreshConfigValueCache, resolveConfigValue } from "./resolve-config-value.ts";
 
 type AuthStorageData = Record<string, Credential>;
 
@@ -448,6 +448,24 @@ export class AuthStorage implements CredentialStore {
 		if (credential?.type !== "api_key") return credential;
 		if (credential.key === undefined) return credential;
 		return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
+	}
+
+	hasCachedCommandCredential(provider: string): boolean {
+		const credential = this.readState.data[provider];
+		return credential?.type === "api_key" && credential.key !== undefined && isCommandConfigValue(credential.key);
+	}
+
+	/**
+	 * Re-run a stored `!command` API key and update the cache only when the command succeeds
+	 * with a non-empty value, leaving any previously cached value intact on transient failure.
+	 */
+	async refreshCachedCredential(provider: string, options?: AuthOperationOptions): Promise<boolean> {
+		const credential = (await this.readLatestData(options))[provider];
+		options?.signal?.throwIfAborted();
+		if (credential?.type !== "api_key" || credential.key === undefined || !isCommandConfigValue(credential.key)) {
+			return false;
+		}
+		return refreshConfigValueCache(credential.key) !== undefined;
 	}
 
 	async modify(

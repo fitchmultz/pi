@@ -1,13 +1,18 @@
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
 
+type CommandCacheableCredentialStore = CredentialStore & {
+	hasCachedCommandCredential?: (provider: string) => boolean;
+	refreshCachedCredential?: (provider: string, options?: AuthOperationOptions) => Promise<boolean>;
+};
+
 /** Async credential store overlay for non-persistent runtime API keys. */
 export class RuntimeCredentials implements CredentialStore {
-	private readonly store: CredentialStore;
+	private readonly store: CommandCacheableCredentialStore;
 	private readonly overrides = new Map<string, string>();
 	/** Modifications not yet written or failed, for example an OAuth refresh. */
 	private readonly pendingModifications = new Set<Promise<void>>();
 
-	constructor(store: CredentialStore) {
+	constructor(store: CommandCacheableCredentialStore) {
 		this.store = store;
 	}
 
@@ -27,6 +32,17 @@ export class RuntimeCredentials implements CredentialStore {
 		options?.signal?.throwIfAborted();
 		const override = this.overrides.get(providerId);
 		return override ? { type: "api_key", key: override } : this.store.read(providerId, options);
+	}
+
+	hasCachedCommandCredential(providerId: string): boolean {
+		if (this.overrides.has(providerId)) return false;
+		return this.store.hasCachedCommandCredential?.(providerId) ?? false;
+	}
+
+	async refreshCachedCredential(providerId: string, options?: AuthOperationOptions): Promise<boolean> {
+		options?.signal?.throwIfAborted();
+		if (this.overrides.has(providerId)) return false;
+		return (await this.store.refreshCachedCredential?.(providerId, options)) ?? false;
 	}
 
 	async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
