@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `google-decisions` classifier API for Google's Gemini Decisions API (`POST /v1beta/decisions`), with `gemini-decision-1` as a multimodal classifier model of the `google` provider.
+- Added GPT-6.2 Astra and GPT-6.2 Sol on Cloudflare AI Gateway's `/openai` passthrough, with OpenAI's limits and pricing and the mid-conversation system message and additional-tools defaults of the other GPT-6 models.
 - Added Claude Fable 5.2 on Cloudflare AI Gateway, including adaptive thinking and mid-conversation system, tool, and effort updates. Fable 5.2 requests on Anthropic and Cloudflare AI Gateway omit `temperature`.
 - Added optional non-secret `AssistantMessage.cacheIdentity` metadata for provider-scoped credential and cache-owner diagnostics.
 - Added an optional `Models.streamSimple()` prepared-request observer, forwarded by `withClientIdentity()`, for effective cache policy and dispatch timing without resolving auth twice.
@@ -12,6 +13,7 @@
 - Added the `anthropic_thinking_blocks` diagnostic to Anthropic replies whose request carried thinking blocks or lost some: `details.sent` and `details.dropped`.
 - Added custom `fetch` support to the `google-generative-ai` and `google-vertex` adapters; Vertex ADC token requests still use `google-auth-library`'s own HTTP client ([#12103](https://github.com/earendil-works/pi/pull/12103) by [@rometi](https://github.com/rometi))
 - Added `deepseek-v4.1-flash` and `deepseek-v4.1-flash-1017` to the Qwen Token Plan Individual providers, and per-plan key variables `QWEN_TOKEN_PLAN_TEAM_API_KEY`, `QWEN_TOKEN_PLAN_TEAM_CN_API_KEY`, `QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY`, and `QWEN_TOKEN_PLAN_INDIVIDUAL_CN_API_KEY`; the shared `QWEN_TOKEN_PLAN_API_KEY` and `QWEN_TOKEN_PLAN_CN_API_KEY` still work ([#11773](https://github.com/earendil-works/pi/issues/11773))
+- Added GPT-6.2 Astra and GPT-6.2 Sol to the OpenAI, Azure OpenAI Responses, and OpenAI Codex providers with official pricing (Astra: $8 input, $0.40 cached input, $10 cache writes, $40 output; Sol: $2, $0.10, $2.50, $10; long-context tier above 272k), tool search, additional tools, and mid-conversation effort changes. Both reject reasoning effort `none` and `minimal`, so `off` is unavailable. Azure serves them with a 1.05M context window; Codex serves GPT-6.2 Sol with 500K and GPT-6.2 Astra with 272K
 
 ### Changed
 
