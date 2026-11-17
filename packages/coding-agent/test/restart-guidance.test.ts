@@ -574,7 +574,7 @@ describe("stale extension code in a managed session", () => {
 		await f.makeStale();
 		const looks = f.seen.looks;
 		// Past the quiet period and the next regular look at the disk.
-		await vi.advanceTimersByTimeAsync(6 * 60_000);
+		await vi.advanceTimersByTimeAsync(2 * 60_000);
 		await vi.waitFor(() => expect(f.seen.looks).toBeGreaterThan(looks));
 		expect(f.seen).toMatchObject({ editorReads: 0, workAsks: 0, notices: [] });
 		expect(f.shutdownRequested()).toBe(false);
