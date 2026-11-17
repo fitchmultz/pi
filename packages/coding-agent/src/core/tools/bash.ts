@@ -22,7 +22,10 @@ import {
 
 /**
  * Foreground commands without an explicit timeout stop after this long, so a silent hang cannot block a
- * session until someone aborts it; longer work belongs in background_command.
+ * session until someone aborts it; longer work belongs in background_command. Comparable agent shells
+ * bound the no-timeout call far tighter: Claude Code stops foreground Bash at 120 s
+ * (BASH_DEFAULT_TIMEOUT_MS), Codex unified exec at 10 s (DEFAULT_EXEC_COMMAND_TIMEOUT_MS in
+ * codex-rs/core/src/exec.rs), and Gemini CLI's shell at a 300 s limit (tools.shell.inactivityTimeout).
  */
 export const DEFAULT_TIMEOUT_SECONDS = 300;
 
