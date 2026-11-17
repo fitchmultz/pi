@@ -29,10 +29,11 @@ const guidance =
 
 /**
  * How long a session waits between comparing its loaded extension code with the disk. Each comparison
- * starts one `git` process per loaded git package (26 installed packages took 0.1 s of CPU when measured),
- * so an idle session checks rarely; a session that is used also checks after every agent run.
+ * starts one `git` process per loaded git package; with 26 installed packages it took 0.1 s of CPU when
+ * measured. Once a minute, that is about 0.17% of one core for each open session, and an idle session
+ * notices a change within a minute. A session that is used also checks after every agent run.
  */
-const STALE_CHECK_INTERVAL_MS = 5 * 60_000;
+const STALE_CHECK_INTERVAL_MS = 60_000;
 
 export interface RestartInputState {
 	busy: boolean;
