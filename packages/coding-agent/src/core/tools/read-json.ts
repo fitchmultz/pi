@@ -38,7 +38,7 @@ export function extractReadJson(text: string, { path = "", fields }: ReadJsonOpt
 		throw new Error(`JSON selection requires valid JSON: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
-	for (const key of Pointer.Indices(path)) {
+	for (const key of Pointer.Fragments(path)) {
 		if (
 			value === null ||
 			typeof value !== "object" ||

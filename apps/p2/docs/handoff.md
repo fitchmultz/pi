@@ -171,7 +171,7 @@ From `AGENTS.md` and this project's history:
    same-named servers of several people are p3's; whether Radius sends its cookie on a
    sign-in's redirect back is unverified.
 5. **npm:** deprecate `@earendil-works/pi-client`, `pi-protocol` and `pi-server` (1.1.0), which no longer exist.
-6. `docs/p2-notes.md` TODO: the TypeScript 5.9.3 pin (Termux), an isolating plugin loader, sandboxing third-party
+6. `docs/p2-notes.md` TODO: the TypeScript 6.0.3 pin (Termux), an isolating plugin loader, sandboxing third-party
    facets.
 7. **Slow test suite:** about 11 minutes serially; files could run in parallel once their isolation is fixed. The
    chat-mode long-press reply browser test times out under load.

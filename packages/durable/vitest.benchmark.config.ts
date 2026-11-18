@@ -3,9 +3,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
 	test: {
 		environment: "node",
+		reporters: ["verbose"],
 		benchmark: {
 			include: ["test/**/*.bench.ts"],
-			reporters: ["verbose"],
 		},
 	},
 	resolve: { conditions: ["source"] },

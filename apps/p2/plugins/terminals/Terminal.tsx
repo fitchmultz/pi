@@ -135,7 +135,7 @@ const encoder = new TextEncoder();
 const mac = /Mac|iPhone|iPad/.test(navigator.platform);
 const NO_MODIFIERS = { shift: false, ctrl: false, alt: false };
 
-function concat(parts: Uint8Array[]): Uint8Array {
+function concat(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
 	const bytes = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
 	let offset = 0;
 	for (const part of parts) {
@@ -556,7 +556,7 @@ class TerminalSession {
 	}
 
 	/** Typed text; a sticky Ctrl or Alt from the key row applies to a single character (`modified`). */
-	#encodeText(text: string): { bytes: Uint8Array; modified: boolean } {
+	#encodeText(text: string): { bytes: Uint8Array<ArrayBuffer>; modified: boolean } {
 		const { ctrl, alt } = this.#modifiers();
 		if ((ctrl || alt) && [...text].length === 1) {
 			const code = /^[a-z]$/i.test(text) ? `Key${text.toUpperCase()}` : /^\d$/.test(text) ? `Digit${text}` : "";
@@ -936,7 +936,7 @@ class TerminalSession {
 		this.#request((control) => control.ack({ bytes }, BACKGROUND_CONTEXT));
 	}
 
-	#send(bytes: Uint8Array): void {
+	#send(bytes: Uint8Array<ArrayBuffer>): void {
 		if (this.#socket?.readyState !== WebSocket.OPEN || !this.#state.current || this.#state.current.exited) return;
 		// Typing returns to the bottom, like a terminal, and stops a fling (whose own wheel events come from its frame,
 		// before it asks for the next).

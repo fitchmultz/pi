@@ -19,7 +19,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
 
-describe.sequential("OAuthAuth adapters", () => {
+describe("OAuthAuth adapters", { concurrent: false }, () => {
 	it("keeps the extension OAuth barrel free of built-in flow implementations", () => {
 		expect(extensionOAuthCompatibility).not.toHaveProperty("loginAnthropic");
 		expect(extensionOAuthCompatibility).not.toHaveProperty("anthropicOAuth");

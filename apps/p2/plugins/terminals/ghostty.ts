@@ -504,7 +504,7 @@ export class VtTerminal {
 	 * The bytes a mouse event sends in the program's mouse mode and format; undefined when the program does not want
 	 * it (no tracking, or motion it did not ask for).
 	 */
-	encodeMouse(input: MouseInput): Uint8Array | undefined {
+	encodeMouse(input: MouseInput): Uint8Array<ArrayBuffer> | undefined {
 		const ghostty = this.#ghostty;
 		if (!this.#mouseEncoder) {
 			this.#mouseEncoder = ghostty.create("ghostty_mouse_encoder_new");
@@ -791,7 +791,7 @@ export class VtTerminal {
 	}
 
 	/** The bytes a key press sends in the terminal's current modes; undefined when it sends nothing. */
-	encodeKey(input: KeyInput): Uint8Array | undefined {
+	encodeKey(input: KeyInput): Uint8Array<ArrayBuffer> | undefined {
 		const ghostty = this.#ghostty;
 		if (!this.#encoder) {
 			this.#encoder = ghostty.create("ghostty_key_encoder_new");
@@ -841,7 +841,7 @@ export class VtTerminal {
 	}
 
 	/** Pasted text as the program should receive it: control bytes made safe, bracketed when the program asked. */
-	encodePaste(text: string): Uint8Array {
+	encodePaste(text: string): Uint8Array<ArrayBuffer> {
 		const ghostty = this.#ghostty;
 		const data = new TextEncoder().encode(text);
 		const input = ghostty.alloc(Math.max(1, data.length));

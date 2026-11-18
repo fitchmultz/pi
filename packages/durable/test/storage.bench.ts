@@ -9,7 +9,7 @@ import {
 	seedStorageBenchmark,
 	seedStorageWriteBenchmark,
 } from "@earendil-works/pi-durable/testing";
-import { afterAll, bench, describe } from "vitest";
+import { afterAll, test } from "vitest";
 import { openNodeJsonlStorage } from "../src/storage/jsonl/node.ts";
 import { MemoryStorage } from "../src/storage/memory.ts";
 import { openNodeSqliteStorage } from "../src/storage/sqlite/node.ts";
@@ -67,18 +67,15 @@ for (let index = 0; index < readFixtures.length; index++) {
 }
 
 for (const scenario of STORAGE_READ_BENCHMARKS) {
-	describe(scenario.name, () => {
-		for (let index = 0; index < readFixtures.length; index++) {
-			const fixture = readFixtures[index];
-			const dataset = readDatasets[index];
-			bench(
-				fixture.backend,
-				async () => {
-					await scenario.run(fixture.storage, dataset);
-				},
-				READ_OPTIONS,
-			);
-		}
+	test(scenario.name, async ({ bench }) => {
+		await bench.compare(
+			...readFixtures.map((fixture, index) =>
+				bench(fixture.backend, async () => {
+					await scenario.run(fixture.storage, readDatasets[index]);
+				}),
+			),
+			READ_OPTIONS,
+		);
 	});
 }
 
@@ -100,19 +97,18 @@ for (const scenario of STORAGE_WRITE_BENCHMARKS) {
 		);
 		writePools.set(`${scenario.name}:${backend}`, pool);
 	}
-	describe(scenario.name, () => {
-		for (const backend of STORAGE_BENCHMARK_BACKENDS) {
-			const pool = writePools.get(`${scenario.name}:${backend}`)!;
-			bench(
-				backend,
-				async () => {
+	test(scenario.name, async ({ bench }) => {
+		await bench.compare(
+			...STORAGE_BENCHMARK_BACKENDS.map((backend) => {
+				const pool = writePools.get(`${scenario.name}:${backend}`)!;
+				return bench(backend, async () => {
 					const fixture = pool.shift();
 					if (fixture === undefined) throw new Error("Write benchmark fixture pool was exhausted");
 					await scenario.run(fixture.storage);
-				},
-				WRITE_OPTIONS,
-			);
-		}
+				});
+			}),
+			WRITE_OPTIONS,
+		);
 	});
 }
 
@@ -172,19 +168,18 @@ for (const fixture of reopenFixtures) {
 	await reopenValidation.storage.close(BACKGROUND_CONTEXT);
 }
 
-describe("reopen and first exact read", () => {
-	for (const fixture of reopenFixtures) {
-		bench(
-			fixture.backend,
-			async () => {
+test("reopen and first exact read", async ({ bench }) => {
+	await bench.compare(
+		...reopenFixtures.map((fixture) =>
+			bench(fixture.backend, async () => {
 				const path = fixture.samples.shift();
 				if (path === undefined) throw new Error("Reopen benchmark fixture pool was exhausted");
 				const result = await reopenAndRead(fixture.backend, path, fixture.firstEntryId);
 				reopenedStorages.push(result.storage);
-			},
-			REOPEN_OPTIONS,
-		);
-	}
+			}),
+		),
+		REOPEN_OPTIONS,
+	);
 });
 
 afterAll(async () => {

@@ -6,11 +6,9 @@ how p2 uses it: **Chord v2** below.
 
 ## TODO
 
-- **TypeScript 5.9.3 pin:** p2 pins `typescript` 5.9.3 (nested in `apps/p2/node_modules`, a devDependency used only by
-  `npm run check`; nothing imports it at runtime) only because the repo's TypeScript 7 has no Android ARM64 build, so
-  `npm run check` could not type-check on Termux. Move p2 to the repo's
-  TypeScript (drop the pin and the nested copy) once a portable TS 7 exists or checks run off-device; same for
-  apps/mobile.
+- **TypeScript 6 pin:** p2 uses TypeScript 6 for `npm run check` on Termux because stable TypeScript 7 does not ship
+  an Android ARM64 binary. Switch to the repo's compiler when it ships a stable Android ARM64 build or checks run
+  off-device. If the check runs out of Node heap on Termux, use `NODE_OPTIONS=--max-old-space-size=4096 npm run check`.
 - **TUI plugins:** the TUI still loads its facets with p2's own bundle and a `host.load` in the sandbox, not through
   Chord's plugins component (C2: Chord's child-process sandbox for the launcher).
 - **Guest TUI isolation:** the owner superseded the earlier QuickJS/secure-eval-worker plan with a plain locked-down

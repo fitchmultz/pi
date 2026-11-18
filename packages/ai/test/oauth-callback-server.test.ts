@@ -29,7 +29,7 @@ function pendingPrompt(onPrompt?: (prompt: AuthPrompt) => void): (prompt: AuthPr
 	};
 }
 
-describe.sequential("OAuth callback server", () => {
+describe("OAuth callback server", { concurrent: false }, () => {
 	const servers: { close(): void }[] = [];
 	const start = async <T>(options: Partial<Parameters<typeof startOAuthCallbackServer<T>>[0]> = {}) => {
 		const server = await startOAuthCallbackServer<T>({
@@ -178,7 +178,7 @@ describe.sequential("OAuth callback server", () => {
 	});
 });
 
-describe.sequential("waitForCallbackOrManualInput", () => {
+describe("waitForCallbackOrManualInput", { concurrent: false }, () => {
 	it("cancels manual input even when the prompt ignores its abort signal", async () => {
 		const controller = new AbortController();
 		const result = waitForCallbackOrManualInput(
