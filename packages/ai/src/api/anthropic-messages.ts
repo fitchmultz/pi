@@ -5,13 +5,15 @@ import type {
 	BetaRequestToolAdditionBlock,
 	BetaRequestToolRemovalBlock,
 	BetaStopReason,
+	BetaSystemMessageParam,
+	BetaTextBlockParam,
 	BetaTool,
 	BetaCacheControlEphemeral as CacheControlEphemeral,
 	BetaContentBlockParam as ContentBlockParam,
-	MessageCreateParamsStreaming,
 	BetaMessageParam as MessageParam,
 	BetaRawMessageStreamEvent as RawMessageStreamEvent,
 	BetaRefusalStopDetails as RefusalStopDetails,
+	MessageCreateParamsStreaming as SdkMessageCreateParamsStreaming,
 } from "@anthropic-ai/sdk/resources/beta/messages/messages.js";
 import {
 	ANTHROPIC_FEDERATION_RULE_ID_ENV,
@@ -272,16 +274,8 @@ function usesNativeToolChanges(compat: ReturnType<typeof getAnthropicCompat>, co
 	);
 }
 
-/**
- * Message threads: the server keeps the conversation of a thread, so a request can continue
- * from the previous reply and send only the new messages. pi still builds the full request;
- * `prepareThreadRequest()` compares it with the previous request of the session and sends
- * only the new part when nothing earlier changed.
- */
-type ThreadParam = { type: "create" } | { type: "continue"; previous_message_id: string };
-
-/** The pinned SDK types do not include the `thread` request field yet. */
-type ThreadedParams = MessageCreateParamsStreaming & { thread?: ThreadParam };
+// Pi still sends the 2023-06-01 API version, which accepts temperature on supported models.
+type MessageCreateParamsStreaming = SdkMessageCreateParamsStreaming & { temperature?: number };
 
 interface ThreadEntry {
 	/** Number of messages in the last full request as sent plus the converted reply. */
@@ -373,7 +367,7 @@ function hashThreadPrefix(
 
 interface PreparedThreadRequest {
 	sessionId: string;
-	body: ThreadedParams;
+	body: MessageCreateParamsStreaming;
 }
 
 function createThreadRequest(sessionId: string, params: MessageCreateParamsStreaming): PreparedThreadRequest {
@@ -423,7 +417,7 @@ function getThreadErrorCode(error: InstanceType<typeof Anthropic.APIError>): str
 async function sendThreadRequest(
 	thread: PreparedThreadRequest,
 	params: MessageCreateParamsStreaming,
-	send: (body: ThreadedParams) => Promise<Response>,
+	send: (body: MessageCreateParamsStreaming) => Promise<Response>,
 	output: AssistantMessage,
 	signal: AbortSignal | undefined,
 ): Promise<{ response: Response; thread: PreparedThreadRequest | undefined }> {
@@ -554,7 +548,7 @@ export interface AnthropicOptions extends StreamOptions {
 }
 
 function mergeHeaders(...headerSources: (ProviderHeaders | undefined)[]): ProviderHeaders {
-	const merged: ProviderHeaders = {};
+	const merged: ProviderHeaders = { "anthropic-version": "2023-06-01" };
 	for (const headers of headerSources) {
 		if (headers) {
 			Object.assign(merged, headers);
@@ -914,7 +908,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			};
 			// Thinking blocks in the body of the request that was answered, for the journal.
 			let thinkingBlocksSent = 0;
-			const send = (body: ThreadedParams) => {
+			const send = (body: MessageCreateParamsStreaming) => {
 				thinkingBlocksSent = countThinkingBlocks(body.messages);
 				return retryProviderRequest(() => client.beta.messages.create(body, requestOptions).asResponse(), {
 					maxRetries: options?.maxRetries,
@@ -1411,8 +1405,13 @@ function createClient(
 		return { client: federationClient.client.withOptions({ defaultHeaders }), isOAuthToken: false };
 	}
 
+	// The SDK now sends API keys as Bearer tokens. Gateways may require the old header;
+	// an explicit provider or request header can still replace or remove the resolved key.
+	if (apiKey && !Object.keys(defaultHeaders).some((name) => name.toLowerCase() === "x-api-key")) {
+		defaultHeaders["x-api-key"] = apiKey;
+	}
 	const client = new PiAnthropic({
-		apiKey: apiKey ?? null,
+		apiKey: null,
 		authToken: null,
 		baseURL: model.baseUrl,
 		dangerouslyAllowBrowser: true,
@@ -1748,7 +1747,7 @@ function convertMessages(
 	// immediately follow their `tool_use`, so a system message between them is rejected; this
 	// also mirrors where the managed-effort system messages are inserted. As a result an
 	// update placed before a user message in the transcript lands after it on the wire.
-	const pendingSystemMessages: MessageParam[] = [];
+	const pendingSystemMessages: BetaSystemMessageParam[] = [];
 	const flushPendingSystemMessages = (): void => {
 		params.push(...pendingSystemMessages);
 		pendingSystemMessages.length = 0;
@@ -1790,10 +1789,10 @@ function convertMessages(
 					toolBlocks.push({ type: "tool_addition", tool: { type: "tool_definition", definition } });
 				}
 			}
-			const blocks: ContentBlockParam[] =
+			const blocks: (BetaTextBlockParam | ToolChangeBlock)[] =
 				text.length > 0 ? [{ type: "text", text: sanitizeSurrogates(text) }, ...toolBlocks] : toolBlocks;
 			if (i < leadingUpdates) {
-				pendingSystemMessages.push(...blocks.map((block): MessageParam => ({ role: "system", content: [block] })));
+				for (const block of blocks) pendingSystemMessages.push({ role: "system", content: [block] });
 				leadingToolChangesEnd = toolBlocks.at(-1) ?? leadingToolChangesEnd;
 			} else if (blocks.length > 0) {
 				pendingSystemMessages.push({ role: "system", content: blocks });
@@ -1943,7 +1942,7 @@ function convertMessages(
 						lastBlock.type === "tool_addition" ||
 						lastBlock.type === "tool_removal")
 				) {
-					(lastBlock as any).cache_control = cacheControl;
+					lastBlock.cache_control = cacheControl;
 				}
 			} else if (typeof lastMessage.content === "string") {
 				lastMessage.content = [
@@ -1952,7 +1951,7 @@ function convertMessages(
 						text: lastMessage.content,
 						cache_control: cacheControl,
 					},
-				] as any;
+				];
 			}
 		}
 	}
@@ -2080,7 +2079,7 @@ function convertTools(
 function countThinkingBlocks(messages: MessageParam[]): number {
 	let count = 0;
 	for (const message of messages) {
-		if (typeof message.content === "string") continue;
+		if (message.role === "system" || typeof message.content === "string") continue;
 		for (const block of message.content) {
 			if (block.type === "thinking" || block.type === "redacted_thinking") count++;
 		}

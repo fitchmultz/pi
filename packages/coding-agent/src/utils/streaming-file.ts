@@ -1,15 +1,9 @@
 import { createHash, type Hash } from "node:crypto";
 import { closeSync, openSync, readSync } from "node:fs";
 import { isJsonValue } from "@earendil-works/chord/json";
-import { getManyValues, type Many, none } from "stream-chain/core";
+import { getManyValues, none } from "stream-chain/core";
 import { Assembler } from "stream-json/core/assembler.js";
-import type { ParserOptions, Token } from "stream-json/core/parser.js";
-import * as streamJson from "stream-json/core/parser.js";
-
-// ponytail: 3.7 omits its public synchronous factory's types; drop this narrowing when upstream includes them.
-const { jsonParser } = streamJson as typeof streamJson & {
-	jsonParser(options?: ParserOptions): (input: string | typeof none) => Many<Token> | typeof none;
-};
+import { jsonParser } from "stream-json/core/parser.js";
 
 const CHUNK_SIZE = 64 * 1024;
 
@@ -36,12 +30,12 @@ export function hashFileSync(path: string): string {
 
 /** Parse a full JSON value without constructing a string for the whole document. */
 export function readJsonFileSync(path: string, hash?: Hash): unknown {
-	const parse = jsonParser({ streamValues: false });
+	// Keep accepting files written by Pi, which does not cap their nesting or string size.
+	const parse = jsonParser({ streamValues: false, maxDepth: Infinity, maxPackedLength: Infinity });
 	const assembler = new Assembler();
 	const decoder = new TextDecoder("utf-8", { fatal: true });
 	let nonFiniteNumber = false;
-	const consume = (input: string | typeof none) => {
-		const tokens = parse(input);
+	const consume = (tokens: ReturnType<typeof parse>) => {
 		if (tokens === none) return;
 		for (const token of getManyValues(tokens)) {
 			if (token.name === "numberValue" && !Number.isFinite(Number(token.value))) nonFiniteNumber = true;
@@ -53,10 +47,11 @@ export function readJsonFileSync(path: string, hash?: Hash): unknown {
 	};
 	for (const chunk of readFileChunksSync(path)) {
 		hash?.update(chunk);
-		consume(decoder.decode(chunk, { stream: true }));
+		consume(parse(decoder.decode(chunk, { stream: true })));
 	}
-	consume(decoder.decode());
-	consume(none);
+	consume(parse(decoder.decode()));
+	// stream-chain's Flushable type omits the end-of-input sentinel accepted by jsonParser.
+	consume(parse(none as never));
 	// An overflowing value may have been discarded by a later duplicate key.
 	if (nonFiniteNumber && !isJsonValue(assembler.current))
 		throw new TypeError("Value contains a non-finite number and is not strict JSON");

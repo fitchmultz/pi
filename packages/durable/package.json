@@ -176,7 +176,7 @@
 		"@earendil-works/pi-schema": "1.5.2",
 		"@earendil-works/pi-telemetry": "1.5.2",
 		"@silvia-odwyer/photon": "0.3.3",
-		"diff": "8.0.4"
+		"diff": "9.0.0"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-plugin": "1.4.10",
