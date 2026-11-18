@@ -156,3 +156,20 @@ test("returns the failed build status after draining owned children without star
 	assert.ok(events.some((event) => event.name === "chord" && event.phase === "failed"));
 	assert.ok(events.some((event) => event.name === "tui" && event.phase === "finish"), "the remaining child must finish before the root returns");
 });
+
+test("builds only selected packages and their transitive local dependencies when package arguments are provided", async (t) => {
+	const fixture = await createBuildFixture(t);
+	const result = spawnSync(process.execPath, [join(fixture.root, "scripts/build.mjs"), "chord"], {
+		cwd: fixture.root, env: fixture.env, encoding: "utf8",
+	});
+	assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+	const events = (await readFile(fixture.events, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+	const started = events.filter((event) => event.phase === "start").map((event) => event.name).sort();
+	assert.deepEqual(started, ["chord", "schema", "telemetry"]);
+
+	const bad = spawnSync(process.execPath, [join(fixture.root, "scripts/build.mjs"), "nonexistent-pkg"], {
+		cwd: fixture.root, env: fixture.env, encoding: "utf8",
+	});
+	assert.equal(bad.status, 1);
+	assert.match(bad.stderr, /Unknown package: nonexistent-pkg/);
+});

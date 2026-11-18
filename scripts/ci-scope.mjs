@@ -36,21 +36,25 @@ const git = (...args) =>
 
 const isWorkspaceConfig = (path) => /(^|\/)(package(-lock)?\.json|tsconfig[^/]*\.json)$/.test(path);
 
+const isDocsOnlyPath = (path) =>
+	!isWorkspaceConfig(path) &&
+	(ROOT_DOC_FILES.has(path) ||
+		path.startsWith("docs/") ||
+		path.startsWith(".pi/") ||
+		/^packages\/[^/]+\/(README\.md|CHANGELOG\.md|containerization\.md)$/.test(path) ||
+		/^packages\/[^/]+\/(docs|THIRD_PARTY_NOTICES|schemas)\//.test(path) ||
+		path === "packages/tui/native/darwin/README.md" ||
+		/^packages\/chord\/src\/.+\/README\.md$/.test(path));
+
 const fastPaths = [
 	[
 		"documentation and non-CI metadata",
 		(path) =>
-			!isWorkspaceConfig(path) &&
-			(ROOT_DOC_FILES.has(path) ||
-				path.startsWith("docs/") ||
-				path.startsWith(".pi/") ||
-				path === ".github/APPROVED_CONTRIBUTORS" ||
-				path.startsWith(".github/ISSUE_TEMPLATE/") ||
-				(path.startsWith(".github/workflows/") && path !== ".github/workflows/ci.yml") ||
-				/^packages\/[^/]+\/(README\.md|CHANGELOG\.md|containerization\.md)$/.test(path) ||
-				/^packages\/[^/]+\/(docs|THIRD_PARTY_NOTICES|schemas)\//.test(path) ||
-				path === "packages/tui/native/darwin/README.md" ||
-				/^packages\/chord\/src\/.+\/README\.md$/.test(path)),
+			isDocsOnlyPath(path) ||
+			(!isWorkspaceConfig(path) &&
+				(path === ".github/APPROVED_CONTRIBUTORS" ||
+					path.startsWith(".github/ISSUE_TEMPLATE/") ||
+					(path.startsWith(".github/workflows/") && path !== ".github/workflows/ci.yml"))),
 	],
 	[
 		"isolated packages",
@@ -90,6 +94,7 @@ function resolveScope({ event, base, head }) {
 	if (event === "workflow_dispatch") {
 		return {
 			macosRequired: true,
+			docsOnly: false,
 			reason: "Manual dispatch runs macos-restart-background.",
 			files: [],
 		};
@@ -104,6 +109,7 @@ function resolveScope({ event, base, head }) {
 	if (event === "push" && base === ZERO_SHA) {
 		return {
 			macosRequired: true,
+			docsOnly: false,
 			reason: "Branch creation push has no previous commit to compare.",
 			files: [],
 		};
@@ -112,6 +118,7 @@ function resolveScope({ event, base, head }) {
 	if (!hasCommit(base)) {
 		return {
 			macosRequired: true,
+			docsOnly: false,
 			reason: "Base commit is not in local history; running macos-restart-background by default.",
 			files: [],
 		};
@@ -123,6 +130,7 @@ function resolveScope({ event, base, head }) {
 		if (mergeBase.status !== 0) {
 			return {
 				macosRequired: true,
+				docsOnly: false,
 				reason: "Pull request has no merge base with the target branch.",
 				files: [],
 			};
@@ -135,6 +143,7 @@ function resolveScope({ event, base, head }) {
 	if (files.length === 0) {
 		return {
 			macosRequired: true,
+			docsOnly: false,
 			reason: "No changed paths between compared commits; running macos-restart-background by default.",
 			files,
 		};
@@ -146,14 +155,17 @@ function resolveScope({ event, base, head }) {
 		const suffix = requiredPaths.length > 10 ? ` (+${requiredPaths.length - 10} more)` : "";
 		return {
 			macosRequired: true,
+			docsOnly: false,
 			reason: `Default rule: these changed paths require macos-restart-background: ${preview}${suffix}.`,
 			files,
 		};
 	}
 
 	const applied = fastPaths.filter(([, matches]) => files.some(matches)).map(([name]) => name);
+	const docsOnly = files.every(isDocsOnlyPath);
 	return {
 		macosRequired: false,
+		docsOnly,
 		reason: `Skipping macos-restart-background; every changed path is on a fast path: ${applied.join("; ")}.`,
 		files,
 	};
@@ -177,12 +189,12 @@ try {
 		}
 		const plan = resolveScope(values);
 		if (process.env.GITHUB_OUTPUT) {
-			appendFileSync(process.env.GITHUB_OUTPUT, `macos-required=${plan.macosRequired}\n`);
+			appendFileSync(process.env.GITHUB_OUTPUT, `macos-required=${plan.macosRequired}\ndocs-only=${plan.docsOnly}\n`);
 		}
 		if (process.env.GITHUB_STEP_SUMMARY) {
 			appendFileSync(
 				process.env.GITHUB_STEP_SUMMARY,
-				`macOS restart/background CI required: **${plan.macosRequired}**. ${plan.reason}\n`,
+				`macOS restart/background CI required: **${plan.macosRequired}** (docs-only: **${plan.docsOnly}**). ${plan.reason}\n`,
 			);
 		}
 		console.log(JSON.stringify(plan, null, 2));

@@ -37,14 +37,6 @@ on:
       - 'scripts/npm-command.mjs'
       - 'scripts/release-packages.mjs'
       - 'scripts/package-workspaces.mjs'
-  workflow_run:
-    workflows:
-      - Publish Model Catalog
-    types:
-      - completed
-  # Catches packaging drift from changes pushed to main without a pull request.
-  schedule:
-    - cron: '43 5 * * *'
   workflow_dispatch:
 
 permissions: {}
@@ -55,7 +47,6 @@ concurrency:
 
 jobs:
   pin:
-    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -94,8 +85,6 @@ jobs:
 
   build:
     needs: pin
-    # After a catalog publication, only build when the pin changed.
-    if: ${{ github.event_name != 'workflow_run' || needs.pin.outputs.updated == 'true' }}
     strategy:
       fail-fast: false
       matrix:

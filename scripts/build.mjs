@@ -4,23 +4,28 @@ import { spawn } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseArgs } from "node:util";
 
-const args = process.argv.slice(2);
-if (args.includes("-h") || args.includes("--help")) {
-	console.log(`Usage: node scripts/build.mjs [--offline]
+const { values, positionals } = parseArgs({
+	allowPositionals: true,
+	strict: true,
+	options: {
+		offline: { type: "boolean", default: false },
+		help: { type: "boolean", short: "h", default: false },
+	},
+});
+if (values.help) {
+	console.log(`Usage: node scripts/build.mjs [--offline] [package...]
 
-Build all runtime packages in dependency order, with up to two builds at once.
+Build runtime packages and their local dependencies in topological order, with up to two builds at once.
 --offline  Use already hydrated model data; do not refresh the catalog.
 -h, --help Show this help.
 
 Examples: npm run build
           npm run build:offline
+          node scripts/build.mjs chord durable
 Exit codes: 0 success, 1 invalid options, otherwise the failed build's exit code.`);
 	process.exit(0);
-}
-if (args.some((arg) => arg !== "--offline")) {
-	console.error(`Unknown option: ${args.find((arg) => arg !== "--offline")}`);
-	process.exit(1);
 }
 
 const root = realpathSync.native(fileURLToPath(new URL("../", import.meta.url)));
@@ -28,8 +33,29 @@ const packages = new Map([
 	"schema", "chord", "tui", "telemetry", "codemode", "mcp", "ai", "durable",
 	"env", "agent", "coding-agent",
 ].map((name) => [name, JSON.parse(readFileSync(join(root, "packages", name, "package.json"), "utf8"))]));
-const localNames = new Set([...packages.values()].map((pkg) => pkg.name));
-const pending = new Map(packages);
+const byPackageName = new Map([...packages].map(([dir, pkg]) => [pkg.name, dir]));
+const selectedDirs = new Set();
+if (positionals.length === 0) {
+	for (const dir of packages.keys()) selectedDirs.add(dir);
+} else {
+	const queue = [...positionals];
+	while (queue.length > 0) {
+		const target = queue.shift();
+		if (!packages.has(target)) {
+			console.error(`Unknown package: ${target}`);
+			process.exit(1);
+		}
+		if (selectedDirs.has(target)) continue;
+		selectedDirs.add(target);
+		for (const dep of Object.keys(packages.get(target).dependencies ?? {})) {
+			const depDir = byPackageName.get(dep);
+			if (depDir) queue.push(depDir);
+		}
+	}
+}
+
+const localNames = new Set([...selectedDirs].map((dir) => packages.get(dir).name));
+const pending = new Map([...selectedDirs].map((dir) => [dir, packages.get(dir)]));
 const finished = new Set();
 const running = new Map();
 while (pending.size > 0 || running.size > 0) {
@@ -40,7 +66,7 @@ while (pending.size > 0 || running.size > 0) {
 		}
 		pending.delete(name);
 		const cwd = join(root, "packages", name);
-		const script = name === "ai" && args.includes("--offline") ? "build:offline" : "build";
+		const script = name === "ai" && values.offline ? "build:offline" : "build";
 		running.set(name, new Promise((resolve) => {
 			// Go's os.Getwd honors inherited PWD, even when its casing differs from native realpath.
 			const child = spawn("npm", ["run", script], {

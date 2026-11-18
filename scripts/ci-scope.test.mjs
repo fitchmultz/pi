@@ -65,11 +65,12 @@ function createRepoFixture(t) {
 	return { git, write, remove, commit, base, invoke };
 }
 
-function assertPlanned(result, expectedRequired) {
+function assertPlanned(result, expectedRequired, expectedDocsOnly = false) {
 	assert.equal(result.status, 0, result.stderr);
 	const plan = JSON.parse(result.stdout);
 	assert.equal(plan.macosRequired, expectedRequired);
-	assert.equal(result.output, `macos-required=${expectedRequired}\n`);
+	assert.equal(plan.docsOnly, expectedDocsOnly);
+	assert.equal(result.output, `macos-required=${expectedRequired}\ndocs-only=${expectedDocsOnly}\n`);
 	assert.match(result.summary, new RegExp(`macOS restart/background CI required: \\*\\*${expectedRequired}\\*\\*`));
 	assert.ok(result.summary.includes(plan.reason));
 	return plan;
@@ -180,11 +181,23 @@ test("skips macos-restart-background when changes stay in isolated packages, doc
 	const head = f.commit("fast-path changes");
 
 	for (const event of ["pull_request", "push"]) {
-		const plan = assertPlanned(f.invoke(["--event", event, "--base", f.base, "--head", head]), false);
+		const plan = assertPlanned(f.invoke(["--event", event, "--base", f.base, "--head", head]), false, false);
 		assert.match(plan.reason, /documentation and non-CI metadata/);
 		assert.match(plan.reason, /isolated packages/);
 		assert.match(plan.reason, /non-macOS-job package tests/);
 	}
+});
+
+test("marks pure documentation changes docsOnly=true while keeping workflow changes docsOnly=false", (t) => {
+	const f = createRepoFixture(t);
+	f.write("docs/sdk.md", "updated docs\n");
+	f.write("packages/coding-agent/CHANGELOG.md", "entry\n");
+	const docsHead = f.commit("docs only");
+	assertPlanned(f.invoke(["--event", "pull_request", "--base", f.base, "--head", docsHead]), false, true);
+
+	f.write(".github/workflows/nix.yml", "name: Nix\n");
+	const workflowHead = f.commit("docs plus workflow");
+	assertPlanned(f.invoke(["--event", "pull_request", "--base", f.base, "--head", workflowHead]), false, false);
 });
 
 test("pull_request compares against merge-base so concurrent main runtime commits do not mask a PR fast path", (t) => {
