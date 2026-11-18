@@ -8,12 +8,12 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	backgroundCommandFinished,
-	backgroundCommandOutputTail,
 	cancelBackgroundCommand,
 	listBackgroundCommands,
 	readBackgroundCommand,
 	startBackgroundCommand,
 } from "../src/extensions/background-command/jobs.ts";
+import { backgroundCommandOutputTail } from "../src/extensions/background-command/output-tail.ts";
 import { getShellEnv } from "../src/utils/shell.ts";
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
@@ -133,6 +133,18 @@ describe("detached background commands", { timeout: 120_000 }, () => {
 		const alignedTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
 		expect(alignedTail.split("\n").filter(Boolean)).toHaveLength(16);
 		expect(Buffer.byteLength(alignedTail)).toBe(2048);
+		writeFileSync(done.logFile, `${"z".repeat(3000)}\nerror: build failed\n`);
+		const longLineTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(Buffer.byteLength(longLineTail)).toBe(2048);
+		expect(longLineTail.endsWith("\nerror: build failed\n")).toBe(true);
+		writeFileSync(done.logFile, `${"\u001b[38;5;196mstep done\u001b[0m\r".repeat(400)}!`);
+		const crTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(crTail).not.toContain("196m");
+		expect(crTail.startsWith("step done\r")).toBe(true);
+		expect(crTail.endsWith("step done\r!")).toBe(true);
+		writeFileSync(done.logFile, "\u001b[38;5;196mERR\u001b[0m: build step failed ".repeat(300));
+		const singleLineAnsiTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(singleLineAnsiTail).not.toContain("196m");
 		writeFileSync(done.logFile, "line\n".repeat(200));
 		expect(backgroundCommandOutputTail(done).split("\n").length).toBeLessThanOrEqual(100);
 		const unavailable = backgroundCommandOutputTail(

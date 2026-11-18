@@ -49,7 +49,7 @@ const unfinishedAnsiAtEndRegex = new RegExp(
 );
 
 // Longest unfinished sequence held back while streaming. Longer ones are processed as-is.
-const MAX_PENDING_ANSI_LENGTH = 256;
+export const MAX_PENDING_ANSI_LENGTH = 256;
 
 /**
  * Split streamed text into a part that is safe to pass to stripAnsi now and a trailing

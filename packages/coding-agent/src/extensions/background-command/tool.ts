@@ -12,13 +12,13 @@ import { getShellEnv } from "../../utils/shell.ts";
 import {
 	type BackgroundCommandJob,
 	backgroundCommandFinished,
-	backgroundCommandOutputTail,
 	cancelBackgroundCommand,
 	listBackgroundCommands,
 	readBackgroundCommand,
 	startBackgroundCommand,
 	summarizeBackgroundCommand,
 } from "./jobs.ts";
+import { backgroundCommandOutputTail } from "./output-tail.ts";
 
 const schema = Type.Object({
 	action: StringEnum(["start", "status", "cancel"] as const),

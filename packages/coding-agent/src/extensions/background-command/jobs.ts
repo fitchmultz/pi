@@ -3,22 +3,18 @@ import { randomUUID } from "node:crypto";
 import {
 	closeSync,
 	existsSync,
-	fstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readFileSync,
-	readSync,
 	renameSync,
 	writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { stripVTControlCharacters } from "node:util";
 import { getBackgroundCommandWorker } from "../../config.ts";
 import type { ReadonlySessionManager } from "../../core/session-manager.ts";
 import { type BashSpawnContext, createLocalBashOperations } from "../../core/tools/local-shell.ts";
-import { truncateTail } from "../../core/tools/truncate.ts";
 
 export interface BackgroundCommandJob {
 	id: string;
@@ -104,40 +100,6 @@ export function listBackgroundCommands(root: string, excludeIds?: ReadonlySet<st
 			}
 		})
 		.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-}
-export function backgroundCommandOutputTail(
-	job: BackgroundCommandJob,
-	{ maxLines = 100, maxBytes = 16_384 } = {},
-): string {
-	if (job.status === "unknown" && !existsSync(job.logFile)) return "";
-	let fd: number | undefined;
-	try {
-		fd = openSync(job.logFile, "r");
-		const size = fstatSync(fd).size;
-		if (size === 0 || maxBytes <= 0 || maxLines <= 0) return "";
-		const window = Math.min(size, maxBytes);
-		const offset = size - window;
-		const lead = offset > 0 ? 1 : 0;
-		const bytes = Buffer.alloc(window + lead);
-		const count = readSync(fd, bytes, 0, bytes.length, offset - lead);
-		let start = lead;
-		if (offset > 0) while (start < count && (bytes[start] & 0xc0) === 0x80) start++;
-		let text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(start, count), {
-			stream: !backgroundCommandFinished(job),
-		});
-		if (offset > 0 && bytes[0] !== 0x0a) {
-			const newline = text.indexOf("\n");
-			if (newline !== -1 && newline + 1 < text.length) text = text.slice(newline + 1);
-		}
-		return truncateTail(stripVTControlCharacters(text), { maxLines, maxBytes }).content;
-	} catch (error) {
-		return truncateTail(
-			stripVTControlCharacters(`Output unavailable: ${String(error).slice(0, 512)}. Inspect logFile for this job.`),
-			{ maxLines, maxBytes },
-		).content;
-	} finally {
-		if (fd !== undefined) closeSync(fd);
-	}
 }
 export async function startBackgroundCommand(
 	root: string,
