@@ -125,6 +125,10 @@ describe("detached background commands", { timeout: 120_000 }, () => {
 		expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(16_384);
 		expect(tail).not.toContain("\uFFFD");
 		expect(tail).not.toContain("\u001b");
+		writeFileSync(done.logFile, "\u001b[38;5;196mERR\u001b[0m: build step failed\n".repeat(200));
+		const ansiTail = backgroundCommandOutputTail(done, { maxLines: 100, maxBytes: 2048 });
+		expect(ansiTail).not.toContain("196m");
+		expect(ansiTail.startsWith("ERR: build step failed\n")).toBe(true);
 		writeFileSync(done.logFile, "line\n".repeat(200));
 		expect(backgroundCommandOutputTail(done).split("\n").length).toBeLessThanOrEqual(100);
 		const unavailable = backgroundCommandOutputTail(

@@ -118,9 +118,13 @@ export function backgroundCommandOutputTail(
 		const count = readSync(fd, bytes, 0, bytes.length, size - bytes.length);
 		let start = 0;
 		if (size > bytes.length) while (start < count && (bytes[start] & 0xc0) === 0x80) start++;
-		const text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(start, count), {
+		let text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(start, count), {
 			stream: !backgroundCommandFinished(job),
 		});
+		if (size > bytes.length) {
+			const newline = text.indexOf("\n");
+			if (newline !== -1 && newline + 1 < text.length) text = text.slice(newline + 1);
+		}
 		return truncateTail(stripVTControlCharacters(text), { maxLines, maxBytes }).content;
 	} catch (error) {
 		return truncateTail(
