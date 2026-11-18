@@ -167,6 +167,13 @@ describe("detached background commands", { timeout: 120_000 }, () => {
 		const completeAnsiPrefixTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
 		expect(completeAnsiPrefixTail.startsWith("xxxx")).toBe(true);
 		expect(Buffer.byteLength(completeAnsiPrefixTail)).toBe(2044);
+		writeFileSync(
+			done.logFile,
+			`${"P".repeat(500)}\n\r${"x".repeat(1000)}\n${"a".repeat(1000)}\n${"b".repeat(45)}\n`,
+		);
+		const crAlignedTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(crAlignedTail.startsWith("xxxx")).toBe(true);
+		expect(Buffer.byteLength(crAlignedTail)).toBe(2048);
 		writeFileSync(done.logFile, "line\n".repeat(200));
 		expect(backgroundCommandOutputTail(done).split("\n").length).toBeLessThanOrEqual(100);
 		const unavailable = backgroundCommandOutputTail(

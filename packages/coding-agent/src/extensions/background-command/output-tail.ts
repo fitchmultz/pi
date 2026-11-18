@@ -48,12 +48,13 @@ export function backgroundCommandOutputTail(
 			}),
 		);
 		const prefixStart = offset - lookbehind;
-		const lastNewline = bytes.subarray(0, beforePending).lastIndexOf(0x0a);
+		const lookbehindSlice = bytes.subarray(0, beforePending);
+		const lastLineBreak = Math.max(lookbehindSlice.lastIndexOf(0x0a), lookbehindSlice.lastIndexOf(0x0d));
 		const hasVisibleLinePrefix =
 			cursor > 0 &&
-			(lastNewline !== -1
-				? stripAnsi(bytes.subarray(lastNewline + 1, beforePending).toString("utf8")).length > 0
-				: prefixStart > 0 || stripAnsi(bytes.subarray(0, beforePending).toString("utf8")).length > 0);
+			(lastLineBreak !== -1
+				? stripAnsi(bytes.subarray(lastLineBreak + 1, beforePending).toString("utf8")).length > 0
+				: prefixStart > 0 || stripAnsi(lookbehindSlice.toString("utf8")).length > 0);
 		if (hasVisibleLinePrefix) {
 			const newline = stripped.indexOf("\n");
 			if (newline !== -1 && newline + 1 < stripped.length) {
