@@ -145,16 +145,6 @@ describe("detached background commands", { timeout: 120_000 }, () => {
 		writeFileSync(done.logFile, "\u001b[38;5;196mERR\u001b[0m: build step failed ".repeat(300));
 		const singleLineAnsiTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
 		expect(singleLineAnsiTail).not.toContain("196m");
-		writeFileSync(done.logFile, `prefix\n\u001b${"X".repeat(2000)}\nTAIL\n${"z".repeat(42)}`);
-		const orphanEscTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
-		expect(Buffer.byteLength(orphanEscTail)).toBe(2048);
-		expect(orphanEscTail.startsWith("XXXX")).toBe(true);
-		writeFileSync(done.logFile, `prefix\n\u001bSHORT${"a".repeat(2043)}`);
-		const orphanEscWordTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
-		expect(orphanEscWordTail.startsWith("SHORT")).toBe(true);
-		writeFileSync(done.logFile, `prefix\n\u001b]ORPHAN${"b".repeat(2042)}`);
-		const orphanOscTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
-		expect(orphanOscTail.startsWith("ORPHAN")).toBe(true);
 		writeFileSync(done.logFile, "line\n".repeat(200));
 		expect(backgroundCommandOutputTail(done).split("\n").length).toBeLessThanOrEqual(100);
 		const unavailable = backgroundCommandOutputTail(

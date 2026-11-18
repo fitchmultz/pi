@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { stripVTControlCharacters } from "node:util";
 import { truncateTail } from "../../core/tools/truncate.ts";
-import { MAX_PENDING_ANSI_LENGTH, splitIncompleteAnsiSuffix, stripAnsi } from "../../utils/ansi.ts";
+import { MAX_PENDING_ANSI_LENGTH, splitIncompleteAnsiSuffix } from "../../utils/ansi.ts";
 import { type BackgroundCommandJob, backgroundCommandFinished } from "./jobs.ts";
 
 export function backgroundCommandOutputTail(
@@ -29,22 +29,10 @@ export function backgroundCommandOutputTail(
 				if (pendingBytes <= cursor) {
 					let leadStart = cursor;
 					while (leadStart < count && (bytes[leadStart] & 0xc0) === 0x80) leadStart++;
-					const lead = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
-						bytes.subarray(leadStart, Math.min(count, leadStart + MAX_PENDING_ANSI_LENGTH)),
-						{ stream: true },
-					);
-					const candidate = pending + lead;
-					const strippedLead = stripVTControlCharacters(candidate);
-					// Pull pending bytes only when the window actually completes a VT sequence at byte 0.
-					const completesIntroducer =
-						(pending !== "\u001b" || /^[[(\])#;?]/.test(lead)) &&
-						(!pending.startsWith("\u001b]") || /(?:\u0007|\u001b\\|\u009c)/.test(lead));
-					if (
-						completesIntroducer &&
-						!strippedLead.startsWith("\u001b") &&
-						!stripAnsi(candidate).startsWith("\u001b") &&
-						stripAnsi(candidate) !== candidate
-					) {
+					const lead = bytes
+						.subarray(leadStart, Math.min(count, leadStart + MAX_PENDING_ANSI_LENGTH))
+						.toString("utf8");
+					if (!stripVTControlCharacters(pending + lead).startsWith("\u001b")) {
 						cursor -= pendingBytes;
 					}
 				}
@@ -60,10 +48,7 @@ export function backgroundCommandOutputTail(
 			const newline = stripped.indexOf("\n");
 			if (newline !== -1 && newline + 1 < stripped.length) {
 				const after = stripped.slice(newline + 1);
-				if (
-					Buffer.byteLength(after, "utf8") >= maxBytes ||
-					(after.trimEnd().includes("\n") && newline < maxBytes / 2)
-				) {
+				if (Buffer.byteLength(after, "utf8") >= maxBytes || after.trimEnd().includes("\n")) {
 					stripped = after;
 				}
 			}
