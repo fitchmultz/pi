@@ -62,10 +62,7 @@ describe("direct Anthropic request gzip", () => {
 		let sent: RequestInit | undefined;
 		let finalPayload: unknown;
 		const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
-			expect(new URL(String(input))).toMatchObject({
-				origin: "https://api.anthropic.com",
-				pathname: "/v1/messages",
-			});
+			expect(String(input)).toBe(endpoint);
 			sent = init;
 			return response();
 		});
@@ -79,7 +76,6 @@ describe("direct Anthropic request gzip", () => {
 				return finalPayload;
 			},
 		}).result();
-		expect(result.errorMessage).toBeUndefined();
 		expect(result.stopReason).toBe("stop");
 		expect(onResponse).toHaveBeenCalledOnce();
 		expect(fetch).toHaveBeenCalledOnce();

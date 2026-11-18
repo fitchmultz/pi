@@ -904,6 +904,8 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+				// Keep the beta route used by configured gateways after the SDK stopped adding it.
+				query: { beta: true },
 				maxRetries: 0,
 			};
 			// Thinking blocks in the body of the request that was answered, for the journal.

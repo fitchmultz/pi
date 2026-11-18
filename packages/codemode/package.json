@@ -67,7 +67,7 @@
 		"node": "^22.23.5 || ^24.22.3 || >=26.13.1"
 	},
 	"dependencies": {
-		"quickjs-wasi": "3.7.0"
+		"quickjs-wasi": "3.6.4"
 	},
 	"devDependencies": {
 		"vitest": "4.1.12"

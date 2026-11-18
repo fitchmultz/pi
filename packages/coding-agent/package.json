@@ -60,7 +60,7 @@
 		"lovely-mermaid": "0.3.3",
 		"minimatch": "11.0.9",
 		"proper-lockfile": "4.1.2",
-		"quickjs-wasi": "3.7.0",
+		"quickjs-wasi": "3.6.4",
 		"semver": "7.8.6",
 		"stream-chain": "4.4.2",
 		"stream-json": "3.9.0",
