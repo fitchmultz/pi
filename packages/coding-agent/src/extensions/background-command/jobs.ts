@@ -114,14 +114,18 @@ export function backgroundCommandOutputTail(
 	try {
 		fd = openSync(job.logFile, "r");
 		const size = fstatSync(fd).size;
-		const bytes = Buffer.alloc(Math.min(size, maxBytes));
-		const count = readSync(fd, bytes, 0, bytes.length, size - bytes.length);
-		let start = 0;
-		if (size > bytes.length) while (start < count && (bytes[start] & 0xc0) === 0x80) start++;
+		if (size === 0 || maxBytes <= 0 || maxLines <= 0) return "";
+		const window = Math.min(size, maxBytes);
+		const offset = size - window;
+		const lead = offset > 0 ? 1 : 0;
+		const bytes = Buffer.alloc(window + lead);
+		const count = readSync(fd, bytes, 0, bytes.length, offset - lead);
+		let start = lead;
+		if (offset > 0) while (start < count && (bytes[start] & 0xc0) === 0x80) start++;
 		let text = new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(start, count), {
 			stream: !backgroundCommandFinished(job),
 		});
-		if (size > bytes.length) {
+		if (offset > 0 && bytes[0] !== 0x0a) {
 			const newline = text.indexOf("\n");
 			if (newline !== -1 && newline + 1 < text.length) text = text.slice(newline + 1);
 		}

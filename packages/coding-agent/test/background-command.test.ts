@@ -129,6 +129,10 @@ describe("detached background commands", { timeout: 120_000 }, () => {
 		const ansiTail = backgroundCommandOutputTail(done, { maxLines: 100, maxBytes: 2048 });
 		expect(ansiTail).not.toContain("196m");
 		expect(ansiTail.startsWith("ERR: build step failed\n")).toBe(true);
+		writeFileSync(done.logFile, `${"q".repeat(127)}\n`.repeat(60));
+		const alignedTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(alignedTail.split("\n").filter(Boolean)).toHaveLength(16);
+		expect(Buffer.byteLength(alignedTail)).toBe(2048);
 		writeFileSync(done.logFile, "line\n".repeat(200));
 		expect(backgroundCommandOutputTail(done).split("\n").length).toBeLessThanOrEqual(100);
 		const unavailable = backgroundCommandOutputTail(
