@@ -918,7 +918,7 @@ function getServiceTierCostMultiplier(
 ): number {
 	switch (serviceTier) {
 		case "ultrafast":
-			if (model.id === "gpt-6-astra") return 6;
+			if (model.id === "gpt-6-astra" || model.id === "gpt-6.1-sol") return 6;
 			if (model.id === "gpt-6.2-astra" || model.id === "gpt-6.2-sol") {
 				return Date.now() < GPT_6_2_ULTRAFAST_LIST_PRICE_START_MS ? 3 : 6;
 			}

@@ -21,6 +21,8 @@ describe.each(["responses", "codex-sse", "codex-websocket"] as const)("Ultrafast
 		["gpt-6-astra", "default", 1, "ultrafast"],
 		["gpt-6-astra", "unknown", 1, "ultrafast"],
 		["gpt-6-sol-preview", "ultrafast", 1, "ultrafast"],
+		["gpt-6.1-sol", "ultrafast", 6, "ultrafast"],
+		["gpt-6.1-sol", "default", 1, "ultrafast"],
 		// 3x through February 28, 2027 and 6x from March 1, 2027, Pacific time.
 		["gpt-6.2-astra", "ultrafast", 3, "ultrafast", "2027-03-01T07:59:59Z"],
 		["gpt-6.2-sol", "ultrafast", 3, "ultrafast", "2027-03-01T07:59:59Z"],
