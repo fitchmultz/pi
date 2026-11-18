@@ -83,7 +83,7 @@ This fork supports Apple Silicon macOS and Linux (ARM64/x86-64). Use `nix build 
 
 The Nix build runs Pi on nixpkgs' Node 22. That Node links nixpkgs' own llhttp and SQLite, not the copies bundled with Node releases, so a Node security fix in those libraries reaches the Nix build only when nixpkgs updates them.
 
-Nix builds are offline, so the bundled model data comes from a pi.dev model catalog revision pinned in `nix/model-catalog.json`. At runtime, Pi still overlays newer catalog data from pi.dev as usual. Run the Nix workflow manually (`workflow_dispatch` on `main`) or refresh the pin by hand when it stops matching the checkout, for example after a provider is added or gains a new model type:
+Nix builds are offline, so the bundled model data comes from a pi.dev model catalog revision pinned in `nix/model-catalog.json`. At runtime, Pi still overlays newer catalog data from pi.dev as usual. Refresh the pin by hand when it stops matching the checkout, for example after a provider is added or gains a new model type (then commit `nix/model-catalog.json` and run `workflow_dispatch` if you want to verify the flake cleanly):
 
 ```bash
 npm run update:model-catalog-pin
