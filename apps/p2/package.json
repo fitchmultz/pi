@@ -37,7 +37,7 @@
 		"esbuild": "0.28.2",
 		"grok-mermaid": "0.2.3",
 		"lowlight": "3.3.0",
-		"marked": "18.0.14",
+		"marked": "18.2.1",
 		"proper-lockfile": "4.1.2",
 		"react": "19.3.1",
 		"react-dom": "19.3.1",

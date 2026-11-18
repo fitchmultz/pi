@@ -58,6 +58,20 @@ function isSingleCodespanLink(text: string): boolean {
 }
 
 class MarkdownTokenizer extends Tokenizer {
+	override inlineText(src: string): Tokens.Text | undefined {
+		const token = super.inlineText(src);
+		// Keep character references visible instead of decoding them into terminal control bytes.
+		if (token) token.text = token.raw;
+		return token;
+	}
+
+	override fences(src: string): Tokens.Code | undefined {
+		const token = super.fences(src);
+		// The newline before the closing border ends a code row; it doesn't start one.
+		if (token?.text.endsWith("\n")) token.text = token.text.slice(0, -1);
+		return token;
+	}
+
 	override url(src: string): Tokens.Link | undefined {
 		const token = super.url(src);
 		if (!token) return undefined;
@@ -566,6 +580,7 @@ function createMarkdownParser(extensions: readonly TokenizerExtension[]): Marked
 		tokenizer: new MarkdownTokenizer(),
 	});
 	parser.use({
+		// Keep CJK emphasis without letting the extension replace Pi's double-tilde strikethrough rule.
 		tokenizer: { emStrong: markedCjkFriendly().tokenizer?.emStrong },
 		extensions: [...extensions],
 	});

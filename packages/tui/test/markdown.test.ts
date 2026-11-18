@@ -1405,6 +1405,16 @@ Inline \(A_{sf}\)`,
 		});
 	});
 
+	// Marked #4141: decoding these references makes the terminal interpret them instead of displaying them.
+	it("renders numeric character references as literal text", () => {
+		const markdown = new Markdown("Literal &#27; and **&#x1b; and &#65;**.", 0, 0, defaultMarkdownTheme);
+
+		assert.deepStrictEqual(
+			markdown.render(80).map((line) => stripAnsi(line).trimEnd()),
+			["Literal &#27; and &#x1b; and &#65;."],
+		);
+	});
+
 	describe("Pre-styled text (thinking traces)", () => {
 		it("should preserve gray italic styling after inline code", () => {
 			// This replicates how thinking content is rendered in assistant-message.ts
@@ -1500,6 +1510,18 @@ Inline \(A_{sf}\)`,
 	});
 
 	describe("Spacing after code blocks", () => {
+		it("keeps a single blank code row before the closing fence with or without highlighting", () => {
+			const highlightCode = (code: string) => code.split("\n");
+			for (const theme of [defaultMarkdownTheme, { ...defaultMarkdownTheme, highlightCode }]) {
+				const markdown = new Markdown("```js\nconst n = 1;\n\n```", 0, 0, theme);
+
+				assert.deepStrictEqual(
+					markdown.render(80).map((line) => stripAnsi(line).trimEnd()),
+					["```js", "  const n = 1;", "", "```"],
+				);
+			}
+		});
+
 		it("should have only one blank line between code block and following paragraph", () => {
 			const markdown = new Markdown(
 				`hello world

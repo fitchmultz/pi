@@ -22,6 +22,7 @@ const eagerLanguages = [
 	"cpp",
 	"typescript",
 	"php",
+	"php8",
 	"ruby",
 	"c",
 	"csharp",
@@ -40,11 +41,11 @@ const eagerLanguagesLoadedAtStartup = eagerLanguages.every(supportsLanguage);
 const uncommonLanguageLoadedAtStartup = supportsLanguage("ada");
 
 describe("syntax highlight renderer", () => {
-	it("loads the twenty most common languages at startup and defers the rest", async () => {
+	it("loads common languages and their aliases at startup and defers the rest", async () => {
 		expect(eagerLanguagesLoadedAtStartup).toBe(true);
 		expect(uncommonLanguageLoadedAtStartup).toBe(false);
 		await loadAllHighlightLanguages();
-		expect(supportsLanguage("ada")).toBe(true);
+		expect(["ada", "freepascal", "c-like", "mysql", "oracle"].filter((name) => !supportsLanguage(name))).toEqual([]);
 	});
 
 	it("maps file extensions of eagerly loaded languages to their language", () => {
