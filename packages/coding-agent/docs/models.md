@@ -37,7 +37,8 @@ A session records model and thinking-level changes. Resuming the session restore
 ### Ultrafast cost estimates
 
 OpenAI Responses (API keys and Sign in with ChatGPT) and legacy Codex Responses price exact
-`gpt-6-astra` at 6x standard only when the terminal response confirms `service_tier: "ultrafast"`.
+`gpt-6-astra` and `gpt-6.1-sol` at 6x standard only when the terminal response confirms
+`service_tier: "ultrafast"`.
 Exact `gpt-6.2-astra` and `gpt-6.2-sol` are priced the same way at 3x standard through February 28, 2027
 and 6x from March 1, 2027 (Pacific time).
 The multiplier covers input, cached input, cache writes, and output after any long-context tier
