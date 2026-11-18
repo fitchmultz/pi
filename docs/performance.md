@@ -279,8 +279,10 @@ node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --artifact-
 # Exact Nix install-phase subset. Fix the payload to the built after root.
 node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --artifact-repo "$AFTER" --groups nix-pack --repeat 3 --out "$RESULTS/nix-pack"
 
-# In each measured root; pinned toolchain and locked release dependencies, setup outside timing.
-cargo +1.96.0 build --release --locked --offline --manifest-path packages/env/daemon/Cargo.toml
+# Build each daemon with its own pinned toolchain before timing.
+for root in "$BEFORE" "$AFTER"; do
+  (cd "$root/packages/env/daemon" && cargo build --release --locked --offline) || exit 1
+done
 node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --groups env-daemon,env-scan --repeat 3 --out "$RESULTS/env-native"
 
 # Matched qualification as recorded: four rotations per case.
