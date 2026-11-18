@@ -49,7 +49,8 @@ try {
 		.split("\n")
 		.map((line) => JSON.parse(line));
 	const semantic = rows.map(({ ms, allocations, allocatedBytes, ...value }) => value);
-	witness("rust", { args: process.argv.slice(2), toolchain }, semantic);
+	console.log(JSON.stringify({ toolchain }));
+	witness("rust", { args: process.argv.slice(2) }, semantic);
 } finally {
 	rmSync(crate, { recursive: true, force: true });
 }
