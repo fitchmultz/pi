@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
 import { stripVTControlCharacters } from "node:util";
 import { truncateTail } from "../../core/tools/truncate.ts";
-import { MAX_PENDING_ANSI_LENGTH, splitIncompleteAnsiSuffix } from "../../utils/ansi.ts";
+import { MAX_PENDING_ANSI_LENGTH, splitIncompleteAnsiSuffix, stripAnsi } from "../../utils/ansi.ts";
 import { type BackgroundCommandJob, backgroundCommandFinished } from "./jobs.ts";
 
 export function backgroundCommandOutputTail(
@@ -26,7 +26,28 @@ export function backgroundCommandOutputTail(
 			const pending = splitIncompleteAnsiSuffix(bytes.subarray(scan, cursor).toString("utf8")).pending;
 			if (pending.length > 0) {
 				const pendingBytes = Buffer.byteLength(pending, "utf8");
-				if (pendingBytes <= cursor) cursor -= pendingBytes;
+				if (pendingBytes <= cursor) {
+					let leadStart = cursor;
+					while (leadStart < count && (bytes[leadStart] & 0xc0) === 0x80) leadStart++;
+					const lead = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
+						bytes.subarray(leadStart, Math.min(count, leadStart + MAX_PENDING_ANSI_LENGTH)),
+						{ stream: true },
+					);
+					const candidate = pending + lead;
+					const strippedLead = stripVTControlCharacters(candidate);
+					// Pull pending bytes only when the window actually completes a VT sequence at byte 0.
+					const completesIntroducer =
+						(pending !== "\u001b" || /^[[(\])#;?]/.test(lead)) &&
+						(!pending.startsWith("\u001b]") || /(?:\u0007|\u001b\\|\u009c)/.test(lead));
+					if (
+						completesIntroducer &&
+						!strippedLead.startsWith("\u001b") &&
+						!stripAnsi(candidate).startsWith("\u001b") &&
+						stripAnsi(candidate) !== candidate
+					) {
+						cursor -= pendingBytes;
+					}
+				}
 			}
 			while (cursor < count && (bytes[cursor] & 0xc0) === 0x80) cursor++;
 		}
