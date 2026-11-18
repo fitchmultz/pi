@@ -46,7 +46,7 @@ describe("Mermaid rendering", () => {
 		{
 			name: "quoted list with lazy continuation",
 			source: "> quote\n> - list\nlazy\n> quote\n> - list\nlazy\n",
-			expected: "> quote\n> - list\nlazy\n\n> quote\n> - list\nlazy\n",
+			expected: "> quote\n> - list\nlazy\n> quote\n> - list\nlazy\n",
 		},
 		{
 			name: "link definitions",
@@ -56,19 +56,19 @@ describe("Mermaid rendering", () => {
 		{
 			name: "duplicate link definitions",
 			source: "[ref]: /one\r\n\r\n[ref]: /two\r\n\r\n[ref]\r\n",
-			expected: "[ref]: /one\n\n\n\n[ref]\n",
+			expected: "[ref]: /one\n\n[ref]: /two\n\n[ref]\n",
 		},
 		{
 			name: "indented duplicate definitions",
 			source: "   [ref]: /one\n\n   [ref]: /two\n",
-			expected: "   [ref]: /one\n\n\n",
+			expected: "   [ref]: /one\n\n   [ref]: /two\n",
 		},
 		{
 			name: "ANSI hyperlink payload",
 			source: "\x1b]8;;https://example.com/a?x=1\x07link\x1b]8;;\x07\n",
 			expected: "\x1b]8;;https://example.com/a?x=1\x07link\x1b]8;;\x07\n",
 		},
-	])("matches baseline lexer reconstruction without a Mermaid marker: $name", ({ source, expected }) => {
+	])("preserves source except for line endings without a Mermaid marker: $name", ({ source, expected }) => {
 		let downstreamSource: string | undefined;
 		const transform = createMarkdownTransform("assistant", () => true, [
 			createMermaidMarkdownTransformer({ getMode: () => "streaming" }),
