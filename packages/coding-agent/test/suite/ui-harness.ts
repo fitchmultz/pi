@@ -41,6 +41,7 @@ export async function createTestInteractiveView(harness: Harness, options: { wid
 			setRebindSession(callback: () => Promise<void>) {
 				rebind = callback;
 			},
+			takeUnreportedDiagnostics: () => [],
 		} as unknown as AgentSessionRuntime,
 		{ terminal },
 	);

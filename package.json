@@ -49,6 +49,7 @@
 		"publish": "npm run prepublishOnly && node scripts/publish.mjs",
 		"publish:dry": "npm run prepublishOnly && node scripts/publish.mjs --dry-run",
 		"release:local": "node scripts/local-release.mjs",
+		"release:p3:local": "node --disable-warning=ExperimentalWarning apps/p3/scripts/release-local.ts",
 		"pack:packages": "node scripts/pack-packages.mjs",
 		"install-lock:coding-agent": "node scripts/generate-coding-agent-install-lock.mjs",
 		"release:patch": "node scripts/release.mjs patch",
@@ -60,10 +61,10 @@
 	"devDependencies": {
 		"@biomejs/biome": "2.3.5",
 		"@biomejs/wasm-nodejs": "2.3.5",
-		"@types/node": "22.19.19",
+		"@types/node": "22.20.5",
 		"esbuild": "0.28.2",
 		"husky": "9.1.7",
-		"pnpm": "11.15.1",
+		"pnpm": "12.21.0",
 		"typescript": "7.0.2",
 		"yaml": "2.9.1"
 	},

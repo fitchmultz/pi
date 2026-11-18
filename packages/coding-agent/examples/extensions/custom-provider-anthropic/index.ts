@@ -21,7 +21,7 @@
  * Then use /model to select custom-anthropic/claude-sonnet-4-5
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { type ClientOptions } from "@anthropic-ai/sdk";
 import type { ContentBlockParam, MessageCreateParamsStreaming } from "@anthropic-ai/sdk/resources/messages.js";
 import {
 	type Api,
@@ -372,7 +372,7 @@ function streamCustomAnthropic(
 
 			// Configure client based on auth type
 			const betaFeatures = ["fine-grained-tool-streaming-2025-05-14", "interleaved-thinking-2025-05-14"];
-			const clientOptions: any = {
+			const clientOptions: ClientOptions = {
 				baseURL: model.baseUrl,
 				dangerouslyAllowBrowser: true,
 			};
@@ -382,6 +382,7 @@ function streamCustomAnthropic(
 				clientOptions.authToken = apiKey;
 				clientOptions.defaultHeaders = {
 					accept: "application/json",
+					"anthropic-version": "2023-06-01",
 					"anthropic-dangerous-direct-browser-access": "true",
 					"anthropic-beta": `claude-code-20250219,oauth-2025-04-20,${betaFeatures.join(",")}`,
 					"user-agent": "claude-cli/2.1.2 (external, cli)",
@@ -391,6 +392,9 @@ function streamCustomAnthropic(
 				clientOptions.apiKey = apiKey;
 				clientOptions.defaultHeaders = {
 					accept: "application/json",
+					"anthropic-version": "2023-06-01",
+					authorization: null,
+					"x-api-key": apiKey,
 					"anthropic-dangerous-direct-browser-access": "true",
 					"anthropic-beta": betaFeatures.join(","),
 				};

@@ -171,13 +171,6 @@ describe("Anthropic workload identity federation", () => {
 		expect(mockState.constructorOpts?.config).toEqual(expectedConfig);
 	});
 
-	it("lets an explicit API key win over federation env", async () => {
-		await streamAnthropic(anthropicModel, context, { apiKey: "explicit-key", env: federationEnv }).result();
-
-		expect(mockState.constructorOpts?.apiKey).toBe("explicit-key");
-		expect(mockState.constructorOpts?.config).toBeUndefined();
-	});
-
 	it("does not federate other anthropic-messages providers", async () => {
 		const kimi: Model<"anthropic-messages"> = {
 			...anthropicModel,

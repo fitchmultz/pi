@@ -160,7 +160,7 @@ function taskDirectoryName(task: EvalTask): string {
 
 export function runTask(context: DockerContext, task: EvalTask): string | undefined {
 	const outputDirectory = join(context.artifactDirectory, "tasks", taskDirectoryName(task));
-	const testName = `${task.evalSet} ${task.caseId}`;
+	const testName = `${task.evalSet} > ${task.caseId}`;
 	const exactName = `^${testName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
 	const args = dockerArgs(context, task.variant, outputDirectory, [
 		"--project",

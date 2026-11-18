@@ -166,7 +166,7 @@ export class Pcm16kResampler {
 	#rate = 0;
 
 	/** The 16 kHz PCM16 of `input` (at `rate`) and what the previous frames left over. */
-	push(input: Float32Array, rate: number): Int16Array {
+	push(input: Float32Array, rate: number): Int16Array<ArrayBuffer> {
 		if (rate !== this.#rate) {
 			this.reset();
 			this.#rate = rate;

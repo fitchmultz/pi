@@ -1,6 +1,7 @@
 import type { Held } from "@p2/app/v1";
 import { BACKGROUND_CONTEXT, whenLive } from "@p2/app/v1";
 import {
+	APPLE,
 	browserEnvironment,
 	CloseIcon,
 	HideIcon,
@@ -9,6 +10,8 @@ import {
 	PanelBottomIcon,
 	PanelSideIcon,
 	PlusIcon,
+	type PointerKind,
+	pointerKind,
 	type ReconnectLink,
 	type Route,
 	type SocketEvents,
@@ -96,6 +99,19 @@ export function withTerminal(route: Route): Route {
 		: { ...route, workspace: { tab: "terminal", directory: route.workspace?.directory ?? "", startTerminal: true } };
 }
 
+/**
+ * How to paste without clipboard access: a long press opens the field's Paste menu; the browser's own paste key goes
+ * past the terminal's key encoding (Cmd+V on Apple's, Ctrl+Shift+V elsewhere, as #keyDown leaves them).
+ */
+function pasteHint(kind: PointerKind): string {
+	const key = APPLE ? "⌘V" : "Ctrl+Shift+V";
+	return kind === "touch"
+		? "Long-press the terminal to paste."
+		: kind === "mouse"
+			? `Press ${key} in the terminal to paste.`
+			: `Long-press the terminal or press ${key} to paste.`;
+}
+
 /** Whether the row of extra keys shows. Kept per browser; by default only on touch screens. */
 const KEY_ROW = "p2-terminal-keys";
 
@@ -119,7 +135,7 @@ const encoder = new TextEncoder();
 const mac = /Mac|iPhone|iPad/.test(navigator.platform);
 const NO_MODIFIERS = { shift: false, ctrl: false, alt: false };
 
-function concat(parts: Uint8Array[]): Uint8Array {
+function concat(parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
 	const bytes = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
 	let offset = 0;
 	for (const part of parts) {
@@ -540,7 +556,7 @@ class TerminalSession {
 	}
 
 	/** Typed text; a sticky Ctrl or Alt from the key row applies to a single character (`modified`). */
-	#encodeText(text: string): { bytes: Uint8Array; modified: boolean } {
+	#encodeText(text: string): { bytes: Uint8Array<ArrayBuffer>; modified: boolean } {
 		const { ctrl, alt } = this.#modifiers();
 		if ((ctrl || alt) && [...text].length === 1) {
 			const code = /^[a-z]$/i.test(text) ? `Key${text.toUpperCase()}` : /^\d$/.test(text) ? `Digit${text}` : "";
@@ -920,7 +936,7 @@ class TerminalSession {
 		this.#request((control) => control.ack({ bytes }, BACKGROUND_CONTEXT));
 	}
 
-	#send(bytes: Uint8Array): void {
+	#send(bytes: Uint8Array<ArrayBuffer>): void {
 		if (this.#socket?.readyState !== WebSocket.OPEN || !this.#state.current || this.#state.current.exited) return;
 		// Typing returns to the bottom, like a terminal, and stops a fling (whose own wheel events come from its frame,
 		// before it asks for the next).
@@ -1389,7 +1405,7 @@ export function TerminalView({
 	const pasteClipboard = () => {
 		void session.current?.pasteClipboard().then(
 			() => setPasteNotice(""),
-			() => setPasteNotice("Clipboard unavailable. Long-press the terminal to paste."),
+			() => setPasteNotice(`Clipboard unavailable. ${pasteHint(pointerKind())}`),
 		);
 	};
 	const toggleKeys = () => {

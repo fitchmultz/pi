@@ -16,7 +16,6 @@ on:
     tags:
       - 'v*.*.*'
   pull_request:
-    branches: [main]
     paths:
       - '.github/workflows/nix.yml'
       - 'flake.lock'
@@ -58,7 +57,7 @@ jobs:
           persist-credentials: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22.23.5"
 
@@ -109,7 +108,7 @@ jobs:
           printf '{\n  "revision": "%s"\n}\n' "${REVISION}" > nix/model-catalog.json
 
       - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
         with:
           github_access_token: ${{ github.token }}
 

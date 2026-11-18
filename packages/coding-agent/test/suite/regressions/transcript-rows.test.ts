@@ -377,6 +377,7 @@ describe("compaction and boundary rollovers keep scrollback history in the TUI",
 				setRebindSession(callback: () => Promise<void>) {
 					rebind = callback;
 				},
+				takeUnreportedDiagnostics: () => [],
 			} as unknown as AgentSessionRuntime,
 			{ terminal, tuiMode: "fullscreen" },
 		);

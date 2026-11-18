@@ -18,7 +18,7 @@ function base64url(bytes: Uint8Array): string {
 	return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
-describe.sequential("OpenRouter OAuth", () => {
+describe("OpenRouter OAuth", { concurrent: false }, () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
 		vi.unstubAllEnvs();

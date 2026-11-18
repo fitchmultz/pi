@@ -1,12 +1,13 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
 	type ChangelogEntry,
 	getForkChangelog,
 	getNewEntries,
 	normalizeChangelogLinks,
+	parseChangelog,
 } from "../src/utils/changelog.ts";
 
 const entry: ChangelogEntry = {
@@ -135,5 +136,21 @@ describe("getNewEntries", () => {
 		expect(newContent("latest")).toBeUndefined();
 		expect(newContent("0.1")).toBeUndefined();
 		expect(newContent("")).toBeUndefined();
+	});
+});
+
+describe("parseChangelog", () => {
+	// Runs in the TUI (startup notes, /changelog), where a direct write draws over the screen (#11264).
+	test("returns no entries for an unreadable changelog without printing", () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-changelog-"));
+		const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			// A directory exists but cannot be read as a file (EISDIR).
+			expect(parseChangelog(dir)).toEqual([]);
+			expect(consoleError).not.toHaveBeenCalled();
+		} finally {
+			consoleError.mockRestore();
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

@@ -29,13 +29,18 @@ function sseResponse(): Response {
 interface RecordedRequest {
 	path: string;
 	authorization: string | null;
+	apiKey: string | null;
 }
 
 function createFetch(requests: RecordedRequest[]): typeof globalThis.fetch {
 	return async (input, init) => {
 		const request = new Request(input, init);
 		const path = new URL(request.url).pathname;
-		requests.push({ path, authorization: request.headers.get("authorization") });
+		requests.push({
+			path,
+			authorization: request.headers.get("authorization"),
+			apiKey: request.headers.get("x-api-key"),
+		});
 		if (path === "/v1/oauth/token") {
 			return new Response(JSON.stringify({ access_token: "federated-token", expires_in: 3600 }), {
 				status: 200,
@@ -114,6 +119,18 @@ describe("Anthropic workload identity federation with the SDK", () => {
 		}).result();
 
 		expect(message.stopReason).toBe("stop");
-		expect(requests).toEqual([{ path: "/v1/messages", authorization: "Bearer auth-token" }]);
+		expect(requests).toEqual([{ path: "/v1/messages", authorization: "Bearer auth-token", apiKey: null }]);
+	});
+
+	it("lets an explicit API key win over federation env", async () => {
+		const requests: RecordedRequest[] = [];
+		const message = await streamAnthropic(anthropicModel, context, {
+			apiKey: "explicit-key",
+			env: federationEnv,
+			fetch: createFetch(requests),
+		}).result();
+
+		expect(message.stopReason).toBe("stop");
+		expect(requests).toEqual([{ path: "/v1/messages", authorization: null, apiKey: "explicit-key" }]);
 	});
 });

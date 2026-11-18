@@ -54,6 +54,7 @@ These publication restrictions apply to `earendil-works/pi` and take precedence 
 ## Code Quality
 
 - For investigations, read relevant sections and complete functions first. Expand to full files when needed to resolve uncertainty. Read files in full before editing them.
+- Before recommending a fix design, check how sibling implementations (other adapters, providers, commands) handle the same concern, and follow that pattern. If you deviate, say why.
 - No `any` unless absolutely necessary.
 - No runtime checks of values whose types TypeScript already guarantees (no `typeof`/`instanceof`/`Array.isArray`/shape guards on typed parameters, typed callback results or typed declarations). Validate only at decided trust boundaries (wire input, schema-checked arguments and params).
 - Inline single-line helpers that have only one call site.

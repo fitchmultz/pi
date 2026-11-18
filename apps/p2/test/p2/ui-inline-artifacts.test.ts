@@ -82,12 +82,21 @@ describe("inline artifacts in Chromium", { skip: !browserTests }, () => {
 
 	it("renders inline Markdown as Markdown views do, in place, without a tap", async () => {
 		const id = await publish("Inline Markdown", [
-			{ id: "notes", title: "Notes", kind: "md", content: "# Inline heading\n\nSome **bold** text" },
+			{
+				id: "notes",
+				title: "Notes",
+				kind: "md",
+				content: "# Inline heading\n\nSome **bold** text\n\n```js\nconst n = 1;\n\n```",
+			},
 		]);
 		await browser.metrics(390, 844);
 		await browser.open(`http://127.0.0.1:${fixture.server.port}/s/${id}`);
 		await browser.wait(`${card("notes")}?.querySelector('.elanor-markdown strong')?.textContent==='bold'`);
 		assert.match(await browser.evaluate<string>(`${card("notes")}.textContent`), /Inline heading/);
+		assert.equal(
+			await browser.evaluate<string>(`${card("notes")}.querySelector('pre').textContent`),
+			"const n = 1;\n",
+		);
 		// Where it was shown: right after its script's wheel, before the answer.
 		assert.deepEqual(
 			await browser.evaluate<string[]>(

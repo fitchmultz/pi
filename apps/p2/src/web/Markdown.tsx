@@ -318,7 +318,8 @@ function block(token: Token, key: string): ReactNode {
 		case "code":
 			return createElement(current.codeBlock ?? CodeBlock, {
 				key,
-				code: token.text,
+				// The fence separator ends the last code row; it isn't another row to display or copy.
+				code: token.codeBlockStyle === "indented" ? token.text : token.text.replace(/\n$/, ""),
 				language: token.lang?.split(/\s/)[0] || undefined,
 			});
 		case "blockquote":

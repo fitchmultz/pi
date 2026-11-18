@@ -29,20 +29,20 @@ export class CompactPreview {
 	/** Native row of each preview row. */
 	private rows: number[] = [];
 	private nativeHeight = 0;
-	private cache?: { width: number; source: string[]; resultStart: number; lines: string[] };
+	private cache?: { width: number; source: readonly string[]; resultStart: number; lines: string[] };
 
 	/**
 	 * Cut the native lines to their first non-blank row and one more: the first non-blank row from `resultStart`
 	 * on, so a wrapping call cannot crowd out its result, else the next non-blank row. Rows are truncated to
 	 * `width` and an inline image becomes `[image]`. Unchanged input returns the previous array.
 	 */
-	render(source: string[], width: number, resultStart = 0): string[] {
+	render(source: readonly string[], width: number, resultStart = 0): string[] {
 		const cached = this.cache;
 		if (
 			cached?.width === width &&
 			cached.resultStart === resultStart &&
-			cached.source.length === source.length &&
-			cached.source.every((line, i) => line === source[i])
+			(cached.source === source ||
+				(cached.source.length === source.length && cached.source.every((line, i) => line === source[i])))
 		) {
 			return cached.lines;
 		}

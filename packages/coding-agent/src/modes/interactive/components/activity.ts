@@ -37,7 +37,7 @@ class Activity extends Container {
 		this.expanded = expanded;
 	}
 
-	override render(width: number): string[] {
+	override render(width: number): readonly string[] {
 		let calls = 0;
 		let updates = 0;
 		let running = 0;

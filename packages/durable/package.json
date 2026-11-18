@@ -54,6 +54,12 @@
 			"import": "./dist/images/index.js",
 			"default": "./dist/images/index.js"
 		},
+		"./images/fit": {
+			"source": "./src/images/fit.ts",
+			"types": "./dist/images/fit.d.ts",
+			"import": "./dist/images/fit.js",
+			"default": "./dist/images/fit.js"
+		},
 		"./images/node": {
 			"source": "./src/images/node.ts",
 			"types": "./dist/images/node.d.ts",
@@ -170,11 +176,11 @@
 		"@earendil-works/pi-schema": "1.5.2",
 		"@earendil-works/pi-telemetry": "1.5.2",
 		"@silvia-odwyer/photon": "0.3.3",
-		"diff": "8.0.4"
+		"diff": "9.0.0"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-plugin": "1.4.10",
-		"fake-indexeddb": "6.2.6",
-		"vitest": "4.1.12"
+		"@cloudflare/vitest-plugin": "1.8.5",
+		"fake-indexeddb": "6.2.8",
+		"vitest": "5.1.1"
 	}
 }

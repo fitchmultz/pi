@@ -113,7 +113,7 @@ export class ScrollView extends Container {
 		return this.scrollbar === "always" && width > 1 ? width - 1 : width;
 	}
 
-	renderDocumentLines(): string[] {
+	renderDocumentLines(): readonly string[] {
 		return this.child.render(Math.max(1, this.currentContentWidth));
 	}
 
@@ -256,7 +256,7 @@ export class ScrollView extends Container {
 		throw new Error("ScrollView child cannot be cleared");
 	}
 
-	override render(width: number): string[] {
+	override render(width: number): readonly string[] {
 		const contentWidth = this.getContentWidth(width);
 		const lines = this.child.render(contentWidth);
 		return contentWidth === width ? lines : lines.map((line) => `${line} `);

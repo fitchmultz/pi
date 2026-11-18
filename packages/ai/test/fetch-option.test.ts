@@ -60,14 +60,20 @@ afterEach(() => {
 });
 
 describe("fetch stream option", () => {
-	it("passes fetch through streamSimple to the Anthropic SDK", async () => {
+	it("passes fetch through to the Anthropic SDK with Pi's existing request format", async () => {
 		const { custom, fallback } = mockFetches();
 		await streamAnthropic(createModel("anthropic-messages"), context, {
 			apiKey: "test-key",
 			fetch: custom,
 			maxRetries: 0,
+			temperature: 0.5,
 		}).result();
 		expectOnlyCustomFetch(custom, fallback);
+		const request = new Request(...custom.mock.calls[0]!);
+		expect(request.headers.get("anthropic-version")).toBe("2023-06-01");
+		expect(request.headers.get("x-api-key")).toBe("test-key");
+		expect(request.headers.has("authorization")).toBe(false);
+		expect(await request.json()).toMatchObject({ temperature: 0.5 });
 	});
 
 	it("passes fetch through streamSimple to OpenAI SDK adapters", async () => {

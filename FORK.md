@@ -2,7 +2,7 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`147dc531381960e2dd5e69fd05b92bd056b678ea` (2026-11-13), 170 commits after official v1.5.2.
+`942842439e1f1d65f68a61857ddb7590b80c5a92` (2026-11-18), 323 commits after official v1.5.2.
 It is upstream plus the features below. Everything else follows upstream behavior and APIs.
 
 Supported and tested desktop platforms are Apple Silicon macOS and Linux (x64/arm64).
@@ -10,7 +10,8 @@ Android/Termux device functionality is retained. Windows and Intel macOS are not
 
 Each integration record documents its baseline, conflict decisions and verification, newest first:
 
-- [2026-11-13](docs/upstream-sync-2026-11-13.md), the current baseline
+- [2026-11-18](docs/upstream-sync-2026-11-18.md), the current baseline
+- [2026-11-13](docs/upstream-sync-2026-11-13.md)
 - [v1.5.2](docs/upstream-sync-1.5.2.md), including official v1.5.2
 - [2026-11-10](docs/upstream-sync-2026-11-10.md), including official v1.5.1
 - [2026-11-09](docs/upstream-sync-2026-11-09.md)
@@ -419,7 +420,7 @@ phase for a new contract or apply a speculative recovery patch.
 
 The fork carries the coordinated provider/schema refresh proposed in upstream issue
 [#10909](https://github.com/earendil-works/pi/issues/10909), plus reviewed same-major
-runtime updates for YAML 2.9.1, Chalk 6.0.1, Ignore 7.0.12, Undici 8.12.3 and
+runtime updates for YAML 2.9.1, Chalk 6.0.1, Ignore 7.0.12, and
 get-east-asian-width 1.7.0 and the fork's streaming-file dependencies stream-chain 4.2.6
 and stream-json 3.7.0.
 Root and generated installer locks stay together.
@@ -476,7 +477,7 @@ npm run check
 Open the PR with `gh pr create --repo fitchmultz/pi`, follow CI to completion, fix failures and actionable review findings (or record evidence-backed rebuttals), and merge through repository rules. Refresh the canonical local checkout without overwriting unrelated work, install and verify changed resources, then remove only the task's clean worktree and obsolete branch.
 CI adds tmux for the real-terminal restart test, a macOS job for restart, `background_command`,
 bash abort and bash timeout (gated by `scripts/ci-scope.mjs` so changes isolated to docs, changelogs or packages outside that macOS surface skip it), backup DNS resolvers before Linux `apt-get`, and one Linux standalone build with the compiled extension regression.
-The standalone step uses pinned Bun 1.3.14 and the existing package build.
+The standalone step uses pinned Bun 1.4.4 and the existing package build.
 
 ## Install and activate
 
@@ -568,7 +569,7 @@ only complete current native state, with no journal-only or pre-v1 handoff fallb
 - Standalone builds enable `--compile-autoload-package-json`: dependency `main` and `exports`
   resolve at runtime, including Bun export conditions. Unexported subpaths are rejected as under
   Node; use public entrypoints. `--no-compile-autoload-bunfig` keeps project preloads disabled, and `--no-compile-autoload-dotenv` prevents launch-directory `.env` files from changing Pi's environment.
-  Bun 1.3.14's runtime tsconfig autoload default remains disabled; the package-manifest flag is
+  Bun 1.4.4's runtime tsconfig autoload default remains disabled; the package-manifest flag is
   independent. Pi's project-resource trust gate and embedded host peers are unchanged.
 - `compiled-extension-packages.test.ts` requires an explicit `PI_TEST_COMPILED_CLI` standalone
   target; unset skips, invalid targets fail. It checks deferred conditional/transitive imports,

@@ -130,7 +130,16 @@ for (const evalFile of evalFiles) {
 }
 
 const commandArgs = discover
-	? [vitestCli, "list", "--config", "vitest.evals.config.ts", ...vitestArgs, "--json=/artifacts/discovered-tests.json"]
+	? [
+			vitestCli,
+			"list",
+			"--config",
+			"vitest.evals.config.ts",
+			// Vitest 5 lists by parsing files statically, which does not see describeEval's suites; run them to collect.
+			"--no-staticParse",
+			...vitestArgs,
+			"--json=/artifacts/discovered-tests.json",
+		]
 	: [
 			vitestCli,
 			"run",
