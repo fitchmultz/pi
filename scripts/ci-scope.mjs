@@ -42,7 +42,7 @@ const isDocsOnlyPath = (path) =>
 		path.startsWith("docs/") ||
 		path.startsWith(".pi/") ||
 		/^packages\/[^/]+\/(README\.md|CHANGELOG\.md|containerization\.md)$/.test(path) ||
-		/^packages\/[^/]+\/(docs|THIRD_PARTY_NOTICES|schemas)\//.test(path) ||
+		/^packages\/[^/]+\/(docs|THIRD_PARTY_NOTICES)\//.test(path) ||
 		path === "packages/tui/native/darwin/README.md" ||
 		/^packages\/chord\/src\/.+\/README\.md$/.test(path));
 
@@ -54,7 +54,8 @@ const fastPaths = [
 			(!isWorkspaceConfig(path) &&
 				(path === ".github/APPROVED_CONTRIBUTORS" ||
 					path.startsWith(".github/ISSUE_TEMPLATE/") ||
-					(path.startsWith(".github/workflows/") && path !== ".github/workflows/ci.yml"))),
+					(path.startsWith(".github/workflows/") && path !== ".github/workflows/ci.yml") ||
+					/^packages\/[^/]+\/schemas\//.test(path))),
 	],
 	[
 		"isolated packages",

@@ -188,12 +188,16 @@ test("skips macos-restart-background when changes stay in isolated packages, doc
 	}
 });
 
-test("marks pure documentation changes docsOnly=true while keeping workflow changes docsOnly=false", (t) => {
+test("marks pure documentation changes docsOnly=true while keeping workflow and schema changes docsOnly=false", (t) => {
 	const f = createRepoFixture(t);
 	f.write("docs/sdk.md", "updated docs\n");
 	f.write("packages/coding-agent/CHANGELOG.md", "entry\n");
 	const docsHead = f.commit("docs only");
 	assertPlanned(f.invoke(["--event", "pull_request", "--base", f.base, "--head", docsHead]), false, true);
+
+	f.write("packages/coding-agent/schemas/settings.schema.json", "{}\n");
+	const schemaHead = f.commit("docs plus schema");
+	assertPlanned(f.invoke(["--event", "pull_request", "--base", f.base, "--head", schemaHead]), false, false);
 
 	f.write(".github/workflows/nix.yml", "name: Nix\n");
 	const workflowHead = f.commit("docs plus workflow");
