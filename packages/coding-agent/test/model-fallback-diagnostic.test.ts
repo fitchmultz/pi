@@ -99,7 +99,9 @@ describe("model fallback message", () => {
 		child.stdin.end();
 		await exited;
 
-		expect(stderr).toContain("Warning: Could not restore model gone/missing-model. Using fake/fake-model");
+		expect(stderr).toMatch(
+			/Warning: Could not restore model gone\/missing-model .*provider "gone" is not registered.*Using fake\/fake-model/,
+		);
 		expect(stdout).not.toContain("Could not restore model");
 	}, 60_000);
 });
