@@ -19,7 +19,7 @@ export function backgroundCommandOutputTail(
 		const bytes = Buffer.alloc(window + lookbehind);
 		const count = readSync(fd, bytes, 0, bytes.length, offset - lookbehind);
 		let cursor = Math.min(lookbehind, count);
-		let lineCheckIndex = cursor - 1;
+		let beforePending = cursor;
 		if (offset > 0) {
 			let scan = 0;
 			while (scan < cursor && (bytes[scan] & 0xc0) === 0x80) scan++;
@@ -34,9 +34,9 @@ export function backgroundCommandOutputTail(
 						.toString("utf8");
 					if (!stripAnsi(pending + lead).startsWith("\u001b")) {
 						cursor -= pendingBytes;
-						lineCheckIndex = cursor - 1;
+						beforePending = cursor;
 					} else {
-						lineCheckIndex = cursor - pendingBytes - 1;
+						beforePending = cursor - pendingBytes;
 					}
 				}
 			}
@@ -47,7 +47,14 @@ export function backgroundCommandOutputTail(
 				stream: !backgroundCommandFinished(job),
 			}),
 		);
-		if (cursor > 0 && lineCheckIndex >= 0 && bytes[lineCheckIndex] !== 0x0a) {
+		const prefixStart = offset - lookbehind;
+		const lastNewline = bytes.subarray(0, beforePending).lastIndexOf(0x0a);
+		const hasVisibleLinePrefix =
+			cursor > 0 &&
+			(lastNewline !== -1
+				? stripAnsi(bytes.subarray(lastNewline + 1, beforePending).toString("utf8")).length > 0
+				: prefixStart > 0 || stripAnsi(bytes.subarray(0, beforePending).toString("utf8")).length > 0);
+		if (hasVisibleLinePrefix) {
 			const newline = stripped.indexOf("\n");
 			if (newline !== -1 && newline + 1 < stripped.length) {
 				const after = stripped.slice(newline + 1);

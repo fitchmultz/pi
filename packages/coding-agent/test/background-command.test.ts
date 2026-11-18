@@ -160,6 +160,13 @@ describe("detached background commands", { timeout: 120_000 }, () => {
 		const declinedEscCapacityTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
 		expect(Buffer.byteLength(declinedEscCapacityTail)).toBe(2048);
 		expect(declinedEscCapacityTail.endsWith(`\nTAIL\n${"z".repeat(42)}`)).toBe(true);
+		writeFileSync(
+			done.logFile,
+			`${"P".repeat(500)}\n\u001b[31m${"x".repeat(1000)}\u001b[0m\n${"a".repeat(1000)}\n${"b".repeat(41)}\n`,
+		);
+		const completeAnsiPrefixTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(completeAnsiPrefixTail.startsWith("xxxx")).toBe(true);
+		expect(Buffer.byteLength(completeAnsiPrefixTail)).toBe(2044);
 		writeFileSync(done.logFile, "line\n".repeat(200));
 		expect(backgroundCommandOutputTail(done).split("\n").length).toBeLessThanOrEqual(100);
 		const unavailable = backgroundCommandOutputTail(
