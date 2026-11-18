@@ -200,6 +200,7 @@ test("marks pure documentation changes docsOnly=true while keeping workflow and 
 		[".pi/extensions/prompt-url-widget.ts", "export default function () {}\n"],
 		["packages/coding-agent/schemas/settings.schema.json", "{}\n"],
 		[".github/workflows/nix.yml", "name: Nix\n"],
+		["packages/coding-agent/README.md", "# coding-agent\n"],
 		["packages/coding-agent/docs/tui.md", "updated tui docs\n"],
 		["packages/chord/docs/tutorial/book.md", "updated tutorial\n"],
 	]) {
