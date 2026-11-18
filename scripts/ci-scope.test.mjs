@@ -196,17 +196,18 @@ test("marks pure documentation changes docsOnly=true while keeping workflow and 
 	const docsHead = f.commit("docs only");
 	assertPlanned(f.invoke(["--event", "pull_request", "--base", f.base, "--head", docsHead]), false, true);
 
-	f.write(".pi/extensions/prompt-url-widget.ts", "export default function () {}\n");
-	const piExtHead = f.commit("docs plus pi extension");
-	assertPlanned(f.invoke(["--event", "pull_request", "--base", f.base, "--head", piExtHead]), false, false);
-
-	f.write("packages/coding-agent/schemas/settings.schema.json", "{}\n");
-	const schemaHead = f.commit("docs plus schema");
-	assertPlanned(f.invoke(["--event", "pull_request", "--base", f.base, "--head", schemaHead]), false, false);
-
-	f.write(".github/workflows/nix.yml", "name: Nix\n");
-	const workflowHead = f.commit("docs plus workflow");
-	assertPlanned(f.invoke(["--event", "pull_request", "--base", f.base, "--head", workflowHead]), false, false);
+	for (const [path, contents] of [
+		[".pi/extensions/prompt-url-widget.ts", "export default function () {}\n"],
+		["packages/coding-agent/schemas/settings.schema.json", "{}\n"],
+		[".github/workflows/nix.yml", "name: Nix\n"],
+		["packages/coding-agent/docs/tui.md", "updated tui docs\n"],
+		["packages/chord/docs/tutorial/book.md", "updated tutorial\n"],
+	]) {
+		const isolated = createRepoFixture(t);
+		isolated.write(path, contents);
+		const head = isolated.commit(`isolated ${path}`);
+		assertPlanned(isolated.invoke(["--event", "pull_request", "--base", isolated.base, "--head", head]), false, false);
+	}
 });
 
 test("pull_request compares against merge-base so concurrent main runtime commits do not mask a PR fast path", (t) => {

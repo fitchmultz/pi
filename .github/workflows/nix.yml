@@ -75,7 +75,7 @@ jobs:
           else
             echo "updated=true" >> "${GITHUB_OUTPUT}"
             if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-              echo "::warning::The model catalog pin on main is stale; this build uses ${revision}. The pin is refreshed on main after pi.dev publishes a catalog."
+              echo "::warning::The model catalog pin on main is stale; this build uses ${revision}. Run workflow_dispatch on main or npm run update:model-catalog-pin to refresh it."
             fi
           fi
 

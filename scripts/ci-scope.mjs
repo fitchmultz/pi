@@ -47,7 +47,8 @@ const isDocsOnlyPath = (path) =>
 		path.startsWith("docs/") ||
 		path.startsWith(".pi/notes/") ||
 		/^packages\/[^/]+\/(README\.md|CHANGELOG\.md|containerization\.md)$/.test(path) ||
-		/^packages\/[^/]+\/(docs|THIRD_PARTY_NOTICES)\//.test(path) ||
+		/^packages\/(?!coding-agent\/|chord\/)[^/]+\/docs\//.test(path) ||
+		/^packages\/[^/]+\/THIRD_PARTY_NOTICES\//.test(path) ||
 		path === "packages/tui/native/darwin/README.md" ||
 		/^packages\/chord\/src\/.+\/README\.md$/.test(path));
 
@@ -61,6 +62,7 @@ const fastPaths = [
 					path.startsWith(".github/ISSUE_TEMPLATE/") ||
 					path.startsWith(".pi/") ||
 					(path.startsWith(".github/workflows/") && path !== ".github/workflows/ci.yml") ||
+					/^packages\/[^/]+\/(docs|THIRD_PARTY_NOTICES)\//.test(path) ||
 					/^packages\/[^/]+\/schemas\//.test(path))),
 	],
 	[
