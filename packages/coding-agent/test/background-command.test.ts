@@ -8,12 +8,12 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	backgroundCommandFinished,
-	backgroundCommandOutputTail,
 	cancelBackgroundCommand,
 	listBackgroundCommands,
 	readBackgroundCommand,
 	startBackgroundCommand,
 } from "../src/extensions/background-command/jobs.ts";
+import { backgroundCommandOutputTail } from "../src/extensions/background-command/output-tail.ts";
 import { getShellEnv } from "../src/utils/shell.ts";
 
 const quote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
@@ -125,6 +125,55 @@ describe("detached background commands", { timeout: 120_000 }, () => {
 		expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(16_384);
 		expect(tail).not.toContain("\uFFFD");
 		expect(tail).not.toContain("\u001b");
+		writeFileSync(done.logFile, "\u001b[38;5;196mERR\u001b[0m: build step failed\n".repeat(200));
+		const ansiTail = backgroundCommandOutputTail(done, { maxLines: 100, maxBytes: 2048 });
+		expect(ansiTail).not.toContain("196m");
+		expect(ansiTail.startsWith("ERR: build step failed\n")).toBe(true);
+		writeFileSync(done.logFile, `${"q".repeat(127)}\n`.repeat(60));
+		const alignedTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(alignedTail.split("\n").filter(Boolean)).toHaveLength(16);
+		expect(Buffer.byteLength(alignedTail)).toBe(2048);
+		writeFileSync(done.logFile, `${"z".repeat(3000)}\nerror: build failed\n`);
+		const longLineTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(Buffer.byteLength(longLineTail)).toBe(2048);
+		expect(longLineTail.endsWith("\nerror: build failed\n")).toBe(true);
+		writeFileSync(done.logFile, `${"\u001b[38;5;196mstep done\u001b[0m\r".repeat(400)}!`);
+		const crTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(crTail).not.toContain("196m");
+		expect(crTail.startsWith("step done\r")).toBe(true);
+		expect(crTail.endsWith("step done\r!")).toBe(true);
+		writeFileSync(done.logFile, "\u001b[38;5;196mERR\u001b[0m: build step failed ".repeat(300));
+		const singleLineAnsiTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(singleLineAnsiTail).not.toContain("196m");
+		writeFileSync(done.logFile, "\u001b[<35;59;1Mstep one done\n".repeat(300));
+		const privateCsiTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(privateCsiTail.startsWith("step one done\n")).toBe(true);
+		expect(privateCsiTail).not.toContain("35;59;1M");
+		writeFileSync(
+			done.logFile,
+			`${"P".repeat(100)}\n\u001bUNIQUE_HEAD_LINE\nline2\nline3\nline4\n${"z".repeat(2013)}`,
+		);
+		const declinedEscCompleteTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(declinedEscCompleteTail.startsWith("UNIQUE_HEAD_LINE\n")).toBe(true);
+		expect(Buffer.byteLength(declinedEscCompleteTail)).toBe(2048);
+		writeFileSync(done.logFile, `prefix\n\u001b${"X".repeat(2000)}\nTAIL\n${"z".repeat(42)}`);
+		const declinedEscCapacityTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(Buffer.byteLength(declinedEscCapacityTail)).toBe(2048);
+		expect(declinedEscCapacityTail.endsWith(`\nTAIL\n${"z".repeat(42)}`)).toBe(true);
+		writeFileSync(
+			done.logFile,
+			`${"P".repeat(500)}\n\u001b[31m${"x".repeat(1000)}\u001b[0m\n${"a".repeat(1000)}\n${"b".repeat(41)}\n`,
+		);
+		const completeAnsiPrefixTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(completeAnsiPrefixTail.startsWith("xxxx")).toBe(true);
+		expect(Buffer.byteLength(completeAnsiPrefixTail)).toBe(2044);
+		writeFileSync(
+			done.logFile,
+			`${"P".repeat(500)}\n\r${"x".repeat(1000)}\n${"a".repeat(1000)}\n${"b".repeat(45)}\n`,
+		);
+		const crAlignedTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(crAlignedTail.startsWith("xxxx")).toBe(true);
+		expect(Buffer.byteLength(crAlignedTail)).toBe(2048);
 		writeFileSync(done.logFile, "line\n".repeat(200));
 		expect(backgroundCommandOutputTail(done).split("\n").length).toBeLessThanOrEqual(100);
 		const unavailable = backgroundCommandOutputTail(

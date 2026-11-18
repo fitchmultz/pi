@@ -15,11 +15,11 @@ import {
 	type BackgroundCommandJob,
 	backgroundCommandDirectory,
 	backgroundCommandFinished,
-	backgroundCommandOutputTail,
 	cancelBackgroundCommand,
 	listBackgroundCommands,
 	summarizeBackgroundCommand,
 } from "./jobs.ts";
+import { backgroundCommandOutputTail } from "./output-tail.ts";
 import { createBackgroundCommandTool } from "./tool.ts";
 
 export const BACKGROUND_COMMAND_NOTICE = "background-command-complete";
