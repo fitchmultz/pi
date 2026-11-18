@@ -1,7 +1,6 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync } from "node:fs";
-import { stripVTControlCharacters } from "node:util";
 import { truncateTail } from "../../core/tools/truncate.ts";
-import { MAX_PENDING_ANSI_LENGTH, splitIncompleteAnsiSuffix } from "../../utils/ansi.ts";
+import { MAX_PENDING_ANSI_LENGTH, splitIncompleteAnsiSuffix, stripAnsi } from "../../utils/ansi.ts";
 import { type BackgroundCommandJob, backgroundCommandFinished } from "./jobs.ts";
 
 export function backgroundCommandOutputTail(
@@ -20,6 +19,7 @@ export function backgroundCommandOutputTail(
 		const bytes = Buffer.alloc(window + lookbehind);
 		const count = readSync(fd, bytes, 0, bytes.length, offset - lookbehind);
 		let cursor = Math.min(lookbehind, count);
+		let lineCheckIndex = cursor - 1;
 		if (offset > 0) {
 			let scan = 0;
 			while (scan < cursor && (bytes[scan] & 0xc0) === 0x80) scan++;
@@ -32,23 +32,28 @@ export function backgroundCommandOutputTail(
 					const lead = bytes
 						.subarray(leadStart, Math.min(count, leadStart + MAX_PENDING_ANSI_LENGTH))
 						.toString("utf8");
-					if (!stripVTControlCharacters(pending + lead).startsWith("\u001b")) {
+					if (!stripAnsi(pending + lead).startsWith("\u001b")) {
 						cursor -= pendingBytes;
+						lineCheckIndex = cursor - 1;
+					} else {
+						lineCheckIndex = cursor - pendingBytes - 1;
 					}
 				}
 			}
 			while (cursor < count && (bytes[cursor] & 0xc0) === 0x80) cursor++;
 		}
-		let stripped = stripVTControlCharacters(
+		let stripped = stripAnsi(
 			new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes.subarray(cursor, count), {
 				stream: !backgroundCommandFinished(job),
 			}),
 		);
-		if (cursor > 0 && bytes[cursor - 1] !== 0x0a) {
+		if (cursor > 0 && lineCheckIndex >= 0 && bytes[lineCheckIndex] !== 0x0a) {
 			const newline = stripped.indexOf("\n");
 			if (newline !== -1 && newline + 1 < stripped.length) {
 				const after = stripped.slice(newline + 1);
-				if (Buffer.byteLength(after, "utf8") >= maxBytes || after.trimEnd().includes("\n")) {
+				const firstLineBytes = Buffer.byteLength(stripped.slice(0, newline + 1), "utf8");
+				const afterBytes = Buffer.byteLength(after, "utf8");
+				if (afterBytes >= maxBytes || (after.trimEnd().includes("\n") && afterBytes >= firstLineBytes)) {
 					stripped = after;
 				}
 			}
@@ -56,7 +61,7 @@ export function backgroundCommandOutputTail(
 		return truncateTail(stripped, { maxLines, maxBytes }).content;
 	} catch (error) {
 		return truncateTail(
-			stripVTControlCharacters(`Output unavailable: ${String(error).slice(0, 512)}. Inspect logFile for this job.`),
+			stripAnsi(`Output unavailable: ${String(error).slice(0, 512)}. Inspect logFile for this job.`),
 			{ maxLines, maxBytes },
 		).content;
 	} finally {
