@@ -191,9 +191,14 @@ test("skips macos-restart-background when changes stay in isolated packages, doc
 test("marks pure documentation changes docsOnly=true while keeping workflow and schema changes docsOnly=false", (t) => {
 	const f = createRepoFixture(t);
 	f.write("docs/sdk.md", "updated docs\n");
+	f.write(".pi/notes/session.md", "note\n");
 	f.write("packages/coding-agent/CHANGELOG.md", "entry\n");
 	const docsHead = f.commit("docs only");
 	assertPlanned(f.invoke(["--event", "pull_request", "--base", f.base, "--head", docsHead]), false, true);
+
+	f.write(".pi/extensions/prompt-url-widget.ts", "export default function () {}\n");
+	const piExtHead = f.commit("docs plus pi extension");
+	assertPlanned(f.invoke(["--event", "pull_request", "--base", f.base, "--head", piExtHead]), false, false);
 
 	f.write("packages/coding-agent/schemas/settings.schema.json", "{}\n");
 	const schemaHead = f.commit("docs plus schema");

@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 
-// Decide whether `.github/workflows/ci.yml` needs `macos-restart-background`.
-// Every Linux job always runs; this script skips only the macOS job when all
-// changed paths are outside its macOS process/PTY/socket/case-aliased-build surface.
+// Decide CI scope for `.github/workflows/ci.yml`:
+// - `macos-required`: whether `macos-restart-background` must run; false only when
+//   every changed path sits outside macOS process/PTY/socket/case-aliased surfaces.
+// - `docs-only`: true only when every changed path is pure documentation/notes;
+//   `.github/workflows/ci.yml` skips `test` and `mcp-conformance` (only `build-check`
+//   runs), so never add executable code, schemas, or extension sources here.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
@@ -12,9 +15,11 @@ const help = `Usage:
   node scripts/ci-scope.mjs --event pull_request|push|workflow_dispatch [--base SHA --head SHA]
 
 Compare immutable Git commits (the merge base on pull_request), print JSON,
-and write macos-required=true|false to GITHUB_OUTPUT and a reason to
-GITHUB_STEP_SUMMARY when set. Any unclassified path, workspace manifest or
-tsconfig, CI workflow/script change, or manual dispatch requires macOS CI.
+and write macos-required=true|false and docs-only=true|false to GITHUB_OUTPUT
+plus a reason to GITHUB_STEP_SUMMARY when set. When docs-only=true, ci.yml
+skips test and mcp-conformance and runs only build-check. Any unclassified
+path, workspace manifest or tsconfig, CI workflow/script change, or manual
+dispatch requires full macOS CI and sets docs-only=false.
 
 Options:
   --event  GitHub event name (pull_request, push, workflow_dispatch)
@@ -40,7 +45,7 @@ const isDocsOnlyPath = (path) =>
 	!isWorkspaceConfig(path) &&
 	(ROOT_DOC_FILES.has(path) ||
 		path.startsWith("docs/") ||
-		path.startsWith(".pi/") ||
+		path.startsWith(".pi/notes/") ||
 		/^packages\/[^/]+\/(README\.md|CHANGELOG\.md|containerization\.md)$/.test(path) ||
 		/^packages\/[^/]+\/(docs|THIRD_PARTY_NOTICES)\//.test(path) ||
 		path === "packages/tui/native/darwin/README.md" ||
@@ -54,6 +59,7 @@ const fastPaths = [
 			(!isWorkspaceConfig(path) &&
 				(path === ".github/APPROVED_CONTRIBUTORS" ||
 					path.startsWith(".github/ISSUE_TEMPLATE/") ||
+					path.startsWith(".pi/") ||
 					(path.startsWith(".github/workflows/") && path !== ".github/workflows/ci.yml") ||
 					/^packages\/[^/]+\/schemas\//.test(path))),
 	],
