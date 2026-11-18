@@ -130,8 +130,9 @@ function readSections(changelogPath: string): { heading: string; text: string }[
 			.split(/(?<=\n)(?=## )/)
 			.filter((section) => section.startsWith("## "))
 			.map((section) => ({ heading: section.split("\n", 1)[0], text: section.trim() }));
-	} catch (error) {
-		console.error(`Warning: Could not parse changelog: ${error}`);
+	} catch {
+		// Shown in the TUI (startup notes, /changelog), where printing would draw over the screen. An unreadable
+		// changelog shows no notes instead.
 		return [];
 	}
 }

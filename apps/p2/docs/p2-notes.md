@@ -50,13 +50,14 @@ P2_FAKE=1 npm start          # http://127.0.0.1:8788, data in ~/.pi/p2
   503. A plugin reload rolls web facets out with the server's and workers' (the surface's step last): an open page
   fetches the changed scripts and applies them in place (`host.reload` in the page; each plugin's stylesheet swapped
   with its code), so the transcript's scroll and the other panes stay; only base code (the entry, `src/web`,
-  `src/runtime`, the API, Chord, React) needs a restart, and pages reload onto the new base: before reconnecting a
-  page asks `/_chord/web/base`, another one reloads it. No polling. A page's link names its base
+  `src/runtime`, the API, Chord, React) needs a restart, and pages reload onto the new base: when its link drops a
+  page asks `/_chord/web/base` alongside the reconnect (never before it: one check at a time, a drop while one runs
+  asks nothing more), and another base stops the reconnecting and reloads the page. No polling. A page's link names its base
   (`/chord?web=<base>`); every other client names itself (`?client=tui`, `cloud`, `script` for scripts and tests;
   `src/runtime/stale-page.ts`). The server refuses a link naming another base, or neither a base nor a known client (a
   page from before 2026-11-12, which would re-hold types removed since), at once (close code 4001; the page reloads)
-  and the owner gets a notice (source `stale-pages`) naming who it was: the owner's access or device, or the guest,
-  the browser and its address. A TUI launcher from before the marker is refused too (it retries until updated). The last four plugin sets' files stay served. Web facets must not share module state with
+  and the server logs (source `stale-pages`, a log line, not a notice: nothing to act on) who it was: the owner's
+  access or device, or the guest, the browser and its address. A TUI launcher from before the marker is refused too (it retries until updated). The last four plugin sets' files stay served. Web facets must not share module state with
   another plugin's files (each plugin's script holds its own copy of a file it imports from another plugin):
   `plugin-practices.md`. The TUI launcher still polls `/__p2_tui` (p2's own TUI bundle). There is no Vite,
   source-module server or `index.html`.
@@ -566,9 +567,41 @@ tab's sessionStorage; URLs identify conversations (`/s/<id>` and `/s/<id>/c/<con
   (`…/pi/acme/<brain>/s/<id>`), not the frame's. The shell only replaces its URL with each report; the app's history
   entries stay the tab's, so Back moves the frame. Messages go to the shell's origin only; nothing is posted when the
   page is not framed or not relayed. The shell's side and the contract: Radius,
-  `client/src/views/pi-shell/frame-bridge.ts`. `test/p2/shell-bridge.test.ts` (origins, reports, base) and
-  `test/p2/ui-shell-frame.test.ts` (the real bundle framed by a stand-in shell on another site: mirrored URL, links,
-  one history entry per step, Back and Forward).
+  `client/src/views/pi-shell/frame-bridge.ts`. `test/p2/shell-bridge.test.ts` (origins, reports, base, theme
+  messages) and `test/p2/ui-shell-frame.test.ts` (the real bundle framed by a stand-in shell on another site:
+  mirrored URL, links, one history entry per step, Back and Forward, the shell's theme).
+- **Theme** (`src/web/theme.ts`). The light/dark preference lives in the outermost host, and the page picks a backend at
+  startup: `native` when p2-mac's `window.webkit.messageHandlers.piHost` exists (the app's `appearance`; `theme` and
+  `set-theme` messages with replies, `pi-host-theme` events; "system" resolves with `matchMedia`, which follows the
+  app's appearance), `shell` when the Radius shell frames the page (the meta, a plain origin, and a parent) and its
+  `hello` carries `theme` (the shell's `pi-theme`; the page applies the shell's resolved `scheme`, sends `set-theme`,
+  takes the `theme` echo), else `local` (the origin's localStorage `pi-theme`, as before). Hosted pages never read or
+  write their own stored value; the first-paint scripts skip it by the same rule (the app page's in `src/hosts/web.ts`;
+  the server pages' in `src/runtime/page.ts` skip it in any frame, since the CSP lets only the shell frame them). Picks
+  apply at once and the host's answer wins; two quick picks never flicker back: the shell answers each `set-theme`
+  with one `theme`, and the page drops `theme` messages until its last pick's answer (the count resets on `hello`);
+  with p2-mac it ignores `pi-host-theme` while a `set-theme` is unanswered and takes the latest request's answer.
+  Before `hello` a framed page follows the system, ignores its storage and `storage` events and keeps a pick in
+  memory: a `hello` with `theme` sends that pick as `set-theme` (else takes the shell's preference), a `hello` without
+  `theme` (an older shell) stores the pick or, without one, reads the stored value; without any `hello` the pick stays
+  in memory. Before `hello` a framed page shows the scheme the shell hinted in the URL it framed
+  (`#pi-shell-scheme=light|dark`): WebKit (26.6) resolves a cross-site frame's `prefers-color-scheme` with the
+  system's, not the embedder's `color-scheme` as Chrome does, so a shell forcing the opposite of the system would
+  otherwise paint the frame wrong until `hello`. The app page's first-paint script reads the hint only in a shell
+  frame (exactly that fragment; any other stays), paints it, keeps it for `theme.ts` as `<html data-pi-shell-scheme>`
+  and removes the fragment with `history.replaceState(history.state, "", pathname + search)` before the app reads the
+  URL (navigation.ts reads `location` when the bundle starts; nothing reads the fragment). Without a hint: the
+  system's scheme. A change of the shown scheme after load cross-fades: `theme.ts` makes the DOM change in
+  `document.startViewTransition({ update, types: ["pi-theme"] })` (the function form where types are missing), the
+  browser's default cross-fade of the page, about 250 ms; no CSS of its own (scope any to
+  `:active-view-transition-type(pi-theme)`). Each document fades its own pixels: the Radius shell keeps its frame out
+  of its snapshot, p2-mac fades only its native views. No fade for what the page shows while starting (first paint,
+  hint, before the first frame, `hello`, p2-mac's first answer), an unchanged scheme, a hidden page, reduced motion or
+  without the API; a change during a fade starts a new one, and a fade's late DOM change shows the latest scheme.
+  Nothing theme-related keys off `prefers-color-scheme` once `data-color-scheme` is set (Elanor's tokens use it only
+  without the attribute), so the old snapshot is the old theme. `test/p2/theme.test.ts` (backends, races, picks and
+  the hint before `hello`, fades), `test/p2/first-paint.test.ts` (both first-paint scripts, the hint),
+  `test/p2/ui-shell-frame.test.ts` and `test/p2/ui-theme-fade.test.ts` (a pick fades in Chrome, the first paint not).
 - `push`: one step at the tap; `replace`: lateral changes and server/startup corrections. A correction can pass
   its captured route as `replace(next, expected)` so it cannot overwrite a later queued destination.
 - `close`: whole-modal ×/scrim/Escape, or a sheet/file parent; `reset`: workspace tabs, dropping visited files/commits.
@@ -765,7 +798,7 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   envs plugin's directory picker `plugins/envs/contract.web.tsx`); a contract imports only the API, shared packages
   and its own plugin's files. What two plugins share otherwise lives in the base and reaches them through the API
   (`src/runtime/schemas.ts`, `entries.ts`, `notices.ts`, `origin.ts`, `environments.ts`, `downloads.ts`,
-  `tui-chat.ts`). Base code imports no plugin code; only the page's shared components (`ModelPicker.tsx`) read
+  `tui-chat.ts`). Base code imports no plugin code; only the page's shared components (`model-choice.ts`) read
   plugin contract types (`import type`). A plugin's own files stay in the plugin, assets
   included (`plugins/terminals/vendor/ghostty`). Facets use no `import.meta`: the p2 app directory is start data
   (`Server.info.app`, `WorkerInit.app`). The terminal host (`plugins/terminals/main.ts`) is its own program, not a
@@ -893,6 +926,12 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   environment (README, Configuration). The server observes it as envs.json is observed (`ProjectService`: one observer,
   the last valid projects and the reason the last read failed); `Projects` serves them to owners with `local`, the
   server's hostname, which the TUI writes for this device.
+  - **New project** (`Projects.create`, v2; v1 without it is still served): the web sidebar's Projects rollup options
+    (`RollupSheet`'s "New project…") open the folder picker as its own layer (`project-folder`: the chat's `cwd`
+    picker would move the open session), then `NewProjectSheet` (layer `new-project`, locator the place) names it,
+    the folder's name first. `addProject` (`config.ts`) appends it with one place and writes the file anew (temp file,
+    rename; comments and formatting go), one create at a time; refused while the file is invalid, for a taken name and
+    for what `parseProjects` refuses. The observer then applies it as any edit. More places: by hand.
   - **Membership** is explicit, never derived from a path: `ProjectService` keeps session ID → project name in a
     persisted document of the server's Chord store (`p2.project-sessions`), not in the session catalog, so the
     catalog's schema and the `Sessions`/`Catalog` contracts stay as they are and dropping the plugin leaves only an
@@ -935,76 +974,108 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
     sidebar (`useSidebarData` in `web.tsx`). The sidebar is always mounted; it publishes what a list page needs
     (`publishPage`), so the list page shows the same rows and edits, offline too, without holding its own copy.
   - **Rules** (`model.ts`, pure, `sidebar-model.test.ts`): a `Rollup` collects sessions into one section, in one of
-    three layouts: a flat list (`sessions`: Recents), groups of sessions (`groups`: every project, one per folder, each
-    with where its "+" starts a session; a sandbox folder `sandboxed`), or a link only (`link`: the Archive).
-    `ROLLUPS` are the built-in ones, `ordered` puts them in the owner's order. `sectionsOf` shows every rollup and
-    applies relevance (pinned, open, working, unread, a failed worker, an operation, or `updatedAt` within the rollup's
-    window: `1d`, `3d` (default), `1w`, `forever`): a session shows in every rollup and group that has it, a group only
-    with relevant sessions, a collapsed rollup or group only its row. `listPageOf` makes a rollup's or a group's list
-    page: every session, the aged ones (outside the window) after the others, by group for a rollup of groups; the
-    archived ones newest archived first. Keys: `recent`, `projects`, `folders`, `archive`, `project:<name>`,
-    `folder:<base64url of JSON [env, cwd]>` (no slash, for `/list/<key>`). Folders take as many trailing path segments
-    as tell same-named ones apart. Rollup order never follows activity. `glyphsOf` picks project glyphs by the glyphs
-    plugin's `placeSeed` (below); a group's tooltip is its path (a project's: its places), a Recents session's its cwd.
+    three layouts: a flat list (`sessions`: the sessions without a project), groups of sessions (`groups`: every
+    project, each with where its "+" starts a session; a sandbox group `sandboxed`), or a link only (`link`: the
+    Archive). A session belongs to the project it joined, else to the project whose place on its machine holds its
+    folder most closely (`projectOf`, by `projectAt` in `plugins/projects/place.ts`, `project-place.test.ts`; a place at
+    `~` last). `ROLLUPS` are the built-in ones: the sessions without a project (`headless`: no heading, no ⋯, always
+    first), Projects, the Archive; `arranged` keeps the headless rollup first and puts the others in the owner's order
+    (a saved order from before, naming `recent` or `folders`, cannot move it), `movable` are the ones a heading's ⋯
+    moves. `FOLDER_ROLLUP` (one group per folder) is no section: it serves the command menu's "Open folder…".
+    `sectionsOf` shows every rollup and applies relevance (pinned, open, working, unread, a failure, an operation, or
+    `updatedAt` within the rollup's window: `1d`, `3d` (default; the headless one keeps it), `1w`, `forever`): a session
+    shows in every rollup and group that has it, a group only with relevant sessions or `keep` (every project's: a new
+    one's "+" must be reachable), a collapsed rollup or group only its row; the headless section counts the sessions its
+    window hides (`older`, its "N older" row). `failureOf` says what failed in a session: its worker, an operation, or
+    its main conversation's last run (`runState` of `worker.failure`: a stop, a reset or nothing to answer is no
+    failure); relevance, `activityOf` and `wantingOf` count it. `listPageOf` makes a rollup's or a group's list page:
+    every session, the aged ones (outside the window) after the others, by group for a rollup of groups; the archived
+    ones newest archived first. Keys: `other`, `projects`, `archive`, `folders`, `project:<name>`, `folder:<base64url
+    of JSON [env, cwd]>` (no slash, for `/list/<key>`). Folders take as many trailing path segments as tell same-named
+    ones apart. Rollup order never follows activity. The sidebar waits for `Projects` before it shows the owner's
+    sections (a session would otherwise show without a project, then jump into its group).
   - **View** (`Sidebar.tsx`, `Row.tsx`, `ListPage.tsx`, `RollupSheet.tsx`), on Elanor's `Sidebar` and
-    `SideNavigation` and icons (re-exported by `src/web/navigation-components.ts`). Every row is a `NavRow`: a marker
-    column as wide as an icon (a session's working mark, a group's project glyph, folder or lock, a Recents session's
-    glyph; kept when empty; a rollup has none),
-    the label (a link; an action: restoring an archived session, switching to another branch; or, with `expanded`, the
-    control that shows or hides what is below the row, Elanor's chevron right after the label), details (the time of
-    the last activity last) and controls (⋯, "+", a branch's rename), all one control whose hover and selected
-    backgrounds (Elanor's ghost fills) span the row; the label's hit area covers it. Labels are one line, cut with "…" at
-    the end (`.nav-label`). No leading disclosure column, so nothing is indented by it: a group's row shows or hides
-    its sessions, not indented (every session's working mark is in one column); a group's row is medium weight. The
-    owner's list starts with a "New session" row in a group's type ("+" marker, a link to `/new`, the new-session
-    screen, selected while it shows); the header holds the Pi logo (the Familiar's button) and the
-    collapse trigger. A session's row is a link to its main conversation,
-    selected while that shows (the label's hit area covers the row: the label is not positioned, so its `::after` is
-    laid out on the row). Its other conversations (its branches, then its subagents and one-shot agents, the most
-    recently active first) are below it, shown or hidden only by its chevron (`Toggle`, a button after the label;
-    showing a subagent shows them), in the secondary style, their labels and working marks in the session's columns. A rollup's name is a link
-    to its list, its chevron a `Toggle` after it; a collapsed rollup lists nothing ("No activity" is for an open one). Rows start and end on the bars' icon line (`--nav-edge`, style.css). An open session is selected
-    in one place: where this tab opened it from (per session, in sessionStorage), else the first place it shows. The
-    list page in the main area (`Route.page`, at `/list/<key>`; the `page` slot instead of `main`; `openPage` closes
-    the phone drawer as opening a conversation does; top-level links to it authenticate as `/s/` links do) lists
-    sessions only (no conversations below them, `listsConversations`), in the transcript's column (`--chat-size`,
-    `--chat-width`) inside one scroller across the main area, as the transcript; it has a search within its sessions (`Search` 3's `sessions`), kept with its scroll position across Back, its "+" for
-    groups, and the error toast (`ErrorToast`, shared with the chat).
-  - **State marks** (`Row.tsx`, the top of `style.css`): a row says two things in two places. The marker says whether
-    a session runs: `IconMarker` frames the row's icon (a glyph, a folder, a lock) with a dash travelling around it
-    (22px, 3px outside the icon, clear of a glyph's corner cells), `WorkingMark` is a spinner where a row has no icon (a
-    group's sessions, conversations, the Familiar's logo, a collapsed rollup's details). That is the sidebar's only
-    motion. The row's end says whether it wants the owner, steady: an unread answer makes the title bold
-    (`.session-title.unread`) with a blue dot before the time (`UnreadMark`); a failed worker shows a warning sign and
-    "Failed" (`FailedMark`, the error in its tooltip). Each state has its own shape, not only a colour (spinner or
-    frame, dot, warning sign), so colour blindness does not merge them; the dots used to sit on a glyph's corner in the
-    glyph's own colours. With reduced motion the spinner is a still ¾ ring and the frame dashed; in the phone's closed
-    drawer they pause. A collapsed group or rollup sums up what it hides (`hidden`, `activityOf` in `model.ts`): a
-    group frames its icon while one of them works, a rollup shows a spinner, and both count the failed ones (warning
-    sign) and the unread ones (a blue count). The top bars' menu button (`menu-badge` slot, `MenuBadge` in `web.tsx`,
-    rendered by the chat's and the list page's bar) counts the other live sessions that want the owner (`wantingOf`: a
-    failure or an unread answer, the open one left out), red when one failed. The sidebar publishes it, as it publishes
-    the list page's data. A "needs input" state waits for questions and approvals (`docs/waiting.md`).
+    `SideNavigation` and icons (re-exported by `src/web/navigation-components.ts`; a plugin's web build reaches icons
+    only through the host packages). Every row is a `NavRow`: a marker column as wide as an icon (an item's status, a
+    project's folder icon or a sandbox's lock; kept when empty; a rollup has none), the label (a link; an action:
+    restoring an archived session; or, with `expanded`, the control that shows or hides what is below the row, Elanor's
+    chevron right after the label), details and controls (⋯, "+", an item's action), all one control whose hover and
+    selected backgrounds (Elanor's ghost fills) span the row; the label's hit area covers it. Labels are one line, cut
+    with "…" at the end (`.nav-label`). No leading disclosure column, so nothing is indented by it. The owner's list
+    starts with the rows plugins put there (the `sidebar-start:<name>` slots, each a list item: the Familiar's "Ask Pi")
+    and a "New session" row, 16px above the first rollup (rollups are 24px apart); the header holds the Pi logo and the
+    collapse trigger. A session and each of its subagents are the same item (`AgentItem`): status, name, detail. The
+    detail is how long ago its last message was (`ago`); under a fine pointer, on hover or keyboard focus, the item's
+    one action (`ItemAction`, an icon button, its name saying whose: "Stop <name>", "Archive <name>") shows over it:
+    Cancel (`CancelIcon`) while it runs, Archive while idle. The button is laid out but invisible and not hit at rest,
+    so Tab reaches it, and the age's column keeps its width, so nothing moves when it shows and the name is cut before
+    either. On coarse pointers it is not shown: a long press on the item opens its command menu (`useCommandMenuRow`;
+    the item is also the menu's target on hover and focus), which has "Stop run" and "Archive subagent"
+    (`commands.tsx`; a one-shot agent's item is no target, as its chat is none). A session's Cancel stops its busy
+    conversations but one-shot agents (`stoppable`: their script owns them, and stopping the script's conversation
+    ends them); a subagent's or a one-shot agent's stops its own run. Both go through `RunControl` (the chat plugin's
+    contract, participants): unlike the chat's Stop, which hands the caller's own withdrawn inputs back to its
+    composer, a stop from outside the chat puts every withdrawn input into its author's drafts (`DraftStore`), so a
+    queued follow-up is not lost. A session's Archive is the owner's (`Sessions.archive`); a subagent's is the owner's
+    and read/write guests' (`SubagentControl.archive`), shown at once (`useOptimisticCall` over the children). Who may
+    act is `writable`: the owner, or a guest whose grant for the session is `full`. The actions live in
+    `useSidebarData` and reach the list pages through `publishPage` too. A session's item is a link to its main
+    conversation, selected while that shows (the label's hit area covers the row: the label is not positioned, so its
+    `::after` is laid out on the row). Its subagents and one-shot agents (the most recently active first) are below it,
+    shown or hidden only by its chevron (`Toggle`, a button after the label; showing a subagent shows them), archived
+    subagents behind an "N archived" row. Its `/tree` branches are not listed (the tree panel has them, docs/tree.md).
+    A rollup's name is a link to its list, its chevron a `Toggle` after it; a collapsed rollup lists nothing ("No
+    activity" is for an open one). Rows start and end on the bars' icon line (`--nav-edge`, style.css). An open session
+    is selected in one place: where this tab opened it from (per session, in sessionStorage), else the first place it
+    shows. The list page in the main area (`Route.page`, at `/list/<key>`; the `page` slot instead of `main`;
+    `openPage` closes the phone drawer as opening a conversation does; top-level links to it authenticate as `/s/`
+    links do) lists sessions only (no conversations below them, `listsConversations`), in the transcript's column
+    (`--chat-size`, `--chat-width`) inside one scroller across the main area, as the transcript; it has a search within
+    its sessions (`Search` 3's `sessions`), kept with its scroll position across Back, its "+" for groups, and the
+    error toast (`ErrorToast`, shared with the chat).
+  - **State marks** (`marks.tsx`, `run-state.ts`, the top of `style.css`): an item's status is in its marker column.
+    Working is pi's dots (`PiDots`): the terminal UI's braille loader frames, one at a time, a strip of the ten stepped
+    by a CSS animation at 160ms a frame (pi's is 80ms), in the icons' colour, so a list of running agents stays calm.
+    Every strip's delay puts it on the page's clock, so running items step together; with reduced motion it stays on
+    its first frame, in the phone's closed drawer it pauses. That is the sidebar's only motion (the Familiar's row still
+    frames its logo, `IconMarker`). Wanting the owner is steady: a blue dot for an unread answer (`UnreadMark`; the name
+    is bold, `.session-title.unread`, whatever the status shows first), a red dot for a failure (`FailedDot`, what
+    failed in its tooltip and accessible name). The two dots differ by colour only (owner decision); forced-colour mode
+    keeps their colours. A subagent's status is `runState` of its `Child.failure`: busy, failed, or nothing (stopped,
+    reset, nothing to answer). A session's is `failureOf` first, then working (any conversation), then unread; its main
+    conversation's last run failure comes from the session worker (`SessionStatus` 3's `failure`, below). A collapsed
+    group or rollup sums up what it hides (`hidden`, `activityOf` in `model.ts`): pi's dots with the working count, a
+    warning sign with the failed count (`FailedMark`), a blue unread count. The top bars' menu button (`menu-badge`
+    slot, `MenuBadge` in `web.tsx`, rendered by the chat's and the list page's bar) counts the other live sessions that
+    want the owner (`wantingOf`: a failure or an unread answer, the open one left out), red when one failed. The
+    sidebar publishes it, as it publishes the list page's data. A "needs input" state waits for questions and approvals
+    (`docs/waiting.md`).
+  - **Run failure in status** (`plugins/status`): the session worker reports, with its tasks and busy conversations,
+    why the main conversation's last run ended without an answer (`LiveDoc.runFailure`: reason and detail), only while
+    that conversation is not busy; the reader sees it in `SessionStatus` 3's `failure` (a guest sees the reason only).
+    Workers and pages built for versions 1 and 2 still bind (`accepts`; their reports carry no failure). Test:
+    `run-control.test.ts` (a stop from outside: the drafts, then `aborted` in the status), `contract-versions.test.ts`.
   - **Settings** (`sidebar-settings.ts`, `SidebarSettingsStore`/`SidebarSettings`, owner): the rollups' order, windows
     and collapsed rollups and groups, one persisted document in the server's store (`p2.sidebar-settings-state`): a person's
     view, not the catalog. A project's "+" sets the new-session screen's location and a join (`NewSessionJoin`:
     `Projects.assign` once the projects are live), which the chat plugin runs once `Sessions.create` answered (a refused
     creation leaves no membership; a failed join shows in the toast) and clears after. Tests: `sidebar-model.test.ts`,
-    `sidebar-settings.test.ts`, `ui-sidebar.test.ts`, the scoped search in `search.test.ts`, list links in
-    `foreign-requests.test.ts`.
+    `run-state.test.ts`, `sidebar-settings.test.ts`, `ui-sidebar.test.ts`, the scoped search in `search.test.ts`,
+    list links in `foreign-requests.test.ts`.
 - **Project glyphs** (`plugins/glyphs`): `glyph.ts` (pure, browser-safe) draws a 3x3 identicon in the Radius mark's four
   colors from a seed (a path or a name; paths in their `shortPath` form, so `/Users/me/x`, `/home/me/x` and `~/x` draw
   one glyph): SHA-256 of `glyph-v1:<seed>` seeds two sfc32 streams, one for colors, mirror axis and corner style, one
   for cells and shapes (fan, leaf, drop, dome, wedge, circle, diamond, square). It is the "Tiles, 3x3" generator of
   the project-glyphs prototype (Radius artifact) with its recommended settings, and draws the same glyphs. Mirror
   axes only (vertical, horizontal, both diagonals): every glyph is mirror-symmetric, so none is a pinwheel (a
-  swastika); 3x3 cannot hold one anyway. `plugins/projects/glyph-seed.ts` decides which glyph a place shows (`placeSeed`, kept with the projects it reads so other plugins' web facets can import it alone): a project's is
-  seeded by its first place's path, and a folder or a session inside one of its places (a session also by membership)
-  shows the project's; any other place its own path's. `GlyphIcon.tsx` draws one inline (the sidebar's groups and
-  Recents, the chat's top bar before the location; the chat page holds `Projects` once for it, owner only);
+  swastika); 3x3 cannot hold one anyway. `plugins/projects/glyph-seed.ts` decides which glyph a place shows
+  (`placeSeed`, kept with the projects it reads so other plugins' web facets can import it alone): a project's is
+  seeded by its first place's path, and a place of a project (`projectAt`: by membership, else the closest place
+  holding it) shows the project's; any other place its own path's. `GlyphIcon.tsx` draws one inline (the chat's top
+  bar before the location; the chat page holds `Projects` once for it, owner only; the sidebar shows no glyphs);
   `GET /glyph.svg?seed=<seed>&size=<8 to 1024, default 64>` serves one as an SVG file to anyone (it reads no data; the
   seed is at most 1024 characters), cacheable for a day and embeddable from other origins. Tests: `glyphs.test.ts` (the prototype's output, seed forms, colors, symmetry),
-  `sidebar-model.test.ts` (`glyphsOf`), `ui-sidebar.test.ts`.
+  `project-place.test.ts` (`projectAt`, `placeSeed`).
 - **Rollups made from code** (`plugins/rollups`; README, The web sidebar): a saved script over every session that returns
   one sidebar section, in the built-in rollups' layouts. The script decides what a rollup collects; the sidebar decides
   what it shows, so the window, sticky sessions and the owner's settings work the same as for the built-in ones.
@@ -1074,10 +1145,15 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   `<sender kind="owner|guest|session|subagent" …/>` block (`src/runtime/sender.ts`, values escaped; a subagent's
   text follows as `[<intent>] <text>`), which the preamble explains and nothing reads back: readers use the entry data.
   Stop/dequeue restore text only to its author; removing a queued input (×,
-  no restore) discards it, as in Pi Mobile.
+  no restore) discards it, as in Pi Mobile. Stop is Durable's `Conversation.abort()`, which withdraws the queue in the
+  commit that marks the run; people's text it withdrew goes back to its authors (the caller's to the composer,
+  others' to their drafts; `conversations stop`, which has no author, gives all to drafts). Peer and subagent messages
+  are submitted with `onAbort: "keep"`, since their senders cannot take them back: they stay queued, as after a failed
+  run, and go with the next input. A main agent's queued task for a subagent is withdrawn (its reporter says so).
 - **Windowed conversation view** (`plugins/chat/worker.ts`, `src/web/history.ts`, `src/runtime/conversation-stats.ts`):
-  `Chat.view` is Durable's view as is: a window over the transcript (the fork-aware history in entry ID order, head
-  markers in place), the newest 50 entries, then appends, back to 50 past 100, `before` the entry just before it. The
+  `Chat.view` is Durable's view with image references: a window over the transcript (the fork-aware history in entry
+  ID order, head markers in place), the newest 50 entries, then appends, back to 50 past 100, `before` the entry just
+  before it. The
   worker holds one Durable watch per conversation (default window), shared by every viewer. Clients (web and TUI)
   keep a `TranscriptStore` per host and conversation over Durable's `ConversationTranscript`: every value of the view
   is merged in, so entries that leave the window stay; scrolling up loads earlier pages (`Chat.entries`, 100 entries
@@ -1095,6 +1171,14 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   sheet reads `ChatCosts`, from `context()` when it opens. Measured with 3,000 seeded entries (fake provider, slayer):
   opening sends 50 entries (125 KiB, 14 ms) instead of 101 (251 KiB, 33 ms); paging to the start 30 pages, 244 ms
   (before: 29, 186 ms); building the whole transcript 1.3 ms (before: 10.9 ms).
+- **Image references** (`src/runtime/entry-images.ts`, `plugins/chat/server.ts`): the view's and `Chat.entries`'s
+  image parts are `{ type: "image", mimeType, src, width, height }` instead of base64 data; pages load them from
+  `GET /entry-image?session&conversation&entry&message&part` (viewers of the session only, same-site, cached as
+  immutable), which reads the entry through `ChatImages` on the worker. Why: a window of 50 entries with screenshots
+  came to 38 MB, past a page link's part limit, so the session could not be opened; through Radius the brain's loopback
+  socket closed on it and the page reconnected in a loop. Clients read image parts through `shownImage` (inline parts
+  of kept copies become data URLs). Pages take parts up to 32 MiB from the server (`SERVER_PART_LIMITS`, Chord's
+  default is 16 MiB); Radius's relay limits one data message to 32 MiB by default (Radius ee560a41; 16 MiB before).
 - **Run failures** (`pi.live.runFailure`): why the newest run ended without an answer shows as a failure notice at the
   end of the transcript (web and TUI, the error notice style) until the next run starts: `model_error` and `no_model`
   "The model could not answer this input. <detail>", `faulted` "The run failed: <detail>", `orphaned` "The run could
@@ -1255,8 +1339,21 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   through the worker's `Attachments` local (only uploads of that session): each is materialized before admission into
   the data directory's `uploads/<session>/` on this machine (for the default data directory that is
   `~/.pi/p2/uploads/<session>/`) and, when the receiving conversation works on another environment, into
-  `~/.pi/p2/uploads/<session>/` there; the message lists those paths, with images inline (from this machine's copy)
-  when the model accepts them. `DownloadStore` (server local) snapshots a server file into the session's files;
+  `~/.pi/p2/uploads/<session>/` there. The message's text places its files: a reference
+  `![name](attachment:<upload id>)` (images) or `[name](attachment:<upload id>)` (other files) counts when its ID is one
+  of the message's attachments (`src/runtime/references.ts`). The model reads each file where it is referenced, marked
+  as Codex marks local images: `<image name=[Image #N] path="<copy>">`, the image (from this machine's copy, when the
+  model accepts images, fitted to its limits before submission with the worker's image processor,
+  `WorkerParts.images`, Durable's `fitImage`), what fitting changed or why it is left out, `</image>`; other files as
+  `<file name=[File #N] path="<copy>" />`; a second reference as `[Image #N]` alone; unreferenced uploads (the TUI,
+  Discord) after the text. The web composer (`plugins/chat/draft-editor.tsx`) shows references as pills: files are
+  placed at the caret or a drop's point, moved by dragging or the pill's menu (Earlier, Later, Remove), and every
+  change, typing and pills alike, goes through the composer's own undo history (`draft-history.ts`); the browser's
+  undo (keys, Edit menu, iOS shake) never runs. Picked files are referenced by their local keys until the send
+  renames them to upload IDs; references to this session's uploads (a message brought back by Edit or from the queue)
+  go as they are. Transcript, previews, titles and the TUI show references by the files' names. `read`
+  (coding-tools) and the `fit-images` plugin (Durable's `afterTool` extension, for every tool result) fit the images of
+  tool results with the same processor before they are committed: the transcript never changes later. `DownloadStore` (server local) snapshots a server file into the session's files;
   producers on the worker (send_file) write there directly (space `downloads`, key the snapshot's UUID). `GET|HEAD
   /download?session=&id=` serves them through `SessionFiles` to the owner and the session's guests (no
   `Sec-Fetch-Site: cross-site`; ranges for audio/video). An archived or unknown session's downloads and artifacts
@@ -1548,9 +1645,11 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   worker runs; an idle worker stops after 5 minutes without viewers or warming) and at each start, else in an
   `InputGate` before the next input is admitted, which waits for the summary. Web: home (the `home` slot: `/` replaces
   itself with its session, made on first use; while the owner has it archived, with the new-session screen) and the
-  `drawer-brand` slot, the Pi logo at the start of the owner's sidebar header (a button titled "Ask Pi" that opens it,
-  restoring it when archived; the session's working spinner or unread dot on its corner); the sessions plugin's `DrawerRowsContext` (`plugins/sessions/contract.web.tsx`) gives it the
-  rows, `SessionDot` and `listApart`, which leaves its session out of the rollups. The TUI lists it as an ordinary session. Tests:
+  `sidebar-start:familiar` slot, the "Ask Pi" row above the owner's "New session" (the Pi logo as its icon, framed
+  while its session works; bold with a dot for an unread answer; it opens the session, restoring it when archived); the
+  sessions plugin's web contract (`plugins/sessions/contract.web.tsx`) gives it the rows and `listApart`
+  (`DrawerRowsContext`), which leaves its session out of the rollups, and the row's shape and marks (`NavRow`,
+  `IconMarker`, `UnreadMark`). The TUI lists it as an ordinary session. Tests:
   `familiar.test.ts`, `ui-familiar.test.ts`, the conversations actions in `conversations.test.ts`.
 - **Scope prompt** (`plugins/scope-prompt`, experiment; owner only, web only): an overlay (`overlay:` slots, the
   `SlotList` at the end of `AppLayout`) that leaves the page as it is until pointing mode is on (`mode.ts`): a double tap
@@ -1571,7 +1670,7 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   stages the `<scope>` block on the session (`ScopeStage`, worker facet, by `requestId`, dropped after a minute) and
   the views' send router carries it with that message (`MessageContexts`, which now get the routed input), so the
   transcript shows the text with the note "with scope Chat › Message". Anything else (the sidebar) goes to the
-  Familiar: opened as its logo does, the text queued on its main conversation followed by the block with the page's
+  Familiar: opened as its sidebar row does, the text queued on its main conversation followed by the block with the page's
   session, conversation and title or list, which its prompt section explains. Not yet: frames' insides (an html
   artifact is its pane). Test: `ui-scope-prompt.test.ts`.
 - **Subagents** (`plugins/subagents`): owns its protocol-independent Durable extension (persistent
@@ -1674,11 +1773,26 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   does). The worker object (`p2.mcp-worker`) sends `setLocations` with every location its conversations work at (the
   session's, active subagents' own) at start, after moves and subagent commits, and whenever the view re-activates (a
   refusal because a newer generation runs ends it), and
-  contributes one Durable extension per configured server, `mcp:<server>` with the code-mode namespace `mcp__<server>`
-  (`createMcpExtensions`, a `self.writable`, rebuilt only when the tool list changes). The namespace's description
-  comes from the configuration only (and the sign-in hint for OAuth servers), so the prompt's code-mode section is the
-  same before and after a server connects (the KV cache holds); a server's `instructions` (`Mcp` version 3, the
-  instance's `instructions`) are reachable through `describeNamespace()`. There is no `mcp_servers` section. Deferred
+  contributes one composing Durable extension, `mcp` (`createMcpExtension`, a `self.writable`, rebuilt only when an
+  instance, its tools, summary or instructions, or a lease change; `Mcp` version 4 gives the worker its `leases`, the
+  instances each location uses, since a project override decides per lease even for instances serving every location).
+  Durable gives every conversation of a worker the same tools, so the extension registers every variant of every tool
+  (a tool as one instance describes it, `toolDescriptor`: title, description, schemas; instances describing it alike
+  share it) and cuts each conversation's view with wraps: the `codemode` section renders, and the `codemode` and
+  `tool_search` tools run (an `api` whose `agent()` is cut; its getters and symbol keys kept), with the servers of the
+  lease at the conversation's location only, each as its own namespace `mcp__<server>` with that instance's summary
+  and instructions. A server only another location has is not there (the main conversation's prompt does not change
+  when a subagent works elsewhere), a variant another location's instance describes is not there, and a call reaches
+  the caller's instance only as the variant it describes (else `MCP tool … is not offered at …`). Names as pi's, the
+  variant the session's lease uses keeping the plain name, other variants of a tool suffixed with a hash of their
+  descriptor. Still the union: Durable's own agent (hooks, `Conversation.agent()`, nested-call resolution, subagent tool
+  choice), and without code mode a loaded tool stays declared after a move. The namespace's description is pi's
+  one-line summary (`mcpServerSummary`: the configured `description` (`Mcp` version 4, the instance's `description`),
+  else the first line of the server's `instructions` (version 3), at most 250 characters), then where the tools are and
+  the sign-in hint for OAuth servers; it changes once when a server without a `description` first sends instructions (a
+  reloaded manager keeps the instructions it listed). The full
+  instructions come from `describeNamespace()`. Without code mode, the `mcp` extension's `mcp_servers` section lists
+  the conversation's servers with their summaries, as pi's does for `tool_search` servers. Deferred
   tools named by `createMcpToolName` (every tool of a colliding name gets the hash suffix, as in pi), results through
   `toLlmContent` and `limitMcpContent`, `structuredOutput` only for tools with an output schema. Without code mode,
   `tool_search` is installed by the worker's registry (`durableRegistry`: once, while code mode is off and any extension
@@ -1687,7 +1801,7 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   it: `npm run build:daemon` in `packages/env`, or `PI_ENV_DAEMON`), `mcp-instances.test.ts` (the supervisor with a
   short backoff), `mcp-leases.test.ts`, `mcp-environments.test.ts`, `mcp-project.test.ts`,
   `mcp-windows-command.test.ts`, `mcp-tools.test.ts`, `mcp-worker.test.ts` (fake provider: a project file, `tool_search`,
-  a call, a relocation).
+  a call, a relocation, a subagent's project server kept out of the main conversation, the `mcp_servers` section).
 - **MCP sign-in** (`plugins/mcp/sign-in.ts`, `routes.ts`, `probe.ts`, `pages.ts`, `credentials.ts`; as built:
   `docs/mcp-durable.md` section 4.7): HTTP servers without an `Authorization` header use OAuth with pi-mcp's auth
   provider (stored tokens, refreshed, never a browser) and credentials in `<P2_DATA_DIR>/mcp-auth.json` (0600, keyed like

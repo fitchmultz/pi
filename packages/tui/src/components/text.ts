@@ -60,7 +60,7 @@ export class Text implements Component {
 		this.cachedLines = undefined;
 	}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const forSelectionReader = isRenderingForSelectionReader();
 		// Check cache
 		if (

@@ -1,7 +1,7 @@
 import { type Component, stripSelectionMetadata, Text, truncateToWidth } from "@earendil-works/pi-tui";
 
 export interface VisualTruncateResult {
-	visualLines: string[];
+	visualLines: readonly string[];
 	skippedCount: number;
 }
 
@@ -47,15 +47,15 @@ export interface VisualLinePreviewOptions {
 export class VisualLinePreview implements Component {
 	private options: VisualLinePreviewOptions;
 	private readonly text: Text;
-	private cachedSource: string[] | undefined;
-	private cachedLines: string[] = [];
+	private cachedSource: readonly string[] | undefined;
+	private cachedLines: readonly string[] = [];
 
 	constructor(options: VisualLinePreviewOptions) {
 		this.options = options;
 		this.text = new Text(options.text, options.paddingX ?? 0, 0);
 	}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const allLines = this.text.render(width);
 		if (allLines !== this.cachedSource) {
 			const { maxVisualLines, keep, formatHint } = this.options;

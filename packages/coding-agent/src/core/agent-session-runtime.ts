@@ -111,6 +111,8 @@ export class AgentSessionRuntime {
 	private beforeSessionInvalidate?: () => void;
 	private state: RuntimeState;
 	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
+	/** `type\0message` of every diagnostic takeUnreportedDiagnostics() returned so far. */
+	private readonly reportedDiagnosticKeys = new Set<string>();
 	private finalization?: (session: AgentSession) => Promise<void>;
 	private strictFinalization = false;
 
@@ -152,6 +154,23 @@ export class AgentSessionRuntime {
 
 	get modelFallbackMessage(): string | undefined {
 		return this.state.parts.modelFallbackMessage;
+	}
+
+	/**
+	 * Return the current runtime's diagnostics that were not reported yet, and mark them reported.
+	 *
+	 * The host calls this at startup and after each session replacement (/new, /resume, /fork,
+	 * import), whose runtime collects its diagnostics again. A diagnostic with the same type and
+	 * message as one returned before is left out, so an unchanged settings warning is not repeated
+	 * on every replacement.
+	 */
+	takeUnreportedDiagnostics(): AgentSessionRuntimeDiagnostic[] {
+		return this.state.parts.diagnostics.filter((diagnostic) => {
+			const key = `${diagnostic.type}\0${diagnostic.message}`;
+			if (this.reportedDiagnosticKeys.has(key)) return false;
+			this.reportedDiagnosticKeys.add(key);
+			return true;
+		});
 	}
 
 	setRebindSession(rebindSession?: (session: AgentSession) => Promise<void>): void {

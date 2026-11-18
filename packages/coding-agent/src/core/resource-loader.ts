@@ -29,8 +29,10 @@ import { findGitPaths } from "./footer-data-provider.ts";
 import { getCodeSource, importRemembered } from "./loaded-sources.ts";
 import {
 	DefaultPackageManager,
+	type PackageCommandOutput,
 	type PackageInstallFailure,
 	type PathMetadata,
+	type ProgressCallback,
 	type ResolvedResource,
 } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
@@ -315,6 +317,10 @@ export interface DefaultResourceLoaderOptions {
 	agentDir: string;
 	settingsManager?: SettingsManager;
 	eventBus?: EventBus;
+	/** Where git and npm output goes when packages are installed or refreshed. Default `inherit`. */
+	packageCommandOutput?: PackageCommandOutput;
+	/** Called when packages are installed or refreshed, e.g. to show `Installing npm:foo...`. */
+	onPackageProgress?: ProgressCallback;
 	additionalExtensionPaths?: string[];
 	additionalSkillPaths?: string[];
 	additionalPromptTemplatePaths?: string[];
@@ -422,7 +428,9 @@ export class DefaultResourceLoader implements ResourceLoader {
 			agentDir: this.agentDir,
 			settingsManager: this.settingsManager,
 			builtinExtensions: [...this.builtinExtensions.keys()],
+			commandOutput: options.packageCommandOutput,
 		});
+		this.packageManager.setProgressCallback(options.onPackageProgress);
 		this.additionalExtensionPaths = options.additionalExtensionPaths ?? [];
 		this.additionalSkillPaths = options.additionalSkillPaths ?? [];
 		this.additionalPromptTemplatePaths = options.additionalPromptTemplatePaths ?? [];

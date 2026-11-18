@@ -32,7 +32,12 @@ export class BashExecutionComponent extends Container {
 	private compactView: boolean;
 	// The collapsed compact card. `lines` follow the lines its Texts return, so they change with them: between a
 	// fullscreen frame and other callers, as well as for a new width.
-	private compactPreview?: { width: number; components: Text[]; sources: string[][]; lines: string[] };
+	private compactPreview?: {
+		width: number;
+		components: Text[];
+		sources: (readonly string[])[];
+		lines: readonly string[];
+	};
 	private contentContainer: Container;
 	/** `dim` marks `!!` commands, whose output is excluded from the model context. */
 	private readonly colorKey: "dim" | "bashMode";
@@ -92,7 +97,7 @@ export class BashExecutionComponent extends Container {
 		return handledMouseTarget(this, event);
 	}
 
-	override render(width: number): string[] {
+	override render(width: number): readonly string[] {
 		if (!this.compactView || this.expanded) return super.render(width);
 		const preview = this.compactPreview?.width === width ? this.compactPreview : this.createCompactPreview(width);
 		this.compactPreview = preview;

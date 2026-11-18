@@ -243,7 +243,7 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
-	override render(width: number): string[] {
+	override render(width: number): readonly string[] {
 		if (this.argsPending) this.updateDisplay();
 
 		if (this.compactView && !this.expanded) {

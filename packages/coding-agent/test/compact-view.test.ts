@@ -44,7 +44,7 @@ const args = {
 };
 const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a9foAAAAASUVORK5CYII=";
 
-function compactRows(component: Component, width: number): string[] {
+function compactRows(component: Component, width: number): readonly string[] {
 	const lines = component.render(width);
 	expect(lines.length).toBeGreaterThan(0);
 	expect(lines.length).toBeLessThanOrEqual(2);
@@ -778,7 +778,7 @@ describe("compact Activity and messages", () => {
 			"Branch summary",
 		],
 	] as const)("%s takes two rows until expanded and its normal card otherwise", (_name, create, label, what) => {
-		const text = (lines: string[]) => lines.map((line) => stripAnsi(line).trim());
+		const text = (lines: readonly string[]) => lines.map((line) => stripAnsi(line).trim());
 		const preview = [label, `${what} (${keyText("app.tools.expand")} to expand)`];
 		const component = create(true);
 		const collapsed = () => text(compactRows(component, 60));

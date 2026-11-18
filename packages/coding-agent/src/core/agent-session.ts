@@ -611,6 +611,8 @@ export class AgentSession {
 	private _extensionShutdownHandler?: ShutdownHandler;
 	private _extensionErrorListener?: ExtensionErrorListener;
 	private _extensionErrorUnsubscriber?: () => void;
+	// Set by bindExtensions(): reload() restarts extensions only if the host started them.
+	private _extensionsBound = false;
 
 	private _modelRuntime: ModelRuntime;
 	private _cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
@@ -4360,6 +4362,7 @@ export class AgentSession {
 			this._extensionErrorListener = bindings.onError;
 		}
 
+		this._extensionsBound = true;
 		this._applyExtensionBindings(this._extensionRunner);
 		await this._recordRuntime(this._runtimeTrigger ?? this._sessionStartEvent.reason);
 		await this._extensionRunner.emit(this._sessionStartEvent);
@@ -4849,12 +4852,7 @@ export class AgentSession {
 		});
 		await this._modelRuntime.refresh({ allowNetwork: false });
 
-		const hasBindings =
-			this._extensionUIContext ||
-			this._extensionCommandContextActions ||
-			this._extensionShutdownHandler ||
-			this._extensionErrorListener;
-		if (hasBindings) {
+		if (this._extensionsBound) {
 			await options?.beforeSessionStart?.();
 			await this._recordRuntime("reload");
 			await this._extensionRunner.emit({ type: "session_start", reason: "reload" });

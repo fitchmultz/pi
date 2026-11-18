@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `mcpServerSummary(description, instructions)`, a server's one-line summary for the system prompt as pi's coding agent shows it: the first line of the configured `description`, else of the server's `initialize` instructions.
+
 ### Changed
 
 - Reduced repeated copying when assembling stdio messages, SSE events and bounded HTTP error prefixes.

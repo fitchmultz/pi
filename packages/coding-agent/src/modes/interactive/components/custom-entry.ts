@@ -54,7 +54,7 @@ export class CustomEntryComponent extends Container {
 	}
 
 	/** Compact view shows an unexpanded entry as its two-row preview, whatever its renderer returns. */
-	override render(width: number): string[] {
+	override render(width: number): readonly string[] {
 		const lines = super.render(width);
 		return this.compactView && !this._expanded ? this.compactPreview.render(lines, width) : lines;
 	}
