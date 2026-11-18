@@ -149,6 +149,17 @@ describe("detached background commands", { timeout: 120_000 }, () => {
 		const privateCsiTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
 		expect(privateCsiTail.startsWith("step one done\n")).toBe(true);
 		expect(privateCsiTail).not.toContain("35;59;1M");
+		writeFileSync(
+			done.logFile,
+			`${"P".repeat(100)}\n\u001bUNIQUE_HEAD_LINE\nline2\nline3\nline4\n${"z".repeat(2013)}`,
+		);
+		const declinedEscCompleteTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(declinedEscCompleteTail.startsWith("UNIQUE_HEAD_LINE\n")).toBe(true);
+		expect(Buffer.byteLength(declinedEscCompleteTail)).toBe(2048);
+		writeFileSync(done.logFile, `prefix\n\u001b${"X".repeat(2000)}\nTAIL\n${"z".repeat(42)}`);
+		const declinedEscCapacityTail = backgroundCommandOutputTail(done, { maxLines: 20, maxBytes: 2048 });
+		expect(Buffer.byteLength(declinedEscCapacityTail)).toBe(2048);
+		expect(declinedEscCapacityTail.endsWith(`\nTAIL\n${"z".repeat(42)}`)).toBe(true);
 		writeFileSync(done.logFile, "line\n".repeat(200));
 		expect(backgroundCommandOutputTail(done).split("\n").length).toBeLessThanOrEqual(100);
 		const unavailable = backgroundCommandOutputTail(
