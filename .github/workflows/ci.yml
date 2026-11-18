@@ -17,6 +17,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       macos-required: ${{ steps.scope.outputs.macos-required }}
+      docs-only: ${{ steps.scope.outputs.docs-only }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,6 +76,8 @@ jobs:
   # Tests are split across parallel jobs so the slowest suites do not run back to back.
   test:
     name: test (${{ matrix.name }})
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.docs-only != 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -111,7 +114,11 @@ jobs:
         run: npm ci --ignore-scripts
 
       - name: Build
-        run: npm run build
+        run: |
+          case "${{ matrix.name }}" in
+            coding-agent|durable|chord) node scripts/build.mjs "${{ matrix.name }}" ;;
+            *) npm run build ;;
+          esac
 
       # Fork: guard request-time extension dependency resolution in the standalone CLI.
       - name: Setup Bun
@@ -123,7 +130,7 @@ jobs:
       - name: Build standalone CLI
         if: matrix.name == 'coding-agent'
         run: |
-          ./scripts/build-binaries.sh --skip-install --skip-build \
+          ./scripts/build-binaries.sh --skip-install --skip-build --no-archive \
             --platform linux-x64 --out "$RUNNER_TEMP/pi-compiled"
 
       - name: Compiled extension packages
@@ -196,6 +203,8 @@ jobs:
         run: ./test.sh -- node --test scripts/workspace-build.test.mjs scripts/fork-release-liveness.test.mjs
 
   mcp-conformance:
+    needs: scope
+    if: ${{ !cancelled() && needs.scope.outputs.docs-only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

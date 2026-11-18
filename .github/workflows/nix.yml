@@ -1,13 +1,11 @@
 name: Nix
 
 # The flake builds with the model catalog revision pinned in
-# nix/model-catalog.json. This workflow keeps that pin usable independently of
-# releases: after pi.dev publishes a catalog from main, it replaces the pin with
-# the newest catalog only if the current one no longer hydrates main (for
-# example after a provider was added) or its provider/type/API model groups
-# differ from the newest catalog for one of main's providers (for example after
-# a provider gained classifier models or switched APIs), builds the flake, and
-# commits the new pin to main.
+# nix/model-catalog.json. Release tags build with their committed pin, PRs
+# touching Nix/build/catalog inputs verify the flake, and maintainers refresh
+# the fork pin with `npm run update:model-catalog-pin` (`commit-pin` commits
+# automatically only in upstream `earendil-works/pi`; `workflow_dispatch`
+# verifies the flake against the refreshed pin in its own run).
 #
 # Release tags are built exactly as tagged, with their committed pin. Once all
 # systems build, the stable branch is fast-forwarded to the tag so that
@@ -37,14 +35,6 @@ on:
       - 'scripts/npm-command.mjs'
       - 'scripts/release-packages.mjs'
       - 'scripts/package-workspaces.mjs'
-  workflow_run:
-    workflows:
-      - Publish Model Catalog
-    types:
-      - completed
-  # Catches packaging drift from changes pushed to main without a pull request.
-  schedule:
-    - cron: '43 5 * * *'
   workflow_dispatch:
 
 permissions: {}
@@ -55,7 +45,6 @@ concurrency:
 
 jobs:
   pin:
-    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -88,14 +77,12 @@ jobs:
           else
             echo "updated=true" >> "${GITHUB_OUTPUT}"
             if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-              echo "::warning::The model catalog pin on main is stale; this build uses ${revision}. The pin is refreshed on main after pi.dev publishes a catalog."
+              echo "::warning::The model catalog pin on main is stale; this build uses ${revision}. Run npm run update:model-catalog-pin and commit the change to refresh this fork's pin."
             fi
           fi
 
   build:
     needs: pin
-    # After a catalog publication, only build when the pin changed.
-    if: ${{ github.event_name != 'workflow_run' || needs.pin.outputs.updated == 'true' }}
     strategy:
       fail-fast: false
       matrix:

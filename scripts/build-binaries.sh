@@ -4,12 +4,13 @@
 # Mirrors .github/workflows/build-binaries.yml
 #
 # Usage:
-#   ./scripts/build-binaries.sh [--skip-install] [--skip-build] [--offline-model-data] [--platform <platform>] [--out <dir>]
+#   ./scripts/build-binaries.sh [--skip-install] [--skip-build] [--offline-model-data] [--no-archive] [--platform <platform>] [--out <dir>]
 #
 # Options:
 #   --skip-install       Skip npm ci
 #   --skip-build         Skip the package build
 #   --offline-model-data Build with bundled model data instead of refreshing it
+#   --no-archive         Skip creating and re-extracting release .tar.gz archives
 #   --platform <name>    Build only for specified platform (darwin-arm64, linux-x64, linux-arm64)
 #   --out <dir>          Output directory (default: packages/coding-agent/binaries)
 #
@@ -26,6 +27,7 @@ cd "$(dirname "$0")/.."
 SKIP_INSTALL=false
 SKIP_BUILD=false
 OFFLINE_MODEL_DATA=false
+NO_ARCHIVE=false
 PLATFORM=""
 OUTPUT_DIR=""
 
@@ -37,6 +39,7 @@ while [[ $# -gt 0 ]]; do
                 '--skip-install       Skip npm ci' \
                 '--skip-build         Skip the package build' \
                 '--offline-model-data Use bundled model data' \
+                '--no-archive         Skip creating and re-extracting .tar.gz archives' \
                 '--platform <name>    Build darwin-arm64, linux-x64, or linux-arm64' \
                 '--out <dir>          Output directory (its contents are replaced)' \
                 'Example: ./scripts/build-binaries.sh --platform darwin-arm64 --offline-model-data' \
@@ -53,6 +56,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --offline-model-data)
             OFFLINE_MODEL_DATA=true
+            shift
+            ;;
+        --no-archive)
+            NO_ARCHIVE=true
             shift
             ;;
         --platform)
@@ -166,26 +173,30 @@ for platform in "${PLATFORMS[@]}"; do
     cp -R "../tui/$native_path/$native_platform" "$OUTPUT_DIR/$platform/$native_path/"
 done
 
-# Create archives
-cd "$OUTPUT_DIR"
+if [[ "$NO_ARCHIVE" == "false" ]]; then
+    # Create archives
+    cd "$OUTPUT_DIR"
 
-for platform in "${PLATFORMS[@]}"; do
-    # Use a wrapper directory for mise compatibility.
-    echo "Creating pi-$platform.tar.gz..."
-    mv "$platform" pi && tar -czf pi-$platform.tar.gz pi && mv pi "$platform"
-done
+    for platform in "${PLATFORMS[@]}"; do
+        # Use a wrapper directory for mise compatibility.
+        echo "Creating pi-$platform.tar.gz..."
+        mv "$platform" pi && tar -czf pi-$platform.tar.gz pi && mv pi "$platform"
+    done
 
-# Extract archives for easy local testing
-echo "==> Extracting archives for testing..."
-for platform in "${PLATFORMS[@]}"; do
-    rm -rf "$platform"
-    tar -xzf pi-$platform.tar.gz && mv pi "$platform"
-done
+    # Extract archives for easy local testing
+    echo "==> Extracting archives for testing..."
+    for platform in "${PLATFORMS[@]}"; do
+        rm -rf "$platform"
+        tar -xzf pi-$platform.tar.gz && mv pi "$platform"
+    done
+fi
 
 echo ""
 echo "==> Build complete!"
-echo "Archives available in $OUTPUT_DIR/"
-ls -lh *.tar.gz 2>/dev/null || true
+if [[ "$NO_ARCHIVE" == "false" ]]; then
+    echo "Archives available in $OUTPUT_DIR/"
+    ls -lh *.tar.gz 2>/dev/null || true
+fi
 echo ""
 echo "Extracted directories for testing:"
 for platform in "${PLATFORMS[@]}"; do

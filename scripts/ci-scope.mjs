@@ -1,8 +1,11 @@
 #!/usr/bin/env node
 
-// Decide whether `.github/workflows/ci.yml` needs `macos-restart-background`.
-// Every Linux job always runs; this script skips only the macOS job when all
-// changed paths are outside its macOS process/PTY/socket/case-aliased-build surface.
+// Decide CI scope for `.github/workflows/ci.yml`:
+// - `macos-required`: whether `macos-restart-background` must run; false only when
+//   every changed path sits outside macOS process/PTY/socket/case-aliased surfaces.
+// - `docs-only`: true only when every changed path is pure documentation/notes;
+//   `.github/workflows/ci.yml` skips `test` and `mcp-conformance` (only `build-check`
+//   runs), so never add executable code, schemas, or extension sources here.
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
@@ -12,9 +15,11 @@ const help = `Usage:
   node scripts/ci-scope.mjs --event pull_request|push|workflow_dispatch [--base SHA --head SHA]
 
 Compare immutable Git commits (the merge base on pull_request), print JSON,
-and write macos-required=true|false to GITHUB_OUTPUT and a reason to
-GITHUB_STEP_SUMMARY when set. Any unclassified path, workspace manifest or
-tsconfig, CI workflow/script change, or manual dispatch requires macOS CI.
+and write macos-required=true|false and docs-only=true|false to GITHUB_OUTPUT
+plus a reason to GITHUB_STEP_SUMMARY when set. When docs-only=true, ci.yml
+skips test and mcp-conformance and runs only build-check. Any unclassified
+path, workspace manifest or tsconfig, CI workflow/script change, or manual
+dispatch requires full macOS CI and sets docs-only=false.
 
 Options:
   --event  GitHub event name (pull_request, push, workflow_dispatch)
@@ -36,21 +41,31 @@ const git = (...args) =>
 
 const isWorkspaceConfig = (path) => /(^|\/)(package(-lock)?\.json|tsconfig[^/]*\.json)$/.test(path);
 
+const isDocsOnlyPath = (path) =>
+	!isWorkspaceConfig(path) &&
+	(ROOT_DOC_FILES.has(path) ||
+		path.startsWith("docs/") ||
+		path.startsWith(".pi/notes/") ||
+		/^packages\/(?!coding-agent\/)[^/]+\/README\.md$/.test(path) ||
+		/^packages\/[^/]+\/(CHANGELOG\.md|containerization\.md)$/.test(path) ||
+		/^packages\/(?!coding-agent\/|chord\/)[^/]+\/docs\//.test(path) ||
+		/^packages\/[^/]+\/THIRD_PARTY_NOTICES\//.test(path) ||
+		path === "packages/tui/native/darwin/README.md" ||
+		/^packages\/chord\/src\/.+\/README\.md$/.test(path));
+
 const fastPaths = [
 	[
 		"documentation and non-CI metadata",
 		(path) =>
-			!isWorkspaceConfig(path) &&
-			(ROOT_DOC_FILES.has(path) ||
-				path.startsWith("docs/") ||
-				path.startsWith(".pi/") ||
-				path === ".github/APPROVED_CONTRIBUTORS" ||
-				path.startsWith(".github/ISSUE_TEMPLATE/") ||
-				(path.startsWith(".github/workflows/") && path !== ".github/workflows/ci.yml") ||
-				/^packages\/[^/]+\/(README\.md|CHANGELOG\.md|containerization\.md)$/.test(path) ||
-				/^packages\/[^/]+\/(docs|THIRD_PARTY_NOTICES|schemas)\//.test(path) ||
-				path === "packages/tui/native/darwin/README.md" ||
-				/^packages\/chord\/src\/.+\/README\.md$/.test(path)),
+			isDocsOnlyPath(path) ||
+			(!isWorkspaceConfig(path) &&
+				(path === ".github/APPROVED_CONTRIBUTORS" ||
+					path.startsWith(".github/ISSUE_TEMPLATE/") ||
+					path.startsWith(".pi/") ||
+					path === "packages/coding-agent/README.md" ||
+					(path.startsWith(".github/workflows/") && path !== ".github/workflows/ci.yml") ||
+					/^packages\/[^/]+\/(docs|THIRD_PARTY_NOTICES)\//.test(path) ||
+					/^packages\/[^/]+\/schemas\//.test(path))),
 	],
 	[
 		"isolated packages",
@@ -90,6 +105,7 @@ function resolveScope({ event, base, head }) {
 	if (event === "workflow_dispatch") {
 		return {
 			macosRequired: true,
+			docsOnly: false,
 			reason: "Manual dispatch runs macos-restart-background.",
 			files: [],
 		};
@@ -104,6 +120,7 @@ function resolveScope({ event, base, head }) {
 	if (event === "push" && base === ZERO_SHA) {
 		return {
 			macosRequired: true,
+			docsOnly: false,
 			reason: "Branch creation push has no previous commit to compare.",
 			files: [],
 		};
@@ -112,6 +129,7 @@ function resolveScope({ event, base, head }) {
 	if (!hasCommit(base)) {
 		return {
 			macosRequired: true,
+			docsOnly: false,
 			reason: "Base commit is not in local history; running macos-restart-background by default.",
 			files: [],
 		};
@@ -123,6 +141,7 @@ function resolveScope({ event, base, head }) {
 		if (mergeBase.status !== 0) {
 			return {
 				macosRequired: true,
+				docsOnly: false,
 				reason: "Pull request has no merge base with the target branch.",
 				files: [],
 			};
@@ -135,6 +154,7 @@ function resolveScope({ event, base, head }) {
 	if (files.length === 0) {
 		return {
 			macosRequired: true,
+			docsOnly: false,
 			reason: "No changed paths between compared commits; running macos-restart-background by default.",
 			files,
 		};
@@ -146,14 +166,17 @@ function resolveScope({ event, base, head }) {
 		const suffix = requiredPaths.length > 10 ? ` (+${requiredPaths.length - 10} more)` : "";
 		return {
 			macosRequired: true,
+			docsOnly: false,
 			reason: `Default rule: these changed paths require macos-restart-background: ${preview}${suffix}.`,
 			files,
 		};
 	}
 
 	const applied = fastPaths.filter(([, matches]) => files.some(matches)).map(([name]) => name);
+	const docsOnly = files.every(isDocsOnlyPath);
 	return {
 		macosRequired: false,
+		docsOnly,
 		reason: `Skipping macos-restart-background; every changed path is on a fast path: ${applied.join("; ")}.`,
 		files,
 	};
@@ -177,12 +200,12 @@ try {
 		}
 		const plan = resolveScope(values);
 		if (process.env.GITHUB_OUTPUT) {
-			appendFileSync(process.env.GITHUB_OUTPUT, `macos-required=${plan.macosRequired}\n`);
+			appendFileSync(process.env.GITHUB_OUTPUT, `macos-required=${plan.macosRequired}\ndocs-only=${plan.docsOnly}\n`);
 		}
 		if (process.env.GITHUB_STEP_SUMMARY) {
 			appendFileSync(
 				process.env.GITHUB_STEP_SUMMARY,
-				`macOS restart/background CI required: **${plan.macosRequired}**. ${plan.reason}\n`,
+				`macOS restart/background CI required: **${plan.macosRequired}** (docs-only: **${plan.docsOnly}**). ${plan.reason}\n`,
 			);
 		}
 		console.log(JSON.stringify(plan, null, 2));
