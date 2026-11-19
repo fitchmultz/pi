@@ -634,9 +634,9 @@ The kit (`packages/chord/src/node/app`) assumes one owner today. These changes m
    // GET  /_chord/recover             the page: lists the app's candidates, or "create an admin" when there are none
    // POST /_chord/recover            { token, choice } -> a browser session for the chosen principal
    export type RecoveryProvider = {
-     candidates(ctx: Ctx): Promise<readonly { readonly id: string; readonly label: string }[]>;
-     /** Signs in `choice` (an existing user, or a new admin named `name`); returns the principal to issue for. */
-     recover(choice: { readonly user: string } | { readonly create: string }, ctx: Ctx): Promise<Principal>;
+   	candidates(ctx: Ctx): Promise<readonly { readonly id: string; readonly label: string }[]>;
+   	/** Signs in `choice` (an existing user, or a new admin named `name`); returns the principal to issue for. */
+   	recover(choice: { readonly user: string } | { readonly create: string }, ctx: Ctx): Promise<Principal>;
    };
    export const Recovery = defineRegistry<RecoveryProvider, RecoveryProvider | undefined>("chord.app.recovery", { version: 1 });
    ```

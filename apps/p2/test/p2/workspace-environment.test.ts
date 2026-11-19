@@ -102,9 +102,7 @@ test(
 			const root = join(directory, "small");
 			await mkdir(join(root, "a/b"), { recursive: true });
 			await mkdir(join(root, "home/other"), { recursive: true });
-			// Native FileChange notifications may be spurious; snapshots isolate which paths the workspace covers.
-			const watch = { mode: "polling" as const, pollIntervalMs: 100 };
-			const workspace = new Workspace(new NodeExecutionEnv({ cwd: root, watch }));
+			const workspace = new Workspace(new NodeExecutionEnv({ cwd: root }));
 			let changes = 0;
 			const watcher = await workspace.watch(() => changes++, context);
 			assert(watcher);
@@ -120,7 +118,10 @@ test(
 
 			const large = join(directory, "large");
 			for (let index = 0; index <= 2000; index++) await mkdir(join(large, `d${index}`), { recursive: true });
-			const big = new Workspace(new NodeExecutionEnv({ cwd: large, watch }));
+			// Polling isolates watch scope from delayed macOS FSEvents for the 2,001 directories just created.
+			const big = new Workspace(
+				new NodeExecutionEnv({ cwd: large, watch: { mode: "polling", pollIntervalMs: 100 } }),
+			);
 			let bigChanges = 0;
 			const bigWatcher = await big.watch(() => bigChanges++, context);
 			assert(bigWatcher);

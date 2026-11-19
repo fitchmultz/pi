@@ -54,8 +54,8 @@ All on the Session's line (one commit at a time), as today.
 
    ```ts
    type CommitPublication =
-       | { readonly kind: "stored"; readonly seq: Seq; readonly changes: readonly CommitChange[] }               // as today
-       | { readonly kind: "memory"; readonly after: Seq; readonly changes: readonly DocumentCommitChange[] };   // held
+   	| { readonly kind: "stored"; readonly seq: Seq; readonly changes: readonly CommitChange[] }               // as today
+   	| { readonly kind: "memory"; readonly after: Seq; readonly changes: readonly DocumentCommitChange[] };   // held
    ```
 
    A held commit only ever contains document changes, hence `DocumentCommitChange`; `after` is the last stored seq.
