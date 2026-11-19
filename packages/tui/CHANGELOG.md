@@ -36,6 +36,7 @@
 - Fixed a fullscreen text-selection drag staying active when a component handled its release, such as an overlay opened during the drag. Its auto-scroll kept scrolling the transcript with no button held. The primary button's release now ends the drag whichever component handles it.
 - Fixed `wrapTextWithAnsi()` adding a blank row after a line that fills the width when a space follows it and then a word longer than the width, or nothing else on that line. This affected text with an active style or hyperlink and, in a fullscreen frame, all `Text` and `Markdown` text.
 - Fixed fullscreen rendering and `Loader` animation slowing or stopping when the terminal loses focus.
+- Fixed Markdown OSC 8 linkification swallowing trailing CJK punctuation, inline codespans calling `theme.code()` multiple times (duplicating theme delimiters), fullscreen selection copies miscomputing block offsets after HTML comments containing matching text, and `sliceWithWidth()`'s ASCII fast path dropping or leaking selection source markers across sliced overlay rows.
 
 ## [1.5.2] - 2026-11-10
 

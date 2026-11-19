@@ -1446,9 +1446,17 @@ export function sliceWithWidth(
 			const from = Math.max(0, startCol - currentCol);
 			const to = Math.min(text.length, endCol - currentCol);
 			if (to > from) {
+				source.advance(from);
+				if (!started) {
+					result += source.marker;
+					started = true;
+				}
 				result += pendingAnsi + text.slice(from, to);
 				pendingAnsi = "";
 				resultWidth += to - from;
+				source.advance(to - from);
+			} else {
+				source.advance(text.length);
 			}
 			currentCol += text.length;
 			i = textEnd;

@@ -6,9 +6,11 @@ import { Box } from "../src/components/box.ts";
 import { HStack } from "../src/components/h-stack.ts";
 import { Markdown } from "../src/components/markdown.ts";
 import { Text } from "../src/components/text.ts";
+import { SELECTION_SOURCE_END } from "../src/selection-markers.ts";
+import { copySelectionSource, renderForSelectionReader } from "../src/selection-source.ts";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
-import { visibleWidth } from "../src/utils.ts";
+import { sliceWithWidth, visibleWidth } from "../src/utils.ts";
 import { defaultMarkdownTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -331,6 +333,22 @@ describe("source-aware fullscreen selection", () => {
 			width: 100,
 		},
 		{
+			name: "paragraphs after an HTML comment containing matching text",
+			markdown: "Before.\n\n<!-- Hello -->\n\nHello\n\nWorld",
+			first: "Hello",
+			last: "World",
+			expected: "Hello\n\nWorld",
+			width: 60,
+		},
+		{
+			name: "partial paragraphs after a leading HTML comment containing matching text",
+			markdown: "<!-- Hello -->\n\nHello\n\nWorld",
+			first: "Hello",
+			last: "Wor",
+			expected: "Hello\n\nWor",
+			width: 60,
+		},
+		{
 			name: "only a paragraph before an unselected empty table",
 			markdown: "Intro\n\n|  |\n| --- |\n|  |",
 			first: "Intro",
@@ -513,6 +531,78 @@ describe("source-aware fullscreen selection", () => {
 			} finally {
 				tui.stop();
 			}
+		}
+	});
+
+	it("preserves selection sources across sliceWithWidth ASCII fast-path slices", () => {
+		// Pure ASCII line sliced at startCol = 0 breaking at endCol must close with SELECTION_SOURCE_END
+		// so trailing text on the same composited row does not inherit the open source run.
+		const asciiLine = renderForSelectionReader(() =>
+			new Markdown("before **world** after", 0, 0, defaultMarkdownTheme).render(40),
+		)[0];
+		const prefixSlice = sliceWithWidth(asciiLine, 0, 12, true);
+		assert.ok(prefixSlice.text.endsWith(SELECTION_SOURCE_END));
+		assert.equal(copySelectionSource([`${prefixSlice.text} plain`], [{ row: 0, start: 13, end: 18 }]), "plain");
+
+		// Pure ASCII slice with startCol > 0 must emit source.marker at the sliced offset and close cleanly.
+		const midSlice = sliceWithWidth(asciiLine, 7, 5, true);
+		assert.ok(midSlice.text.endsWith(SELECTION_SOURCE_END));
+		assert.equal(copySelectionSource([midSlice.text], [{ row: 0, start: 0, end: 5 }]), "**world**");
+
+		// ASCII preceding non-ASCII in the same run must advance the source offset before the non-ASCII text.
+		const mixedLine = renderForSelectionReader(() =>
+			new Markdown("hello **café** world", 0, 0, defaultMarkdownTheme).render(40),
+		)[0];
+		const mixedSlice = sliceWithWidth(mixedLine, 6, 4, true);
+		assert.equal(copySelectionSource([mixedSlice.text], [{ row: 0, start: 0, end: 4 }]), "**café**");
+	});
+
+	it("keeps overlay and base text selection sources isolated on pure ASCII overlay rows", async () => {
+		const terminal = new VirtualTerminal(30, 6);
+		let copied: string | undefined;
+		const tui = new TuiAltScreen(terminal, undefined, undefined, {
+			copySelection: async (text) => {
+				copied = text;
+				return true;
+			},
+		});
+		// Base row has no selection source markers of its own; an overlay that renders wider than its declared width
+		// is truncated mid-bold-run by compositeOverlays -> sliceWithWidth, which must close the run before base text.
+		tui.addChild({ render: () => ["0123456789abcdefghij0123456789"], invalidate() {} });
+		const wideMarkdown = new Markdown("**overlay** text", 0, 0, defaultMarkdownTheme);
+		tui.showOverlay(
+			{
+				render: () => wideMarkdown.render(40),
+				invalidate: () => wideMarkdown.invalidate(),
+			},
+			{
+				width: 7,
+				anchor: "top-left",
+				offsetX: 4,
+				offsetY: 0,
+			},
+		);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			const row = terminal.getViewport()[0];
+			assert.ok(row.includes("overlay"), row);
+			// Select inside the truncated ASCII overlay (cols 4..10 = "overlay")
+			terminal.sendInput("\x1b[<0;5;1M");
+			terminal.sendInput("\x1b[<32;11;1M");
+			terminal.sendInput("\x1b[<0;11;1m");
+			await terminal.waitForRender();
+			assert.equal(copied, "**overlay**");
+
+			// Select base text to the right of the overlay (cols 15..20 = "fghij0")
+			copied = undefined;
+			terminal.sendInput("\x1b[<0;16;1M");
+			terminal.sendInput("\x1b[<32;21;1M");
+			terminal.sendInput("\x1b[<0;21;1m");
+			await terminal.waitForRender();
+			assert.equal(copied, "fghij0");
+		} finally {
+			tui.stop();
 		}
 	});
 });
