@@ -6,7 +6,8 @@
  * `deferred` exposure) and loads the good matches, so they are declared for the next model call. It
  * lists weaker matches without loading them, and says when the query names a tool that is already
  * active or that it cannot load. Loading goes through the active tool set, so it is recorded in the
- * transcript like any other tool change and survives `/tree`, resume, and fork on that branch.
+ * transcript like any other tool change and survives `/tree`, resume, and fork on that branch until
+ * a compaction or context rollover prunes idle loaded tools back to deferred.
  */
 
 import { resolveSchemaRef } from "@earendil-works/pi-codemode/declarations";

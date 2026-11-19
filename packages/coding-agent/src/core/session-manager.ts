@@ -151,10 +151,12 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	 */
 	systemMessage?: SystemMessage;
 	/**
-	 * Tools that differ from the list in `systemMessage` at this compaction boundary. It follows
-	 * `systemMessage` in the compacted context and carries tool changes only. Absent when the
-	 * tools did not change, and with a provider summary block: `providerSummary` then records the
-	 * tools that the summarized messages changed, and later tool changes stay among the kept entries.
+	 * Tool changes carried by this compaction entry. On standard compactions, it follows
+	 * `systemMessage` in the compacted context and lists tools that differ from `systemMessage`
+	 * (excluding any idle `tool_search`-loaded tools pruned at this boundary). On entries with a
+	 * provider summary block, `providerSummary` records summarized tool changes and `toolUpdate`
+	 * is present only when idle search-loaded tools were pruned, carrying only `toolsRemoved`
+	 * and projected after `compactionSummary`. Absent when no net changes remain.
 	 */
 	toolUpdate?: SystemMessage;
 	/** Provider-written summary block requested with this compaction, and the record of that request. */
@@ -535,8 +537,8 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
  * of `messages`, unchanged, and `toolUpdate` restates the tools that differ from it. A context
  * that is compacted again keeps the same list, and its update keeps the definitions it already had
  * in their order, followed by the newer ones. The prompt text and sections of `systemMessage` are
- * the current ones. Replaying both messages gives the prompt and the tools, in the same order,
- * that replaying every system message of `messages` gives.
+ * the current ones. Replaying both messages gives the prompt and the post-compaction active tools
+ * in order (matching every system message of `messages` minus any `prunedToolNames`).
  *
  * The first system message is not always the first message: a message that an extension sent
  * before the first prompt is stored ahead of the system message that the first prompt declares.
@@ -544,12 +546,16 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 function getCompactionSystemState(
 	messages: AgentMessage[],
 	timestamp: number,
+	prunedToolNames?: ReadonlySet<string>,
 ): Pick<CompactionEntry, "systemMessage" | "toolUpdate"> {
 	const leading = messages.find((message): message is SystemMessage => message.role === "system");
 	const current = getCurrentSystemMessage(messages);
 	// Both are missing only when the context has no system message.
 	if (!leading || !current) return {};
-	const { toolsAdded, toolsRemoved } = getNetToolChanges(leading.toolsAdded ?? [], current.toolsAdded ?? []);
+	const currentTools = prunedToolNames?.size
+		? (current.toolsAdded ?? []).filter((tool) => !prunedToolNames.has(tool.name))
+		: (current.toolsAdded ?? []);
+	const { toolsAdded, toolsRemoved } = getNetToolChanges(leading.toolsAdded ?? [], currentTools);
 	return {
 		systemMessage: {
 			role: "system",
@@ -624,14 +630,18 @@ export function getMessagesBeforeKept(
  * `systemMessage` is the leading system message of the context before the compaction, unchanged:
  * it keeps the first tool list, as {@link getCompactionSystemState} does, and also the prompt it
  * had, where that function stores the current one. Tool changes among the kept entries stay in
- * place, so the entry has no `toolUpdate`; its `providerSummary` names the tools that the
- * summarized messages changed.
+ * place, and `providerSummary` names the tools that the summarized messages changed. When
+ * compaction prunes idle search-loaded tools, `toolUpdate` records their `toolsRemoved` after
+ * the compaction summary so the signed prefix stays unchanged while the pruned loadout is
+ * durable immediately across resume and tree navigation.
  */
 function getSummaryBlockSystemState(
 	projection: SessionProjection,
 	firstKeptEntryId: string | null,
 	providerSummary: CompactionProviderSummary,
-): Pick<CompactionEntry, "systemMessage" | "providerSummary"> {
+	timestamp: number,
+	prunedToolNames?: ReadonlySet<string>,
+): Pick<CompactionEntry, "systemMessage" | "providerSummary" | "toolUpdate"> {
 	const lead = getInitialSystemMessage(projection.messages);
 	const summarized = getMessagesBeforeKept(projection, firstKeptEntryId);
 	if (!lead || !summarized)
@@ -639,6 +649,11 @@ function getSummaryBlockSystemState(
 	// The context before the compaction may itself start with an earlier block.
 	const { providerSummary: _earlierBlock, ...systemMessage } = lead;
 	const { toolsAdded, toolsRemoved } = getToolStateChanges(lead.toolsAdded ?? [], getCurrentTools(summarized));
+	const prunedRemovals = prunedToolNames?.size
+		? getCurrentTools(projection.messages)
+				.filter((tool) => prunedToolNames.has(tool.name))
+				.map((tool) => ({ name: tool.name }))
+		: [];
 	return {
 		systemMessage,
 		providerSummary: {
@@ -646,6 +661,16 @@ function getSummaryBlockSystemState(
 			...(toolsAdded.length > 0 ? { toolsAdded } : {}),
 			...(toolsRemoved.length > 0 ? { toolsRemoved } : {}),
 		},
+		...(prunedRemovals.length > 0
+			? {
+					toolUpdate: {
+						role: "system",
+						content: "",
+						toolsRemoved: prunedRemovals,
+						timestamp,
+					},
+				}
+			: {}),
 	};
 }
 
@@ -779,8 +804,9 @@ function projectContextEntries(
 
 /**
  * Project a context that starts with a provider summary block: the leading system message with the
- * block, the tools the summarized conversation changed, the kept entries, the summary, then the
- * entries after the compaction.
+ * block, the tools the summarized conversation changed, the kept entries, the summary (followed by
+ * any post-summary `toolUpdate` pruning idle search-loaded tools), then the entries after the
+ * compaction.
  */
 function projectSummaryBlockEntries(
 	compaction: SummaryBlockEntry,
@@ -818,6 +844,9 @@ function projectSummaryBlockEntries(
 		if (!keptStarted) {
 			messages = messages.filter((message) => message.role !== "system");
 			keptStarted = messages.length > 0;
+		}
+		if (sourceEntry.type === "compaction" && sourceEntry.providerSummary?.block && sourceEntry.toolUpdate) {
+			messages.push(sourceEntry.toolUpdate);
 		}
 		return { sourceEntry, messages };
 	});
@@ -1750,6 +1779,7 @@ export class SessionManager {
 		fromHook?: boolean,
 		usage?: Usage,
 		providerSummary?: CompactionProviderSummary,
+		prunedToolNames?: ReadonlySet<string>,
 	): string {
 		const timestamp = new Date().toISOString();
 		const projection = this.buildSessionProjection();
@@ -1766,9 +1796,15 @@ export class SessionManager {
 			usage,
 			fromHook,
 			...(providerSummary?.block
-				? getSummaryBlockSystemState(projection, firstKeptEntryId, providerSummary)
+				? getSummaryBlockSystemState(
+						projection,
+						firstKeptEntryId,
+						providerSummary,
+						new Date(timestamp).getTime(),
+						prunedToolNames,
+					)
 				: {
-						...getCompactionSystemState(projection.messages, new Date(timestamp).getTime()),
+						...getCompactionSystemState(projection.messages, new Date(timestamp).getTime(), prunedToolNames),
 						...(providerSummary ? { providerSummary } : {}),
 					}),
 		};

@@ -183,7 +183,7 @@ Scripts run in a QuickJS sandbox and reach the other tools through `tools.<name>
 
 ### Tool search
 
-`tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`. It uses the same ranking as `searchTools()` over the tools with `codemode` or `deferred` exposure and declares the good matches for the next model call, up to `limit` (default 8). Loaded tools are recorded in the session like other tool changes, so they stay declared on that branch.
+`tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`. It uses the same ranking as `searchTools()` over the tools with `codemode` or `deferred` exposure and declares the good matches for the next model call, up to `limit` (default 8). Loaded tools are recorded in the session like other tool changes, staying declared on that branch until a compaction or context rollover prunes idle ones back to deferred (see [Compaction](compaction.md#how-it-works)).
 
 A tool is a good match when one of these holds:
 

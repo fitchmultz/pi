@@ -14,7 +14,7 @@ import { estimateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CompactionEntry } from "../../src/core/session-manager.ts";
-import type { ExtensionAPI } from "../../src/index.ts";
+import { createToolSearchExtension, type ExtensionAPI } from "../../src/index.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 const block: JsonObject = { type: "compaction", content: "Read the task note.", signature: "EuYBCkQY" };
@@ -705,4 +705,115 @@ describe("AgentSession provider summary block", () => {
 			}
 		},
 	);
+
+	it("preserves providerSummary.toolsAdded, persists post-summary toolsRemoved across immediate resume, and restores on tree navigation", async () => {
+		const idleTool = {
+			name: "idle_search_tool",
+			label: "Idle Search Tool",
+			description: "Search-loaded tool that is never called",
+			exposure: "deferred" as const,
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text" as const, text: "idle ok" }], details: undefined }),
+		};
+		let compactNext = false;
+		const harness = await createHarness({
+			initialActiveToolNames: ["tool_search"],
+			tools: [lookup],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				createToolSearchExtension(),
+				(pi) => {
+					pi.registerTool(idleTool);
+					pi.on("turn_end", (event) => {
+						if (!compactNext) return;
+						compactNext = false;
+						const firstKept = event.context.contextEntries.findLast(
+							(entry) => entry.sourceEntry.type === "message" && entry.sourceEntry.message.role === "assistant",
+						)?.sourceEntry.id;
+						return {
+							entries: [
+								{
+									type: "compaction",
+									summary: "Rollover with signed summary block.",
+									firstKeptEntryId: firstKept ?? null,
+									providerSummary: {},
+								},
+							],
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		useSummaryModel(harness);
+
+		let nextTurnMessages: Message[] = [];
+		harness.setResponses([
+			// Turn 1: load idle_search_tool via tool_search, never call it.
+			fauxAssistantMessage(fauxToolCall("tool_search", { query: "idle search tool" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("loaded idle tool"),
+			// Turn 2: ordinary reply; turn_end triggers compaction with providerSummary block keeping this assistant reply.
+			fauxAssistantMessage("kept assistant reply"),
+			blockReply(harness),
+			// Turn 3: capture outgoing messages after rollover.
+			(context) => {
+				nextTurnMessages = context.messages;
+				return fauxAssistantMessage("after rollover");
+			},
+		]);
+
+		await harness.session.prompt("load idle tool");
+		expect(harness.session.getActiveToolNames()).toContain("idle_search_tool");
+		const preCompactionLeafId = harness.sessionManager.getLeafId();
+		expect(preCompactionLeafId).toBeTruthy();
+
+		compactNext = true;
+		await harness.session.prompt("continue without calling idle tool");
+
+		const [stored] = getCompactions(harness);
+		expect(stored.providerSummary?.block).toEqual(block);
+		// Signed block reflects what was declared before firstKeptEntryId, keeping kept thinking valid.
+		expect(stored.providerSummary?.toolsAdded?.map((tool) => tool.name)).toEqual(["idle_search_tool"]);
+		// Pruned idle tool removal is persisted on toolUpdate immediately after the compaction summary.
+		expect(stored.toolUpdate?.toolsRemoved).toEqual([{ name: "idle_search_tool" }]);
+		// Active tool set immediately drops the idle search-loaded tool.
+		expect(harness.session.getActiveToolNames()).not.toContain("idle_search_tool");
+
+		// Resume immediately after compaction (before any later turn) with default transcript restore (`usesDefaultTools: true`):
+		// the pruned tool must stay unloaded and tree navigation back before compaction restores it.
+		const resumed = await createHarness({
+			sessionManager: harness.sessionManager,
+			tools: [lookup],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				createToolSearchExtension(),
+				(pi) => {
+					pi.registerTool(idleTool);
+				},
+			],
+		});
+		harnesses.push(resumed);
+		await resumed.session.bindExtensions({});
+		expect(resumed.session.getActiveToolNames()).toEqual(["tool_search"]);
+		await resumed.session.navigateTree(preCompactionLeafId!);
+		expect(resumed.session.getActiveToolNames()).toEqual(expect.arrayContaining(["tool_search", "idle_search_tool"]));
+		// Restore leaf back to the compaction entry so the next turn test runs on the compacted branch.
+		await resumed.session.navigateTree(stored.id);
+		expect(resumed.session.getActiveToolNames()).toEqual(["tool_search"]);
+
+		await harness.session.prompt("next window prompt");
+		// Next turn keeps the signed block prefix untouched and carries toolsRemoved after the compaction summary.
+		expect(getCurrentTools(nextTurnMessages).map((tool) => tool.name)).toEqual(["tool_search"]);
+		const summaryIdx = nextTurnMessages.findIndex(
+			(message) =>
+				message.role === "user" && getMessageText(message).includes("Rollover with signed summary block."),
+		);
+		const removalIdx = nextTurnMessages.findIndex(
+			(message) =>
+				message.role === "system" && message.toolsRemoved?.some((tool) => tool.name === "idle_search_tool"),
+		);
+		expect(summaryIdx).toBeGreaterThan(0);
+		expect(removalIdx).toBeGreaterThan(summaryIdx);
+	});
 });

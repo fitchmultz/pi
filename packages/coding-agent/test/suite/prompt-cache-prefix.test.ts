@@ -239,10 +239,19 @@ async function runSessionWithLoadsAndCompactions(
 		};
 		const load = (query: string) =>
 			respond(fauxAssistantMessage(fauxToolCall("tool_search", { query }), { stopReason: "toolUse" }));
+		const call = (...toolNames: string[]) =>
+			respond(
+				fauxAssistantMessage(
+					toolNames.map((name) => fauxToolCall(name, {})),
+					{ stopReason: "toolUse" },
+				),
+			);
 		h.setResponses([
 			load("inspect page"),
+			call("browse"),
 			respond(fauxAssistantMessage("loaded browse")),
 			load("download document"),
+			call("browse", "fetch_page"),
 			respond(fauxAssistantMessage("loaded fetch_page")),
 			respond(fauxAssistantMessage("continued")),
 		]);
@@ -253,7 +262,7 @@ async function runSessionWithLoadsAndCompactions(
 		await h.session.compact();
 		afterCompaction(h.session.getActiveToolNames());
 		await h.session.prompt("Continue after the second compaction");
-		expect(request).toBe(5);
+		expect(request).toBe(7);
 	} finally {
 		h.cleanup();
 	}
@@ -279,8 +288,8 @@ it("keeps the start of an Anthropic request across compactions after tools were 
 		(names) => activeAfterCompaction.push(names),
 	);
 
-	const [first, , afterFirst, , afterSecond] = captures;
-	// Loaded tools stay active across a compaction.
+	const [first, , , afterFirst, , , afterSecond] = captures;
+	// Loaded tools used in the previous window stay active across a compaction.
 	expect(activeAfterCompaction[0]).toContain("browse");
 	expect(activeAfterCompaction[1]).toEqual(expect.arrayContaining(["browse", "fetch_page"]));
 	// The request-level tool list is the first thing Anthropic caches. It never changes.
@@ -345,7 +354,7 @@ it.each([
 	const compacted: Array<{ sent: string; before: string }> = [];
 	await runSessionWithLoadsAndCompactions(
 		async (context, request) => {
-			if (request !== 2 && request !== 4) return;
+			if (request !== 3 && request !== 6) return;
 			const conversationStart = context.messages.findIndex((message) => message.role !== "system");
 			// The compacted session starts with the first tool list and the tool update.
 			expect(conversationStart).toBe(2);
