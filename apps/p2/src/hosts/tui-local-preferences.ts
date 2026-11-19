@@ -194,6 +194,7 @@ export function watchLocalPreferences(
 		}, 100);
 	};
 	arm();
+	schedule();
 	return () => {
 		closed = true;
 		clearTimeout(timer);
