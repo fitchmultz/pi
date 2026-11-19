@@ -1,6 +1,7 @@
 // Per-connection limits of Chord client sockets, as Pi Mobile's: 1 MiB frames and 4 MiB unsent output (the socket is
 // cut off).
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { after, before, describe, it } from "node:test";
 import { BACKGROUND_CONTEXT } from "@p2/app/v1";
 import type { WebSocket } from "ws";
@@ -13,9 +14,9 @@ import { clientHost, type Fixture, holdIn, startFixture } from "./helpers.ts";
 function fakeSocket() {
 	const sent: Uint8Array[] = [];
 	const callbacks: ((error?: Error) => void)[] = [];
-	const fake = {
+	const fake = Object.assign(new EventEmitter(), {
 		OPEN: 1,
-		on: () => {},
+		CLOSING: 2,
 		readyState: 1,
 		bufferedAmount: 0,
 		terminated: false,
@@ -29,7 +30,7 @@ function fakeSocket() {
 			fake.terminated = true;
 		},
 		close: () => {},
-	};
+	});
 	return {
 		fake,
 		sent,
@@ -54,6 +55,20 @@ describe("chord2 socket limits", () => {
 		fake.bufferedAmount = MAX_UNSENT_BYTES + 1;
 		socket.send(new Uint8Array(4));
 		assert.equal(fake.terminated, true);
+	});
+
+	it("preserves the close handshake on CLOSING errors and terminates on OPEN errors", () => {
+		const closing = fakeSocket();
+		limitedSocket(closing.fake as unknown as WebSocket);
+		closing.fake.readyState = closing.fake.CLOSING;
+		assert.doesNotThrow(() => closing.fake.emit("error", new Error("Max payload size exceeded")));
+		assert.equal(closing.fake.terminated, false);
+
+		const open = fakeSocket();
+		limitedSocket(open.fake as unknown as WebSocket);
+		open.fake.readyState = open.fake.OPEN;
+		assert.doesNotThrow(() => open.fake.emit("error", new Error("socket reset")));
+		assert.equal(open.fake.terminated, true);
 	});
 });
 
