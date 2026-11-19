@@ -64,6 +64,7 @@
 - Fixed Gemini `MALFORMED_FUNCTION_CALL`, `MALFORMED_RESPONSE`, and `UNEXPECTED_TOOL_CALL` finish reasons ending the turn instead of retrying within the configured retry budget.
 - Fixed model catalog generation aborting when one connection to a catalog source cannot be made or drops while the response is read; the source is now fetched once more.
 - Fixed OpenAI Codex Responses (`openai-codex-responses`) missing the prompt cache on the leading system prompt on every GPT-6.2 Astra and GPT-6.2 Sol turn. The leading system prompt is now sent inside `input` and top-level `instructions` is omitted, matching `openai-responses` and `azure-openai-responses`.
+- Fixed OpenAI Codex turns failing when the workspace rejects Fast or Ultrafast. Pi retries once with the service tier omitted and estimates cost from the tier Codex returns, or at the Standard rate if none is returned. The assistant message carries a `service_tier_fallback` diagnostic with the rejected tier.
 
 ### Removed
 

@@ -60,6 +60,7 @@ const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached";
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found";
+const SERVICE_TIER_NOT_ALLOWED_CODE = "service_tier_not_allowed";
 
 const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 	"completed",
@@ -132,6 +133,10 @@ function isRetryableError(status: number, errorText: string): boolean {
 		return true;
 	}
 	return /rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused/i.test(errorText);
+}
+
+function isNonStandardServiceTier(tier: RequestBody["service_tier"]) {
+	return tier != null && tier !== "default" && tier !== "auto";
 }
 
 function getRetryAfterDelayMs(headers: Headers): number | undefined {
@@ -233,6 +238,16 @@ function compressRequestBodyZstd(bodyJson: string): Uint8Array<ArrayBuffer> | nu
 	}
 }
 
+function encodeSSERequest(url: string, headers: Headers, bodyJson: string): Pick<RequestInit, "headers" | "body"> {
+	// Only the canonical Codex endpoint is known to accept compressed requests.
+	const compressed = url === `${DEFAULT_CODEX_BASE_URL}/codex/responses` ? compressRequestBodyZstd(bodyJson) : null;
+	if (!compressed) return { headers, body: bodyJson };
+
+	const compressedHeaders = new Headers(headers);
+	compressedHeaders.set("content-encoding", "zstd");
+	return { headers: compressedHeaders, body: compressed };
+}
+
 // ============================================================================
 // Main Stream Function
 // ============================================================================
@@ -285,7 +300,27 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				apiKey,
 				websocketRequestId,
 			);
-			const bodyJson = JSON.stringify(body);
+			let bodyJson = JSON.stringify(body);
+			const fallBackToStandardTier = (error: CodexApiError): boolean => {
+				if (
+					error.code !== SERVICE_TIER_NOT_ALLOWED_CODE ||
+					!isNonStandardServiceTier(body.service_tier) ||
+					options?.signal?.aborted ||
+					output.content.length > 0
+				) {
+					return false;
+				}
+				appendAssistantMessageDiagnostic(
+					output,
+					createAssistantMessageDiagnostic("service_tier_fallback", error, { rejectedTier: body.service_tier }),
+				);
+				// Keep the hook's payload intact. The omitted tier also prevents a second fallback.
+				const { service_tier: _rejectedTier, ...standardBody } = body;
+				body = standardBody;
+				bodyJson = JSON.stringify(body);
+				delete output.responseId;
+				return true;
+			};
 			const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
 			const transport = options?.transport || "auto";
@@ -337,6 +372,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						return;
 					} catch (error) {
 						const aborted = options?.signal?.aborted;
+						if (error instanceof CodexApiError && fallBackToStandardTier(error)) {
+							continue;
+						}
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
 						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
 						if (!aborted && previousResponseNotFound && !retriedMissingWebSocketContinuation) {
@@ -370,26 +408,17 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				}
 			}
 
-			// Compress once for the known Codex SSE endpoint, not custom endpoints whose
-			// request-encoding support is unknown. WebSockets send uncompressed JSON.
 			const sseUrl = resolveCodexUrl(model.baseUrl);
-			const compressedBody =
-				sseUrl === `${DEFAULT_CODEX_BASE_URL}/codex/responses` ? compressRequestBodyZstd(bodyJson) : null;
-			if (compressedBody) {
-				sseHeaders.set("content-encoding", "zstd");
-			}
-			const sseBody: Uint8Array<ArrayBuffer> | string = compressedBody ?? bodyJson;
+			let sseRequest = encodeSSERequest(sseUrl, sseHeaders, bodyJson);
 
-			// Fetch with retry logic for rate limits and transient errors
-			let response: Response | undefined;
-			let lastError: Error | undefined;
 			const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
-
-			for (let attempt = 0; attempt <= maxRetries; attempt++) {
+			// A tier rejection does not consume the retry budget for transient errors.
+			for (let attempt = 0; attempt <= maxRetries; ) {
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
 
+				let response: Response;
 				try {
 					const headerTimeoutSignal =
 						httpTimeoutMs !== undefined && httpTimeoutMs > 0 ? AbortSignal.timeout(httpTimeoutMs) : undefined;
@@ -397,8 +426,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					try {
 						response = await (options?.fetch ?? globalThis.fetch)(sseUrl, {
 							method: "POST",
-							headers: sseHeaders,
-							body: sseBody,
+							...sseRequest,
 							signal: combinedSignal.signal,
 						});
 					} catch (error) {
@@ -414,36 +442,39 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						model,
 					);
 
-					if (response.ok) {
-						break;
+					if (!response.ok) {
+						const errorText = await response.text();
+						if (response.status !== 400 && attempt < maxRetries && isRetryableError(response.status, errorText)) {
+							const retryAfterDelayMs = getRetryAfterDelayMs(response.headers);
+							const delayMs =
+								retryAfterDelayMs === undefined
+									? BASE_DELAY_MS * 2 ** attempt
+									: validateRetryDelayMs(retryAfterDelayMs, options);
+
+							await sleep(delayMs, options?.signal);
+							attempt++;
+							continue;
+						}
+
+						const info = parseErrorResponse(response, errorText);
+						const message = info.friendlyMessage || info.message;
+						if (response.status === 400) {
+							throw new CodexApiError(message, { code: info.code });
+						}
+						throw new Error(message);
 					}
-
-					const errorText = await response.text();
-					if (attempt < maxRetries && isRetryableError(response.status, errorText)) {
-						const retryAfterDelayMs = getRetryAfterDelayMs(response.headers);
-						const delayMs =
-							retryAfterDelayMs === undefined
-								? BASE_DELAY_MS * 2 ** attempt
-								: validateRetryDelayMs(retryAfterDelayMs, options);
-
-						await sleep(delayMs, options?.signal);
+				} catch (error) {
+					if (error instanceof CodexApiError) {
+						if (!fallBackToStandardTier(error)) throw error;
+						sseRequest = encodeSSERequest(sseUrl, sseHeaders, bodyJson);
 						continue;
 					}
-
-					// Parse error for friendly message on final attempt or non-retryable error
-					const fakeResponse = new Response(errorText, {
-						status: response.status,
-						statusText: response.statusText,
-					});
-					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
-				} catch (error) {
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
 						}
 					}
-					lastError = error instanceof Error ? error : new Error(String(error));
+					const lastError = error instanceof Error ? error : new Error(String(error));
 					// Network errors are retryable
 					if (
 						attempt < maxRetries &&
@@ -452,33 +483,44 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					) {
 						const delayMs = BASE_DELAY_MS * 2 ** attempt;
 						await sleep(delayMs, options?.signal);
+						attempt++;
 						continue;
 					}
 					throw lastError;
 				}
-			}
+				if (!response.body) {
+					throw new Error("No response body");
+				}
+				if (!startEmitted) {
+					startEmitted = true;
+					stream.push({ type: "start", partial: output });
+				}
+				try {
+					await processStream(
+						response,
+						output,
+						stream,
+						model,
+						body.service_tier,
+						grammarToolInputProperties,
+						options,
+					);
+				} catch (error) {
+					if (!(error instanceof CodexApiError) || !fallBackToStandardTier(error)) throw error;
+					sseRequest = encodeSSERequest(sseUrl, sseHeaders, bodyJson);
+					continue;
+				}
 
-			if (!response?.ok) {
-				throw lastError ?? new Error("Failed after retries");
-			}
+				if (options?.signal?.aborted) {
+					throw new Error("Request was aborted");
+				}
 
-			if (!response.body) {
-				throw new Error("No response body");
+				assertSuccessfulOutput(output);
+				stream.push({ type: "done", reason: output.stopReason, message: output });
+				stream.end();
+				return;
 			}
-
-			if (!startEmitted) {
-				startEmitted = true;
-				stream.push({ type: "start", partial: output });
-			}
-			await processStream(response, output, stream, model, grammarToolInputProperties, options);
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			assertSuccessfulOutput(output);
-			stream.push({ type: "done", reason: output.stopReason, message: output });
-			stream.end();
+			throw new Error("Failed after retries");
 		} catch (error) {
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatProviderError(normalizeProviderError(error));
@@ -633,16 +675,23 @@ async function processStream(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	model: Model<"openai-codex-responses">,
+	requestServiceTier: RequestBody["service_tier"],
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
 	await processResponsesStream(
-		mapCodexEvents(parseSSE(response, options?.signal), output, model, options?.onProviderStreamEvent),
+		mapCodexEvents(
+			parseSSE(response, options?.signal),
+			output,
+			model,
+			requestServiceTier,
+			options?.onProviderStreamEvent,
+		),
 		output,
 		stream,
 		model,
 		{
-			serviceTier: options?.serviceTier,
+			serviceTier: requestServiceTier,
 			grammarToolInputProperties,
 			resolveServiceTier: resolveCodexServiceTier,
 			applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
@@ -701,7 +750,7 @@ function isPreviousResponseNotFoundError(error: unknown): boolean {
 
 /** The typed error for a failed response; transport recovery reads its code. */
 function codexFailedResponseError(event: ResponseFailedEvent): CodexApiError {
-	const error = event.response.error;
+	const error = event.response?.error;
 	return new CodexApiError(error?.message || "Codex response failed", { code: error?.code, payload: event });
 }
 
@@ -722,6 +771,7 @@ async function* mapCodexEvents(
 	events: AsyncIterable<Record<string, unknown>>,
 	output: AssistantMessage,
 	model: Model<"openai-codex-responses">,
+	requestServiceTier: RequestBody["service_tier"],
 	onProviderStreamEvent: StreamOptions["onProviderStreamEvent"] | undefined,
 ): AsyncGenerator<ResponseStreamEvent> {
 	for await (const event of events) {
@@ -740,6 +790,14 @@ async function* mapCodexEvents(
 				code,
 				payload: event,
 			});
+		}
+
+		if (type === "response.failed" && isNonStandardServiceTier(requestServiceTier) && output.content.length === 0) {
+			const error = codexFailedResponseError(event as unknown as ResponseFailedEvent);
+			if (error.code === SERVICE_TIER_NOT_ALLOWED_CODE) {
+				// Do not record rejected-attempt metadata before a Standard retry.
+				throw error;
+			}
 		}
 
 		if (type === "response.done" || type === "response.completed" || type === "response.incomplete") {
@@ -1511,6 +1569,9 @@ async function processWebSocketStream(
 		}
 	}
 	try {
+		if (options?.signal?.aborted) {
+			throw new Error("Request was aborted");
+		}
 		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(
@@ -1518,6 +1579,7 @@ async function processWebSocketStream(
 					parseWebSocket(socket, options?.signal, idleTimeoutMs),
 					output,
 					model,
+					requestBody.service_tier,
 					options?.onProviderStreamEvent,
 				),
 				onStart,
@@ -1526,7 +1588,7 @@ async function processWebSocketStream(
 			stream,
 			model,
 			{
-				serviceTier: options?.serviceTier,
+				serviceTier: requestBody.service_tier,
 				grammarToolInputProperties,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
@@ -1565,9 +1627,12 @@ async function processWebSocketStream(
 // Error Handling
 // ============================================================================
 
-async function parseErrorResponse(response: Response): Promise<{ message: string; friendlyMessage?: string }> {
-	const raw = await response.text();
+function parseErrorResponse(
+	response: Response,
+	raw: string,
+): { message: string; code?: string; friendlyMessage?: string } {
 	let message = raw || response.statusText || "Request failed";
+	let code: string | undefined;
 	let friendlyMessage: string | undefined;
 
 	try {
@@ -1576,8 +1641,11 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 		};
 		const err = parsed?.error;
 		if (err) {
-			const code = err.code || err.type || "";
-			if (/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code) || response.status === 429) {
+			code = err.code || err.type;
+			if (
+				/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code ?? "") ||
+				response.status === 429
+			) {
 				const plan = err.plan_type ? ` (${err.plan_type.toLowerCase()} plan)` : "";
 				const mins = err.resets_at
 					? Math.max(0, Math.round((err.resets_at * 1000 - Date.now()) / 60000))
@@ -1589,7 +1657,7 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 		}
 	} catch {}
 
-	return { message, friendlyMessage };
+	return { message, code, friendlyMessage };
 }
 
 // ============================================================================
