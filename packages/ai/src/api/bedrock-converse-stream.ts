@@ -1003,12 +1003,21 @@ function convertMessages(
 	cacheRetention: CacheRetention,
 	env?: ProviderEnv,
 ): Message[] {
-	const result: Message[] = [];
+	const result: { role: ConversationRole; content: ContentBlock[] }[] = [];
 	const transformedMessages = transformMessages(
 		withoutInitialSystemMessage(context.messages),
 		model,
 		normalizeToolCallId,
 	);
+
+	function appendMessage(role: ConversationRole, content: ContentBlock[]): void {
+		const previous = result.at(-1);
+		if (previous?.role === role) {
+			for (const block of content) previous.content.push(block);
+		} else {
+			result.push({ role, content });
+		}
+	}
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const m = transformedMessages[i];
@@ -1035,7 +1044,7 @@ function convertMessages(
 					}
 					if (content.length === 0) content.push({ text: EMPTY_TEXT_PLACEHOLDER });
 				}
-				result.push({ role: ConversationRole.USER, content });
+				appendMessage(ConversationRole.USER, content);
 				break;
 			}
 			case "assistant": {
@@ -1108,10 +1117,7 @@ function convertMessages(
 				if (contentBlocks.length === 0) {
 					continue;
 				}
-				result.push({
-					role: ConversationRole.ASSISTANT,
-					content: contentBlocks,
-				});
+				appendMessage(ConversationRole.ASSISTANT, contentBlocks);
 				break;
 			}
 			case "toolResult": {
@@ -1144,7 +1150,7 @@ function convertMessages(
 				// Skip the messages we've already processed
 				i = j - 1;
 
-				result.push({ role: ConversationRole.USER, content: [...toolResults, ...errorImages] });
+				appendMessage(ConversationRole.USER, [...toolResults, ...errorImages]);
 				break;
 			}
 			default:
@@ -1152,17 +1158,14 @@ function convertMessages(
 		}
 	}
 
-	// Add cache point to the last user message for supported Claude models when caching is enabled
-	if (cacheRetention !== "none" && supportsPromptCaching(model, env) && result.length > 0) {
-		const lastMessage = result[result.length - 1];
-		if (lastMessage.role === ConversationRole.USER && lastMessage.content) {
-			(lastMessage.content as ContentBlock[]).push({
-				cachePoint: {
-					type: CachePointType.DEFAULT,
-					...(cacheRetention === "long" ? { ttl: CacheTTL.ONE_HOUR } : {}),
-				},
-			});
-		}
+	const lastMessage = result.at(-1);
+	if (lastMessage?.role === ConversationRole.USER && cacheRetention !== "none" && supportsPromptCaching(model, env)) {
+		lastMessage.content.push({
+			cachePoint: {
+				type: CachePointType.DEFAULT,
+				...(cacheRetention === "long" ? { ttl: CacheTTL.ONE_HOUR } : {}),
+			},
+		});
 	}
 
 	return result;
