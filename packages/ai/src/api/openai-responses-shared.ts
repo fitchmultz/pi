@@ -20,6 +20,7 @@ import type {
 	Api,
 	AssistantMessage,
 	ImageContent,
+	JsonObject,
 	Model,
 	StopReason,
 	StreamOptions,
@@ -32,6 +33,7 @@ import type {
 	TranscriptContext,
 	Usage,
 } from "../types.ts";
+import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -52,6 +54,9 @@ import { transformMessages } from "./transform-messages.ts";
 // =============================================================================
 // Utilities
 // =============================================================================
+
+/** Fixed request-level reasoning.effort while `configuration_update` items carry the active level. */
+export const CONFIGURATION_UPDATE_REQUEST_EFFORT = "medium";
 
 function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): string {
 	const payload: TextSignatureV1 = { v: 1, id };
@@ -507,6 +512,7 @@ export async function processResponsesStream<TApi extends Api>(
 	options?: OpenAIResponsesStreamOptions,
 ): Promise<void> {
 	let sawTerminalResponseEvent = false;
+	let recordedInputTransformations = false;
 	const outputSlots = new Map<number, ResponsesOutputSlot>();
 	// Tool calls whose output_item.done has not arrived yet.
 	const unfinishedToolCalls = new Set<ToolCall>();
@@ -632,6 +638,31 @@ export async function processResponsesStream<TApi extends Api>(
 		backfillReasoningSignatures(response?.output ?? []);
 		if (response?.id) {
 			output.responseId = response.id;
+		}
+		if (!recordedInputTransformations) {
+			const rawTransformations = (response as { input_transformations?: unknown } | undefined)
+				?.input_transformations;
+			if (Array.isArray(rawTransformations) && rawTransformations.length > 0) {
+				const transformations: JsonObject[] = [];
+				for (const item of rawTransformations) {
+					if (typeof item !== "object" || item === null) continue;
+					const record = item as Record<string, unknown>;
+					const normalized: JsonObject = {};
+					if (typeof record.type === "string") normalized.type = record.type;
+					if (typeof record.id === "string") normalized.id = record.id;
+					if (typeof record.action === "string") normalized.action = record.action;
+					if (typeof record.reason === "string") normalized.reason = record.reason;
+					transformations.push(normalized);
+				}
+				if (transformations.length > 0) {
+					recordedInputTransformations = true;
+					appendAssistantMessageDiagnostic(output, {
+						type: "openai_input_transformations",
+						timestamp: Date.now(),
+						details: { transformations },
+					});
+				}
+			}
 		}
 		if (response?.usage) {
 			const inputDetails = response.usage.input_tokens_details as

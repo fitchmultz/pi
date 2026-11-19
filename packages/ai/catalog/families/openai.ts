@@ -1,6 +1,9 @@
 // OpenAI GPT models: facts that hold on every host that serves them.
 
 import type { Api, Model, ModelCost } from "../../src/types.ts";
+
+export { OPENAI_MID_CONVO_EFFORT_MODEL_IDS } from "../../src/api/openai-prompt-cache.ts";
+
 import { type ChatModel, mergeCompat, mergeThinking } from "../define.ts";
 import { roundCost } from "../sources/models-dev.ts";
 

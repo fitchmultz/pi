@@ -67,17 +67,8 @@ describe("max thinking level", () => {
 		expect(clampThinkingLevel(model, "xhigh")).toBe("max");
 	});
 
-	it.each([
-		"gpt-5.6-sol",
-		"gpt-6-astra",
-		"gpt-6-sol",
-		"gpt-6-luna",
-		"gpt-6.1-sol",
-		"gpt-6.1-terra",
-		"gpt-6.2-astra",
-		"gpt-6.2-sol",
-	] as const)("sends max to the Codex Responses API for %s", async (modelId) => {
-		const model = getModel("openai-codex", modelId)!;
+	it("sends max directly to the Codex Responses API for gpt-5.6-sol", async () => {
+		const model = getModel("openai-codex", "gpt-5.6-sol")!;
 		const context = normalizeContext({
 			systemPrompt: "You are a helpful assistant.",
 			messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
@@ -94,5 +85,34 @@ describe("max thinking level", () => {
 		}).result();
 
 		expect(payload).toMatchObject({ reasoning: { effort: "max", summary: "auto" } });
+	});
+
+	it.each([
+		"gpt-6-astra",
+		"gpt-6-sol",
+		"gpt-6-luna",
+		"gpt-6.1-sol",
+		"gpt-6.1-terra",
+		"gpt-6.2-astra",
+		"gpt-6.2-sol",
+	] as const)("sends max via configuration_update to the Codex Responses API for %s", async (modelId) => {
+		const model = getModel("openai-codex", modelId)!;
+		const context = normalizeContext({
+			systemPrompt: "You are a helpful assistant.",
+			messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
+		});
+		let payload: { reasoning?: unknown; input?: unknown[] } | undefined;
+
+		await streamSimpleOpenAICodexResponses(model, context, {
+			apiKey: mockToken(),
+			reasoning: "max",
+			onPayload: (request) => {
+				payload = request as { reasoning?: unknown; input?: unknown[] };
+				throw new Error("payload captured");
+			},
+		}).result();
+
+		expect(payload).toMatchObject({ reasoning: { effort: "medium", summary: "auto" } });
+		expect(payload?.input?.at(-1)).toEqual({ type: "configuration_update", reasoning: { effort: "max" } });
 	});
 });

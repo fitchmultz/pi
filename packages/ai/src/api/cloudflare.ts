@@ -1,5 +1,6 @@
 import type { AnyModel } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
+import { OPENAI_MID_CONVO_EFFORT_MODEL_IDS } from "./openai-prompt-cache.ts";
 
 /** Workers AI direct endpoint. */
 export const CLOUDFLARE_WORKERS_AI_BASE_URL =
@@ -22,10 +23,11 @@ export const CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL =
 	"https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/anthropic";
 
 /**
- * Direct OpenAI models that accept `additional_tools` items, and those that accept developer messages
- * mid-conversation (`OPENAI_TOOL_SEARCH_MODEL_IDS` and `OPENAI_MID_CONVO_MODEL_IDS` in
- * catalog/families/openai.ts). Cloudflare's /openai route passes both through unchanged. The defaults
- * live here rather than only in the catalog because pi.dev overlays, published upstream without them,
+ * Direct OpenAI models that accept prefix-preserving Responses features (`OPENAI_TOOL_SEARCH_MODEL_IDS`,
+ * `OPENAI_MID_CONVO_EFFORT_MODEL_IDS`, and `OPENAI_MID_CONVO_MODEL_IDS` in catalog/families/openai.ts).
+ * Cloudflare's /openai route passes developer messages, `additional_tools`, tool search,
+ * `prompt_cache_options`, and `configuration_update` through unchanged. The defaults live here rather
+ * than only in the catalog because pi.dev overlays, published upstream without them,
  * replace generated entries. A parity test keeps these lists in sync.
  */
 const OPENAI_ADDITIONAL_TOOLS_MODEL_IDS = new Set([
@@ -94,11 +96,19 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 		model.baseUrl === CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL &&
 		OPENAI_MID_CONVO_MODEL_IDS.has(model.id)
 	) {
+		const supportsToolFeatures = OPENAI_ADDITIONAL_TOOLS_MODEL_IDS.has(model.id);
 		return {
 			...model,
 			compat: {
 				supportsMidConvoSystemMessages: true,
-				...(OPENAI_ADDITIONAL_TOOLS_MODEL_IDS.has(model.id) ? { supportsAdditionalTools: true } : {}),
+				...(supportsToolFeatures
+					? {
+							supportsAdditionalTools: true,
+							supportsToolSearch: true,
+							supportsExplicitPromptCacheMode: true,
+						}
+					: {}),
+				...(OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id) ? { supportsMidConvoEffort: true } : {}),
 				...model.compat,
 			},
 		};
