@@ -204,6 +204,7 @@
 - Fixed `tool_search` loading unrelated tools when the query is the name of a tool it does not search, such as a tool that is declared from the start. A search for `name_session` answered `name_session is already active; call it directly.` and also loaded up to `limit` tools whose descriptions mention "name" and "session", which were then declared in every later request. Such a query now loads nothing else, as the name of a loadable tool already did. The same holds for the name of a `hidden` tool or a deselected built-in tool, and for a one-word query that is the name of an active tool, such as `notes`. See [Tool search](docs/cli.md#tool-search).
 - The MCP sign-in tests that need a configured callback port ("uses the configured callback URL and scope", "adds the listening port to a callback URL without one") hold the port until just before the sign-in. They released it before starting their OAuth test server, and Linux gives a released port to the next server that asks for any port about once in 7,000 times; the sign-in then failed with `listen EADDRINUSE`.
 - Fixed `tools.tool_search({ query })` failing inside codemode. It now returns the same ranked matches as `searchTools(query)` without changing which tools are declared to the model.
+- Fixed the working spinner freezing and streamed output updating in bursts when a fullscreen terminal loses focus.
 
 ### Removed
 
