@@ -37,11 +37,12 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 ]);
 
 const RETRYABLE_RAW_STOP_REASONS = new Set([
-	// Gemini ends an HTTP 200 stream with these finish reasons when a generated
-	// tool call or reply cannot be parsed or validated; retrying the turn recovers
-	// transient malformed generations.
+	// Gemini ends an HTTP 200 stream with these finish reasons on transient
+	// malformed generations or stochastic false-positive prohibited-content blocks;
+	// retrying the turn recovers them cleanly (bounded by maxRetries).
 	"malformed_function_call",
 	"malformed_response",
+	"prohibited_content",
 	"unexpected_tool_call",
 ]);
 
@@ -150,7 +151,7 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 
 	// Gemini generation failures relayed through formatted error text or
 	// OpenAI-compatible gateways without `rawStopReason`.
-	"(?<![a-z0-9_])(?:malformed_function_call|malformed_response|unexpected_tool_call)(?![a-z0-9_])",
+	"(?<![a-z0-9_])(?:malformed_function_call|malformed_response|prohibited_content|unexpected_tool_call)(?![a-z0-9_])",
 ]);
 
 /**
