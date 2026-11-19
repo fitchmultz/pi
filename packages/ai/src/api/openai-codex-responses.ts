@@ -705,7 +705,7 @@ class CodexApiError extends Error {
 	readonly payload?: unknown;
 
 	constructor(message: string, options?: { code?: string; payload?: unknown; cause?: unknown }) {
-		super(options?.code ? `${options.code}: ${message}` : message);
+		super(message);
 		this.name = "CodexApiError";
 		this.code = options?.code;
 		this.payload = options?.payload;
@@ -751,7 +751,11 @@ function isPreviousResponseNotFoundError(error: unknown): boolean {
 /** The typed error for a failed response; transport recovery reads its code. */
 function codexFailedResponseError(event: ResponseFailedEvent): CodexApiError {
 	const error = event.response?.error;
-	return new CodexApiError(error?.message || "Codex response failed", { code: error?.code, payload: event });
+	const message = error?.message || "Codex response failed";
+	return new CodexApiError(error?.code ? `${error.code}: ${message}` : message, {
+		code: error?.code,
+		payload: event,
+	});
 }
 
 function extractCodexEventError(event: Record<string, unknown>): { code?: string; message?: string } {

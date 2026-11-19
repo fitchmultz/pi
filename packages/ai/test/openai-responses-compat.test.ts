@@ -541,6 +541,27 @@ describe("openai-responses provider defaults", () => {
 			);
 		},
 	);
+
+	it("falls back cleanly when a response.failed event omits response", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(`data: ${JSON.stringify({ type: "response.failed" })}\n\n`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			}),
+		);
+
+		const result = await streamOpenAIResponses(
+			getModel("openai", "gpt-5.4"),
+			normalizeContext({
+				systemPrompt: "sys",
+				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+			}),
+			{ apiKey: "sk-test-key" },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Unknown error (no error details in response)");
+	});
 });
 
 describe("openai-responses max_output_tokens compat", () => {

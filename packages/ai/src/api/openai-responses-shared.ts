@@ -621,13 +621,15 @@ export async function processResponsesStream<TApi extends Api>(
 		}
 	};
 	const finalizeResponse = (
-		response: Extract<
-			ResponseStreamEvent,
-			{ type: "response.completed" | "response.incomplete" | "response.failed" }
-		>["response"],
+		response:
+			| Extract<
+					ResponseStreamEvent,
+					{ type: "response.completed" | "response.incomplete" | "response.failed" }
+			  >["response"]
+			| undefined,
 	): void => {
 		sawTerminalResponseEvent = true;
-		backfillReasoningSignatures(response.output ?? []);
+		backfillReasoningSignatures(response?.output ?? []);
 		if (response?.id) {
 			output.responseId = response.id;
 		}

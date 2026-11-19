@@ -550,8 +550,14 @@ export interface AnthropicOptions extends StreamOptions {
 function mergeHeaders(...headerSources: (ProviderHeaders | undefined)[]): ProviderHeaders {
 	const merged: ProviderHeaders = { "anthropic-version": "2023-06-01" };
 	for (const headers of headerSources) {
-		if (headers) {
-			Object.assign(merged, headers);
+		if (!headers) continue;
+		for (const [name, value] of Object.entries(headers)) {
+			if (value === undefined) continue;
+			const lowerName = name.toLowerCase();
+			for (const existingName of Object.keys(merged)) {
+				if (existingName.toLowerCase() === lowerName) delete merged[existingName];
+			}
+			merged[name] = value;
 		}
 	}
 	return merged;
@@ -561,7 +567,7 @@ function hasHeader(headers: ProviderHeaders | undefined, name: string): boolean 
 	if (!headers) return false;
 	const expected = name.toLowerCase();
 	for (const [key, value] of Object.entries(headers)) {
-		if (key.toLowerCase() === expected && value !== null && value.trim().length > 0) return true;
+		if (key.toLowerCase() === expected && value != null && value.trim().length > 0) return true;
 	}
 	return false;
 }
@@ -1411,6 +1417,15 @@ function createClient(
 	// an explicit provider or request header can still replace or remove the resolved key.
 	if (apiKey && !Object.keys(defaultHeaders).some((name) => name.toLowerCase() === "x-api-key")) {
 		defaultHeaders["x-api-key"] = apiKey;
+	}
+	// Under @anthropic-ai/sdk 1.10+, validateHeaders() only recognizes explicit auth omission via
+	// `authorization: null` (not `x-api-key: null`). When neither auth header is sent, omit
+	// authorization so custom or gateway auth headers pass SDK validation.
+	if (
+		!hasHeader(defaultHeaders, "x-api-key") &&
+		!Object.keys(defaultHeaders).some((name) => name.toLowerCase() === "authorization")
+	) {
+		defaultHeaders.authorization = null;
 	}
 	const client = new PiAnthropic({
 		apiKey: null,
