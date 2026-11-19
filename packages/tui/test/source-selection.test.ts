@@ -741,6 +741,30 @@ describe("source-aware fullscreen selection", () => {
 				last: "widget",
 				expected: "different display widget",
 			},
+			{
+				name: "displayed text for an unrelated replacement line even when a sibling line is unchanged",
+				markdown: "First paragraph.\n\nSecond paragraph.",
+				transform: () => "First paragraph.\n\nTotally unrelated widget",
+				first: "Totally",
+				last: "widget",
+				expected: "Totally unrelated widget",
+			},
+			{
+				name: "mixed mapped and displayed text across a full reply with an unrelated replacement line",
+				markdown: "First paragraph.\n\nSecond paragraph.",
+				transform: () => "First paragraph.\n\nTotally unrelated widget",
+				first: "First",
+				last: "widget",
+				expected: "First paragraph.\n\n Totally unrelated widget",
+			},
+			{
+				name: "displayed text when an unrelated replacement only shares a word substring",
+				markdown: "[[OK]]",
+				transform: () => "BOOK END",
+				first: "BOOK",
+				last: "END",
+				expected: "BOOK END",
+			},
 		]) {
 			it(`copies ${name}`, async () => {
 				assert.equal(await selectTransformed(markdown, transform, first, last), expected);

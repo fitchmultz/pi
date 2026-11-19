@@ -682,16 +682,14 @@ function commonSuffixLength(a: string, b: string, maxLen: number): number {
 }
 
 function sharesWord(a: string, b: string): boolean {
-	const words = a.match(/[A-Za-z0-9]{2,}/g);
-	if (!words) return false;
-	for (const word of words) {
-		if (b.includes(word)) return true;
-	}
-	return false;
+	const aWords = a.match(/[A-Za-z0-9]{2,}/g);
+	if (!aWords) return false;
+	const bWords = new Set(b.match(/[A-Za-z0-9]{2,}/g));
+	if (bWords.size === 0) return false;
+	return aWords.some((word) => bWords.has(word));
 }
 
 interface AlignStats {
-	matchedAnchors: number;
 	deletedNonWhitespace: boolean;
 }
 
@@ -703,13 +701,12 @@ function emitGap(
 	visText: string,
 	visOffset: number,
 	stats: AlignStats,
-	allowUnanchoredAtomic: boolean,
+	hasLocalAnchor: boolean,
 ): void {
 	const prefix = commonPrefixLength(origText, visText);
 	const suffix = commonSuffixLength(origText, visText, Math.min(origText.length, visText.length) - prefix);
 	if (prefix > 0) {
 		emitMappedRange(spans, runs, visOffset, visOffset + prefix, origOffset, origOffset + prefix, false);
-		if (origText.slice(0, prefix).trim()) stats.matchedAnchors++;
 	}
 	const origRemStart = prefix;
 	const origRemEnd = origText.length - suffix;
@@ -718,7 +715,7 @@ function emitGap(
 	const origRem = origText.slice(origRemStart, origRemEnd);
 	const visRem = visText.slice(visRemStart, visRemEnd);
 	if (origRem.length > 0 && visRem.length > 0) {
-		if (allowUnanchoredAtomic || stats.matchedAnchors > 0 || sharesWord(origRem, visRem)) {
+		if (hasLocalAnchor || sharesWord(origRem, visRem)) {
 			emitMappedRange(
 				spans,
 				runs,
@@ -744,7 +741,6 @@ function emitGap(
 			origOffset + origText.length,
 			false,
 		);
-		if (origText.slice(origRemEnd).trim()) stats.matchedAnchors++;
 	}
 }
 
@@ -755,7 +751,6 @@ function alignRange(
 	transText: string,
 	transOffset: number,
 	stats: AlignStats,
-	hasOuterAnchor: boolean,
 ): void {
 	if (origText === transText) {
 		if (origText.length > 0) {
@@ -765,14 +760,12 @@ function alignRange(
 				sourceStart: origOffset,
 				sourceEnd: origOffset + origText.length,
 			});
-			if (origText.trim()) stats.matchedAnchors++;
 		}
 		return;
 	}
 	const visible = decomposeVisibleText(transText, transOffset);
 	if (visible.text === origText) {
 		emitMappedRange(spans, visible.runs, 0, visible.text.length, origOffset, origOffset + origText.length, false);
-		if (origText.trim()) stats.matchedAnchors++;
 		return;
 	}
 	const origTokens = tokenizeForAlign(origText);
@@ -781,8 +774,8 @@ function alignRange(
 		origTokens.map((t) => t.text),
 		visTokens.map((t) => t.text),
 	);
-	const anchored = hasOuterAnchor || stats.matchedAnchors > 0 || matches.length > 0;
-	if (!anchored && !sharesWord(origText, visible.text)) {
+	const hasLocalAnchor = matches.length > 0;
+	if (!hasLocalAnchor && !sharesWord(origText, visible.text)) {
 		if (origText.trim()) stats.deletedNonWhitespace = true;
 		return;
 	}
@@ -799,10 +792,9 @@ function alignRange(
 			visible.text.slice(visCursor, vt.start),
 			visCursor,
 			stats,
-			anchored,
+			hasLocalAnchor,
 		);
 		emitMappedRange(spans, visible.runs, vt.start, vt.end, origOffset + ot.start, origOffset + ot.end, false);
-		stats.matchedAnchors++;
 		origCursor = ot.end;
 		visCursor = vt.end;
 	}
@@ -814,7 +806,7 @@ function alignRange(
 		visible.text.slice(visCursor),
 		visCursor,
 		stats,
-		anchored,
+		hasLocalAnchor,
 	);
 }
 
@@ -829,23 +821,11 @@ export function alignSourceText(original: string, transformed: string): { source
 	const origLines = splitLinesWithOffsets(original);
 	const transLines = splitLinesWithOffsets(transformed);
 	const spans: SourceSpan[] = [];
-	const stats: AlignStats = { matchedAnchors: 0, deletedNonWhitespace: false };
+	const stats: AlignStats = { deletedNonWhitespace: false };
 
 	if (origLines.length === transLines.length) {
-		// Pre-check whether any line matches so localized substitutions on earlier lines still anchor cleanly.
-		const hasLineAnchor = origLines.some(
-			(line, idx) => line.text.trim().length > 0 && stripTerminalSequences(transLines[idx].text) === line.text,
-		);
 		for (let i = 0; i < origLines.length; i++) {
-			alignRange(
-				spans,
-				origLines[i].text,
-				origLines[i].start,
-				transLines[i].text,
-				transLines[i].start,
-				stats,
-				hasLineAnchor,
-			);
+			alignRange(spans, origLines[i].text, origLines[i].start, transLines[i].text, transLines[i].start, stats);
 		}
 	} else {
 		const transVisibleLines = transLines.map((line) => stripTerminalSequences(line.text));
@@ -853,7 +833,6 @@ export function alignSourceText(original: string, transformed: string): { source
 			origLines.map((line) => line.text),
 			transVisibleLines,
 		);
-		const hasLineAnchor = lineMatches.some(([oi]) => origLines[oi].text.trim().length > 0);
 		let origCursor = 0;
 		let transCursor = 0;
 		const alignHunk = (origEnd: number, transEnd: number): void => {
@@ -874,20 +853,11 @@ export function alignSourceText(original: string, transformed: string): { source
 				transformed.slice(transStartOffset, transEndOffset),
 				transStartOffset,
 				stats,
-				hasLineAnchor,
 			);
 		};
 		for (const [oi, ti] of lineMatches) {
 			alignHunk(oi, ti);
-			alignRange(
-				spans,
-				origLines[oi].text,
-				origLines[oi].start,
-				transLines[ti].text,
-				transLines[ti].start,
-				stats,
-				hasLineAnchor,
-			);
+			alignRange(spans, origLines[oi].text, origLines[oi].start, transLines[ti].text, transLines[ti].start, stats);
 			origCursor = oi + 1;
 			transCursor = ti + 1;
 		}
