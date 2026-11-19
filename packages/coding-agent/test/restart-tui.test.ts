@@ -281,8 +281,8 @@ child.on('exit', code => {process.exitCode = code ?? 1;});
 		keys(...keys: string[]) {
 			execFileSync("tmux", ["-L", socket, "send-keys", "-t", "test", ...keys]);
 		},
-		async wait(predicate: (receipts: Receipt[]) => boolean) {
-			const deadline = Date.now() + 30_000;
+		async wait(predicate: (receipts: Receipt[]) => boolean, timeoutMs = 30_000) {
+			const deadline = Date.now() + timeoutMs;
 			while (Date.now() < deadline) {
 				if (predicate(this.read())) return;
 				if (existsSync(status)) break;
@@ -377,7 +377,8 @@ export default function(pi) {
 			},
 			tuiMode: "fullscreen",
 		});
-		await f.wait((rows) => rows.some((row) => row.event === "settled"));
+		// Starts the parent TUI plus two sequential nested headless CLIs, all with JITI_FS_CACHE=0.
+		await f.wait((rows) => rows.some((row) => row.event === "settled"), 60_000);
 		const first = f.read().find((row) => row.event === "start")!;
 		expect(f.read().find((row) => row.event === "prompt")?.endpoint).toBeTruthy();
 		const journal = readFileSync(first.sessionFile, "utf8");
@@ -485,7 +486,7 @@ export default function(pi) {
 			(entry) => entry.message?.role === "user" && JSON.stringify(entry).includes("Continue after nested workers"),
 		);
 		expect(entries.indexOf(records[1]!)).toBe(continuation - 1);
-	}, 60_000);
+	}, 90_000);
 
 	it.each([false, true])(
 		"starts a replacement on the same session, continuation once, completed work never replayed; rollback=%s",
