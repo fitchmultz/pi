@@ -322,6 +322,9 @@ function buildParams(
 	const config: GenerateContentConfig = {
 		// Pi owns retry/continuation; do not silently resume inside the SDK.
 		automaticContinuation: false,
+		// gemini-4-neon intermittently omits its end-of-turn stop token and emits a raw "\nuser\n"
+		// turn header followed by a fabricated user turn and tool calls.
+		...(model.id.toLowerCase() === "gemini-4-neon" && { stopSequences: ["\nuser\n"] }),
 		...(options.temperature !== undefined && { temperature: options.temperature }),
 		...(options.maxTokens !== undefined && { maxOutputTokens: options.maxTokens }),
 		...(systemInstruction && { systemInstruction: sanitizeSurrogates(systemInstruction) }),

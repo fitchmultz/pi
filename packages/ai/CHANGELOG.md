@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- Fixed `gemini-4-neon` intermittently omitting its end-of-turn stop token and emitting a raw `\nuser\n` turn header with hallucinated follow-up turns and tool calls by sending `stopSequences: ["\nuser\n"]` on `gemini-4-neon` requests.
 - Fixed transient Google Gemini `PROHIBITED_CONTENT` finish reasons aborting turns immediately instead of retrying through Pi's retry policy.
 - Fixed tools with `strict: "prefer"` constrained sampling being sent in strict mode when their schema contains a node without a `type` (such as `items: {}`, `Type.Unknown()`, or a bare `const`), which OpenAI rejects with a 400 error; these tools now fall back to non-strict mode, and `strict: "require"` fails locally. Nodes with only an `enum` stay strict ([#12049](https://github.com/earendil-works/pi/issues/12049))
 - Fixed provider errors that report only a Node socket error code, such as `read ECONNRESET`, `write EPIPE`, or `connect ETIMEDOUT`, not being retried ([#12128](https://github.com/earendil-works/pi/issues/12128))
