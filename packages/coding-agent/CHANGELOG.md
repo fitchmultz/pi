@@ -80,7 +80,6 @@
 ### Fixed
 
 - Fixed managed restarts (`pi restart`, `/restart`, and `restartWhenStale`) restoring stale pre-restart `settings.json` snapshots over updated disk settings files; managed restarts now refresh global and trusted project settings from disk while preserving transient `applyOverrides` (falling back per scope on parse errors), and `/reload` now also refreshes setting-managed `httpProxy` environment variables. Explicit `--working-session` and SDK restores keep exact captured settings.
-||||||| 09468c418
 - Fixed `background_command` calls failing validation on strict-schema providers that forced every optional action field to be populated: `background_command` no longer requests strict JSON-schema sampling, matching Pi's other multiplexed tools.
 - Fixed `read` storing a note that the current model does not support images, which was replayed to the model as stale text after switching to a vision model. The image is still replaced with a placeholder per request for models without image input, and the read result now shows the warning in the TUI only, also when collapsed ([#12131](https://github.com/earendil-works/pi/issues/12131))
 - Fixed MCP tools loaded by `tool_search` being dropped on resume and `/reload` when an extension deactivates only its own tool at `session_start`, as pi-web-access and pi-subagents do in `toolActivation: "auto"` mode ([#11996](https://github.com/earendil-works/pi/issues/11996))
