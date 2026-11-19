@@ -26,7 +26,7 @@ Selecting a complete formatted phrase includes its Markdown syntax. For example,
 
 Copy-on-select is on by default. If you turn off `fullscreenCopyOnSelect`, use your configured copy shortcut after selecting. `/copy` still copies the entire last assistant message, including blocks with no selectable text.
 
-Source copying applies to built-in Markdown and text components. Transformed or image-rendered Markdown, unmappable text, selections across independent side-by-side components, and custom components without source information use displayed text. This includes Mermaid diagrams.
+Source copying applies to built-in Markdown and text components, including Markdown with display-only `transform` decorations (such as ANSI styling, icons, or status pills) that keep surrounding original words aligned—an in-line replacement on an anchored line maps atomically back to the original source. Image-rendered Markdown, transforms that remove non-whitespace content with no replacement or replace a whole line/block with unrelated text, unmappable text, selections across independent side-by-side components, and custom components without source information use displayed text. This includes Mermaid diagrams.
 
 Regular mode and terminal-native selection use the terminal's copying behavior.
 
