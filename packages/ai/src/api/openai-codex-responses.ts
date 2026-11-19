@@ -30,14 +30,7 @@ import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { createPendingAssistantMessage } from "../utils/pending-assistant.ts";
-import { getSystemMessageText } from "../utils/text.ts";
-import {
-	getDeclaredTools,
-	getInitialSystemMessage,
-	normalizeContext,
-	resolveTranscript,
-	resolveTranscriptTools,
-} from "../utils/transcript.ts";
+import { getDeclaredTools, normalizeContext, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { uuidv7 } from "../utils/uuid.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -547,7 +540,6 @@ function buildRequestBody(
 		}),
 	);
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
-		includeSystemPrompt: false,
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
 		supportsAdditionalTools,
@@ -555,13 +547,10 @@ function buildRequestBody(
 		toolOptions: { strict: null, supportsStrictMode, supportsOpenAIGrammarTools },
 	});
 
-	const initialSystemMessage = getInitialSystemMessage(context.messages);
-	const instructions = initialSystemMessage ? getSystemMessageText(initialSystemMessage) : "";
 	const body: RequestBody = {
 		model: model.id,
 		store: false,
 		stream: true,
-		instructions: instructions || "You are a helpful assistant.",
 		input: messages,
 		text: { verbosity: options?.textVerbosity || "low" },
 		include: ["reasoning.encrypted_content"],
@@ -1552,7 +1541,6 @@ async function processWebSocketStream(
 				normalizeContext({ messages: [output] }),
 				CODEX_TOOL_CALL_PROVIDERS,
 				{
-					includeSystemPrompt: false,
 					grammarToolInputProperties,
 				},
 			).filter((item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output");

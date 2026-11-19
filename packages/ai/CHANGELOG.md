@@ -63,6 +63,7 @@
 - Fixed Claude models with native tool changes (`supportsMidConvoToolChanges`) rewriting the cached tool list and system prompt in the first request after a compaction when tools were loaded earlier in the session. System messages that directly follow the leading one are sent in place, one block per system message, with a cache breakpoint on the last tool change, and the request-level tool list stays the session's first. On every other route `resolveTranscript()` folds their tool changes into the first tool list, so those requests start with the current tools as before. Added `getNetToolChanges()` and `countLeadingSystemMessages()`.
 - Fixed Gemini `MALFORMED_FUNCTION_CALL`, `MALFORMED_RESPONSE`, and `UNEXPECTED_TOOL_CALL` finish reasons ending the turn instead of retrying within the configured retry budget.
 - Fixed model catalog generation aborting when one connection to a catalog source cannot be made or drops while the response is read; the source is now fetched once more.
+- Fixed OpenAI Codex Responses (`openai-codex-responses`) missing the prompt cache on the leading system prompt on every GPT-6.2 Astra and GPT-6.2 Sol turn. The leading system prompt is now sent inside `input` and top-level `instructions` is omitted, matching `openai-responses` and `azure-openai-responses`.
 
 ### Removed
 
