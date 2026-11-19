@@ -10,7 +10,12 @@ import { resolvePath } from "../utils/paths.ts";
 import { jsonChunks, readFileChunksSync, readJsonFileSync } from "../utils/streaming-file.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { assertValidSessionId, type SessionEntry, type SessionHeader, SessionManager } from "./session-manager.ts";
-import { getToolListError, isToolModifier, type Settings } from "./settings-manager.ts";
+import {
+	getToolListError,
+	isToolModifier,
+	type Settings,
+	type WorkingSessionSettingsLayers,
+} from "./settings-manager.ts";
 import type { NormalizedBuildSystemPromptOptions } from "./system-prompt.ts";
 
 export type WorkingSessionBoundary = "turn" | "settled";
@@ -45,7 +50,7 @@ export interface WorkingSession {
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
 	settings: Settings;
-	settingsLayers: { global: Settings; project: Settings };
+	settingsLayers: WorkingSessionSettingsLayers;
 	prompt: NormalizedBuildSystemPromptOptions;
 	runPrompt?: NormalizedBuildSystemPromptOptions;
 	flags: Array<[string, boolean | string]>;
@@ -358,6 +363,9 @@ function validateWorkingSession(value: unknown): WorkingSession {
 	if (value.runPrompt !== undefined) prompt(value.runPrompt, "runPrompt");
 	if (!record(value.settingsLayers)) fail("settingsLayers");
 	for (const name of ["global", "project"]) if (!record(value.settingsLayers[name])) fail(`settingsLayers.${name}`);
+	if (value.settingsLayers.overrides !== undefined && !record(value.settingsLayers.overrides)) {
+		fail("settingsLayers.overrides");
+	}
 	list(value.flags, "flags", (item, at) => {
 		if (!Array.isArray(item) || item.length !== 2) fail(at);
 		if (typeof item[0] !== "string") fail(`${at}[0]`);

@@ -853,6 +853,9 @@ export class AgentSession {
 				settingsLayers: {
 					global: this.settingsManager.getGlobalSettings(),
 					project: this.settingsManager.getProjectSettings(),
+					...(Object.keys(this.settingsManager.getOverrides()).length > 0
+						? { overrides: this.settingsManager.getOverrides() }
+						: {}),
 				},
 				prompt: this._baseSystemPromptOptions,
 				runPrompt: this._runSystemPromptOptions,

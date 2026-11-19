@@ -814,7 +814,6 @@ describe("SettingsManager", () => {
 			);
 
 			const original = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
-			const savedSettings = original.getSettings();
 			const savedLayers = {
 				global: original.getGlobalSettings(),
 				project: original.getProjectSettings(),
@@ -833,7 +832,7 @@ describe("SettingsManager", () => {
 			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ shellCommandPrefix: "new-project" }));
 
 			const refreshedManager = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
-			const refreshed = refreshedManager.refreshWorkingSessionSettings(savedSettings, savedLayers);
+			const refreshed = refreshedManager.refreshWorkingSessionSettings(savedLayers);
 			refreshedManager.restoreWorkingSession(refreshed.settings, refreshed.settingsLayers);
 
 			expect(refreshed.settings.httpIdleTimeoutMs).toBeUndefined();
@@ -851,10 +850,10 @@ describe("SettingsManager", () => {
 
 			// Untrusted projects must ignore .pi/settings.json on disk.
 			const untrustedManager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
-			const untrustedRefreshed = untrustedManager.refreshWorkingSessionSettings(
-				{ ...savedLayers.global },
-				{ global: savedLayers.global, project: {} },
-			);
+			const untrustedRefreshed = untrustedManager.refreshWorkingSessionSettings({
+				global: savedLayers.global,
+				project: {},
+			});
 			untrustedManager.restoreWorkingSession(untrustedRefreshed.settings, untrustedRefreshed.settingsLayers);
 			expect(untrustedRefreshed.settingsLayers.project).toEqual({});
 			expect(untrustedManager.getShellCommandPrefix()).toBeUndefined();
@@ -880,10 +879,10 @@ describe("SettingsManager", () => {
 				defaultTools: ["+codemode"],
 				toolExposure: { "mcp__docs__*": "hidden", calculator: "deferred" },
 			});
-			const savedSettings = original.getSettings();
 			const savedLayers = {
 				global: original.getGlobalSettings(),
 				project: original.getProjectSettings(),
+				overrides: original.getOverrides(),
 			};
 
 			writeFileSync(
@@ -897,7 +896,7 @@ describe("SettingsManager", () => {
 			);
 
 			const next = SettingsManager.create(projectDir, agentDir);
-			const refreshed = next.refreshWorkingSessionSettings(savedSettings, savedLayers);
+			const refreshed = next.refreshWorkingSessionSettings(savedLayers);
 			next.restoreWorkingSession(refreshed.settings, refreshed.settingsLayers);
 
 			expect(next.getHttpIdleTimeoutMs()).toBe(DEFAULT_HTTP_IDLE_TIMEOUT_MS);
@@ -913,38 +912,37 @@ describe("SettingsManager", () => {
 			expect(next.getToolExposure("mcp__linear__list")).toBe("direct");
 			expect(next.getToolExposure("calculator")).toBe("deferred");
 			expect(next.getToolExposure("bash")).toBe("hidden");
+			// Subsequent restarts keep the recorded overrides too.
+			expect(next.getOverrides()).toEqual(savedLayers.overrides);
+			// Persisted setter supersedes that overridden field without resurrecting it on later restarts.
+			next.setShellCommandPrefix("persisted-prefix");
+			expect(next.getOverrides().shellCommandPrefix).toBeUndefined();
 		});
 
-		it.each(["{ broken json", "[]"])(
-			"falls back to the saved layer when disk settings.json is invalid (%s)",
-			(invalidGlobalContent) => {
-				writeFileSync(
-					join(agentDir, "settings.json"),
-					JSON.stringify({ httpIdleTimeoutMs: 60_000, theme: "dark" }),
-				);
-				writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ retry: { maxRetries: 2 } }));
+		it("falls back to the saved layer when disk settings.json is invalid JSON", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ httpIdleTimeoutMs: 60_000, theme: "dark" }));
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ retry: { maxRetries: 2 } }));
 
-				const original = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
-				original.applyOverrides({ shellCommandPrefix: "kept-override" });
-				const savedSettings = original.getSettings();
-				const savedLayers = {
-					global: original.getGlobalSettings(),
-					project: original.getProjectSettings(),
-				};
+			const original = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
+			original.applyOverrides({ shellCommandPrefix: "kept-override" });
+			const savedLayers = {
+				global: original.getGlobalSettings(),
+				project: original.getProjectSettings(),
+				overrides: original.getOverrides(),
+			};
 
-				writeFileSync(join(agentDir, "settings.json"), invalidGlobalContent);
-				writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ retry: { maxRetries: 8 } }));
+			writeFileSync(join(agentDir, "settings.json"), "{ broken json");
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ retry: { maxRetries: 8 } }));
 
-				const next = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
-				const refreshed = next.refreshWorkingSessionSettings(savedSettings, savedLayers);
-				next.restoreWorkingSession(refreshed.settings, refreshed.settingsLayers);
+			const next = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
+			const refreshed = next.refreshWorkingSessionSettings(savedLayers);
+			next.restoreWorkingSession(refreshed.settings, refreshed.settingsLayers);
 
-				expect(next.drainErrors()).toHaveLength(1);
-				expect(next.getHttpIdleTimeoutMs()).toBe(60_000);
-				expect(next.getTheme()).toBe("dark");
-				expect(next.getRetrySettings().maxRetries).toBe(8);
-				expect(next.getShellCommandPrefix()).toBe("kept-override");
-			},
-		);
+			expect(next.drainErrors()).toHaveLength(1);
+			expect(next.getHttpIdleTimeoutMs()).toBe(60_000);
+			expect(next.getTheme()).toBe("dark");
+			expect(next.getRetrySettings().maxRetries).toBe(8);
+			expect(next.getShellCommandPrefix()).toBe("kept-override");
+		});
 	});
 });

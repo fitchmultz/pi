@@ -705,7 +705,7 @@ export async function main(args: string[], options?: MainOptions) {
 		projectTrusted: saved && handoff ? savedProjectTrusted : false,
 	});
 	if (saved && handoff) {
-		const refreshed = bootstrapSettingsManager.refreshWorkingSessionSettings(saved.settings, saved.settingsLayers);
+		const refreshed = bootstrapSettingsManager.refreshWorkingSessionSettings(saved.settingsLayers);
 		saved.settings = refreshed.settings;
 		saved.settingsLayers = refreshed.settingsLayers;
 	}
