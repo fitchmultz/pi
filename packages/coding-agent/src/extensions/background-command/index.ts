@@ -309,6 +309,7 @@ export function createBackgroundCommandExtension(options: BackgroundCommandExten
 				work: listBackgroundCommands(directory, seen).map((job) => ({
 					id: job.id,
 					description: summarizeBackgroundCommand(job).commandPreview.replace(/\s+/g, " "),
+					survivesRestart: true,
 					cancel: async () => {
 						await cancelBackgroundCommand(directory, job.id);
 					},

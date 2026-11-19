@@ -65,7 +65,7 @@ The session restarts when all of the following are true:
 - No changed package has an unfinished `pi update`. An update of a git package is unfinished from the moment before its commit moves until its files are cleaned and its dependencies are installed.
 - The session is at final idle, as for `/restart`.
 - The editor is empty and no input is pending.
-- The session has no background work: no background tool run and no work that an extension reports, such as a `background_command` job.
+- The session has no background work that would be lost on restart: no in-process background tool run and no extension `background_work` item without `survivesRestart: true`. Detached `background_command` jobs report `survivesRestart: true`, keep running across worker replacement, and do not postpone the automatic restart.
 
 If one of them is not true, nothing happens and nothing is shown except the footer status. The session looks again every 30 seconds and after every agent run. A draft is never discarded and a running agent is never interrupted.
 

@@ -654,4 +654,23 @@ describe("stale extension code in a managed session", () => {
 		await vi.advanceTimersByTimeAsync(30_000);
 		await vi.waitFor(() => expect(f.shutdownRequested()).toBe(true));
 	});
+
+	it("restarts automatically when the only background work survives restart, and waits when mixed with fragile work", async () => {
+		const f = await staleFixture({ restartWhenStale: true });
+		await f.makeStale();
+		f.state.work = [
+			{ id: "bg-cmd-1", description: "watch-pr", survivesRestart: true, cancel: async () => {} },
+			{ id: "run-1", description: "in-process script", cancel: async () => {} },
+		];
+		const asks = f.seen.workAsks;
+		await vi.advanceTimersByTimeAsync(30_000);
+		await vi.waitFor(() => expect(f.seen.workAsks).toBeGreaterThan(asks));
+		expect(f.shutdownRequested()).toBe(false);
+
+		// Once only restart-safe work remains, the automatic restart proceeds without waiting for it.
+		f.state.work = [{ id: "bg-cmd-1", description: "watch-pr", survivesRestart: true, cancel: async () => {} }];
+		await vi.advanceTimersByTimeAsync(30_000);
+		await vi.waitFor(() => expect(f.shutdownRequested()).toBe(true));
+		expect(f.seen.notices).toEqual(["Extensions changed on disk; restarting Pi on the same saved session."]);
+	});
 });

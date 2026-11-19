@@ -933,6 +933,7 @@ describe("background command extension delivery", { timeout: 180_000 }, () => {
 		const job = jobFrom(h);
 		const work = await h.session.getBackgroundWork();
 		expect(work.map(({ id }) => id)).toEqual([job.id]);
+		expect(work[0]?.survivesRestart).toBe(true);
 		await work[0]!.cancel();
 		const root = backgroundCommandDirectory(h.sessionManager);
 		await until(() => backgroundCommandFinished(readBackgroundCommand(root, job.id)));

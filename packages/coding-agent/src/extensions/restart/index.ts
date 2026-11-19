@@ -240,8 +240,8 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		// `pi update` moved a package's commit and has not finished its files and dependencies.
 		if (stale.some(({ kind, path }) => kind === "package" && existsSync(getGitUpdateMarkerPath(path))))
 			return STALE_QUIET_MS;
-		// A restart aborts background tool runs, and the idle test does not see them.
-		if ((await current.getBackgroundWork()).length > 0) return STALE_QUIET_MS;
+		// A restart aborts in-process background runs and non-detached extension work, which the idle test does not see.
+		if ((await current.getBackgroundWork()).some((item) => !item.survivesRestart)) return STALE_QUIET_MS;
 		if (ctx !== context || closing || pending || phase.kind === "committed") return STALE_QUIET_MS;
 		const ready = readiness(context);
 		if (ready.kind === "ready")
