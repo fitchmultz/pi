@@ -1,3 +1,4 @@
+import { diffArrays } from "diff";
 import {
 	SELECTION_METADATA,
 	SELECTION_SOURCE_END,
@@ -11,19 +12,23 @@ interface SourceSpan {
 	end: number;
 	sourceStart: number;
 	sourceEnd: number;
+	atomic?: boolean;
 }
 
 /** Text after a declared rendering transformation, with positions in the original source. */
 export class SourceText {
 	readonly text: string;
 	readonly spans: readonly SourceSpan[];
+	readonly allowUnmappedDecorations: boolean;
 
 	constructor(
 		text: string,
 		spans: readonly SourceSpan[] = [{ start: 0, end: text.length, sourceStart: 0, sourceEnd: text.length }],
+		allowUnmappedDecorations = false,
 	) {
 		this.text = text;
 		this.spans = spans;
+		this.allowUnmappedDecorations = allowUnmappedDecorations;
 	}
 
 	slice(start: number, end = this.text.length): SourceText {
@@ -32,15 +37,16 @@ export class SourceText {
 			const from = Math.max(start, span.start);
 			const to = Math.min(end, span.end);
 			if (to <= from) continue;
-			const identity = span.end - span.start === span.sourceEnd - span.sourceStart;
+			const identity = !span.atomic && span.end - span.start === span.sourceEnd - span.sourceStart;
 			spans.push({
 				start: from - start,
 				end: to - start,
 				sourceStart: identity ? span.sourceStart + from - span.start : span.sourceStart,
 				sourceEnd: identity ? span.sourceStart + to - span.start : span.sourceEnd,
+				...(identity ? {} : { atomic: true }),
 			});
 		}
-		return new SourceText(this.text.slice(start, end), spans);
+		return new SourceText(this.text.slice(start, end), spans, this.allowUnmappedDecorations);
 	}
 
 	replace(pattern: RegExp, replacement: string): SourceText {
@@ -59,6 +65,7 @@ export class SourceText {
 							end: replacement.length,
 							sourceStart: replaced.spans[0].sourceStart,
 							sourceEnd: replaced.spans[replaced.spans.length - 1].sourceEnd,
+							atomic: true,
 						},
 					]),
 				);
@@ -93,12 +100,34 @@ export class SourceText {
 	static concat(parts: readonly SourceText[]): SourceText {
 		let text = "";
 		const spans: SourceSpan[] = [];
+		let allowUnmappedDecorations = false;
 		for (const part of parts) {
-			for (const span of part.spans)
-				spans.push({ ...span, start: text.length + span.start, end: text.length + span.end });
+			if (part.allowUnmappedDecorations) allowUnmappedDecorations = true;
+			for (const span of part.spans) {
+				const start = text.length + span.start;
+				const end = text.length + span.end;
+				const prev = spans[spans.length - 1];
+				const prevIdentity = prev && !prev.atomic && prev.end - prev.start === prev.sourceEnd - prev.sourceStart;
+				const nextIdentity = !span.atomic && end - start === span.sourceEnd - span.sourceStart;
+				if (prev && prev.end === start && prevIdentity && nextIdentity && prev.sourceEnd === span.sourceStart) {
+					prev.end = end;
+					prev.sourceEnd = span.sourceEnd;
+				} else if (
+					prev &&
+					prev.end === start &&
+					!prevIdentity &&
+					!nextIdentity &&
+					prev.sourceStart === span.sourceStart &&
+					prev.sourceEnd === span.sourceEnd
+				) {
+					prev.end = end;
+				} else {
+					spans.push({ ...span, start, end });
+				}
+			}
 			text += part.text;
 		}
-		return new SourceText(text, spans);
+		return new SourceText(text, spans, allowUnmappedDecorations);
 	}
 }
 
@@ -171,17 +200,19 @@ export class SelectionSource {
 	}
 
 	annotate(styled: string, source: SourceText): string {
+		if (source.text.includes("\x1b")) source = stripAnsiSourceText(source);
 		if (!source.spans.length) {
-			if (stripTerminalSequences(styled).trim()) this.fullyMapped = false;
+			if (!source.allowUnmappedDecorations && stripTerminalSequences(styled).trim()) this.fullyMapped = false;
 			return styled;
 		}
 		for (const span of source.spans) this.contentRanges.push({ start: span.sourceStart, end: span.sourceEnd });
 		styled = styled.replace(SELECTION_METADATA, "");
-		if (source.spans.length === 1) {
+		if (source.spans.length === 1 && source.spans[0].start === 0 && source.spans[0].end === source.text.length) {
 			const span = source.spans[0];
+			const identity = !span.atomic && span.end - span.start === span.sourceEnd - span.sourceStart;
 			return (
 				selectionRunMarker(
-					span.end - span.start === span.sourceEnd - span.sourceStart
+					identity
 						? { kind: "identity", id: this.id, offset: span.sourceStart }
 						: { kind: "atomic", id: this.id, start: span.sourceStart, end: span.sourceEnd },
 				) +
@@ -203,14 +234,14 @@ export class SelectionSource {
 			while (spanIndex < source.spans.length && position >= source.spans[spanIndex].end) spanIndex++;
 			const span = source.spans[spanIndex];
 			if (span && position >= span.start && activeSpan !== spanIndex) {
-				const identity = span.end - span.start === span.sourceEnd - span.sourceStart;
+				const identity = !span.atomic && span.end - span.start === span.sourceEnd - span.sourceStart;
 				result += selectionRunMarker(
 					identity
 						? { kind: "identity", id: this.id, offset: span.sourceStart + position - span.start }
 						: { kind: "atomic", id: this.id, start: span.sourceStart, end: span.sourceEnd },
 				);
 				activeSpan = spanIndex;
-			} else if (!span && activeSpan !== -1) {
+			} else if ((!span || position < span.start) && activeSpan !== -1) {
 				result += SELECTION_SOURCE_END;
 				activeSpan = -1;
 			}
@@ -221,7 +252,7 @@ export class SelectionSource {
 			position += end - i;
 			i = end;
 		}
-		return result + SELECTION_SOURCE_END;
+		return activeSpan !== -1 ? result + SELECTION_SOURCE_END : result;
 	}
 
 	atomic(styled: string, source: SourceText, kind: "atomic" | "generated" = "atomic"): string {
@@ -484,4 +515,355 @@ function mergeRanges(ranges: readonly SourceRange[]): SourceRange[] {
 		else result.push({ ...range });
 	}
 	return result;
+}
+
+function stripAnsiSourceText(source: SourceText): SourceText {
+	const parts: SourceText[] = [];
+	let plainStart = 0;
+	for (let i = 0; i < source.text.length; ) {
+		const ansi = extractAnsiCode(source.text, i);
+		if (!ansi) {
+			i++;
+			continue;
+		}
+		if (i > plainStart) parts.push(source.slice(plainStart, i));
+		i += ansi.length;
+		plainStart = i;
+	}
+	if (plainStart === 0) return source;
+	if (plainStart < source.text.length) parts.push(source.slice(plainStart));
+	return SourceText.concat(parts);
+}
+
+interface VisibleRun {
+	rawStart: number;
+	rawEnd: number;
+	visStart: number;
+	visEnd: number;
+}
+
+interface VisibleText {
+	text: string;
+	runs: VisibleRun[];
+}
+
+function decomposeVisibleText(raw: string, rawOffset: number): VisibleText {
+	if (!raw.includes("\x1b")) {
+		return {
+			text: raw,
+			runs:
+				raw.length > 0
+					? [{ rawStart: rawOffset, rawEnd: rawOffset + raw.length, visStart: 0, visEnd: raw.length }]
+					: [],
+		};
+	}
+	let text = "";
+	const runs: VisibleRun[] = [];
+	let plainStart = 0;
+	for (let i = 0; i < raw.length; ) {
+		const ansi = extractAnsiCode(raw, i);
+		if (!ansi) {
+			i++;
+			continue;
+		}
+		if (i > plainStart) {
+			const visStart = text.length;
+			text += raw.slice(plainStart, i);
+			runs.push({ rawStart: rawOffset + plainStart, rawEnd: rawOffset + i, visStart, visEnd: text.length });
+		}
+		i += ansi.length;
+		plainStart = i;
+	}
+	if (plainStart < raw.length) {
+		const visStart = text.length;
+		text += raw.slice(plainStart);
+		runs.push({ rawStart: rawOffset + plainStart, rawEnd: rawOffset + raw.length, visStart, visEnd: text.length });
+	}
+	return { text, runs };
+}
+
+function emitMappedRange(
+	spans: SourceSpan[],
+	runs: readonly VisibleRun[],
+	visStart: number,
+	visEnd: number,
+	sourceStart: number,
+	sourceEnd: number,
+	atomic: boolean,
+): void {
+	if (visEnd <= visStart || sourceEnd <= sourceStart) return;
+	for (const run of runs) {
+		if (run.visEnd <= visStart) continue;
+		if (run.visStart >= visEnd) break;
+		const from = Math.max(visStart, run.visStart);
+		const to = Math.min(visEnd, run.visEnd);
+		const rawStart = run.rawStart + (from - run.visStart);
+		const rawEnd = run.rawStart + (to - run.visStart);
+		if (atomic) {
+			spans.push({ start: rawStart, end: rawEnd, sourceStart, sourceEnd, atomic: true });
+		} else {
+			spans.push({
+				start: rawStart,
+				end: rawEnd,
+				sourceStart: sourceStart + (from - visStart),
+				sourceEnd: sourceStart + (to - visStart),
+			});
+		}
+	}
+}
+
+interface TextSegment {
+	text: string;
+	start: number;
+	end: number;
+}
+
+function splitLinesWithOffsets(text: string): TextSegment[] {
+	const lines: TextSegment[] = [];
+	let start = 0;
+	for (let i = 0; i < text.length; i++) {
+		if (text.charCodeAt(i) === 10) {
+			lines.push({ text: text.slice(start, i + 1), start, end: i + 1 });
+			start = i + 1;
+		}
+	}
+	if (start < text.length || lines.length === 0) {
+		lines.push({ text: text.slice(start), start, end: text.length });
+	}
+	return lines;
+}
+
+// Split on ASCII spaces/tabs/newlines (never NBSP) and Markdown delimiter punctuation so decorated tokens like
+// `**\uf012 Status:**` align their `**` and `Status:` independently while NBSP-joined pills stay atomic.
+const ALIGN_TOKEN_REGEX = /\*\*|__|[`~*_[\]()#]+|[^ \t\r\n`~*_[\]()#]+/g;
+
+function tokenizeForAlign(text: string): TextSegment[] {
+	const tokens: TextSegment[] = [];
+	for (const match of text.matchAll(ALIGN_TOKEN_REGEX)) {
+		tokens.push({ text: match[0], start: match.index, end: match.index + match[0].length });
+	}
+	return tokens;
+}
+
+/** Return matched index pairs `[aIndex, bIndex]` in strictly increasing order. */
+function matchSequence(a: readonly string[], b: readonly string[]): Array<[number, number]> {
+	const pairs: Array<[number, number]> = [];
+	let aIdx = 0;
+	let bIdx = 0;
+	for (const change of diffArrays([...a], [...b])) {
+		if (change.removed) {
+			aIdx += change.count;
+		} else if (change.added) {
+			bIdx += change.count;
+		} else {
+			for (let k = 0; k < change.count; k++) {
+				pairs.push([aIdx + k, bIdx + k]);
+			}
+			aIdx += change.count;
+			bIdx += change.count;
+		}
+	}
+	return pairs;
+}
+
+function commonPrefixLength(a: string, b: string): number {
+	const limit = Math.min(a.length, b.length);
+	let i = 0;
+	while (i < limit && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+	return i;
+}
+
+function commonSuffixLength(a: string, b: string, maxLen: number): number {
+	let i = 0;
+	while (i < maxLen && a.charCodeAt(a.length - 1 - i) === b.charCodeAt(b.length - 1 - i)) i++;
+	return i;
+}
+
+function sharesWord(a: string, b: string): boolean {
+	const aWords = a.match(/[A-Za-z0-9]{2,}/g);
+	if (!aWords) return false;
+	const bWords = new Set(b.match(/[A-Za-z0-9]{2,}/g));
+	if (bWords.size === 0) return false;
+	return aWords.some((word) => bWords.has(word));
+}
+
+interface AlignStats {
+	deletedNonWhitespace: boolean;
+}
+
+function emitGap(
+	spans: SourceSpan[],
+	runs: readonly VisibleRun[],
+	origText: string,
+	origOffset: number,
+	visText: string,
+	visOffset: number,
+	stats: AlignStats,
+	hasLocalAnchor: boolean,
+): void {
+	const prefix = commonPrefixLength(origText, visText);
+	const suffix = commonSuffixLength(origText, visText, Math.min(origText.length, visText.length) - prefix);
+	if (prefix > 0) {
+		emitMappedRange(spans, runs, visOffset, visOffset + prefix, origOffset, origOffset + prefix, false);
+	}
+	const origRemStart = prefix;
+	const origRemEnd = origText.length - suffix;
+	const visRemStart = prefix;
+	const visRemEnd = visText.length - suffix;
+	const origRem = origText.slice(origRemStart, origRemEnd);
+	const visRem = visText.slice(visRemStart, visRemEnd);
+	if (origRem.length > 0 && visRem.length > 0) {
+		if (hasLocalAnchor || sharesWord(origRem, visRem)) {
+			emitMappedRange(
+				spans,
+				runs,
+				visOffset + visRemStart,
+				visOffset + visRemEnd,
+				origOffset + origRemStart,
+				origOffset + origRemEnd,
+				true,
+			);
+		} else if (origRem.trim()) {
+			stats.deletedNonWhitespace = true;
+		}
+	} else if (origRem.trim()) {
+		stats.deletedNonWhitespace = true;
+	}
+	if (suffix > 0) {
+		emitMappedRange(
+			spans,
+			runs,
+			visOffset + visRemEnd,
+			visOffset + visText.length,
+			origOffset + origRemEnd,
+			origOffset + origText.length,
+			false,
+		);
+	}
+}
+
+function alignRange(
+	spans: SourceSpan[],
+	origText: string,
+	origOffset: number,
+	transText: string,
+	transOffset: number,
+	stats: AlignStats,
+): void {
+	if (origText === transText) {
+		if (origText.length > 0) {
+			spans.push({
+				start: transOffset,
+				end: transOffset + transText.length,
+				sourceStart: origOffset,
+				sourceEnd: origOffset + origText.length,
+			});
+		}
+		return;
+	}
+	const visible = decomposeVisibleText(transText, transOffset);
+	if (visible.text === origText) {
+		emitMappedRange(spans, visible.runs, 0, visible.text.length, origOffset, origOffset + origText.length, false);
+		return;
+	}
+	const origTokens = tokenizeForAlign(origText);
+	const visTokens = tokenizeForAlign(visible.text);
+	const matches = matchSequence(
+		origTokens.map((t) => t.text),
+		visTokens.map((t) => t.text),
+	);
+	const hasLocalAnchor = matches.length > 0;
+	if (!hasLocalAnchor && !sharesWord(origText, visible.text)) {
+		if (origText.trim()) stats.deletedNonWhitespace = true;
+		return;
+	}
+	let origCursor = 0;
+	let visCursor = 0;
+	for (const [oi, vi] of matches) {
+		const ot = origTokens[oi];
+		const vt = visTokens[vi];
+		emitGap(
+			spans,
+			visible.runs,
+			origText.slice(origCursor, ot.start),
+			origOffset + origCursor,
+			visible.text.slice(visCursor, vt.start),
+			visCursor,
+			stats,
+			hasLocalAnchor,
+		);
+		emitMappedRange(spans, visible.runs, vt.start, vt.end, origOffset + ot.start, origOffset + ot.end, false);
+		origCursor = ot.end;
+		visCursor = vt.end;
+	}
+	emitGap(
+		spans,
+		visible.runs,
+		origText.slice(origCursor),
+		origOffset + origCursor,
+		visible.text.slice(visCursor),
+		visCursor,
+		stats,
+		hasLocalAnchor,
+	);
+}
+
+/**
+ * Map transformed Markdown text back to positions in `original` while ignoring injected ANSI codes and
+ * preserving atomic replacements (e.g. status pills) and unmapped visual decorations (e.g. prefix icons).
+ * Returns `undefined` when the transform omits, truncates, or replaces original content with unrelated text,
+ * so callers fall back to displayed-cell copying instead of resurrecting omitted source text.
+ */
+export function alignSourceText(original: string, transformed: string): SourceText | undefined {
+	if (transformed === original) {
+		return new SourceText(transformed);
+	}
+	const origLines = splitLinesWithOffsets(original);
+	const transLines = splitLinesWithOffsets(transformed);
+	const spans: SourceSpan[] = [];
+	const stats: AlignStats = { deletedNonWhitespace: false };
+
+	if (origLines.length === transLines.length) {
+		for (let i = 0; i < origLines.length; i++) {
+			alignRange(spans, origLines[i].text, origLines[i].start, transLines[i].text, transLines[i].start, stats);
+		}
+	} else {
+		const transVisibleLines = transLines.map((line) => stripTerminalSequences(line.text));
+		const lineMatches = matchSequence(
+			origLines.map((line) => line.text),
+			transVisibleLines,
+		);
+		let origCursor = 0;
+		let transCursor = 0;
+		const alignHunk = (origEnd: number, transEnd: number): void => {
+			if (origEnd === origCursor && transEnd === transCursor) return;
+			const origStartOffset = origCursor < origLines.length ? origLines[origCursor].start : original.length;
+			const origEndOffset = origEnd > origCursor ? origLines[origEnd - 1].end : origStartOffset;
+			const transStartOffset = transCursor < transLines.length ? transLines[transCursor].start : transformed.length;
+			const transEndOffset = transEnd > transCursor ? transLines[transEnd - 1].end : transStartOffset;
+			if (origEndOffset === origStartOffset) return;
+			if (transEndOffset === transStartOffset) {
+				if (original.slice(origStartOffset, origEndOffset).trim()) stats.deletedNonWhitespace = true;
+				return;
+			}
+			alignRange(
+				spans,
+				original.slice(origStartOffset, origEndOffset),
+				origStartOffset,
+				transformed.slice(transStartOffset, transEndOffset),
+				transStartOffset,
+				stats,
+			);
+		};
+		for (const [oi, ti] of lineMatches) {
+			alignHunk(oi, ti);
+			alignRange(spans, origLines[oi].text, origLines[oi].start, transLines[ti].text, transLines[ti].start, stats);
+			origCursor = oi + 1;
+			transCursor = ti + 1;
+		}
+		alignHunk(origLines.length, transLines.length);
+	}
+
+	if (spans.length === 0 || stats.deletedNonWhitespace) return undefined;
+	return new SourceText(transformed, spans, true);
 }
