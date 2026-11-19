@@ -56,7 +56,7 @@ vi.mock("@aws-sdk/client-bedrock-runtime", () => {
 });
 
 import { stream as streamBedrock } from "../src/api/bedrock-converse-stream.ts";
-import type { Context, Message, Model } from "../src/types.ts";
+import type { AssistantMessage, CacheRetention, Context, Message, Model } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const baseModel: Model<"bedrock-converse-stream"> = {
@@ -81,10 +81,14 @@ const novaModel: Model<"bedrock-converse-stream"> = {
 	compat: undefined,
 };
 
-async function capturePayload(context: Context, model = baseModel): Promise<unknown> {
+async function capturePayload(
+	context: Context,
+	model = baseModel,
+	cacheRetention: CacheRetention = "none",
+): Promise<unknown> {
 	let capturedPayload: unknown;
 	const s = streamBedrock(model, normalizeContext(context), {
-		cacheRetention: "none",
+		cacheRetention,
 		signal: AbortSignal.abort(),
 		onPayload: (payload) => {
 			capturedPayload = payload;
@@ -96,6 +100,73 @@ async function capturePayload(context: Context, model = baseModel): Promise<unkn
 	}
 	return capturedPayload;
 }
+
+function assistant(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: baseModel.api,
+		provider: baseModel.provider,
+		model: baseModel.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+describe("Bedrock message roles", () => {
+	it("folds consecutive user messages in order, including the blank-message placeholder", async () => {
+		const payload = await capturePayload({
+			messages: [
+				{ role: "user", content: "First", timestamp: Date.now() },
+				{ role: "user", content: " ", timestamp: Date.now() },
+				{ role: "user", content: "Last", timestamp: Date.now() },
+			],
+		});
+		expect(payload).toHaveProperty("messages", [
+			{ role: "user", content: [{ text: "First" }, { text: "<empty>" }, { text: "Last" }] },
+		]);
+	});
+
+	it("folds consecutive assistant messages after skipping an empty assistant message", async () => {
+		const payload = await capturePayload({
+			messages: [
+				{ role: "user", content: "Start", timestamp: Date.now() },
+				assistant([{ type: "text", text: "First" }]),
+				assistant([]),
+				assistant([{ type: "text", text: "Second" }]),
+				{ role: "user", content: "Continue", timestamp: Date.now() },
+			],
+		});
+		expect(payload).toHaveProperty("messages", [
+			{ role: "user", content: [{ text: "Start" }] },
+			{ role: "assistant", content: [{ text: "First" }, { text: "Second" }] },
+			{ role: "user", content: [{ text: "Continue" }] },
+		]);
+	});
+
+	it("preserves alternating user and assistant messages", async () => {
+		const payload = await capturePayload({
+			messages: [
+				{ role: "user", content: "Start", timestamp: Date.now() },
+				assistant([{ type: "text", text: "Reply" }]),
+				{ role: "user", content: "Continue", timestamp: Date.now() },
+			],
+		});
+		expect(payload).toHaveProperty("messages", [
+			{ role: "user", content: [{ text: "Start" }] },
+			{ role: "assistant", content: [{ text: "Reply" }] },
+			{ role: "user", content: [{ text: "Continue" }] },
+		]);
+	});
+});
 
 describe("Bedrock constrained sampling", () => {
 	it("gates native strict tool use by model capability", async () => {
@@ -174,7 +245,7 @@ describe("Bedrock tool arguments", () => {
 	});
 });
 
-describe("bedrock convertMessages skips unknown content types", () => {
+describe("Bedrock message conversion", () => {
 	it("skips unknown user content blocks instead of throwing", async () => {
 		const messages: Message[] = [
 			{
@@ -326,27 +397,15 @@ describe("bedrock convertMessages skips unknown content types", () => {
 	});
 
 	// Regression for #10794: Claude rejects error tool results that contain images.
-	it("moves images of error tool results after the tool results", async () => {
+	it("folds tool results and a user update, keeping error images after the results and the cache point last", async () => {
 		const messages: Message[] = [
+			{ role: "user", content: "Run the tools", timestamp: Date.now() },
 			{
-				role: "assistant",
-				content: [
+				...assistant([
 					{ type: "toolCall", id: "call-1", name: "codemode", arguments: {} },
 					{ type: "toolCall", id: "call-2", name: "read", arguments: {} },
-				],
-				api: "bedrock-converse-stream",
-				provider: "amazon-bedrock",
-				model: baseModel.id,
-				usage: {
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
+				]),
 				stopReason: "toolUse",
-				timestamp: Date.now(),
 			},
 			{
 				role: "toolResult",
@@ -368,25 +427,45 @@ describe("bedrock convertMessages skips unknown content types", () => {
 				isError: false,
 				timestamp: Date.now(),
 			},
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "The working directory changed" },
+					{ type: "image", data: "CCCC", mimeType: "image/png" },
+				],
+				timestamp: Date.now(),
+			},
 		];
-		const payload = (await capturePayload({ messages })) as {
-			messages: Array<{ role: string; content: Array<Record<string, any>> }>;
-		};
-		const content = payload.messages[1].content;
-		expect(content).toHaveLength(4);
-		expect(content[0].toolResult).toEqual({
-			toolUseId: "call-1",
+		const payload = await capturePayload({ messages }, baseModel, "short");
+		expect(payload).toHaveProperty("messages.length", 3);
+		expect(payload).toHaveProperty("messages.2", {
+			role: "user",
 			content: [
-				{ text: "Script failed" },
-				{ text: "(image attached after the tool results)" },
-				{ text: "Script error" },
+				{
+					toolResult: {
+						toolUseId: "call-1",
+						content: [
+							{ text: "Script failed" },
+							{ text: "(image attached after the tool results)" },
+							{ text: "Script error" },
+						],
+						status: "error",
+					},
+				},
+				{
+					toolResult: {
+						toolUseId: "call-2",
+						content: [{ image: { format: "png", source: { bytes: Uint8Array.from([4, 16, 65]) } } }],
+						status: "success",
+					},
+				},
+				{ text: "Images from the error result of tool call call-1 (codemode):" },
+				{ image: { format: "png", source: { bytes: Uint8Array.from([0, 0, 0]) } } },
+				{ text: "The working directory changed" },
+				{ image: { format: "png", source: { bytes: Uint8Array.from([8, 32, 130]) } } },
+				{ cachePoint: { type: "default" } },
 			],
-			status: "error",
 		});
-		expect(content[1].toolResult.status).toBe("success");
-		expect(content[1].toolResult.content).toEqual([{ image: expect.objectContaining({ format: "png" }) }]);
-		expect(content[2]).toEqual({ text: "Images from the error result of tool call call-1 (codemode):" });
-		expect(content[3]).toEqual({ image: expect.objectContaining({ format: "png" }) });
 	});
 
 	it("keeps images in error tool results for non-Claude models", async () => {
