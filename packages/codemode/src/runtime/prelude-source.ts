@@ -495,7 +495,12 @@ export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson
 			const texts = [];
 			for (const key of Object.keys(value)) {
 				if (typeof value[key] === "string" && value[key].includes("\\n")) texts.push(key + ":\\n" + value[key]);
-				else fields[key] = value[key];
+				else Object.defineProperty(fields, key, {
+					value: value[key],
+					writable: true,
+					enumerable: true,
+					configurable: true,
+				});
 			}
 			lines.push(format(fields), ...texts);
 		}
@@ -522,7 +527,7 @@ export const PRELUDE_SOURCE: string = `(function (bridge, toolsJson, globalsJson
 			const images = [];
 			if (result.status === "rejected") lines.push(failure(result.reason));
 			else describeResult(result.value, lines, images);
-			output("text", lines.join("\\n"));
+			if (lines.length > 0) output("text", lines.join("\\n"));
 			for (const block of images) {
 				// An image that image() rejects must not end the script and lose the results after it.
 				try {

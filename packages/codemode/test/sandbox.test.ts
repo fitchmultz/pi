@@ -504,6 +504,28 @@ describe.each(Object.keys(BACKENDS))("%s backend", (name) => {
 				{ type: "text", text: 'count\n{"total":3,"names":["a"]}' },
 			]);
 		});
+
+		it("preserves own __proto__ properties and omits empty text before unlabelled image blocks", async () => {
+			const sandbox = createSandbox([
+				{
+					name: "proto",
+					execute: () =>
+						Object.fromEntries([
+							["__proto__", { a: 1 }],
+							["ok", 1],
+						]),
+				},
+			]);
+			const result = await sandbox.execute(
+				`await show(tools.proto(), Promise.resolve({ type: "image", data: ${JSON.stringify(PNG)}, mimeType: "image/png" }), Promise.resolve(""));`,
+			);
+			expect(result.ok).toBe(true);
+			expect(result.output).toEqual([
+				{ type: "text", text: 'proto\n{"__proto__":{"a":1},"ok":1}' },
+				{ type: "image", data: PNG, mimeType: "image/png" },
+				{ type: "text", text: "" },
+			]);
+		});
 	});
 
 	describe("store and load", () => {
