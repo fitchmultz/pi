@@ -1615,6 +1615,7 @@ export class AgentSession {
 		drafts: SessionBoundaryDraft[],
 		/** The provider summary block record of the single compaction draft in `drafts`. */
 		providerSummary?: CompactionProviderSummary,
+		prunedToolNames?: ReadonlySet<string>,
 	): SessionEntry[] {
 		const appended: SessionEntry[] = [];
 		for (const draft of drafts) {
@@ -1647,6 +1648,7 @@ export class AgentSession {
 						true,
 						withProviderSummaryUsage(draft.usage, providerSummary),
 						providerSummary,
+						prunedToolNames ?? this._findIdleSearchLoadedTools(draft.firstKeptEntryId, manager),
 					);
 					break;
 				}
@@ -1719,7 +1721,10 @@ export class AgentSession {
 				draft.type === "compaction" && draft.providerSummary
 					? await this._requestProviderSummary(draft.providerSummary, draft.firstKeptEntryId, "threshold")
 					: undefined;
-			appended.push(...this._applyBoundaryDrafts(this.sessionManager, [draft], providerSummary));
+			const pruned =
+				draft.type === "compaction" ? this._findIdleSearchLoadedTools(draft.firstKeptEntryId) : undefined;
+			appended.push(...this._applyBoundaryDrafts(this.sessionManager, [draft], providerSummary, pruned));
+			if (pruned && pruned.size > 0) this._deactivatePrunedTools(pruned);
 		}
 		this._refreshFinalizedContext();
 		for (const entry of appended) this._emit({ type: "entry_appended", entry });
@@ -2598,6 +2603,80 @@ export class AgentSession {
 	}
 
 	/**
+	 * Identify `tool_search`-loaded (`deferred`/`codemode`) tools that are neither in the leading
+	 * system message's initial tool list nor used in the current window or retained tail.
+	 * Retain-none compactions (`firstKeptEntryId === null`, such as `new_context`) start a clean
+	 * window and drop all search-loaded tools.
+	 * Returns an empty set when `tool_search` is inactive so pruned tools remain reloadable on demand.
+	 */
+	private _findIdleSearchLoadedTools(
+		firstKeptEntryId: string | null,
+		manager: SessionManager = this.sessionManager,
+	): Set<string> {
+		const activeNames = this.getActiveToolNames();
+		if (!activeNames.includes("tool_search")) return new Set();
+		const projection = manager.buildSessionProjection();
+		const leading = projection.messages.find((message): message is SystemMessage => message.role === "system");
+		if (!leading) return new Set();
+		const initialToolNames = new Set((leading.toolsAdded ?? []).map((tool) => tool.name));
+		const candidates = activeNames.filter((name) => {
+			if (initialToolNames.has(name)) return false;
+			const exposure = this._getToolExposure(name);
+			return exposure === "deferred" || exposure === "codemode";
+		});
+		if (candidates.length === 0) return new Set();
+		if (firstKeptEntryId === null) return new Set(candidates);
+
+		const kept = new Set<string>();
+		const branch = manager.getBranch();
+		const lastCompactionIndex = branch.findLastIndex((entry) => entry.type === "compaction");
+		const windowEntryIds =
+			lastCompactionIndex >= 0 ? new Set(branch.slice(lastCompactionIndex + 1).map((entry) => entry.id)) : undefined;
+		const firstKeptIndex = projection.entries.findLastIndex((entry) => entry.sourceEntry.id === firstKeptEntryId);
+
+		for (let i = 0; i < projection.entries.length; i++) {
+			const entry = projection.entries[i];
+			const inWindow = windowEntryIds === undefined || windowEntryIds.has(entry.sourceEntry.id);
+			const inRetainedTail = firstKeptIndex >= 0 && i >= firstKeptIndex;
+			if (!inWindow && !inRetainedTail) continue;
+			for (const message of entry.messages) {
+				if (message.role === "assistant") {
+					for (const block of message.content) {
+						if (block.type === "toolCall") kept.add(block.name);
+					}
+				} else if (message.role === "toolResult") {
+					kept.add(message.toolName);
+					if (
+						inRetainedTail &&
+						message.toolName === "tool_search" &&
+						message.details &&
+						typeof message.details === "object"
+					) {
+						const loaded = (message.details as { loaded?: unknown }).loaded;
+						if (Array.isArray(loaded)) {
+							for (const name of loaded) {
+								if (typeof name === "string") kept.add(name);
+							}
+						}
+					}
+				} else if (inRetainedTail && message.role === "system" && entry.sourceEntry.type !== "compaction") {
+					for (const tool of message.toolsAdded ?? []) kept.add(tool.name);
+				}
+			}
+		}
+		return new Set(candidates.filter((name) => !kept.has(name)));
+	}
+
+	private _deactivatePrunedTools(pruned: ReadonlySet<string>): void {
+		if (pruned.size === 0) return;
+		for (const name of pruned) {
+			this._pendingToolNames.delete(name);
+			this._restoredToolNames.delete(name);
+		}
+		this._setActiveTools(this.getActiveToolNames().filter((name) => !pruned.has(name)));
+	}
+
+	/**
 	 * Restore the active tool loadout declared by the session transcript, if it declares one.
 	 * Tools reachable only from other tools are never declared, but they do not depend on the active
 	 * set, so the transcript's declarations are the whole loadout.
@@ -2606,16 +2685,26 @@ export class AgentSession {
 	private _restoreToolsFromTranscript(modifiers: readonly string[] = []): void {
 		this._pendingToolNames.clear();
 		this._restoredToolNames.clear();
-		// All system messages on the branch, including those before a compaction. Compaction snapshots
-		// are derived from these, so replaying them gives the current loadout.
-		const systemMessages = this.sessionManager
-			.getBranch()
-			.flatMap((entry) => (entry.type === "message" && entry.message.role === "system" ? [entry.message] : []));
+		const branch = this.sessionManager.getBranch();
+		const branchSystemMessages = branch.flatMap((entry) =>
+			entry.type === "message" && entry.message.role === "system" ? [entry.message] : [],
+		);
+		const latestCompaction = [...branch].reverse().find((entry) => entry.type === "compaction");
+		// Compaction snapshots may prune idle search-loaded tools, so replay the projected system
+		// messages when the latest compaction recorded a system snapshot; fall back to raw branch
+		// system messages for uncompacted branches or legacy pre-snapshot compactions.
+		const projectedSystemMessages =
+			latestCompaction?.type === "compaction" && latestCompaction.systemMessage !== undefined
+				? this.sessionManager
+						.buildSessionProjection()
+						.messages.filter((message): message is SystemMessage => message.role === "system")
+				: [];
+		const currentSystemMessages = projectedSystemMessages.length > 0 ? projectedSystemMessages : branchSystemMessages;
 		// No recorded loadout: keep the current tools.
-		if (systemMessages.length === 0) return;
+		if (currentSystemMessages.length === 0) return;
 		// Tools the branch ever added or removed. Removed tools stay inactive.
 		const mentioned = new Set(
-			systemMessages
+			[...branchSystemMessages, ...projectedSystemMessages]
 				.flatMap((message) => [...(message.toolsAdded ?? []), ...(message.toolsRemoved ?? [])])
 				.map((tool) => tool.name),
 		);
@@ -2627,7 +2716,7 @@ export class AgentSession {
 		);
 		// The recorded loadout plus the new tools, with `--tools +name`/`-name` applied.
 		const names = applyToolModifiers(
-			[...getCurrentTools(systemMessages).map((tool) => tool.name), ...newTools],
+			[...getCurrentTools(currentSystemMessages).map((tool) => tool.name), ...newTools],
 			modifiers,
 		);
 		// Recorded tools that are not registered yet, such as MCP tools of servers still connecting, are
@@ -2635,7 +2724,7 @@ export class AgentSession {
 		this._pendingToolNames = new Set(names.filter((name) => this._isAllowedTool(name)));
 		this._restoredToolNames = new Set(
 			applyToolModifiers(
-				getCurrentTools(systemMessages).map((tool) => tool.name),
+				getCurrentTools(currentSystemMessages).map((tool) => tool.name),
 				modifiers,
 			),
 		);
@@ -3822,6 +3911,7 @@ export class AgentSession {
 			}
 			// The block request is part of what the compaction cost, in the entry and in the result.
 			usage = withProviderSummaryUsage(usage, providerSummary);
+			const pruned = this._findIdleSearchLoadedTools(firstKeptEntryId);
 			this.sessionManager.appendCompaction(
 				summary,
 				firstKeptEntryId,
@@ -3830,9 +3920,11 @@ export class AgentSession {
 				fromExtension,
 				usage,
 				providerSummary,
+				pruned,
 			);
 			const newEntries = this.sessionManager.getEntries();
 			this._refreshFinalizedContext();
+			this._deactivatePrunedTools(pruned);
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event
@@ -4253,6 +4345,7 @@ export class AgentSession {
 			abortController.signal.throwIfAborted();
 			// The block request is part of what the compaction cost, in the entry and in the result.
 			usage = withProviderSummaryUsage(usage, providerSummary);
+			const pruned = this._findIdleSearchLoadedTools(firstKeptEntryId);
 			this.sessionManager.appendCompaction(
 				summary,
 				firstKeptEntryId,
@@ -4261,9 +4354,11 @@ export class AgentSession {
 				fromExtension,
 				usage,
 				providerSummary,
+				pruned,
 			);
 			const newEntries = this.sessionManager.getEntries();
 			this._refreshFinalizedContext();
+			this._deactivatePrunedTools(pruned);
 			const estimatedTokensAfter = estimateMessagesTokens(this.sessionManager.buildSessionProjection().messages);
 
 			// Get the saved compaction entry for the extension event

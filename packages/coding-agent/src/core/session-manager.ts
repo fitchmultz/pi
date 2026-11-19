@@ -544,12 +544,16 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 function getCompactionSystemState(
 	messages: AgentMessage[],
 	timestamp: number,
+	prunedToolNames?: ReadonlySet<string>,
 ): Pick<CompactionEntry, "systemMessage" | "toolUpdate"> {
 	const leading = messages.find((message): message is SystemMessage => message.role === "system");
 	const current = getCurrentSystemMessage(messages);
 	// Both are missing only when the context has no system message.
 	if (!leading || !current) return {};
-	const { toolsAdded, toolsRemoved } = getNetToolChanges(leading.toolsAdded ?? [], current.toolsAdded ?? []);
+	const currentTools = prunedToolNames?.size
+		? (current.toolsAdded ?? []).filter((tool) => !prunedToolNames.has(tool.name))
+		: (current.toolsAdded ?? []);
+	const { toolsAdded, toolsRemoved } = getNetToolChanges(leading.toolsAdded ?? [], currentTools);
 	return {
 		systemMessage: {
 			role: "system",
@@ -1750,6 +1754,7 @@ export class SessionManager {
 		fromHook?: boolean,
 		usage?: Usage,
 		providerSummary?: CompactionProviderSummary,
+		prunedToolNames?: ReadonlySet<string>,
 	): string {
 		const timestamp = new Date().toISOString();
 		const projection = this.buildSessionProjection();
@@ -1768,7 +1773,7 @@ export class SessionManager {
 			...(providerSummary?.block
 				? getSummaryBlockSystemState(projection, firstKeptEntryId, providerSummary)
 				: {
-						...getCompactionSystemState(projection.messages, new Date(timestamp).getTime()),
+						...getCompactionSystemState(projection.messages, new Date(timestamp).getTime(), prunedToolNames),
 						...(providerSummary ? { providerSummary } : {}),
 					}),
 		};

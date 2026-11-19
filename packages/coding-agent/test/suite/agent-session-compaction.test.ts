@@ -13,7 +13,9 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { estimateTokens } from "../../src/core/compaction/index.ts";
-import { createHarness, getUserTexts, type Harness } from "./harness.ts";
+import type { CompactionEntry } from "../../src/core/session-manager.ts";
+import { createToolSearchExtension, type ExtensionAPI } from "../../src/index.ts";
+import { createHarness, getMessageText, getUserTexts, type Harness } from "./harness.ts";
 
 type SessionWithCompactionInternals = {
 	_checkCompaction: (assistantMessage: AssistantMessage, skipAbortedCheck?: boolean) => Promise<boolean>;
@@ -1156,5 +1158,247 @@ describe("AgentSession compaction characterization", () => {
 
 		expect(belowThresholdSpy).not.toHaveBeenCalled();
 		expect(disabledSpy).not.toHaveBeenCalled();
+	});
+
+	describe("pruning idle tool_search-loaded declarations", () => {
+		const makeTool = (name: string, description: string, exposure: "deferred" | "codemode" = "deferred") => ({
+			name,
+			label: name,
+			description,
+			exposure,
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text" as const, text: `${name} ok` }], details: undefined }),
+		});
+
+		const registerDeferredTools = (pi: ExtensionAPI) => {
+			pi.registerTool(makeTool("linear_get_issue", "Read a Linear issue"));
+			pi.registerTool(makeTool("linear_delete_issue", "Delete a Linear issue"));
+			pi.registerTool(makeTool("datadog_query_logs", "Query Datadog logs", "codemode"));
+			pi.on("session_before_compact", async (event) => ({
+				compaction: {
+					summary: "Window summary.",
+					firstKeptEntryId: event.preparation.firstKeptEntryId,
+					tokensBefore: event.preparation.tokensBefore,
+					details: {},
+				},
+			}));
+		};
+
+		it("drops idle search-loaded tools across windows, keeps used tools, preserves leading prefix, and allows reloading", async () => {
+			const harness = await createHarness({
+				initialActiveToolNames: ["read", "tool_search"],
+				settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+				extensionFactories: [createToolSearchExtension(), registerDeferredTools],
+			});
+			harnesses.push(harness);
+			await harness.session.bindExtensions({});
+
+			const requestTools: string[][] = [];
+			const capture = (message: ReturnType<typeof fauxAssistantMessage>) => (context: TranscriptContext) => {
+				requestTools.push(getCurrentTools(context.messages).map((tool) => tool.name));
+				return message;
+			};
+
+			harness.setResponses([
+				// Window 1: load both Linear tools and the codemode Datadog tool; call only linear_get_issue.
+				capture(
+					fauxAssistantMessage(fauxToolCall("tool_search", { query: "linear issue" }), { stopReason: "toolUse" }),
+				),
+				capture(
+					fauxAssistantMessage(fauxToolCall("tool_search", { query: "datadog logs" }), { stopReason: "toolUse" }),
+				),
+				capture(fauxAssistantMessage(fauxToolCall("linear_get_issue", {}), { stopReason: "toolUse" })),
+				capture(fauxAssistantMessage("window 1 done")),
+				// Window 2: do not call linear_get_issue.
+				capture(fauxAssistantMessage("window 2 done")),
+				// Window 3: reload linear_delete_issue via tool_search and verify it becomes active again.
+				capture(
+					fauxAssistantMessage(fauxToolCall("tool_search", { query: "datadog logs" }), { stopReason: "toolUse" }),
+				),
+				capture(fauxAssistantMessage(fauxToolCall("datadog_query_logs", {}), { stopReason: "toolUse" })),
+				capture(fauxAssistantMessage("window 3 done")),
+			]);
+
+			await harness.session.prompt("Inspect Linear issues");
+			expect(harness.session.getActiveToolNames()).toEqual(
+				expect.arrayContaining([
+					"read",
+					"tool_search",
+					"linear_get_issue",
+					"linear_delete_issue",
+					"datadog_query_logs",
+				]),
+			);
+
+			// Compaction 1: never-called deferred & codemode tools are pruned; called tool and initial tools survive.
+			await harness.session.compact();
+			expect(harness.session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["read", "tool_search", "linear_get_issue"]),
+			);
+			expect(harness.session.getActiveToolNames()).not.toContain("linear_delete_issue");
+			expect(harness.session.getActiveToolNames()).not.toContain("datadog_query_logs");
+
+			const compactions1 = harness.sessionManager
+				.getEntries()
+				.filter((entry): entry is CompactionEntry => entry.type === "compaction");
+			expect(compactions1).toHaveLength(1);
+			// Leading systemMessage keeps the initial tool list unchanged for prompt caching.
+			expect(compactions1[0].systemMessage?.toolsAdded?.map((t) => t.name)).toEqual(["read", "tool_search"]);
+			expect(compactions1[0].toolUpdate?.toolsAdded?.map((t) => t.name)).toEqual(["linear_get_issue"]);
+
+			await harness.session.prompt("Continue without calling Linear");
+			expect(requestTools[4]).toEqual(["read", "tool_search", "linear_get_issue"]);
+
+			// Compaction 2: linear_get_issue was not called in Window 2, so it is now pruned too.
+			await harness.session.compact();
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "tool_search"]);
+			const compactions2 = harness.sessionManager
+				.getEntries()
+				.filter((entry): entry is CompactionEntry => entry.type === "compaction");
+			expect(compactions2[1].systemMessage?.toolsAdded?.map((t) => t.name)).toEqual(["read", "tool_search"]);
+			expect(compactions2[1].toolUpdate).toBeUndefined();
+
+			// Window 3: pruned tool can be reloaded cleanly via tool_search and called.
+			await harness.session.prompt("Now query Datadog logs");
+			expect(requestTools[5]).toEqual(["read", "tool_search"]);
+			expect(requestTools[6]).toEqual(["read", "tool_search", "datadog_query_logs"]);
+			expect(harness.session.getActiveToolNames()).toContain("datadog_query_logs");
+		});
+
+		it("keeps tools freshly loaded by tool_search inside the retained tail", async () => {
+			let keptEntryId: string | undefined;
+			const harness = await createHarness({
+				initialActiveToolNames: ["read", "tool_search"],
+				settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+				extensionFactories: [
+					createToolSearchExtension(),
+					(pi) => {
+						pi.registerTool(makeTool("linear_get_issue", "Read a Linear issue"));
+						pi.on("session_before_compact", async (event) => {
+							const kept = harness.sessionManager
+								.getBranch()
+								.find(
+									(entry) =>
+										entry.type === "message" &&
+										entry.message.role === "user" &&
+										getMessageText(entry.message) === "load linear tools",
+								);
+							keptEntryId = kept?.id;
+							return {
+								compaction: {
+									summary: "Kept tail includes tool_search.",
+									firstKeptEntryId: kept?.id ?? event.preparation.firstKeptEntryId,
+									tokensBefore: event.preparation.tokensBefore,
+									details: {},
+								},
+							};
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			await harness.session.bindExtensions({});
+			harness.setResponses([
+				fauxAssistantMessage("seed earlier turn"),
+				fauxAssistantMessage(fauxToolCall("tool_search", { query: "linear issue" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage("loaded linear tools for next turn"),
+			]);
+
+			await harness.session.prompt("first turn");
+			await harness.session.prompt("load linear tools");
+			await harness.session.compact();
+
+			expect(keptEntryId).toBeDefined();
+			expect(harness.session.getActiveToolNames()).toContain("linear_get_issue");
+		});
+
+		it("drops all search-loaded tools on a retain-none turn_end boundary rollover and preserves pruned loadout on resume and tree navigation", async () => {
+			let rolloverOnNextTurn = false;
+			const harness = await createHarness({
+				initialActiveToolNames: ["read", "tool_search"],
+				settings: { compaction: { enabled: false } },
+				extensionFactories: [
+					createToolSearchExtension(),
+					(pi) => {
+						pi.registerTool(makeTool("linear_get_issue", "Read a Linear issue"));
+						pi.on("turn_end", async () => {
+							if (!rolloverOnNextTurn) return;
+							rolloverOnNextTurn = false;
+							return {
+								entries: [
+									{
+										type: "compaction",
+										summary: "Clean context reset handoff.",
+										firstKeptEntryId: null,
+									},
+								],
+							};
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			await harness.session.bindExtensions({});
+
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("tool_search", { query: "linear issue" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("linear_get_issue", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage("done with linear"),
+			]);
+
+			await harness.session.prompt("load and use linear");
+			expect(harness.session.getActiveToolNames()).toContain("linear_get_issue");
+			const preRolloverLeafId = harness.sessionManager.getLeafId();
+			expect(preRolloverLeafId).toBeTruthy();
+
+			// Trigger a retain-none turn_end rollover (same shape as Posthorse new_context).
+			rolloverOnNextTurn = true;
+			harness.setResponses([fauxAssistantMessage("resetting context")]);
+			await harness.session.prompt("reset context");
+
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "tool_search"]);
+			const [compaction] = harness.sessionManager
+				.getEntries()
+				.filter((entry): entry is CompactionEntry => entry.type === "compaction");
+			expect(compaction.toolUpdate).toBeUndefined();
+
+			// Resume on the same SessionManager must NOT resurrect the pruned tool.
+			const resumed = await createHarness({
+				initialActiveToolNames: ["read", "tool_search"],
+				sessionManager: harness.sessionManager,
+				settings: { compaction: { enabled: false } },
+				extensionFactories: [
+					createToolSearchExtension(),
+					(pi) => {
+						pi.registerTool(makeTool("linear_get_issue", "Read a Linear issue"));
+					},
+				],
+			});
+			harnesses.push(resumed);
+			await resumed.session.bindExtensions({});
+			expect(resumed.session.getActiveToolNames()).toEqual(["read", "tool_search"]);
+
+			// Navigating the tree back before the compaction restores the pre-compaction loadout.
+			await resumed.session.navigateTree(preRolloverLeafId!);
+			expect(resumed.session.getActiveToolNames()).toContain("linear_get_issue");
+		});
+
+		it("does not prune deferred tools when tool_search is inactive", async () => {
+			const harness = await createHarness({
+				initialActiveToolNames: ["read"],
+				settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+				extensionFactories: [registerDeferredTools],
+			});
+			harnesses.push(harness);
+			await harness.session.bindExtensions({});
+
+			harness.setResponses([fauxAssistantMessage("turn 1"), fauxAssistantMessage("turn 2")]);
+			await harness.session.prompt("start");
+			harness.session.setActiveToolsByName(["read", "linear_get_issue"]);
+			await harness.session.prompt("continue without calling linear");
+			await harness.session.compact();
+
+			expect(harness.session.getActiveToolNames()).toEqual(["read", "linear_get_issue"]);
+		});
 	});
 });
