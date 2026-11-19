@@ -333,4 +333,54 @@ describe("InteractiveMode cache estimates", () => {
 		expect(continuation).toContain("Cache miss estimate:");
 		expect(continuation).not.toContain("Expected cache transition");
 	});
+
+	test("announces OpenAI reasoning removals with cause and deduplicates per provider", () => {
+		initTheme("dark");
+		const manager = SessionManager.inMemory();
+		const openAiReply = (reasons: string[]): AssistantMessage => ({
+			...message,
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			model: "gpt-6.2-sol",
+			diagnostics: [
+				{
+					type: "openai_input_transformations",
+					timestamp: 1,
+					details: {
+						transformations: reasons.map((reason, index) => ({
+							type: "reasoning",
+							id: `rs_${index}`,
+							action: "removed",
+							reason,
+						})),
+					},
+				},
+			],
+		});
+
+		// An earlier Anthropic drop in the same window must not hide a new OpenAI drop.
+		manager.appendMessage(reply(2));
+		const context: NoticeContext = {
+			chatContainer: new Container(),
+			settingsManager: { getShowCacheMissNotices: () => true },
+			sessionManager: manager,
+		};
+		const firstOpenAi = openAiReply(["prefix_mismatch"]);
+		maybeShowThinkingDropNotice.call(context, firstOpenAi);
+		const firstOutput = stripAnsi(context.chatContainer.render(160).join("\n"));
+		expect(firstOutput).toContain(
+			"OpenAI dropped 1 reasoning item after the earlier prompt changed (details in session)",
+		);
+
+		// Repeating the same count in the same window stays silent.
+		manager.appendMessage(firstOpenAi);
+		context.chatContainer.clear();
+		maybeShowThinkingDropNotice.call(context, openAiReply(["prefix_mismatch"]));
+		expect(context.chatContainer.children).toHaveLength(0);
+
+		// A larger drop with end_user_mismatch announces again.
+		maybeShowThinkingDropNotice.call(context, openAiReply(["end_user_mismatch", "end_user_mismatch"]));
+		const secondOutput = stripAnsi(context.chatContainer.render(160).join("\n"));
+		expect(secondOutput).toContain("OpenAI dropped 2 reasoning items for another end user (details in session)");
+	});
 });

@@ -36,6 +36,7 @@ import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	applyServiceTierPricing,
+	CONFIGURATION_UPDATE_REQUEST_EFFORT,
 	convertResponsesMessages,
 	convertResponsesTools,
 	getResponsesToolSupport,
@@ -61,6 +62,21 @@ const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached";
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found";
 const SERVICE_TIER_NOT_ALLOWED_CODE = "service_tier_not_allowed";
+/**
+ * GPT-6 models on the canonical Codex backend accept `configuration_update` items (verified live
+ * across SSE and WebSocket continuation). Kept here as a fallback so upstream `pi.dev` catalog
+ * overlays without `supportsMidConvoEffort` still preserve prompt caches on effort changes; an
+ * explicit `compat.supportsMidConvoEffort: false` always opts out.
+ */
+const CODEX_MID_CONVO_EFFORT_MODEL_IDS = new Set([
+	"gpt-6-astra",
+	"gpt-6-sol",
+	"gpt-6-luna",
+	"gpt-6.1-sol",
+	"gpt-6.1-terra",
+	"gpt-6.2-astra",
+	"gpt-6.2-sol",
+]);
 
 const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 	"completed",
@@ -248,6 +264,23 @@ function encodeSSERequest(url: string, headers: Headers, bodyJson: string): Pick
 	return { headers: compressedHeaders, body: compressed };
 }
 
+/** Effort to send in configuration_update items, or undefined to send it as reasoning.effort. */
+function getConfigurationUpdateEffort(
+	model: Model<"openai-codex-responses">,
+	options: OpenAICodexResponsesOptions | undefined,
+): string | undefined {
+	const supportsMidConvoEffort =
+		model.compat?.supportsMidConvoEffort ??
+		(model.provider === "openai-codex" &&
+			model.baseUrl === DEFAULT_CODEX_BASE_URL &&
+			CODEX_MID_CONVO_EFFORT_MODEL_IDS.has(model.id));
+	if (!supportsMidConvoEffort || !options?.reasoningEffort || options.reasoningEffort === "none") {
+		return undefined;
+	}
+	const effort = model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
+	return effort === null || effort === "none" ? undefined : effort;
+}
+
 // ============================================================================
 // Main Stream Function
 // ============================================================================
@@ -259,6 +292,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
 	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+	const configurationUpdateEffort = getConfigurationUpdateEffort(model, options);
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -267,6 +301,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			api: "openai-codex-responses" as Api,
 			provider: model.provider,
 			model: model.id,
+			...(configurationUpdateEffort !== undefined ? { providerThinkingLevel: configurationUpdateEffort } : {}),
 			usage: {
 				input: 0,
 				output: 0,
@@ -292,7 +327,14 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			);
 			const cacheSessionId = options?.cacheRetention === "none" ? undefined : options?.sessionId;
 			const codexSessionId = clampOpenAIPromptCacheKey(cacheSessionId);
-			let body = buildRequestBody(model, normalizedContext, options, codexSessionId, grammarToolInputProperties);
+			let body = buildRequestBody(
+				model,
+				normalizedContext,
+				options,
+				codexSessionId,
+				grammarToolInputProperties,
+				configurationUpdateEffort,
+			);
 			const nextBody = await options?.onPayload?.(body, model);
 			if (nextBody !== undefined) {
 				body = nextBody as RequestBody;
@@ -584,6 +626,7 @@ function buildRequestBody(
 		getDeclaredTools(context.messages),
 		model.compat?.supportsOpenAIGrammarTools ?? false,
 	),
+	configurationUpdateEffort?: string,
 ): RequestBody {
 	const supportsStrictMode = model.compat?.supportsStrictMode ?? true;
 	const supportsOpenAIGrammarTools = model.compat?.supportsOpenAIGrammarTools ?? false;
@@ -603,6 +646,7 @@ function buildRequestBody(
 		supportsAdditionalTools,
 		supportsToolSearch,
 		toolOptions: { strict: null, supportsStrictMode, supportsOpenAIGrammarTools },
+		configurationUpdateEffort,
 	});
 
 	const body: RequestBody = {
@@ -642,7 +686,7 @@ function buildRequestBody(
 				: (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort);
 		if (effort !== null) {
 			body.reasoning = {
-				effort,
+				effort: configurationUpdateEffort === undefined ? effort : CONFIGURATION_UPDATE_REQUEST_EFFORT,
 				summary: options.reasoningSummary ?? "auto",
 			};
 		}

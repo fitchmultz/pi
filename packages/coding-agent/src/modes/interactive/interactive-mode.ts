@@ -4799,20 +4799,43 @@ export class InteractiveMode {
 		);
 	}
 
-	/** List the reason Anthropic reported for each thinking block it dropped from the request of `message`. */
-	private static droppedThinkingBlockReasons(message: AssistantMessage): unknown[] {
-		const reasons: unknown[] = [];
+	/** List the provider and reasons reported for dropped thinking blocks / reasoning items on `message`. */
+	private static droppedThinkingReport(message: AssistantMessage): {
+		providerLabel: "Anthropic" | "OpenAI";
+		noun: { singular: string; plural: string };
+		reasons: unknown[];
+	} {
+		const anthropicReasons: unknown[] = [];
+		const openaiReasons: unknown[] = [];
 		for (const diagnostic of message.diagnostics ?? []) {
-			if (diagnostic.type !== "anthropic_input_transformations") continue;
 			const transformations = diagnostic.details?.transformations;
 			if (!Array.isArray(transformations)) continue;
-			for (const transformation of transformations as unknown[]) {
-				if (typeof transformation !== "object" || transformation === null) continue;
-				const { type, reason } = transformation as Record<string, unknown>;
-				if (type === "thinking_dropped") reasons.push(reason);
+			if (diagnostic.type === "anthropic_input_transformations") {
+				for (const transformation of transformations as unknown[]) {
+					if (typeof transformation !== "object" || transformation === null) continue;
+					const { type, reason } = transformation as Record<string, unknown>;
+					if (type === "thinking_dropped") anthropicReasons.push(reason);
+				}
+			} else if (diagnostic.type === "openai_input_transformations") {
+				for (const transformation of transformations as unknown[]) {
+					if (typeof transformation !== "object" || transformation === null) continue;
+					const { type, action, reason } = transformation as Record<string, unknown>;
+					if (type === "reasoning" && action === "removed") openaiReasons.push(reason);
+				}
 			}
 		}
-		return reasons;
+		if (openaiReasons.length > 0 && anthropicReasons.length === 0) {
+			return {
+				providerLabel: "OpenAI",
+				noun: { singular: "reasoning item", plural: "reasoning items" },
+				reasons: openaiReasons,
+			};
+		}
+		return {
+			providerLabel: "Anthropic",
+			noun: { singular: "thinking block", plural: "thinking blocks" },
+			reasons: anthropicReasons,
+		};
 	}
 
 	/**
@@ -4829,12 +4852,15 @@ export class InteractiveMode {
 	 *   with a provider summary block expects none: the block stands for that history, so Anthropic
 	 *   keeps the kept blocks.
 	 */
-	private static countKnownThinkingDrops(branch: SessionEntry[]): number {
+	private static countKnownThinkingDrops(branch: SessionEntry[], providerLabel: "Anthropic" | "OpenAI"): number {
 		let reported = 0;
 		for (let i = branch.length - 1; i >= 0; i--) {
 			const entry = branch[i];
 			if (entry.type === "message" && entry.message.role === "assistant") {
-				reported = Math.max(reported, InteractiveMode.droppedThinkingBlockReasons(entry.message).length);
+				const report = InteractiveMode.droppedThinkingReport(entry.message);
+				if (report.providerLabel === providerLabel) {
+					reported = Math.max(reported, report.reasons.length);
+				}
 			}
 			if (entry.type !== "compaction") continue;
 			if (reported > 0) return reported;
@@ -4856,27 +4882,31 @@ export class InteractiveMode {
 	private maybeShowThinkingDropNotice(message: AssistantMessage): void {
 		if (!this.settingsManager.getShowCacheMissNotices()) return;
 
-		const reasons = InteractiveMode.droppedThinkingBlockReasons(message);
+		const { providerLabel, noun: nouns, reasons } = InteractiveMode.droppedThinkingReport(message);
 		const droppedCount = reasons.length;
 		if (droppedCount === 0) return;
 
 		// message_end reaches the UI before the current message is persisted,
 		// so the branch holds only the responses before it.
-		if (droppedCount <= InteractiveMode.countKnownThinkingDrops(this.sessionManager.getBranch())) return;
+		if (droppedCount <= InteractiveMode.countKnownThinkingDrops(this.sessionManager.getBranch(), providerLabel)) {
+			return;
+		}
 
-		// Name a cause only when every dropped block reports it. Anthropic's other reasons (another
-		// organization or end user) and mixed or missing reasons get no cause.
-		const cause = reasons.every((reason) => reason === "prefix_binding_mismatch")
+		// Name a cause only when every dropped block/item reports it. Other reasons (such as another
+		// organization) and mixed or missing reasons get no cause.
+		const cause = reasons.every((reason) => reason === "prefix_binding_mismatch" || reason === "prefix_mismatch")
 			? " after the earlier prompt changed"
 			: reasons.every((reason) => reason === "model_binding_mismatch")
 				? " written by another model"
-				: "";
-		const noun = droppedCount === 1 ? "thinking block" : "thinking blocks";
+				: reasons.every((reason) => reason === "end_user_mismatch")
+					? " for another end user"
+					: "";
+		const noun = droppedCount === 1 ? nouns.singular : nouns.plural;
 		this.chatContainer.addChild(new Spacer(1));
 		addChatActivity(
 			this.chatContainer,
 			new ThemedText(
-				() => theme.fg("warning", `Anthropic dropped ${droppedCount} ${noun}${cause} (details in session)`),
+				() => theme.fg("warning", `${providerLabel} dropped ${droppedCount} ${noun}${cause} (details in session)`),
 				1,
 				0,
 			),

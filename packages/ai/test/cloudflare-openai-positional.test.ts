@@ -12,6 +12,9 @@ function positional(model: { compat?: unknown }) {
 	return {
 		systemMessages: compat?.supportsMidConvoSystemMessages === true,
 		additionalTools: compat?.supportsAdditionalTools === true,
+		toolSearch: compat?.supportsToolSearch === true,
+		explicitPromptCacheMode: compat?.supportsExplicitPromptCacheMode === true,
+		effort: compat?.supportsMidConvoEffort === true,
 	};
 }
 
@@ -27,13 +30,20 @@ describe("Cloudflare OpenAI positional defaults", () => {
 		const actual = routed.map((model) => ({ id: model.id, ...positional(normalizeCloudflareModel(model)) }));
 		expect(actual).toEqual(routed.map((model) => ({ id: model.id, ...(direct.get(model.id) ?? positional({})) })));
 		expect(actual.some((model) => model.additionalTools)).toBe(true);
+		expect(actual.some((model) => model.effort)).toBe(true);
 	});
 
 	it("keeps explicit values and leaves custom endpoints alone", () => {
 		const astra = routed.find((model) => model.id === "gpt-6-astra");
 		if (!astra) throw new Error("Missing Cloudflare gpt-6-astra");
 		const optOut = normalizeCloudflareModel({ ...astra, compat: { supportsMidConvoSystemMessages: false } });
-		expect(optOut.compat).toEqual({ supportsMidConvoSystemMessages: false, supportsAdditionalTools: true });
+		expect(optOut.compat).toEqual({
+			supportsMidConvoSystemMessages: false,
+			supportsAdditionalTools: true,
+			supportsToolSearch: true,
+			supportsExplicitPromptCacheMode: true,
+			supportsMidConvoEffort: true,
+		});
 		const custom = { ...astra, baseUrl: "https://proxy.invalid/openai", compat: { supportsStrictMode: true } };
 		expect(normalizeCloudflareModel(custom)).toBe(custom);
 	});
