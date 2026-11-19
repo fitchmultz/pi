@@ -100,7 +100,7 @@ An idle session can start a run without new input when background work ends. `wa
 - Background tool runs started with `ctx.runInBackground()`, such as a `codemode` background script. A run is listed from its start until the run that its completion message started has ended.
 - Work that extensions report through the [`background_work`](extensions.md#background_work) event. The `background_command` extension reports each job from its start until its completion notice is in the session; see [Background commands](background-command.md#completion-and-lifetime).
 
-Each item has an `id`, a one-line `description` and `cancel()`. `cancel()` resolves when cancellation is requested; the work may still be stopping, and a cancelled job stays listed until its notice records the outcome. `getBackgroundWork()` only asks: it writes nothing, cancels nothing and does not disturb a working-session save.
+Each item has an `id`, a one-line `description`, an optional `survivesRestart` flag (default `false`; `true` for detached `background_command` jobs and other work that outlives a managed worker replacement), and `cancel()`. `cancel()` resolves when cancellation is requested; the work may still be stopping, and a cancelled job stays listed until its notice records the outcome. `getBackgroundWork()` only asks: it writes nothing, cancels nothing and does not disturb a working-session save.
 
 The rule for a host: a session that is idle, is not settling and has no background work stays idle until new input. To keep a run open until then:
 

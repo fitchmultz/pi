@@ -629,13 +629,14 @@ pi.on("background_work", (event, ctx) => {
     work: [...watchers.values()].map((watcher) => ({
       id: watcher.id,                    // the extension's own ID for the work
       description: watcher.description,  // what is running, in one line
+      survivesRestart: false,            // optional (default false): set true only if work outlives a managed restart
       cancel: async () => watcher.stop(), // resolves when requested; the work may still be stopping
     })),
   };
 });
 ```
 
-A host uses the list to keep a run open until the session can no longer wake on its own; see [Background work](sdk.md#background-work). Report an item from the moment the work starts until its message is in the session. Stop reporting work whose message will not come, or the host waits for it without end.
+A host uses the list to keep a run open until the session can no longer wake on its own; see [Background work](sdk.md#background-work). Report an item from the moment the work starts until its message is in the session. Stop reporting work whose message will not come, or the host waits for it without end. Automatic stale restarts (`restartWhenStale`) postpone while any reported item has `survivesRestart` falsy, and proceed when all active items set `survivesRestart: true` (such as detached `background_command` jobs).
 
 The handler is a question, not an action: answer from state the extension already holds, and change nothing. It can run at any time, including while the agent is streaming and during a working-session save. A handler that throws is reported as an extension error and contributes nothing; the work of the other handlers is still returned.
 
