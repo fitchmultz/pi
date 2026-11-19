@@ -1,12 +1,11 @@
 import { AzureOpenAI } from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
-import type { Model, SimpleStreamOptions, StreamFunction, TranscriptContext } from "../types.ts";
+import type { Api, AssistantMessage, Model, SimpleStreamOptions, StreamFunction, TranscriptContext } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
-import { createPendingAssistantMessage } from "../utils/pending-assistant.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { type AzureEndpointOptions, resolveAzureConfig, resolveDeploymentName } from "./azure-openai-config.ts";
@@ -50,7 +49,23 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 	(async () => {
 		const deploymentName = resolveDeploymentName(model, options);
 
-		const output = createPendingAssistantMessage("azure-openai-responses", model);
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "azure-openai-responses" as Api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "pending",
+			timestamp: Date.now(),
+		};
 
 		try {
 			// Create Azure OpenAI client
