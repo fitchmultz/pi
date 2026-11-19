@@ -67,21 +67,16 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		);
 		await browser.evaluate(`document.querySelector('.command-layer .scrim').click()`);
 		await browser.wait(`!document.querySelector('.command-menu')`);
-		// The folder button opens the menu's folder page; Select folder… opens the picker.
+		// The folder button opens the location picker; a typed path browses there.
 		await browser.click(".cwd-pick");
-		await browser.wait(
-			`Boolean([...document.querySelectorAll(".command-menu [role=option]")].find((row) => row.textContent.includes("Select folder…")))`,
-		);
-		await browser.evaluate(
-			`[...document.querySelectorAll(".command-menu [role=option]")].find((row) => row.textContent.includes("Select folder…")).click()`,
-		);
-		await browser.wait(`document.querySelector('.directory-use:not(:disabled)')`);
+		await browser.wait(`document.querySelector('.location-use:not(:disabled)')`);
+		await browser.click('button[aria-label="Type a path"]');
 		await browser.evaluate(setInput("input[aria-label=Directory]", fixture.workspace));
 		await browser.evaluate(`document.querySelector('input[aria-label=Directory]').form.requestSubmit()`);
 		await browser.wait(
-			`document.querySelector('.directory-use:not(:disabled)')?.textContent.trim()===${JSON.stringify(`Use ${fixture.workspace}`)}`,
+			`document.querySelector('.location-use:not(:disabled)')?.textContent.trim()===${JSON.stringify(`Use ${fixture.workspace}`)}`,
 		);
-		await browser.click(".directory-use");
+		await browser.click(".location-use");
 		await browser.wait(`!document.querySelector('[role=dialog]')`);
 		writeFileSync(join(fixture.workspace, "first.txt"), "First-message attachment\n");
 		// The picked file's pill goes at the caret, after the text.
@@ -218,7 +213,8 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		await browser.wait(`!${conversations}.hidden && ${conversations}.querySelector('.subagent-row')`);
 		await browser.click(`${header} .subagent-toggle`);
 		await browser.wait(`${conversations}.hidden`);
-		// While the subagent works, its collapsed session shows pi's dots; shown, the subagent's item does too.
+		// While only the subagent works, its collapsed session shows pi's dots as its status, as when its main
+		// conversation works; shown, the subagent's item has them as its status too.
 		const childChat = await holdIn(
 			owner,
 			Chat,
@@ -226,7 +222,14 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 			"participant",
 		);
 		await childChat.send({ text: "slow child", requestId: "drawer-busy" }, BACKGROUND_CONTEXT);
-		await browser.wait(`document.querySelector('${header} > .nav-marker > .pi-dots')`);
+		// The status settles once the main conversation's last answer is read (the session is open).
+		await browser.wait(
+			`document.querySelector('${header} > .nav-marker > .pi-dots') && !document.querySelector('${header} .background-work')`,
+		);
+		// The main conversation's dock says which agent runs, with pi's dots; its subagent's view has its own bar instead.
+		await browser.wait(
+			`document.querySelector('.dock .running-agents > .pi-dots') && document.querySelector('.dock .running-agents .running-agent')?.textContent === ${JSON.stringify(child.name)}`,
+		);
 		await browser.click(`${header} .subagent-toggle`);
 		const subagentRow = `document.querySelector('.nav-row:has(> .subagent-row)')`;
 		await browser.wait(`!${conversations}.hidden && ${subagentRow}.querySelector('.nav-marker > .pi-dots')`);
@@ -234,6 +237,7 @@ describe("drawer and new-session parity", { skip: !browserTests }, () => {
 		await browser.wait(
 			`location.pathname.endsWith('/c/${child.conversationId}') && document.querySelector('.subagent-row.active')`,
 		);
+		assert.equal(await browser.evaluate(`document.querySelector('.running-agents') === null`), true);
 		await childChat.stop(BACKGROUND_CONTEXT);
 		await browser.wait(`!document.querySelector('.sidebar-section[data-key=other] .pi-dots')`);
 		for (const held of [childChat, chat, agents, sessions]) held.release();
