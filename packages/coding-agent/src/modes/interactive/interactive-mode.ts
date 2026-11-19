@@ -286,6 +286,19 @@ export function formatEmptySessionResumeHint(sessions: readonly SessionInfo[]): 
 	return `${countPrefix}${latestSuffix}. Run /resume to continue.`;
 }
 
+class ConditionalSpacer extends Spacer {
+	private readonly isVisible: () => boolean;
+
+	constructor(isVisible: () => boolean, lines = 1) {
+		super(lines);
+		this.isVisible = isVisible;
+	}
+
+	override render(width: number): string[] {
+		return this.isVisible() ? super.render(width) : [];
+	}
+}
+
 class ExpandableText extends ThemedText implements Expandable {
 	private readonly state: { expanded: boolean };
 
@@ -4389,6 +4402,7 @@ export class InteractiveMode {
 					!!this.compactView,
 				);
 				component.setExpanded(this.toolOutputExpanded);
+				this.chatContainer.addChild(new ConditionalSpacer(() => !this.compactView || component.isExpanded()));
 				this.chatContainer.addChild(component);
 				break;
 			}
@@ -4403,6 +4417,7 @@ export class InteractiveMode {
 					!!this.compactView,
 				);
 				component.setExpanded(this.toolOutputExpanded);
+				this.chatContainer.addChild(new ConditionalSpacer(() => !this.compactView || component.isExpanded()));
 				this.chatContainer.addChild(component);
 				break;
 			}

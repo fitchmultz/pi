@@ -67,6 +67,32 @@ describe("collapsible message components", () => {
 		expect(renderText(component)).not.toContain("branch details");
 	});
 
+	test("standalone summary components render only the Box without a leading blank row", () => {
+		const compaction = new CompactionSummaryMessageComponent({
+			role: "compactionSummary",
+			summary: "compaction details",
+			tokensBefore: 1234,
+			timestamp: Date.now(),
+		});
+		const branch = new BranchSummaryMessageComponent({
+			role: "branchSummary",
+			summary: "branch details",
+			fromId: "entry-1",
+			timestamp: Date.now(),
+		});
+
+		for (const [component, label] of [
+			[compaction, "[compaction]"],
+			[branch, "[branch]"],
+		] as const) {
+			const lines = component.render(WIDTH);
+			expect(lines).toHaveLength(5);
+			// Row 0 is the Box's own top padding (styled background), not an unstyled leading spacer.
+			expect(lines[0]).not.toBe("");
+			expect(stripAnsi(lines[1]).trim()).toBe(label);
+		}
+	});
+
 	test("toggles a skill invocation when clicked", () => {
 		const component = new SkillInvocationMessageComponent({
 			name: "example-skill",

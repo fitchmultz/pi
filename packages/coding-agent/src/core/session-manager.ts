@@ -1635,6 +1635,8 @@ export class SessionManager {
 
 	private _appendEntry(entry: SessionEntry): void {
 		this.beforeMutation?.();
+		const previousLeafId = this.leafId;
+		const previousLatestSessionInfo = this.latestSessionInfo;
 		this.fileEntries.push(entry);
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
@@ -1647,7 +1649,24 @@ export class SessionManager {
 			if (entry.type === "compaction") branch.contextEntries = contextEntriesFor(branch.path);
 			else branch.contextEntries.push(entry);
 		}
-		this._persist(entry);
+		try {
+			this._persist(entry);
+		} catch (error) {
+			// Roll back memory state when initial exclusive creation refuses to overwrite an existing file.
+			// Post-creation write failures (#257) remain in memory so the next write can recover them.
+			if (
+				this.journal.status === "deferred" &&
+				error instanceof Error &&
+				(error as NodeJS.ErrnoException).code === "EEXIST"
+			) {
+				this.fileEntries.pop();
+				this.byId.delete(entry.id);
+				this.leafId = previousLeafId;
+				this.latestSessionInfo = previousLatestSessionInfo;
+				this.activeBranch = undefined;
+			}
+			throw error;
+		}
 	}
 
 	/** Append a message as child of current leaf, then advance leaf. Returns entry id.

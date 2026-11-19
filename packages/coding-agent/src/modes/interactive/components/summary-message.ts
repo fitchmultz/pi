@@ -59,6 +59,10 @@ export abstract class SummaryMessageComponent<TMessage extends { summary: string
 		this.updateDisplay();
 	}
 
+	isExpanded(): boolean {
+		return this.expanded;
+	}
+
 	setOutputPad(outputPad: number): void {
 		this.setPaddingX(outputPad);
 	}
@@ -72,19 +76,15 @@ export abstract class SummaryMessageComponent<TMessage extends { summary: string
 		this.compactView = compactView;
 	}
 
-	/**
-	 * The card with its blank row above it. Compact view shows an unexpanded summary as its two-row preview:
-	 * the label and the summary row. The preview skips blank rows, so the row above the card goes too.
-	 */
-	override render(width: number): string[] {
-		const lines = ["", ...super.render(width)];
+	/** Compact view shows an unexpanded summary as its two-row preview: the label and the summary row. */
+	override render(width: number): readonly string[] {
+		const lines = super.render(width);
 		return this.compactView && !this.expanded ? this.compactPreview.render(lines, width) : lines;
 	}
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Box["handleMouse"]> {
 		const native = this.compactView && !this.expanded ? this.compactPreview.toNative(event) : event;
-		// The box starts one row down, below the blank row.
-		return native && super.handleMouse({ ...native, y: native.y - 1, height: native.height - 1 });
+		return native && super.handleMouse(native);
 	}
 
 	private updateDisplay(): void {

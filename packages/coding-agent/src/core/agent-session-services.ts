@@ -178,7 +178,9 @@ export async function createAgentSessionServices(
 
 	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
 	const extensionsResult = resourceLoader.getExtensions();
-	const errors = await applyProviderRegistrations(extensionsResult.runtime, modelRuntime);
+	const errors = await applyProviderRegistrations(extensionsResult.runtime, modelRuntime, undefined, {
+		refresh: "always",
+	});
 	extensionsResult.errors.push(...errors.map((error) => ({ path: error.extensionPath, error: error.error })));
 	diagnostics.push(
 		...errors.map((error) => ({

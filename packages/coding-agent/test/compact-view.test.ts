@@ -33,6 +33,8 @@ import { ToolExecutionComponent, type ToolRenderers } from "../src/modes/interac
 import { initTheme } from "../src/modes/interactive/theme/theme.ts";
 import { createInteractiveTui } from "../src/modes/interactive/tui-renderer.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import { createHarness } from "./suite/harness.ts";
+import { createTestInteractiveView } from "./suite/ui-harness.ts";
 
 const ui = { requestRender() {} } as TUI;
 const output = Array.from({ length: 30 }, (_, i) => `output ${i}: ${"界 wide ".repeat(10)}`).join("\n");
@@ -785,20 +787,21 @@ describe("compact Activity and messages", () => {
 		expect(collapsed()).toEqual(preview);
 		for (const width of [1, 12]) compactRows(component, width);
 
-		// Normal view: the blank row above the card, then the card.
+		// Standalone card in normal view renders only the Box without a baked-in leading blank row.
 		const normal = create(false);
-		const card = ["", "", label, "", preview[1], ""];
+		const card = ["", label, "", preview[1], ""];
+		expect(normal.render(60)[0]).not.toBe("");
 		expect(text(normal.render(60))).toEqual(card);
 		normal.setExpanded(true);
 		const full = normal.render(60);
-		expect(text(full).slice(0, 4)).toEqual(["", "", label, ""]);
+		expect(text(full).slice(0, 3)).toEqual(["", label, ""]);
 		expect(text(full)).toContain("detail 11");
 
 		// A click on either row opens the card; a click on the label of the open card closes it.
 		for (const row of [0, 1]) {
 			click(component, row, 60);
 			expect(component.render(60)).toEqual(full);
-			click(component, 2, 60);
+			click(component, 1, 60);
 			expect(collapsed()).toEqual(preview);
 		}
 		// Ctrl+O reaches the card through setExpanded.
@@ -818,5 +821,47 @@ describe("compact Activity and messages", () => {
 		expect(text(component.render(60))).toEqual(card);
 		component.setCompactView(true);
 		expect(collapsed()).toEqual(preview);
+	});
+
+	test("InteractiveMode adds a spacer above summary cards in normal view and collapses it in compact view", async () => {
+		const h = await createHarness();
+		try {
+			const first = h.session.sessionManager.appendMessage({
+				role: "user",
+				content: "before summary",
+				timestamp: 1,
+			});
+			h.session.sessionManager.branchWithSummary(first, "branch summary body");
+
+			const { view, submit } = await createTestInteractiveView(h, { width: 80, height: 40 });
+			(view as unknown as { renderInitialMessages(): void }).renderInitialMessages();
+
+			const findLabelRow = (lines: readonly string[]) =>
+				lines.findIndex((line) => stripAnsi(line).includes("[branch]"));
+
+			// Normal view: unstyled blank spacer row sits immediately above the Box's styled top padding row.
+			const normalLines = view.chatContainer.render(80);
+			const normalLabelRow = findLabelRow(normalLines);
+			expect(normalLabelRow).toBeGreaterThanOrEqual(2);
+			expect(normalLines[normalLabelRow - 2]).toBe("");
+			expect(normalLines[normalLabelRow - 1]).not.toBe("");
+
+			// Hybrid compact view: collapsed summary card sits directly below the Activity heading with no blank row.
+			await submit("/compact-view hybrid");
+			const hybridLines = view.chatContainer.render(80);
+			const hybridLabelRow = findLabelRow(hybridLines);
+			expect(hybridLabelRow).toBeGreaterThanOrEqual(1);
+			expect(stripAnsi(hybridLines[hybridLabelRow - 1]).trim()).toMatch(/^▾ Activity · /);
+
+			// Expanding the summary card in compact view restores its blank spacer row above the Box.
+			view.setToolsExpanded(true);
+			const expandedLines = view.chatContainer.render(80);
+			const expandedLabelRow = findLabelRow(expandedLines);
+			expect(expandedLabelRow).toBeGreaterThanOrEqual(2);
+			expect(expandedLines[expandedLabelRow - 2]).toBe("");
+			expect(expandedLines[expandedLabelRow - 1]).not.toBe("");
+		} finally {
+			h.cleanup();
+		}
 	});
 });
