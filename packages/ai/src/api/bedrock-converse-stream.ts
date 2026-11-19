@@ -29,6 +29,7 @@ import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { calculateCost } from "../models.ts";
 import type {
+	Api,
 	AssistantMessage,
 	CacheRetention,
 	ImageContent,
@@ -55,7 +56,6 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { providerHeadersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getClientVersion } from "../utils/identity.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
-import { createPendingAssistantMessage } from "../utils/pending-assistant.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
@@ -156,7 +156,23 @@ export const stream: StreamFunction<"bedrock-converse-stream", BedrockOptions> =
 	const normalizedContext = collapseSystemMessages(context);
 
 	(async () => {
-		const output = createPendingAssistantMessage("bedrock-converse-stream", model);
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: "bedrock-converse-stream" as Api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "pending",
+			timestamp: Date.now(),
+		};
 
 		const openBlocks: OpenBlocks = new Map();
 

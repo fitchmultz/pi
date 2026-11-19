@@ -28,7 +28,6 @@ import { appendAssistantMessageDiagnostic, createAssistantMessageDiagnostic } fr
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
-import { createPendingAssistantMessage } from "../utils/pending-assistant.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { ownedSlice } from "../utils/text.ts";
@@ -183,7 +182,16 @@ function appendRewriteDiagnostic(message: AssistantMessage, rewrite: PiMessagesR
 }
 
 function createEventConverter(model: Model<"pi-messages">) {
-	const partial = createPendingAssistantMessage(model.api, model);
+	const partial: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: createEmptyUsage(),
+		stopReason: "pending",
+		timestamp: Date.now(),
+	};
 	const toolArguments = new Map<number, ToolCallArgumentsStream>();
 
 	return (event: PiMessagesEvent): AssistantMessageEvent => {

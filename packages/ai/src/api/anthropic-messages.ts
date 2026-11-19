@@ -26,6 +26,7 @@ import { calculateCost } from "../models.ts";
 import { wroteProviderSummary } from "../provider-summary.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
+	Api,
 	AssistantMessage,
 	CacheRetention,
 	ImageContent,
@@ -58,7 +59,6 @@ import {
 	isOpenRouterModel,
 	type OpenRouterUsageAccounting,
 } from "../utils/openrouter-cost.ts";
-import { createPendingAssistantMessage } from "../utils/pending-assistant.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { createAnthropicRequestCompressionFetch } from "../utils/request-compression.ts";
@@ -858,7 +858,23 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	const summaryBlock = getSummaryBlock(model, normalizedContext.messages);
 
 	(async () => {
-		const output = createPendingAssistantMessage(model.api, model);
+		const output: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api as Api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "pending",
+			timestamp: Date.now(),
+		};
 
 		try {
 			let client: Anthropic;
