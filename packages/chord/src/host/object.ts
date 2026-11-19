@@ -248,8 +248,8 @@ export class ChordObject implements Target {
 	#runs = 0;
 	/**
 	 * The instance its references follow (`followed`): the live one, or the last one that went live while it still
-	 * changes after a failure or during a restart (a restart's old attempt: `openOldAttempt` while it drains); references
-	 * take their last values from it when it stops. `undefined` before the first went live and once it stopped changing.
+	 * changes after a failure or during a restart (references take their last values from it when it stops);
+	 * `undefined` before the first went live and once it stopped changing.
 	 */
 	#exposed: Attempt | undefined;
 	/**
@@ -262,6 +262,11 @@ export class ChordObject implements Target {
 	#flush: { readonly deadline: number; readonly timer: ReturnType<typeof setTimeout> } | undefined;
 	/** Its wake signals (`retryOn`), the last attempt's declaration; made by the first. */
 	#wakes: RetryWakes | undefined;
+	/**
+	 * A restart's old attempt while it is open (until it stopped changing): old work runs on it, and consumers whose
+	 * version it binds see it live (decision "Reload restarts every affected object", rules 2 and 5).
+	 */
+	#old: Attempt | undefined;
 	/**
 	 * A restart's old attempt without natives whose contributions stay in the tables until its successor is live (F-c),
 	 * replaced there in one batch; they leave if the successor fails, parks on a failure or the object ends.
@@ -364,14 +369,11 @@ export class ChordObject implements Target {
 
 	/**
 	 * A restart's old attempt while it is open (draining, not sealed yet): old work runs on it, and consumers whose
-	 * version it binds see it as the live instance (decision "Reload restarts every affected object", rules 2 and 5);
-	 * `undefined` otherwise.
+	 * version it binds see it as the live instance; `undefined` otherwise.
 	 */
 	get openOldAttempt(): Attempt | undefined {
-		// A restart's old attempt stays the exposed instance while it drains: no later attempt goes live before its end
-		// (`host.endingOf`), and it stops being followed only once sealed. Only a restart drains an attempt.
-		const exposed = this.#exposed;
-		return exposed?.draining ? exposed : undefined;
+		const old = this.#old;
+		return old?.draining ? old : undefined;
 	}
 
 	/** Resolves at its first outcome (the start barrier waits for it); never rejects. */
@@ -910,7 +912,7 @@ export class ChordObject implements Target {
 		const state = this.#state;
 		if ((state.kind === "live" || state.kind === "activating") && state.attempt === attempt) {
 			this.#rebuild(attempt, denial);
-		} else if (this.openOldAttempt === attempt) {
+		} else if (this.#old === attempt && attempt.draining) {
 			this.#sealDraining(attempt, denial);
 		} else if (state.kind === "failed" && this.#admissions?.at(-1) === attempt) {
 			this.#followFailed(attempt, verdict);
@@ -1136,7 +1138,9 @@ export class ChordObject implements Target {
 	#restart(requests: readonly Request[]): Attempt {
 		// A restart starts from a live object (`reloadFate`).
 		const old = (this.#state as Extract<ObjectState, { readonly kind: "live" }>).attempt;
+		this.#old = old;
 		old.beginDrain();
+		old.stopRoutines();
 		if (!old.opensNatives) this.#kept = old;
 		this.#instance = uuidv7();
 		const attempt = this.#replace();
@@ -1492,6 +1496,7 @@ export class ChordObject implements Target {
 	 * reference made later never attached to it: it takes nothing from it).
 	 */
 	#stopFollowing(attempt: Attempt): void {
+		if (this.#old === attempt) this.#old = undefined;
 		if (this.#exposed !== attempt || !this.#following) return;
 		this.#following = false;
 		this.#notify();
@@ -1530,9 +1535,8 @@ export class ChordObject implements Target {
 		if (state.kind === "ended") return { kind: "none" };
 		// A restart's teardown (its old attempt's end) finishes before this one (they share its documents).
 		const previous = this.host.endingOf(this.identity);
-		// Its ending rejects the callers of a restart's old attempt too, at once (found here, while it is still the exposed
-		// instance); that attempt's end closes it.
-		this.openOldAttempt?.seal(error);
+		// Its ending rejects the callers of a restart's old attempt too, at once; that attempt's end closes it.
+		this.#old?.seal(error);
 		this.#dropKept();
 		this.#readiness?.release();
 		this.#readiness = undefined;
