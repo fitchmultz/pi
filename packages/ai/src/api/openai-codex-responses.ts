@@ -33,7 +33,7 @@ import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { getDeclaredTools, normalizeContext, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { uuidv7 } from "../utils/uuid.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
-import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
+import { clampOpenAIPromptCacheKey, OPENAI_MID_CONVO_EFFORT_MODEL_IDS } from "./openai-prompt-cache.ts";
 import {
 	applyServiceTierPricing,
 	CONFIGURATION_UPDATE_REQUEST_EFFORT,
@@ -62,21 +62,6 @@ const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached";
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found";
 const SERVICE_TIER_NOT_ALLOWED_CODE = "service_tier_not_allowed";
-/**
- * GPT-6 models on the canonical Codex backend accept `configuration_update` items (verified live
- * across SSE and WebSocket continuation). Kept here as a fallback so upstream `pi.dev` catalog
- * overlays without `supportsMidConvoEffort` still preserve prompt caches on effort changes; an
- * explicit `compat.supportsMidConvoEffort: false` always opts out.
- */
-const CODEX_MID_CONVO_EFFORT_MODEL_IDS = new Set([
-	"gpt-6-astra",
-	"gpt-6-sol",
-	"gpt-6-luna",
-	"gpt-6.1-sol",
-	"gpt-6.1-terra",
-	"gpt-6.2-astra",
-	"gpt-6.2-sol",
-]);
 
 const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 	"completed",
@@ -273,7 +258,7 @@ function getConfigurationUpdateEffort(
 		model.compat?.supportsMidConvoEffort ??
 		(model.provider === "openai-codex" &&
 			model.baseUrl === DEFAULT_CODEX_BASE_URL &&
-			CODEX_MID_CONVO_EFFORT_MODEL_IDS.has(model.id));
+			OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id));
 	if (!supportsMidConvoEffort || !options?.reasoningEffort || options.reasoningEffort === "none") {
 		return undefined;
 	}

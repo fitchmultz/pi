@@ -1,6 +1,9 @@
 // OpenAI GPT models: facts that hold on every host that serves them.
 
 import type { Api, Model, ModelCost } from "../../src/types.ts";
+
+export { OPENAI_MID_CONVO_EFFORT_MODEL_IDS } from "../../src/api/openai-prompt-cache.ts";
+
 import { type ChatModel, mergeCompat, mergeThinking } from "../define.ts";
 import { roundCost } from "../sources/models-dev.ts";
 
@@ -66,20 +69,6 @@ export const OPENAI_MID_CONVO_MODEL_IDS = new Set([
 	"gpt-5.4-pro",
 	"gpt-5.5",
 	...OPENAI_TOOL_SEARCH_MODEL_IDS,
-]);
-/**
- * GPT-6 models that accept `configuration_update` items to change reasoning effort mid-conversation
- * without invalidating the prompt cache.
- * https://developers.openai.com/api/docs/guides/reasoning
- */
-export const OPENAI_MID_CONVO_EFFORT_MODEL_IDS = new Set([
-	"gpt-6-astra",
-	"gpt-6-sol",
-	"gpt-6-luna",
-	"gpt-6.1-sol",
-	"gpt-6.1-terra",
-	"gpt-6.2-astra",
-	"gpt-6.2-sol",
 ]);
 
 const RESPONSES_APIS = new Set<Api>(["openai-responses", "azure-openai-responses", "openai-codex-responses"]);

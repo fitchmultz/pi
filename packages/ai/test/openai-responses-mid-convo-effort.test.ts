@@ -7,7 +7,7 @@ import {
 	stream as streamOpenAICodexResponses,
 } from "../src/api/openai-codex-responses.ts";
 import { type OpenAIResponsesOptions, stream as streamOpenAIResponses } from "../src/api/openai-responses.ts";
-import { getBuiltinModel } from "../src/providers/all.ts";
+import { getBuiltinModel, getBuiltinModels } from "../src/providers/all.ts";
 import type { AssistantMessage, Message, Model, ToolResultMessage } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
@@ -297,8 +297,20 @@ describe("OpenAI Codex Responses configuration_update", () => {
 	});
 
 	it("enables supportsMidConvoEffort on built-in GPT-6 Codex models", () => {
-		expect(getBuiltinModel("openai-codex", "gpt-6.2-sol").compat?.supportsMidConvoEffort).toBe(true);
-		expect(getBuiltinModel("openai-codex", "gpt-6.2-astra").compat?.supportsMidConvoEffort).toBe(true);
+		const directOpenAiEffortIds = new Set(
+			getBuiltinModels("openai")
+				.filter((m) => m.api === "openai-responses" && m.compat?.supportsMidConvoEffort === true)
+				.map((m) => m.id),
+		);
+		const codexModels = getBuiltinModels("openai-codex");
+		const codexEffortIds = new Set(
+			codexModels.filter((m) => m.compat?.supportsMidConvoEffort === true).map((m) => m.id),
+		);
+		const expectedCodexEffortIds = new Set(
+			codexModels.map((m) => m.id).filter((id) => directOpenAiEffortIds.has(id)),
+		);
+		expect(codexEffortIds).toEqual(expectedCodexEffortIds);
+		expect(codexEffortIds.size).toBeGreaterThan(0);
 		expect(getBuiltinModel("openai-codex", "gpt-5.6-sol").compat?.supportsMidConvoEffort).toBeUndefined();
 	});
 
