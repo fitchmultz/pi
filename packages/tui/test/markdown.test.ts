@@ -9,6 +9,7 @@ import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
 import { Lexer } from "marked";
 import { Markdown, type MarkdownTheme } from "../src/components/markdown.ts";
+import { copySelectionSource, renderForSelectionReader } from "../src/selection-source.ts";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
 import type { Component, TUI } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
@@ -125,6 +126,48 @@ describe("Markdown component", () => {
 			markdown.render(80);
 			markdown.setText("[a][x]\n\n[x]: https://two.example");
 			assert.ok(stripAnsi(markdown.render(80).join("\n")).includes("https://two.example"));
+		});
+
+		it("reuses repeated identical blocks while streaming for a selection reader", () => {
+			let hrCalls = 0;
+			let boldCalls = 0;
+			const theme: MarkdownTheme = {
+				...defaultMarkdownTheme,
+				hr: (text) => {
+					hrCalls++;
+					return defaultMarkdownTheme.hr(text);
+				},
+				bold: (text) => {
+					boldCalls++;
+					return defaultMarkdownTheme.bold(text);
+				},
+			};
+			const prefix = "---\n\n**repeat**\n\n---\n\n**repeat**\n\n";
+			const markdown = new Markdown(`${prefix}stream`, 0, 0, theme);
+			renderForSelectionReader(() => markdown.render(80));
+			assert.strictEqual(hrCalls, 2);
+			assert.strictEqual(boldCalls, 2);
+
+			markdown.setText(`${prefix}stream more`);
+			renderForSelectionReader(() => markdown.render(80));
+			assert.strictEqual(hrCalls, 2);
+			assert.strictEqual(boldCalls, 2);
+
+			markdown.setText(`${prefix}stream more tokens`);
+			const lines = renderForSelectionReader(() => markdown.render(80));
+			assert.strictEqual(hrCalls, 2);
+			assert.strictEqual(boldCalls, 2);
+
+			// The second repeated bold block keeps its own source offset when copied with the trailing paragraph.
+			const secondBoldRow = lines.findLastIndex((line) => line.includes("repeat"));
+			const lastRow = lines.findIndex((line) => line.includes("stream more tokens"));
+			assert.ok(secondBoldRow >= 0 && lastRow > secondBoldRow);
+			const copied = copySelectionSource(lines, [
+				{ row: secondBoldRow, start: 0, end: 6 },
+				{ row: secondBoldRow + 1, start: 0, end: 1 },
+				{ row: lastRow, start: 0, end: 18 },
+			]);
+			assert.strictEqual(copied, "**repeat**\n\nstream more tokens");
 		});
 	});
 
@@ -2332,6 +2375,120 @@ bar`,
 				JSON.stringify(commandJoined),
 			);
 			assert.ok(!commandJoined.includes("echo%20hello"), JSON.stringify(commandJoined));
+		});
+
+		it("should stop prose paths and inline-code URLs/paths before CJK punctuation", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			const pathUrl = pathToFileURL("/Users/me/file.ts").href;
+			const cjkPathUrl = pathToFileURL("/Users/me/中文/file.ts").href;
+			for (const punctuation of "。，；：！？）」】…—") {
+				const proseSource = `Edit /Users/me/file.ts${punctuation}后面`;
+				const proseOut = new Markdown(proseSource, 0, 0, defaultMarkdownTheme).render(120).join("");
+				assert.ok(
+					proseOut.includes(`\x1b]8;;${pathUrl}\x1b\\/Users/me/file.ts\x1b]8;;\x1b\\${punctuation}后面`),
+					proseSource,
+				);
+
+				const codeUrlSource = `\`https://example.com${punctuation}后面\``;
+				const codeUrlOut = new Markdown(codeUrlSource, 0, 0, defaultMarkdownTheme).render(120).join("");
+				assert.ok(
+					stripAnsi(codeUrlOut).includes(
+						`\x1b]8;;https://example.com\x1b\\https://example.com\x1b]8;;\x1b\\${punctuation}后面`,
+					),
+					codeUrlSource,
+				);
+
+				const codePathSource = `\`/Users/me/file.ts${punctuation}后面\``;
+				const codePathOut = new Markdown(codePathSource, 0, 0, defaultMarkdownTheme).render(120).join("");
+				assert.ok(
+					stripAnsi(codePathOut).includes(
+						`\x1b]8;;${pathUrl}\x1b\\/Users/me/file.ts\x1b]8;;\x1b\\${punctuation}后面`,
+					),
+					codePathSource,
+				);
+			}
+
+			// Paths preceded by CJK punctuation and containing CJK letters remain linked cleanly.
+			const cjkProseOut = new Markdown("路径：/Users/me/中文/file.ts。后面", 0, 0, defaultMarkdownTheme)
+				.render(120)
+				.join("");
+			assert.ok(
+				cjkProseOut.includes(`路径：\x1b]8;;${cjkPathUrl}\x1b\\/Users/me/中文/file.ts\x1b]8;;\x1b\\。后面`),
+				JSON.stringify(cjkProseOut),
+			);
+
+			// Trailing ASCII punctuation before CJK punctuation is also trimmed.
+			const mixedPunctOut = new Markdown("`https://example.com.，后面`", 0, 0, defaultMarkdownTheme)
+				.render(120)
+				.join("");
+			assert.ok(
+				stripAnsi(mixedPunctOut).includes(
+					"\x1b]8;;https://example.com\x1b\\https://example.com\x1b]8;;\x1b\\.，后面",
+				),
+				JSON.stringify(mixedPunctOut),
+			);
+
+			// Inline-code URLs and paths with CJK letters (no CJK punctuation) stay linked in full.
+			const fullCjkUrl = "https://example.com/中文?q=搜索#片段";
+			const fullCjkUrlOut = new Markdown(`\`${fullCjkUrl}\``, 0, 0, defaultMarkdownTheme).render(120).join("");
+			assert.ok(fullCjkUrlOut.includes(`\x1b]8;;${fullCjkUrl}\x1b\\`), JSON.stringify(fullCjkUrlOut));
+
+			const fullCjkPath = "/Users/me/中文/file.ts";
+			const fullCjkPathOut = new Markdown(`\`${fullCjkPath}\``, 0, 0, defaultMarkdownTheme).render(120).join("");
+			assert.ok(fullCjkPathOut.includes(`\x1b]8;;${cjkPathUrl}\x1b\\`), JSON.stringify(fullCjkPathOut));
+		});
+
+		it("should invoke theme.code once per codespan when hyperlinking paths and URLs", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: true });
+			const pathUrl = pathToFileURL("/Users/me/file.ts").href;
+
+			// Delimiter-wrapping theme.code must not duplicate delimiters across link segments.
+			let delimiterCalls = 0;
+			const delimiterTheme: MarkdownTheme = {
+				...defaultMarkdownTheme,
+				code: (text) => {
+					delimiterCalls++;
+					return `\`${text}\``;
+				},
+			};
+
+			const multiSegment = new Markdown("`edit /Users/me/file.ts now`", 0, 0, delimiterTheme)
+				.render(120)
+				.join("")
+				.trimEnd();
+			assert.strictEqual(delimiterCalls, 1);
+			assert.strictEqual(multiSegment, `\`edit \x1b]8;;${pathUrl}\x1b\\/Users/me/file.ts\x1b]8;;\x1b\\ now\``);
+
+			delimiterCalls = 0;
+			const singleLink = new Markdown("`/Users/me/file.ts`", 0, 0, delimiterTheme).render(120).join("").trimEnd();
+			assert.strictEqual(delimiterCalls, 1);
+			assert.strictEqual(singleLink, `\`\x1b]8;;${pathUrl}\x1b\\/Users/me/file.ts\x1b]8;;\x1b\\\``);
+
+			delimiterCalls = 0;
+			const cjkCodeUrl = new Markdown("`https://example.com。后面`", 0, 0, delimiterTheme)
+				.render(120)
+				.join("")
+				.trimEnd();
+			assert.strictEqual(delimiterCalls, 1);
+			assert.strictEqual(cjkCodeUrl, "`\x1b]8;;https://example.com\x1b\\https://example.com\x1b]8;;\x1b\\。后面`");
+
+			// ANSI-only theme.code is also called once and preserves styling across wrapped hyperlink rows.
+			let ansiCalls = 0;
+			const ansiTheme: MarkdownTheme = {
+				...defaultMarkdownTheme,
+				code: (text) => {
+					ansiCalls++;
+					return chalk.yellow(text);
+				},
+			};
+			const ansiLines = new Markdown("`edit /Users/me/file.ts now`", 0, 0, ansiTheme).render(16);
+			assert.strictEqual(ansiCalls, 1);
+			const joined = ansiLines.join("");
+			assert.ok(joined.includes(`\x1b]8;;${pathUrl}\x1b\\`), JSON.stringify(ansiLines));
+			assert.ok(
+				ansiLines.every((line) => line.includes("\x1b[33m")),
+				JSON.stringify(ansiLines),
+			);
 		});
 	});
 

@@ -21,7 +21,10 @@ import { MarkdownSource } from "./markdown-source.ts";
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
 // Terminals regex-match links within one row, so a wrapped path or URL is only clickable as an OSC 8 hyperlink.
-const LINKABLE_TEXT_REGEX = /(?<=^|[\s(["'<=])(?:https?:\/\/|~?\/)[^\s"'<>`]*[^\s"'<>`.,;:!?)\]}]/g;
+const LINKABLE_TEXT_REGEX = new RegExp(
+	`(?<=^|[\\s(["'<=]|${cjkPunctuationRegex.source})(?:https?:\\/\\/|~?\\/)(?:(?!${cjkPunctuationRegex.source})[^\\s"'<>\\x60])*(?:(?!${cjkPunctuationRegex.source})[^\\s"'<>\\x60.,;:!?)\\]}])`,
+	"gu",
+);
 
 function linkTarget(text: string): string | undefined {
 	if (/^https?:\/\//.test(text)) {
@@ -36,7 +39,7 @@ function linkTarget(text: string): string | undefined {
 }
 
 function isSingleCodespanLink(text: string): boolean {
-	if (/[\r\n"'<>`]|^$/.test(text)) {
+	if (/[\r\n"'<>`]|^$/.test(text) || cjkPunctuationRegex.test(text)) {
 		return false;
 	}
 	if (!/\s/.test(text)) {
@@ -682,7 +685,7 @@ export class Markdown implements Component {
 	// Parsed tokens depend only on the source, so they survive theme and width invalidation. Held weakly: a token tree is
 	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
 	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
-	private cachedTokens?: WeakRef<{ source: string; tokens: TokensList }>;
+	private cachedTokens?: WeakRef<{ source: string; tokens: TokensList; offsets: number[] }>;
 	// The last render's top-level blocks. While a message streams only its last block changes, so a render styles and
 	// wraps only that block. Each render keeps only the blocks it used, which drops a streamed block's earlier versions.
 	// Held weakly like the tokens: the blocks repeat the source in their keys and the code in their highlighting, and
@@ -772,11 +775,23 @@ export class Markdown implements Component {
 		// Parse markdown to HTML-like tokens
 		const cached = this.cachedTokens?.deref();
 		let tokens = cached?.source === normalizedText ? cached.tokens : undefined;
-		if (!tokens) {
+		let tokenOffsets = cached?.source === normalizedText ? cached.offsets : undefined;
+		if (!tokens || !tokenOffsets) {
 			tokens = markdownParser.lexer(normalizedText);
 			trimPartialClosingFences(tokens);
+			// Record top-level token offsets before stripping HTML comment blocks so later tokens cannot match inside them.
+			const rawOffsets = new Map<Token, number>();
+			let cursor = 0;
+			for (const token of tokens) {
+				const index = normalizedText.indexOf(token.raw, cursor);
+				if (index >= 0) {
+					rawOffsets.set(token, index);
+					cursor = index + token.raw.length;
+				}
+			}
 			removeHtmlCommentBlocks(tokens);
-			this.cachedTokens = new WeakRef({ source: normalizedText, tokens });
+			tokenOffsets = tokens.map((token) => rawOffsets.get(token) ?? -1);
+			this.cachedTokens = new WeakRef({ source: normalizedText, tokens, offsets: tokenOffsets });
 		}
 
 		// A reference link resolves through a definition anywhere in the text, so blocks with the same source can render
@@ -786,17 +801,19 @@ export class Markdown implements Component {
 		const blocks = new Map<string, RenderedBlock>();
 		this.blocks = new WeakRef(blocks);
 		const contentLines: string[] = [];
-		let sourceOffset = 0;
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
-			const tokenOffset = normalizedText.indexOf(token.raw, sourceOffset);
-			const mapped = normalizedSource.slice(tokenOffset, tokenOffset + token.raw.length);
-			sourceOffset = tokenOffset + token.raw.length;
+			const tokenOffset = tokenOffsets[i];
+			const mapped =
+				tokenOffset >= 0
+					? normalizedSource.slice(tokenOffset, tokenOffset + token.raw.length)
+					: new SourceText(token.raw, []);
 			const originalStart = mapped.spans[0]?.sourceStart ?? 0;
 			const originalEnd = mapped.spans[mapped.spans.length - 1]?.sourceEnd ?? originalStart;
-			const original = text.slice(originalStart, originalEnd);
+			const original = tokenOffset >= 0 ? text.slice(originalStart, originalEnd) : token.raw;
 			const nextTokenType = tokens[i + 1]?.type;
-			const reused = reuseBlocks ? (blocks.get(original) ?? previousBlocks?.get(original)) : undefined;
+			const blockKey = `${tokenOffset >= 0 ? originalStart : `unmapped:${i}`}\0${original}`;
+			const reused = reuseBlocks && !blocks.has(blockKey) ? previousBlocks?.get(blockKey) : undefined;
 			const block: RenderedBlock = reused ?? { width: -1, nextTokenType, lines: [], highlightedCode: new Map() };
 			if (
 				block.width !== width ||
@@ -825,7 +842,7 @@ export class Markdown implements Component {
 				this.blockSource = undefined;
 			}
 			if (block.source) selectionDocument?.sources.push(block.source);
-			if (reuseBlocks) blocks.set(original, block);
+			if (reuseBlocks) blocks.set(blockKey, block);
 			for (const line of block.lines) {
 				contentLines.push(line);
 			}
@@ -979,10 +996,10 @@ export class Markdown implements Component {
 		};
 	}
 
-	/** Style text, wrapping local paths and URLs in OSC 8 hyperlinks so every wrapped row stays clickable. */
-	private renderLinkableText(text: string, style: (text: string) => string): string {
+	/** Wrap local paths and URLs in OSC 8 hyperlinks so every wrapped row stays clickable. */
+	private linkifyText(text: string): string {
 		if (this.renderingLinkText || !getCapabilities().hyperlinks) {
-			return style(text);
+			return text;
 		}
 		let result = "";
 		let start = 0;
@@ -992,26 +1009,28 @@ export class Markdown implements Component {
 				continue;
 			}
 			if (match.index > start) {
-				result += style(text.slice(start, match.index));
+				result += text.slice(start, match.index);
 			}
-			result += hyperlink(style(match[0]), target);
+			result += hyperlink(match[0], target);
 			start = match.index + match[0].length;
 		}
-		return start < text.length ? result + style(text.slice(start)) : result;
+		if (start === 0) {
+			return text;
+		}
+		return start < text.length ? result + text.slice(start) : result;
 	}
 
 	private renderCodespan(text: string): string {
-		const style = (segment: string) => this.theme.code(segment);
 		if (this.renderingLinkText || !getCapabilities().hyperlinks) {
-			return style(text);
+			return this.theme.code(text);
 		}
 		if (isSingleCodespanLink(text)) {
 			const target = linkTarget(text);
 			if (target) {
-				return hyperlink(style(text), target);
+				return this.theme.code(hyperlink(text, target));
 			}
 		}
-		return this.renderLinkableText(text, style);
+		return this.theme.code(this.linkifyText(text));
 	}
 
 	private renderToken(
@@ -1295,7 +1314,7 @@ export class Markdown implements Component {
 					if (token.tokens && token.tokens.length > 0) {
 						result += this.renderInlineTokens(token.tokens, resolvedStyleContext);
 					} else {
-						const styled = this.renderLinkableText(token.text, applyTextWithNewlines);
+						const styled = applyTextWithNewlines(this.linkifyText(token.text));
 						result += source && contentSource ? source.annotate(styled, contentSource) : styled;
 					}
 					break;
