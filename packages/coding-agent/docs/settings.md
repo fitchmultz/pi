@@ -97,7 +97,7 @@ Keys are tool names or patterns where `*` matches any characters. An exact name 
 | `direct` | Declared to the model while active, and callable from [`codemode`](cli.md#tools) scripts while active. |
 | `model-only` | Declared to the model while active, never callable from scripts. |
 | `codemode` | Not declared. Scripts call it, and the `codemode` tool lists it. `tool_search` can load it. |
-| `deferred` | Not declared. `tool_search` finds and loads it; from then on it is declared with its prompt snippet and guidelines. Scripts call it without loading it. |
+| `deferred` | Not declared. `tool_search` finds and loads it; it is then declared with its prompt snippet and guidelines until a compaction or context rollover prunes it when idle (see [Compaction](compaction.md#how-it-works)). Scripts call it without loading it. |
 | `hidden` | Unreachable. |
 
 The tool then behaves like a tool that registered with that exposure:

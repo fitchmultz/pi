@@ -706,7 +706,7 @@ describe("AgentSession provider summary block", () => {
 		},
 	);
 
-	it("preserves providerSummary.toolsAdded and removes idle search-loaded tools on the next turn", async () => {
+	it("preserves providerSummary.toolsAdded, persists post-summary toolsRemoved across immediate resume, and restores on tree navigation", async () => {
 		const idleTool = {
 			name: "idle_search_tool",
 			label: "Idle Search Tool",
@@ -765,6 +765,8 @@ describe("AgentSession provider summary block", () => {
 
 		await harness.session.prompt("load idle tool");
 		expect(harness.session.getActiveToolNames()).toContain("idle_search_tool");
+		const preCompactionLeafId = harness.sessionManager.getLeafId();
+		expect(preCompactionLeafId).toBeTruthy();
 
 		compactNext = true;
 		await harness.session.prompt("continue without calling idle tool");
@@ -773,11 +775,35 @@ describe("AgentSession provider summary block", () => {
 		expect(stored.providerSummary?.block).toEqual(block);
 		// Signed block reflects what was declared before firstKeptEntryId, keeping kept thinking valid.
 		expect(stored.providerSummary?.toolsAdded?.map((tool) => tool.name)).toEqual(["idle_search_tool"]);
+		// Pruned idle tool removal is persisted on toolUpdate immediately after the compaction summary.
+		expect(stored.toolUpdate?.toolsRemoved).toEqual([{ name: "idle_search_tool" }]);
 		// Active tool set immediately drops the idle search-loaded tool.
 		expect(harness.session.getActiveToolNames()).not.toContain("idle_search_tool");
 
+		// Resume immediately after compaction (before any later turn) with default transcript restore (`usesDefaultTools: true`):
+		// the pruned tool must stay unloaded and tree navigation back before compaction restores it.
+		const resumed = await createHarness({
+			sessionManager: harness.sessionManager,
+			tools: [lookup],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [
+				createToolSearchExtension(),
+				(pi) => {
+					pi.registerTool(idleTool);
+				},
+			],
+		});
+		harnesses.push(resumed);
+		await resumed.session.bindExtensions({});
+		expect(resumed.session.getActiveToolNames()).toEqual(["tool_search"]);
+		await resumed.session.navigateTree(preCompactionLeafId!);
+		expect(resumed.session.getActiveToolNames()).toEqual(expect.arrayContaining(["tool_search", "idle_search_tool"]));
+		// Restore leaf back to the compaction entry so the next turn test runs on the compacted branch.
+		await resumed.session.navigateTree(stored.id);
+		expect(resumed.session.getActiveToolNames()).toEqual(["tool_search"]);
+
 		await harness.session.prompt("next window prompt");
-		// Next turn keeps the signed block prefix untouched and emits toolsRemoved after the compaction summary.
+		// Next turn keeps the signed block prefix untouched and carries toolsRemoved after the compaction summary.
 		expect(getCurrentTools(nextTurnMessages).map((tool) => tool.name)).toEqual(["tool_search"]);
 		const summaryIdx = nextTurnMessages.findIndex(
 			(message) =>

@@ -628,14 +628,18 @@ export function getMessagesBeforeKept(
  * `systemMessage` is the leading system message of the context before the compaction, unchanged:
  * it keeps the first tool list, as {@link getCompactionSystemState} does, and also the prompt it
  * had, where that function stores the current one. Tool changes among the kept entries stay in
- * place, so the entry has no `toolUpdate`; its `providerSummary` names the tools that the
- * summarized messages changed.
+ * place, and `providerSummary` names the tools that the summarized messages changed. When
+ * compaction prunes idle search-loaded tools, `toolUpdate` records their `toolsRemoved` after
+ * the compaction summary so the signed prefix stays unchanged while the pruned loadout is
+ * durable immediately across resume and tree navigation.
  */
 function getSummaryBlockSystemState(
 	projection: SessionProjection,
 	firstKeptEntryId: string | null,
 	providerSummary: CompactionProviderSummary,
-): Pick<CompactionEntry, "systemMessage" | "providerSummary"> {
+	timestamp: number,
+	prunedToolNames?: ReadonlySet<string>,
+): Pick<CompactionEntry, "systemMessage" | "providerSummary" | "toolUpdate"> {
 	const lead = getInitialSystemMessage(projection.messages);
 	const summarized = getMessagesBeforeKept(projection, firstKeptEntryId);
 	if (!lead || !summarized)
@@ -643,6 +647,11 @@ function getSummaryBlockSystemState(
 	// The context before the compaction may itself start with an earlier block.
 	const { providerSummary: _earlierBlock, ...systemMessage } = lead;
 	const { toolsAdded, toolsRemoved } = getToolStateChanges(lead.toolsAdded ?? [], getCurrentTools(summarized));
+	const prunedRemovals = prunedToolNames?.size
+		? getCurrentTools(projection.messages)
+				.filter((tool) => prunedToolNames.has(tool.name))
+				.map((tool) => ({ name: tool.name }))
+		: [];
 	return {
 		systemMessage,
 		providerSummary: {
@@ -650,6 +659,16 @@ function getSummaryBlockSystemState(
 			...(toolsAdded.length > 0 ? { toolsAdded } : {}),
 			...(toolsRemoved.length > 0 ? { toolsRemoved } : {}),
 		},
+		...(prunedRemovals.length > 0
+			? {
+					toolUpdate: {
+						role: "system",
+						content: "",
+						toolsRemoved: prunedRemovals,
+						timestamp,
+					},
+				}
+			: {}),
 	};
 }
 
@@ -822,6 +841,9 @@ function projectSummaryBlockEntries(
 		if (!keptStarted) {
 			messages = messages.filter((message) => message.role !== "system");
 			keptStarted = messages.length > 0;
+		}
+		if (sourceEntry.type === "compaction" && sourceEntry.providerSummary?.block && sourceEntry.toolUpdate) {
+			messages.push(sourceEntry.toolUpdate);
 		}
 		return { sourceEntry, messages };
 	});
@@ -1771,7 +1793,13 @@ export class SessionManager {
 			usage,
 			fromHook,
 			...(providerSummary?.block
-				? getSummaryBlockSystemState(projection, firstKeptEntryId, providerSummary)
+				? getSummaryBlockSystemState(
+						projection,
+						firstKeptEntryId,
+						providerSummary,
+						new Date(timestamp).getTime(),
+						prunedToolNames,
+					)
 				: {
 						...getCompactionSystemState(projection.messages, new Date(timestamp).getTime(), prunedToolNames),
 						...(providerSummary ? { providerSummary } : {}),

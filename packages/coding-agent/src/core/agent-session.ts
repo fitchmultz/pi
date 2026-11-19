@@ -68,6 +68,7 @@ import {
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
 import { setTimeout as sleep } from "timers/promises";
+import type { ToolSearchToolDetails } from "../extensions/tool-search/tool.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { processImage } from "../utils/image-process.ts";
@@ -2652,7 +2653,7 @@ export class AgentSession {
 						message.details &&
 						typeof message.details === "object"
 					) {
-						const loaded = (message.details as { loaded?: unknown }).loaded;
+						const { loaded } = message.details as Partial<ToolSearchToolDetails>;
 						if (Array.isArray(loaded)) {
 							for (const name of loaded) {
 								if (typeof name === "string") kept.add(name);
@@ -2689,7 +2690,7 @@ export class AgentSession {
 		const branchSystemMessages = branch.flatMap((entry) =>
 			entry.type === "message" && entry.message.role === "system" ? [entry.message] : [],
 		);
-		const latestCompaction = [...branch].reverse().find((entry) => entry.type === "compaction");
+		const latestCompaction = branch.findLast((entry) => entry.type === "compaction");
 		// Compaction snapshots may prune idle search-loaded tools, so replay the projected system
 		// messages when the latest compaction recorded a system snapshot; fall back to raw branch
 		// system messages for uncompacted branches or legacy pre-snapshot compactions.

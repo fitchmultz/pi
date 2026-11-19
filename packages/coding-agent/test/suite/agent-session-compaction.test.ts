@@ -1267,14 +1267,35 @@ describe("AgentSession compaction characterization", () => {
 
 		it("keeps tools freshly loaded by tool_search inside the retained tail", async () => {
 			let keptEntryId: string | undefined;
+			let rolloverOnSearchTurn = true;
+			let activationSystemsBeforeRollover = -1;
 			const harness = await createHarness({
 				initialActiveToolNames: ["read", "tool_search"],
-				settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+				settings: { compaction: { enabled: false } },
 				extensionFactories: [
 					createToolSearchExtension(),
 					(pi) => {
 						pi.registerTool(makeTool("linear_get_issue", "Read a Linear issue"));
-						pi.on("session_before_compact", async (event) => {
+						pi.on("turn_end", (event) => {
+							if (!rolloverOnSearchTurn) return;
+							const hasSearchResult = event.context.contextEntries.some(
+								(entry) =>
+									entry.sourceEntry.type === "message" &&
+									entry.sourceEntry.message.role === "toolResult" &&
+									entry.sourceEntry.message.toolName === "tool_search",
+							);
+							if (!hasSearchResult) return;
+							rolloverOnSearchTurn = false;
+							// At turn_end right after tool_search, declareToolChanges has not yet recorded
+							// a toolsAdded system message for linear_get_issue, so only details.loaded keeps it.
+							activationSystemsBeforeRollover = harness.sessionManager
+								.getBranch()
+								.filter(
+									(entry) =>
+										entry.type === "message" &&
+										entry.message.role === "system" &&
+										entry.message.toolsAdded?.some((tool) => tool.name === "linear_get_issue"),
+								).length;
 							const kept = harness.sessionManager
 								.getBranch()
 								.find(
@@ -1285,12 +1306,14 @@ describe("AgentSession compaction characterization", () => {
 								);
 							keptEntryId = kept?.id;
 							return {
-								compaction: {
-									summary: "Kept tail includes tool_search.",
-									firstKeptEntryId: kept?.id ?? event.preparation.firstKeptEntryId,
-									tokensBefore: event.preparation.tokensBefore,
-									details: {},
-								},
+								entries: [
+									{
+										type: "compaction",
+										summary: "Kept tail includes tool_search before activation system message.",
+										firstKeptEntryId: kept?.id ?? null,
+									},
+								],
+								continue: true,
 							};
 						});
 					},
@@ -1298,17 +1321,23 @@ describe("AgentSession compaction characterization", () => {
 			});
 			harnesses.push(harness);
 			await harness.session.bindExtensions({});
+			const postRolloverTools: string[][] = [];
 			harness.setResponses([
 				fauxAssistantMessage("seed earlier turn"),
 				fauxAssistantMessage(fauxToolCall("tool_search", { query: "linear issue" }), { stopReason: "toolUse" }),
-				fauxAssistantMessage("loaded linear tools for next turn"),
+				(context) => {
+					postRolloverTools.push(getCurrentTools(context.messages).map((tool) => tool.name));
+					return fauxAssistantMessage(fauxToolCall("linear_get_issue", {}), { stopReason: "toolUse" });
+				},
+				fauxAssistantMessage("called linear_get_issue right after rollover"),
 			]);
 
 			await harness.session.prompt("first turn");
 			await harness.session.prompt("load linear tools");
-			await harness.session.compact();
 
 			expect(keptEntryId).toBeDefined();
+			expect(activationSystemsBeforeRollover).toBe(0);
+			expect(postRolloverTools).toEqual([["read", "tool_search", "linear_get_issue"]]);
 			expect(harness.session.getActiveToolNames()).toContain("linear_get_issue");
 		});
 
@@ -1362,9 +1391,9 @@ describe("AgentSession compaction characterization", () => {
 				.filter((entry): entry is CompactionEntry => entry.type === "compaction");
 			expect(compaction.toolUpdate).toBeUndefined();
 
-			// Resume on the same SessionManager must NOT resurrect the pruned tool.
+			// Resume with default tool restoration (`usesDefaultTools: true`, omitting `initialActiveToolNames`)
+			// so `_restoreToolsFromTranscript` actually runs from the compaction snapshot and must NOT resurrect the pruned tool.
 			const resumed = await createHarness({
-				initialActiveToolNames: ["read", "tool_search"],
 				sessionManager: harness.sessionManager,
 				settings: { compaction: { enabled: false } },
 				extensionFactories: [
