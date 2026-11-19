@@ -11,19 +11,23 @@ interface SourceSpan {
 	end: number;
 	sourceStart: number;
 	sourceEnd: number;
+	atomic?: boolean;
 }
 
 /** Text after a declared rendering transformation, with positions in the original source. */
 export class SourceText {
 	readonly text: string;
 	readonly spans: readonly SourceSpan[];
+	readonly unmapped: boolean;
 
 	constructor(
 		text: string,
 		spans: readonly SourceSpan[] = [{ start: 0, end: text.length, sourceStart: 0, sourceEnd: text.length }],
+		unmapped = false,
 	) {
 		this.text = text;
 		this.spans = spans;
+		this.unmapped = unmapped;
 	}
 
 	slice(start: number, end = this.text.length): SourceText {
@@ -32,15 +36,16 @@ export class SourceText {
 			const from = Math.max(start, span.start);
 			const to = Math.min(end, span.end);
 			if (to <= from) continue;
-			const identity = span.end - span.start === span.sourceEnd - span.sourceStart;
+			const identity = !span.atomic && span.end - span.start === span.sourceEnd - span.sourceStart;
 			spans.push({
 				start: from - start,
 				end: to - start,
 				sourceStart: identity ? span.sourceStart + from - span.start : span.sourceStart,
 				sourceEnd: identity ? span.sourceStart + to - span.start : span.sourceEnd,
+				...(identity ? {} : { atomic: true }),
 			});
 		}
-		return new SourceText(this.text.slice(start, end), spans);
+		return new SourceText(this.text.slice(start, end), spans, this.unmapped);
 	}
 
 	replace(pattern: RegExp, replacement: string): SourceText {
@@ -59,6 +64,7 @@ export class SourceText {
 							end: replacement.length,
 							sourceStart: replaced.spans[0].sourceStart,
 							sourceEnd: replaced.spans[replaced.spans.length - 1].sourceEnd,
+							atomic: true,
 						},
 					]),
 				);
@@ -82,7 +88,7 @@ export class SourceText {
 		for (const [index, line] of text.split("\n").entries()) {
 			const raw = rawLines[firstLine + index] ?? "";
 			const start = raw.lastIndexOf(line);
-			if (start < 0) return new SourceText(text, []);
+			if (start < 0) return new SourceText(text, [], true);
 			if (index > 0) parts.push(this.slice(offset - 1, offset));
 			parts.push(this.slice(offset + start, offset + start + line.length));
 			offset += raw.length + 1;
@@ -93,12 +99,34 @@ export class SourceText {
 	static concat(parts: readonly SourceText[]): SourceText {
 		let text = "";
 		const spans: SourceSpan[] = [];
+		let unmapped = false;
 		for (const part of parts) {
-			for (const span of part.spans)
-				spans.push({ ...span, start: text.length + span.start, end: text.length + span.end });
+			if (part.unmapped) unmapped = true;
+			for (const span of part.spans) {
+				const start = text.length + span.start;
+				const end = text.length + span.end;
+				const prev = spans[spans.length - 1];
+				const prevIdentity = prev && !prev.atomic && prev.end - prev.start === prev.sourceEnd - prev.sourceStart;
+				const nextIdentity = !span.atomic && end - start === span.sourceEnd - span.sourceStart;
+				if (prev && prev.end === start && prevIdentity && nextIdentity && prev.sourceEnd === span.sourceStart) {
+					prev.end = end;
+					prev.sourceEnd = span.sourceEnd;
+				} else if (
+					prev &&
+					prev.end === start &&
+					!prevIdentity &&
+					!nextIdentity &&
+					prev.sourceStart === span.sourceStart &&
+					prev.sourceEnd === span.sourceEnd
+				) {
+					prev.end = end;
+				} else {
+					spans.push({ ...span, start, end });
+				}
+			}
 			text += part.text;
 		}
-		return new SourceText(text, spans);
+		return new SourceText(text, spans, unmapped);
 	}
 }
 
@@ -132,6 +160,7 @@ const PROMPT_MARKER = /^\x1b\]133;[ABC](?:\x07|\x1b\\)$/;
 /** Original document and the source blocks owned by its current rendered frame. */
 export class SelectionDocument {
 	text: string;
+	complete = true;
 	readonly sources: SelectionSource[] = [];
 
 	constructor(text = "") {
@@ -171,17 +200,19 @@ export class SelectionSource {
 	}
 
 	annotate(styled: string, source: SourceText): string {
+		if (source.text.includes("\x1b")) source = stripAnsiSourceText(source);
 		if (!source.spans.length) {
-			if (stripTerminalSequences(styled).trim()) this.fullyMapped = false;
+			if (source.unmapped && stripTerminalSequences(styled).trim()) this.fullyMapped = false;
 			return styled;
 		}
 		for (const span of source.spans) this.contentRanges.push({ start: span.sourceStart, end: span.sourceEnd });
 		styled = styled.replace(SELECTION_METADATA, "");
-		if (source.spans.length === 1) {
+		if (source.spans.length === 1 && source.spans[0].start === 0 && source.spans[0].end === source.text.length) {
 			const span = source.spans[0];
+			const identity = !span.atomic && span.end - span.start === span.sourceEnd - span.sourceStart;
 			return (
 				selectionRunMarker(
-					span.end - span.start === span.sourceEnd - span.sourceStart
+					identity
 						? { kind: "identity", id: this.id, offset: span.sourceStart }
 						: { kind: "atomic", id: this.id, start: span.sourceStart, end: span.sourceEnd },
 				) +
@@ -203,14 +234,14 @@ export class SelectionSource {
 			while (spanIndex < source.spans.length && position >= source.spans[spanIndex].end) spanIndex++;
 			const span = source.spans[spanIndex];
 			if (span && position >= span.start && activeSpan !== spanIndex) {
-				const identity = span.end - span.start === span.sourceEnd - span.sourceStart;
+				const identity = !span.atomic && span.end - span.start === span.sourceEnd - span.sourceStart;
 				result += selectionRunMarker(
 					identity
 						? { kind: "identity", id: this.id, offset: span.sourceStart + position - span.start }
 						: { kind: "atomic", id: this.id, start: span.sourceStart, end: span.sourceEnd },
 				);
 				activeSpan = spanIndex;
-			} else if (!span && activeSpan !== -1) {
+			} else if ((!span || position < span.start) && activeSpan !== -1) {
 				result += SELECTION_SOURCE_END;
 				activeSpan = -1;
 			}
@@ -221,7 +252,7 @@ export class SelectionSource {
 			position += end - i;
 			i = end;
 		}
-		return result + SELECTION_SOURCE_END;
+		return activeSpan !== -1 ? result + SELECTION_SOURCE_END : result;
 	}
 
 	atomic(styled: string, source: SourceText, kind: "atomic" | "generated" = "atomic"): string {
@@ -455,6 +486,7 @@ export function copySelectionSource(lines: readonly string[], selection: readonl
 function copyDocumentSelection(document: SelectionDocument, parts: readonly SelectedSource[]): string {
 	const selected = new Map(parts.map((part) => [part.source, part.source.select(part.ranges)]));
 	if (
+		document.complete &&
 		parts.some((part) => part.ranges.length > 0) &&
 		document.sources.every((source) => (selected.get(source) ?? source.select([])).complete)
 	)
@@ -484,4 +516,454 @@ function mergeRanges(ranges: readonly SourceRange[]): SourceRange[] {
 		else result.push({ ...range });
 	}
 	return result;
+}
+
+function stripAnsiSourceText(source: SourceText): SourceText {
+	const parts: SourceText[] = [];
+	let plainStart = 0;
+	for (let i = 0; i < source.text.length; ) {
+		const ansi = extractAnsiCode(source.text, i);
+		if (!ansi) {
+			i++;
+			continue;
+		}
+		if (i > plainStart) parts.push(source.slice(plainStart, i));
+		i += ansi.length;
+		plainStart = i;
+	}
+	if (plainStart === 0) return source;
+	if (plainStart < source.text.length) parts.push(source.slice(plainStart));
+	return SourceText.concat(parts);
+}
+
+interface VisibleRun {
+	rawStart: number;
+	rawEnd: number;
+	visStart: number;
+	visEnd: number;
+}
+
+interface VisibleText {
+	text: string;
+	runs: VisibleRun[];
+}
+
+function decomposeVisibleText(raw: string, rawOffset: number): VisibleText {
+	if (!raw.includes("\x1b")) {
+		return {
+			text: raw,
+			runs:
+				raw.length > 0
+					? [{ rawStart: rawOffset, rawEnd: rawOffset + raw.length, visStart: 0, visEnd: raw.length }]
+					: [],
+		};
+	}
+	let text = "";
+	const runs: VisibleRun[] = [];
+	let plainStart = 0;
+	for (let i = 0; i < raw.length; ) {
+		const ansi = extractAnsiCode(raw, i);
+		if (!ansi) {
+			i++;
+			continue;
+		}
+		if (i > plainStart) {
+			const visStart = text.length;
+			text += raw.slice(plainStart, i);
+			runs.push({ rawStart: rawOffset + plainStart, rawEnd: rawOffset + i, visStart, visEnd: text.length });
+		}
+		i += ansi.length;
+		plainStart = i;
+	}
+	if (plainStart < raw.length) {
+		const visStart = text.length;
+		text += raw.slice(plainStart);
+		runs.push({ rawStart: rawOffset + plainStart, rawEnd: rawOffset + raw.length, visStart, visEnd: text.length });
+	}
+	return { text, runs };
+}
+
+function emitMappedRange(
+	spans: SourceSpan[],
+	runs: readonly VisibleRun[],
+	visStart: number,
+	visEnd: number,
+	sourceStart: number,
+	sourceEnd: number,
+	atomic: boolean,
+): void {
+	if (visEnd <= visStart || sourceEnd <= sourceStart) return;
+	for (const run of runs) {
+		if (run.visEnd <= visStart) continue;
+		if (run.visStart >= visEnd) break;
+		const from = Math.max(visStart, run.visStart);
+		const to = Math.min(visEnd, run.visEnd);
+		const rawStart = run.rawStart + (from - run.visStart);
+		const rawEnd = run.rawStart + (to - run.visStart);
+		if (atomic) {
+			spans.push({ start: rawStart, end: rawEnd, sourceStart, sourceEnd, atomic: true });
+		} else {
+			spans.push({
+				start: rawStart,
+				end: rawEnd,
+				sourceStart: sourceStart + (from - visStart),
+				sourceEnd: sourceStart + (to - visStart),
+			});
+		}
+	}
+}
+
+interface TextSegment {
+	text: string;
+	start: number;
+	end: number;
+}
+
+function splitLinesWithOffsets(text: string): TextSegment[] {
+	const lines: TextSegment[] = [];
+	let start = 0;
+	for (let i = 0; i < text.length; i++) {
+		if (text.charCodeAt(i) === 10) {
+			lines.push({ text: text.slice(start, i + 1), start, end: i + 1 });
+			start = i + 1;
+		}
+	}
+	if (start < text.length || lines.length === 0) {
+		lines.push({ text: text.slice(start), start, end: text.length });
+	}
+	return lines;
+}
+
+// Split on ASCII spaces/tabs/newlines (never NBSP) and Markdown delimiter punctuation so decorated tokens like
+// `**\uf012 Status:**` align their `**` and `Status:` independently while NBSP-joined pills stay atomic.
+const ALIGN_TOKEN_REGEX = /\*\*|__|[`~*_[\]()#]+|[^ \t\r\n`~*_[\]()#]+/g;
+
+function tokenizeForAlign(text: string): TextSegment[] {
+	const tokens: TextSegment[] = [];
+	for (const match of text.matchAll(ALIGN_TOKEN_REGEX)) {
+		tokens.push({ text: match[0], start: match.index, end: match.index + match[0].length });
+	}
+	return tokens;
+}
+
+const MAX_LCS_CELLS = 250_000;
+
+/** Return matched index pairs `[aIndex, bIndex]` in strictly increasing order. */
+function matchSequence(a: readonly string[], b: readonly string[]): Array<[number, number]> {
+	let prefix = 0;
+	const minLen = Math.min(a.length, b.length);
+	while (prefix < minLen && a[prefix] === b[prefix]) prefix++;
+
+	let suffix = 0;
+	while (suffix < minLen - prefix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix++;
+
+	const pairs: Array<[number, number]> = [];
+	for (let i = 0; i < prefix; i++) pairs.push([i, i]);
+
+	const aMid = a.slice(prefix, a.length - suffix);
+	const bMid = b.slice(prefix, b.length - suffix);
+	const m = aMid.length;
+	const n = bMid.length;
+
+	if (m > 0 && n > 0) {
+		if (m * n <= MAX_LCS_CELLS) {
+			const cols = n + 1;
+			const dp = new Int32Array((m + 1) * cols);
+			for (let i = m - 1; i >= 0; i--) {
+				const row = i * cols;
+				const nextRow = (i + 1) * cols;
+				for (let j = n - 1; j >= 0; j--) {
+					dp[row + j] = aMid[i] === bMid[j] ? dp[nextRow + j + 1] + 1 : Math.max(dp[nextRow + j], dp[row + j + 1]);
+				}
+			}
+			let i = 0;
+			let j = 0;
+			while (i < m && j < n) {
+				if (aMid[i] === bMid[j]) {
+					pairs.push([prefix + i, prefix + j]);
+					i++;
+					j++;
+				} else if (dp[(i + 1) * cols + j] >= dp[i * cols + j + 1]) {
+					i++;
+				} else {
+					j++;
+				}
+			}
+		} else {
+			// Bounded O(N log N) patience fallback for very large changed regions: match unique items and take LIS.
+			const aCounts = new Map<string, number>();
+			const bCounts = new Map<string, number>();
+			const bPos = new Map<string, number>();
+			for (let i = 0; i < m; i++) aCounts.set(aMid[i], (aCounts.get(aMid[i]) ?? 0) + 1);
+			for (let j = 0; j < n; j++) {
+				bCounts.set(bMid[j], (bCounts.get(bMid[j]) ?? 0) + 1);
+				bPos.set(bMid[j], j);
+			}
+			const candidates: Array<[number, number]> = [];
+			for (let i = 0; i < m; i++) {
+				const key = aMid[i];
+				if (aCounts.get(key) === 1 && bCounts.get(key) === 1) {
+					candidates.push([i, bPos.get(key)!]);
+				}
+			}
+			if (candidates.length > 0) {
+				const tails: number[] = [];
+				const prev = new Int32Array(candidates.length).fill(-1);
+				for (let k = 0; k < candidates.length; k++) {
+					const bIdx = candidates[k][1];
+					let lo = 0;
+					let hi = tails.length;
+					while (lo < hi) {
+						const mid = (lo + hi) >> 1;
+						if (candidates[tails[mid]][1] < bIdx) lo = mid + 1;
+						else hi = mid;
+					}
+					if (lo > 0) prev[k] = tails[lo - 1];
+					tails[lo] = k;
+				}
+				const lis: Array<[number, number]> = [];
+				for (let k = tails[tails.length - 1]; k >= 0; k = prev[k]) {
+					lis.push([prefix + candidates[k][0], prefix + candidates[k][1]]);
+				}
+				for (let k = lis.length - 1; k >= 0; k--) pairs.push(lis[k]);
+			}
+		}
+	}
+
+	for (let i = 0; i < suffix; i++) {
+		pairs.push([a.length - suffix + i, b.length - suffix + i]);
+	}
+	return pairs;
+}
+
+function commonPrefixLength(a: string, b: string): number {
+	const limit = Math.min(a.length, b.length);
+	let i = 0;
+	while (i < limit && a.charCodeAt(i) === b.charCodeAt(i)) i++;
+	return i;
+}
+
+function commonSuffixLength(a: string, b: string, maxLen: number): number {
+	let i = 0;
+	while (i < maxLen && a.charCodeAt(a.length - 1 - i) === b.charCodeAt(b.length - 1 - i)) i++;
+	return i;
+}
+
+function sharesWord(a: string, b: string): boolean {
+	const words = a.match(/[A-Za-z0-9]{2,}/g);
+	if (!words) return false;
+	for (const word of words) {
+		if (b.includes(word)) return true;
+	}
+	return false;
+}
+
+interface AlignStats {
+	matchedAnchors: number;
+	deletedNonWhitespace: boolean;
+}
+
+function emitGap(
+	spans: SourceSpan[],
+	runs: readonly VisibleRun[],
+	origText: string,
+	origOffset: number,
+	visText: string,
+	visOffset: number,
+	stats: AlignStats,
+	allowUnanchoredAtomic: boolean,
+): void {
+	const prefix = commonPrefixLength(origText, visText);
+	const suffix = commonSuffixLength(origText, visText, Math.min(origText.length, visText.length) - prefix);
+	if (prefix > 0) {
+		emitMappedRange(spans, runs, visOffset, visOffset + prefix, origOffset, origOffset + prefix, false);
+		if (origText.slice(0, prefix).trim()) stats.matchedAnchors++;
+	}
+	const origRemStart = prefix;
+	const origRemEnd = origText.length - suffix;
+	const visRemStart = prefix;
+	const visRemEnd = visText.length - suffix;
+	const origRem = origText.slice(origRemStart, origRemEnd);
+	const visRem = visText.slice(visRemStart, visRemEnd);
+	if (origRem.length > 0 && visRem.length > 0) {
+		if (allowUnanchoredAtomic || stats.matchedAnchors > 0 || sharesWord(origRem, visRem)) {
+			emitMappedRange(
+				spans,
+				runs,
+				visOffset + visRemStart,
+				visOffset + visRemEnd,
+				origOffset + origRemStart,
+				origOffset + origRemEnd,
+				true,
+			);
+		} else if (origRem.trim()) {
+			stats.deletedNonWhitespace = true;
+		}
+	} else if (origRem.trim()) {
+		stats.deletedNonWhitespace = true;
+	}
+	if (suffix > 0) {
+		emitMappedRange(
+			spans,
+			runs,
+			visOffset + visRemEnd,
+			visOffset + visText.length,
+			origOffset + origRemEnd,
+			origOffset + origText.length,
+			false,
+		);
+		if (origText.slice(origRemEnd).trim()) stats.matchedAnchors++;
+	}
+}
+
+function alignRange(
+	spans: SourceSpan[],
+	origText: string,
+	origOffset: number,
+	transText: string,
+	transOffset: number,
+	stats: AlignStats,
+	hasOuterAnchor: boolean,
+): void {
+	if (origText === transText) {
+		if (origText.length > 0) {
+			spans.push({
+				start: transOffset,
+				end: transOffset + transText.length,
+				sourceStart: origOffset,
+				sourceEnd: origOffset + origText.length,
+			});
+			if (origText.trim()) stats.matchedAnchors++;
+		}
+		return;
+	}
+	const visible = decomposeVisibleText(transText, transOffset);
+	if (visible.text === origText) {
+		emitMappedRange(spans, visible.runs, 0, visible.text.length, origOffset, origOffset + origText.length, false);
+		if (origText.trim()) stats.matchedAnchors++;
+		return;
+	}
+	const origTokens = tokenizeForAlign(origText);
+	const visTokens = tokenizeForAlign(visible.text);
+	const matches = matchSequence(
+		origTokens.map((t) => t.text),
+		visTokens.map((t) => t.text),
+	);
+	const anchored = hasOuterAnchor || stats.matchedAnchors > 0 || matches.length > 0;
+	if (!anchored && !sharesWord(origText, visible.text)) {
+		if (origText.trim()) stats.deletedNonWhitespace = true;
+		return;
+	}
+	let origCursor = 0;
+	let visCursor = 0;
+	for (const [oi, vi] of matches) {
+		const ot = origTokens[oi];
+		const vt = visTokens[vi];
+		emitGap(
+			spans,
+			visible.runs,
+			origText.slice(origCursor, ot.start),
+			origOffset + origCursor,
+			visible.text.slice(visCursor, vt.start),
+			visCursor,
+			stats,
+			anchored,
+		);
+		emitMappedRange(spans, visible.runs, vt.start, vt.end, origOffset + ot.start, origOffset + ot.end, false);
+		stats.matchedAnchors++;
+		origCursor = ot.end;
+		visCursor = vt.end;
+	}
+	emitGap(
+		spans,
+		visible.runs,
+		origText.slice(origCursor),
+		origOffset + origCursor,
+		visible.text.slice(visCursor),
+		visCursor,
+		stats,
+		anchored,
+	);
+}
+
+/**
+ * Map transformed Markdown text back to positions in `original` while ignoring injected ANSI codes and
+ * preserving atomic replacements (e.g. status pills) and unmapped visual decorations (e.g. prefix icons).
+ */
+export function alignSourceText(original: string, transformed: string): { source: SourceText; complete: boolean } {
+	if (transformed === original) {
+		return { source: new SourceText(transformed), complete: true };
+	}
+	const origLines = splitLinesWithOffsets(original);
+	const transLines = splitLinesWithOffsets(transformed);
+	const spans: SourceSpan[] = [];
+	const stats: AlignStats = { matchedAnchors: 0, deletedNonWhitespace: false };
+
+	if (origLines.length === transLines.length) {
+		// Pre-check whether any line matches so localized substitutions on earlier lines still anchor cleanly.
+		const hasLineAnchor = origLines.some(
+			(line, idx) => line.text.trim().length > 0 && stripTerminalSequences(transLines[idx].text) === line.text,
+		);
+		for (let i = 0; i < origLines.length; i++) {
+			alignRange(
+				spans,
+				origLines[i].text,
+				origLines[i].start,
+				transLines[i].text,
+				transLines[i].start,
+				stats,
+				hasLineAnchor,
+			);
+		}
+	} else {
+		const transVisibleLines = transLines.map((line) => stripTerminalSequences(line.text));
+		const lineMatches = matchSequence(
+			origLines.map((line) => line.text),
+			transVisibleLines,
+		);
+		const hasLineAnchor = lineMatches.some(([oi]) => origLines[oi].text.trim().length > 0);
+		let origCursor = 0;
+		let transCursor = 0;
+		const alignHunk = (origEnd: number, transEnd: number): void => {
+			if (origEnd === origCursor && transEnd === transCursor) return;
+			const origStartOffset = origCursor < origLines.length ? origLines[origCursor].start : original.length;
+			const origEndOffset = origEnd > origCursor ? origLines[origEnd - 1].end : origStartOffset;
+			const transStartOffset = transCursor < transLines.length ? transLines[transCursor].start : transformed.length;
+			const transEndOffset = transEnd > transCursor ? transLines[transEnd - 1].end : transStartOffset;
+			if (origEndOffset === origStartOffset) return;
+			if (transEndOffset === transStartOffset) {
+				if (original.slice(origStartOffset, origEndOffset).trim()) stats.deletedNonWhitespace = true;
+				return;
+			}
+			alignRange(
+				spans,
+				original.slice(origStartOffset, origEndOffset),
+				origStartOffset,
+				transformed.slice(transStartOffset, transEndOffset),
+				transStartOffset,
+				stats,
+				hasLineAnchor,
+			);
+		};
+		for (const [oi, ti] of lineMatches) {
+			alignHunk(oi, ti);
+			alignRange(
+				spans,
+				origLines[oi].text,
+				origLines[oi].start,
+				transLines[ti].text,
+				transLines[ti].start,
+				stats,
+				hasLineAnchor,
+			);
+			origCursor = oi + 1;
+			transCursor = ti + 1;
+		}
+		alignHunk(origLines.length, transLines.length);
+	}
+
+	return {
+		source: new SourceText(transformed, spans),
+		complete: spans.length > 0 && !stats.deletedNonWhitespace,
+	};
 }

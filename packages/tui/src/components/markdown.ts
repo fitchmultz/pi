@@ -12,7 +12,7 @@ import {
 import markedCjkFriendly from "marked-cjk-friendly";
 import { renderLatex } from "../latex.ts";
 import { SELECTION_METADATA, SELECTION_SOURCE_END } from "../selection-markers.ts";
-import { isRenderingForSelectionReader, SelectionDocument, SourceText } from "../selection-source.ts";
+import { alignSourceText, isRenderingForSelectionReader, SelectionDocument, SourceText } from "../selection-source.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, cjkPunctuationRegex, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -751,10 +751,10 @@ export class Markdown implements Component {
 		const selectionDocument = forSelectionReader ? this.selectionDocument : undefined;
 		if (selectionDocument) {
 			selectionDocument.sources.length = 0;
-			selectionDocument.text = text;
+			selectionDocument.text = this.text;
+			selectionDocument.complete = true;
 		}
-		// Sources map rendered text back to this.text, so transformed text has none.
-		const mapSource = selectionDocument !== undefined && text === this.text;
+		const mapSource = selectionDocument !== undefined;
 
 		// Don't render anything if there's no actual text
 		if (!text || text.trim() === "") {
@@ -769,7 +769,12 @@ export class Markdown implements Component {
 		}
 
 		// Replace tabs with 3 spaces for consistent rendering
-		const normalizedSource = new SourceText(text).replace(/\r\n?/g, "\n").replace(/\t/g, "   ");
+		const aligned = mapSource ? alignSourceText(this.text, text) : undefined;
+		if (selectionDocument && aligned) {
+			selectionDocument.complete = aligned.complete;
+		}
+		const transformedSource = aligned?.source ?? new SourceText(text);
+		const normalizedSource = transformedSource.replace(/\r\n?/g, "\n").replace(/\t/g, "   ");
 		const normalizedText = normalizedSource.text;
 
 		// Parse markdown to HTML-like tokens
@@ -807,21 +812,26 @@ export class Markdown implements Component {
 			const mapped =
 				tokenOffset >= 0
 					? normalizedSource.slice(tokenOffset, tokenOffset + token.raw.length)
-					: new SourceText(token.raw, []);
-			const originalStart = mapped.spans[0]?.sourceStart ?? 0;
-			const originalEnd = mapped.spans[mapped.spans.length - 1]?.sourceEnd ?? originalStart;
-			const original = tokenOffset >= 0 ? text.slice(originalStart, originalEnd) : token.raw;
+					: new SourceText(token.raw, [], true);
+			const hasSpans = tokenOffset >= 0 && mapped.spans.length > 0;
+			const hasMappedSource = mapSource && hasSpans;
+			if (selectionDocument && !hasMappedSource && token.type !== "space") {
+				selectionDocument.complete = false;
+			}
+			const originalStart = hasSpans ? mapped.spans[0].sourceStart : 0;
+			const originalEnd = hasSpans ? mapped.spans[mapped.spans.length - 1].sourceEnd : 0;
+			const original = hasMappedSource ? this.text.slice(originalStart, originalEnd) : "";
 			const nextTokenType = tokens[i + 1]?.type;
-			const blockKey = `${tokenOffset >= 0 ? originalStart : `unmapped:${i}`}\0${original}`;
+			const blockKey = `${hasSpans ? originalStart : `unmapped:${i}`}\0${token.raw}\0${original}`;
 			const reused = reuseBlocks && !blocks.has(blockKey) ? previousBlocks?.get(blockKey) : undefined;
 			const block: RenderedBlock = reused ?? { width: -1, nextTokenType, lines: [], highlightedCode: new Map() };
 			if (
 				block.width !== width ||
 				block.nextTokenType !== nextTokenType ||
-				!!block.source !== mapSource ||
+				!!block.source !== hasMappedSource ||
 				(block.source && block.source.offset !== originalStart)
 			) {
-				this.blockSource = mapSource
+				this.blockSource = hasMappedSource
 					? new MarkdownSource(
 							original,
 							new SourceText(

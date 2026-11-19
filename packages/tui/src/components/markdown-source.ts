@@ -12,7 +12,7 @@ export class MarkdownSource extends SelectionSource {
 	}
 
 	raw(token: object): SourceText {
-		return this.rawSources.get(token) ?? new SourceText("", []);
+		return this.rawSources.get(token) ?? new SourceText("", [], true);
 	}
 
 	content(token: object): SourceText {
@@ -70,7 +70,7 @@ export class MarkdownSource extends SelectionSource {
 					const labelStart = label.text.indexOf(token.text, prefix);
 					content =
 						labelStart < 0
-							? new SourceText(token.text, [])
+							? new SourceText(token.text, [], true)
 							: label.slice(labelStart, labelStart + token.text.length);
 					if (token.tokens) this.indexTokens(token.tokens, content);
 					this.format(raw, content);

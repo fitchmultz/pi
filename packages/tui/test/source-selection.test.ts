@@ -605,6 +605,167 @@ describe("source-aware fullscreen selection", () => {
 			tui.stop();
 		}
 	});
+
+	describe("transformed Markdown", () => {
+		// Simulates display-only Markdown transformers (such as pi-emphasis): ANSI bold color, prefix icons
+		// in headings and bold labels, and rounded status pills using NBSPs (equal length for single-word pills).
+		const decorateDisplay = (markdown: string): string =>
+			markdown
+				.replace(/^## (.+)$/gm, "## \uf002 $1")
+				.replace(/\*\*Status:\*\*/g, "**\x1b[34m\uf012 Status:\x1b[39m**")
+				.replace(/\*\*Next:\*\*/g, "**\x1b[34m\uf061 Next:\x1b[39m**")
+				.replace(/\*\*([^*]+)\*\*/g, (match, inner: string) =>
+					inner.startsWith("\x1b[34m") ? match : `**\x1b[34m${inner}\x1b[39m**`,
+				)
+				.replace(/\[\[([^\]]+)\]\]/g, (_match, label: string) => {
+					const body = label.replace(/ /g, "\u00a0");
+					return `\x1b[36m\ue0b6\x1b[39m\x1b[36m\x1b[7m\x1b[1m\uf0ad\u00a0${body}\x1b[22;27m\x1b[39m\x1b[49m\x1b[36m\ue0b4\x1b[39m`;
+				});
+
+		const selectTransformed = async (
+			markdown: string,
+			transform: (text: string, width: number) => string,
+			first: string,
+			last: string,
+			width = 50,
+		): Promise<string | undefined> => {
+			const terminal = new VirtualTerminal(width, 40);
+			let copied: string | undefined;
+			const tui = new TuiAltScreen(terminal, undefined, undefined, {
+				copySelection: async (text) => {
+					copied = text;
+					return true;
+				},
+			});
+			tui.addChild(new Markdown(markdown, 1, 0, defaultMarkdownTheme, undefined, { transform }));
+			tui.start();
+			try {
+				await terminal.waitForRender();
+				const lines = terminal.getViewport();
+				const firstRow = lines.findIndex((line) => line.includes(first));
+				const lastRow = lines.findIndex((line, index) => index >= firstRow && line.includes(last));
+				assert.ok(firstRow >= 0 && lastRow >= firstRow, lines.join("\n"));
+				const start = visibleWidth(lines[firstRow].slice(0, lines[firstRow].indexOf(first)));
+				const end = visibleWidth(lines[lastRow].slice(0, lines[lastRow].indexOf(last) + last.length)) - 1;
+				terminal.sendInput(`\x1b[<0;${start + 1};${firstRow + 1}M`);
+				terminal.sendInput(`\x1b[<32;${end + 1};${lastRow + 1}M`);
+				terminal.sendInput(`\x1b[<0;${end + 1};${lastRow + 1}m`);
+				await terminal.waitForRender();
+				return copied;
+			} finally {
+				tui.stop();
+			}
+		};
+
+		const decoratedReply = `## Finding
+
+**Status:** [[Implement]] All four active watchers are running normally across a long wrapped sentence. **Next:** check [[In progress]].
+
+- Keep **run \`npm test\` now** and **anchor term** clean.
+
+| Check | State |
+| --- | --- |
+| **Build** | [[Passed 12/12]] |`;
+
+		for (const { name, markdown, transform = decorateDisplay, first, last, expected } of [
+			{
+				name: "a full decorated reply as original Markdown without icons or wrap breaks",
+				markdown: decoratedReply,
+				first: "Finding",
+				last: "12/12",
+				expected: decoratedReply,
+			},
+			{
+				name: "a wrapped paragraph fragment unwrapped across terminal rows",
+				markdown: decoratedReply,
+				first: "All four",
+				last: "sentence.",
+				expected: "All four active watchers are running normally across a long wrapped sentence.",
+			},
+			{
+				name: "an icon-prefixed bold label as original Markdown bold without the icon",
+				markdown: decoratedReply,
+				first: "\uf012",
+				last: "Status:",
+				expected: "**Status:**",
+			},
+			{
+				name: "an equal-length status pill atomically even when dragging mid-pill",
+				markdown: decoratedReply,
+				first: "plem",
+				last: "All",
+				expected: "[[Implement]] All",
+			},
+			{
+				name: "a multi-word NBSP status pill back to its original bracket syntax",
+				markdown: decoratedReply,
+				first: "In",
+				last: "progress",
+				expected: "[[In progress]]",
+			},
+			{
+				name: "a heading wrapping bold after an inserted prefix icon",
+				markdown: "## **Finding**\n\nBody text.",
+				first: "Finding",
+				last: "Finding",
+				expected: "## **Finding**",
+			},
+			{
+				name: "bold text containing inline code without ANSI offset drift",
+				markdown: decoratedReply,
+				first: "run npm",
+				last: "now",
+				expected: "**run `npm test` now**",
+			},
+			{
+				name: "selected original blocks when a transformer prepends a banner",
+				markdown: "First paragraph.\n\nSecond paragraph.",
+				transform: (md: string) => `> Banner notice\n\n${md}`,
+				first: "First",
+				last: "Second paragraph.",
+				expected: "First paragraph.\n\nSecond paragraph.",
+			},
+			{
+				name: "only the rendered paragraph without resurrecting a deleted block",
+				markdown: "First paragraph.\n\nSecond paragraph.",
+				transform: () => "Second paragraph.",
+				first: "Second",
+				last: "paragraph.",
+				expected: "Second paragraph.",
+			},
+			{
+				name: "displayed text when a transformer replaces content with unrelated text",
+				markdown: "secret original text",
+				transform: () => "completely different display widget",
+				first: "different",
+				last: "widget",
+				expected: "different display widget",
+			},
+		]) {
+			it(`copies ${name}`, async () => {
+				assert.equal(await selectTransformed(markdown, transform, first, last), expected);
+			});
+		}
+
+		it("updates cached blocks and stays marker-free outside selection reader renders", () => {
+			let streaming = true;
+			const md = new Markdown("Hello **world**", 0, 0, defaultMarkdownTheme, undefined, {
+				transform: (text) => (streaming ? text : decorateDisplay(text)),
+			});
+			const plainOutside = md.render(40);
+			for (const line of plainOutside) assert.ok(!line.includes("\x1b]pi:"), JSON.stringify(line));
+
+			renderForSelectionReader(() => md.render(40));
+			streaming = false;
+			md.setText("Hello **world**");
+			const decoratedOutside = md.render(40);
+			assert.ok(decoratedOutside[0].includes("\x1b[34m"));
+			for (const line of decoratedOutside) assert.ok(!line.includes("\x1b]pi:"), JSON.stringify(line));
+
+			const decoratedReader = renderForSelectionReader(() => md.render(40));
+			assert.equal(copySelectionSource(decoratedReader, [{ row: 0, start: 0, end: 40 }]), "Hello **world**");
+		});
+	});
 });
 
 describe("selection sources outside the fullscreen renderer", () => {
