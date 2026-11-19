@@ -4896,7 +4896,7 @@ export class InteractiveMode {
 		// organization) and mixed or missing reasons get no cause.
 		const cause = reasons.every((reason) => reason === "prefix_binding_mismatch" || reason === "prefix_mismatch")
 			? " after the earlier prompt changed"
-			: reasons.every((reason) => reason === "model_binding_mismatch")
+			: reasons.every((reason) => reason === "model_binding_mismatch" || reason === "model_mismatch")
 				? " written by another model"
 				: reasons.every((reason) => reason === "end_user_mismatch")
 					? " for another end user"

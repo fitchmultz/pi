@@ -382,5 +382,11 @@ describe("InteractiveMode cache estimates", () => {
 		maybeShowThinkingDropNotice.call(context, openAiReply(["end_user_mismatch", "end_user_mismatch"]));
 		const secondOutput = stripAnsi(context.chatContainer.render(160).join("\n"));
 		expect(secondOutput).toContain("OpenAI dropped 2 reasoning items for another end user (details in session)");
+
+		// OpenAI's model_mismatch reason maps to the same model-swap cause as Anthropic's model_binding_mismatch.
+		context.chatContainer.clear();
+		maybeShowThinkingDropNotice.call(context, openAiReply(["model_mismatch", "model_mismatch", "model_mismatch"]));
+		const thirdOutput = stripAnsi(context.chatContainer.render(160).join("\n"));
+		expect(thirdOutput).toContain("OpenAI dropped 3 reasoning items written by another model (details in session)");
 	});
 });
