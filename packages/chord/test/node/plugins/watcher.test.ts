@@ -155,11 +155,12 @@ describe("the watcher and single-file plugins (slice 12 §4)", () => {
 		await writeFiles(root, { "hello.server.ts": "" });
 		watcher.mark(join(root, "hello.server.ts"));
 		expect(watcher.value).toMatchObject({ set: true, dirty: [] });
-		// The write's native event may arrive during discovery and correctly keep its newer mark.
+		// The write's native event may arrive during or right after discovery and keep `set` or dirty `"hello"`.
 		await vi.waitFor(async () => {
 			const seen = watcher.discoverySnapshot();
 			watcher.know(await discoverPlugins([root], { kinds: KINDS }, context), seen);
-			expect(watcher.value).toMatchObject({ set: false });
+			watcher.applied(["hello"], watcher.snapshot(["hello"]));
+			expect(watcher.value).toMatchObject({ set: false, dirty: [] });
 		});
 		// Its own file: only it is dirty (not every plugin of the root its directory is).
 		watcher.mark(join(root, "hello.server.ts"));

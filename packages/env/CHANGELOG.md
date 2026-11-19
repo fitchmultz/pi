@@ -8,7 +8,6 @@
 
 ### Fixed
 
-- Fixed one oversized file-watch change stopping the daemon's output writer; the change is reported as `overflow` and the connection and watcher keep working ([#10516](https://github.com/earendil-works/pi/issues/10516)).
 - Fixed concurrent `acceptHostKey`/`forgetHostKey` calls through equivalent known-hosts path spellings losing updates, which could restore a removed host key ([#10517](https://github.com/earendil-works/pi/issues/10517)).
 - Fixed cancelled or timed-out daemon shell commands on macOS sometimes running later steps after the current step was killed. A waiting shell no longer goes on to its next step, and a step that the shell was starting when the kill landed, which that kill can miss, is now killed as soon as the daemon sees the shell exit.
 - `RemoteExecutionEnv.listDir()` leaves out an entry removed between enumeration and `lstat` instead of failing, like `NodeExecutionEnv.listDir()` and both directory readers. Names that are not valid UTF-8, which `lstat` also reports as missing, are now left out the same way instead of failing the listing, as the directory readers already did ([#11994](https://github.com/earendil-works/pi/issues/11994))

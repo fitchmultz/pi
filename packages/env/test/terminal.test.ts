@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -86,8 +86,9 @@ describe.skipIf(process.platform === "win32")("openTerminal", () => {
 		terminal.write("echo READY\n");
 		await output.waitFor("READY");
 		expect(await terminal.foreground()).toBeUndefined();
-		// By path: a `sleep` found on PATH can be another program, such as Homebrew's `gsleep`.
-		terminal.write("/bin/sleep 100\n");
+		// Prefer `/bin/sleep` when present: a `sleep` on PATH can be another binary, such as Homebrew's `gsleep`.
+		const sleep = existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+		terminal.write(`${sleep} 100\n`);
 		// The shell forks before it execs: wait until the foreground job is the command itself, not the forked shell.
 		const named = process.platform === "darwin" || process.platform === "linux";
 		let foreground = await terminal.foreground();
