@@ -438,8 +438,9 @@ export class TaskScheduler {
 	#reading: Set<string> | undefined;
 	#cascadePending = false;
 	#unsubscribeRegistry: () => void = () => {};
-	#scheduling: HarnessInspection["scheduling"] = "paused";
+	#enabled = false;
 	readonly #readOnly: boolean;
+	#closing = false;
 	/** Aborted at the seal: cancels the cleanups an abort must not cancel (`closeSignal()`). */
 	readonly #closed = new AbortController();
 	#dirty = false;
@@ -525,7 +526,7 @@ export class TaskScheduler {
 	 */
 	resume(): void {
 		if (this.#readOnly) throw new ReadOnlySession("running tasks");
-		if (this.#scheduling === "paused") this.#scheduling = "running";
+		this.#enabled = true;
 		this.#wakeDue();
 		this.#kick();
 	}
@@ -673,7 +674,7 @@ export class TaskScheduler {
 	async waitForTask(id: TaskId, context: Context): Promise<SettledTask<JsonValue>> {
 		// Check and register on the line so no terminal publication falls between them.
 		const found = await this.#session.readOnLine(async (storage) => {
-			if (this.#scheduling === "closing") throw closedError(this.#session);
+			if (this.#closing) throw closedError(this.#session);
 			if (await this.#region(() => this.#liveRecord(id) !== undefined)) {
 				return { promise: this.#taskWaiters.add(id, context) };
 			}
@@ -689,7 +690,7 @@ export class TaskScheduler {
 	 * non-background task.
 	 */
 	waitForIdle(conversationId: ConversationId | undefined, context: Context): Promise<void> {
-		if (this.#scheduling === "closing") return Promise.reject(closedError(this.#session));
+		if (this.#closing) return Promise.reject(closedError(this.#session));
 		if (this.#idle(conversationId)) return Promise.resolve();
 		this.#scheduleReconcile();
 		return this.#idleWaiters.add(conversationId, context);
@@ -1052,7 +1053,7 @@ export class TaskScheduler {
 		if (this.#expiry !== undefined && this.#expiry.at === at) return;
 		this.#expiry?.disarm();
 		this.#expiry = undefined;
-		if (at === undefined || this.#scheduling === "closing") return;
+		if (at === undefined || this.#closing) return;
 		const disarm = this.#timers.background(() => {
 			this.#expiry = undefined;
 			this.#expireContexts(this.#now(), this.#contextRetentionMs());
@@ -1065,7 +1066,7 @@ export class TaskScheduler {
 
 	#scheduleReconcile(): void {
 		// A read-only reconcile could only fail: what it writes is refused, and its own commits fail the Session.
-		if (this.#reconcileScheduled || this.#scheduling === "closing" || this.#readOnly) return;
+		if (this.#reconcileScheduled || this.#closing || this.#readOnly) return;
 		this.#reconcileScheduled = true;
 		queueMicrotask(() => void this.#reconcile());
 	}
@@ -1082,7 +1083,7 @@ export class TaskScheduler {
 		if (work) this.#reconcilingWork++;
 		try {
 			await this.#session.commitInternal(async (tx) => {
-				if (this.#scheduling === "closing") return;
+				if (this.#closing) return;
 				// A cascade scans the queued inputs, which waits for every unpublished commit: a request made before the scan
 				// is covered by it, and none is published while the job holds the line after it.
 				const cascade = this.#cascadePending;
@@ -1381,7 +1382,7 @@ export class TaskScheduler {
 	 * write, and a read publish nothing, so the sweep at the end of `#observe` would not run for what they loaded.
 	 */
 	#scheduleSweep(): void {
-		if (this.#sweepScheduled || this.#scheduling === "closing") return;
+		if (this.#sweepScheduled || this.#closing) return;
 		this.#sweepScheduled = true;
 		this.#session
 			.readOnLine(async () => {
@@ -1486,9 +1487,9 @@ export class TaskScheduler {
 		const invocation = this.#invocations.get(id);
 		if (invocation !== undefined) invocation.record = record as TaskRecord<JsonValue, Checkpoint, JsonValue>;
 		if (record.state.status === "terminal") {
-			if (previous !== undefined && this.#scheduling !== "closing") this.#countActive(-1, record.kind);
+			if (previous !== undefined && !this.#closing) this.#countActive(-1, record.kind);
 			this.#resumed.delete(id);
-		} else if (previous === undefined && this.#scheduling !== "closing") {
+		} else if (previous === undefined && !this.#closing) {
 			this.#countActive(1, record.kind);
 		}
 		if (previous?.state.status === "waiting") for (const on of previous.state.on) deleteFrom(this.#waiters, on, id);
@@ -1791,14 +1792,14 @@ export class TaskScheduler {
 
 	/** Fail the Session, which reports it, for a throw in one of the scheduler's own commits; ignored once closing. */
 	#failSession(error: unknown, context?: Context): void {
-		if (this.#scheduling !== "closing") this.#session.fail(error, context);
+		if (!this.#closing) this.#session.fail(error, context);
 	}
 
 	/** Close listener: runs synchronously once admission is sealed, before `join()`, or when the Session fails. */
 	#seal(): void {
 		for (const record of this.#live.values()) this.#countActive(-1, record.kind);
 		this.#resumed.clear();
-		this.#scheduling = "closing";
+		this.#closing = true;
 		this.#closed.abort(closedError(this.#session));
 		try {
 			this.#unsubscribeRegistry();
@@ -1821,14 +1822,14 @@ export class TaskScheduler {
 	 * already queued serves later changes too): arm the built-in timer, or tell `onWake` of a change.
 	 */
 	#scheduleWake(): void {
-		if (this.#wakeScheduled || this.#scheduling === "closing" || this.#readOnly) return;
+		if (this.#wakeScheduled || this.#closing || this.#readOnly) return;
 		this.#wakeScheduled = true;
 		queueMicrotask(() => {
 			this.#wakeScheduled = false;
-			if (this.#scheduling === "closing") return;
+			if (this.#closing) return;
 			const wake = this.wake();
 			if (this.#onWake === undefined) {
-				this.#armTimer(this.#scheduling === "running" ? wake.at : undefined);
+				this.#armTimer(this.#enabled ? wake.at : undefined);
 				return;
 			}
 			const last = this.#lastWake;
@@ -1852,7 +1853,7 @@ export class TaskScheduler {
 		if (this.#timer !== undefined && this.#timer.at === at) return;
 		this.#timer?.disarm();
 		this.#timer = undefined;
-		if (at === undefined || this.#scheduling === "closing") return;
+		if (at === undefined || this.#closing) return;
 		const disarm = this.#timers.foreground(() => {
 			this.#timer = undefined;
 			this.#wakeDue();
@@ -1936,7 +1937,7 @@ export class TaskScheduler {
 	#kick(): void {
 		this.#scheduleWake();
 		this.#dirty = true;
-		if (this.#draining || this.#scheduling !== "running") return;
+		if (this.#draining || !this.#enabled || this.#closing) return;
 		this.#draining = true;
 		// Never commit synchronously from a commit or registry listener.
 		queueMicrotask(() => void this.#drain());
@@ -1944,7 +1945,7 @@ export class TaskScheduler {
 
 	async #drain(): Promise<void> {
 		try {
-			while (this.#dirty && this.#scheduling === "running") {
+			while (this.#dirty && this.#enabled && !this.#closing) {
 				this.#dirty = false;
 				for (const reservation of await this.#reserve()) this.#start(reservation);
 			}
@@ -1968,7 +1969,7 @@ export class TaskScheduler {
 		let abandoned: TaskId[] = [];
 		try {
 			await this.#session.commitInternal(async (tx) => {
-				if (this.#scheduling !== "running") return;
+				if (!this.#enabled || this.#closing) return;
 				if (this.#abandoned.size > 0) {
 					const ids = [...this.#abandoned];
 					const unmarked = await this.#region(() =>
@@ -2240,7 +2241,8 @@ export class TaskScheduler {
 		await this.#loadScopes(false);
 		const tasks: TaskInspection[] = [];
 		for (const record of this.#live.values()) tasks.push({ record, state: this.#inspectTask(record, snapshot) });
-		return { scheduling: this.#scheduling, tasks };
+		const scheduling = this.#closing ? "closing" : this.#enabled ? "running" : "paused";
+		return { scheduling, tasks };
 	}
 
 	#inspectTask(record: AnyTaskRecord, snapshot: RegistrySnapshot): TaskInspection["state"] {
@@ -2316,7 +2318,7 @@ export class TaskScheduler {
 		const progress = (tx: Transaction, current: ErasedRunningTask) =>
 			this.#progress(tx, current, state, invocation.extension, invocation.context);
 		let current = await this.#step(invocation, (task) => this.#rules(task, undefined), progress);
-		while (current !== undefined && this.#scheduling !== "closing") {
+		while (current !== undefined && !this.#closing) {
 			const task = current;
 			current = await this.#phase(invocation, task, async () => {
 				const checkpoint = task.state.checkpoint;
@@ -2384,7 +2386,7 @@ export class TaskScheduler {
 									: "faulted"
 							: state.status === "waiting" || state.status === "sleeping"
 								? state.status
-								: invocation.ended || this.#scheduling === "closing"
+								: invocation.ended || this.#closing
 									? "aborted"
 									: `next=${state.checkpoint!.phase}`;
 					span.setAttributes({ outcome });
@@ -2467,7 +2469,7 @@ export class TaskScheduler {
 	async #runAbort(reservation: Reservation): Promise<void> {
 		const invocation = reservation.invocation;
 		const current = this.#live.get(invocation.taskId) as ErasedRunningTask | undefined;
-		if (current === undefined || this.#scheduling === "closing") return;
+		if (current === undefined || this.#closing) return;
 		await this.#phase(invocation, current, async () => {
 			let failure: { readonly error: unknown } | undefined;
 			try {
@@ -2504,7 +2506,7 @@ export class TaskScheduler {
 			const continued = await this.#session.commitInternal(async (tx) => {
 				const decided = await this.#region(() => {
 					const found = this.#liveRecord(invocation.taskId);
-					if (found?.state.status !== "running" || this.#scheduling === "closing") return { plan: END };
+					if (found?.state.status !== "running" || this.#closing) return { plan: END };
 					const current = found as ErasedRunningTask;
 					return { current, plan: plan(current) };
 				});
@@ -3005,7 +3007,7 @@ export class TaskScheduler {
 					const kept = this.#contexts.get(conversationId);
 					if (
 						range !== undefined &&
-						this.#scheduling !== "closing" &&
+						!this.#closing &&
 						!invocation.ended &&
 						(kept === undefined || kept.range.bounds.tail <= range.bounds.tail)
 					) {
@@ -3090,7 +3092,7 @@ export class TaskScheduler {
 		return this.#session.commitWith(
 			async (tx) => {
 				if (invocation.ended) throw endedError(invocation);
-				if (this.#scheduling === "closing") throw closedError(this.#session);
+				if (this.#closing) throw closedError(this.#session);
 				const current = await this.#region(() => {
 					const found = this.#liveRecord(invocation.taskId);
 					if (found === undefined) throw new Error(`Task ${invocation.taskId} is terminal`);

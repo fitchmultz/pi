@@ -118,7 +118,7 @@ export class SqliteStorage implements Storage {
 	private readonly db: SqliteDatabase;
 	private readonly schema: SqliteSchema;
 	private nextId: number;
-	/** Seals admission and retains the outcome for every close caller. */
+	private closed = false;
 	private closing: Promise<void> | undefined;
 	private admittedReads = 0;
 	private readsDrained: (() => void) | undefined;
@@ -659,10 +659,8 @@ export class SqliteStorage implements Storage {
 
 	close(_context: Context): Promise<void> {
 		if (this.closing === undefined) {
-			// Publish before cleanup can run synchronously.
-			const { promise, resolve, reject } = Promise.withResolvers<void>();
-			this.closing = promise;
-			this.closeDatabase().then(resolve, reject);
+			this.closed = true;
+			this.closing = this.closeDatabase();
 		}
 		return this.closing;
 	}
@@ -767,6 +765,6 @@ export class SqliteStorage implements Storage {
 	}
 
 	private assertOpen(): void {
-		if (this.closing !== undefined) throw new Error("SqliteStorage is closed");
+		if (this.closed) throw new Error("SqliteStorage is closed");
 	}
 }

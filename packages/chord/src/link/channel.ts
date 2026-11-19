@@ -79,10 +79,12 @@ export class Channel {
 	/** The fences waiting for their `pong`, oldest first; made by the first (most links never fence). */
 	#fences: { readonly ping: number; readonly then: () => void }[] | undefined;
 	/**
-	 * While a message is handled asynchronously, and until the ones received meanwhile were handled: those, in order, and
-	 * the index of the next to handle. `undefined` while messages are handled as they arrive.
+	 * Messages received while one is handled asynchronously, in order, and the index of the next to handle; `undefined`
+	 * while none waits.
 	 */
 	#held: { queue: Uint8Array[]; next: number } | undefined;
+	/** Whether a message is being handled asynchronously: the held ones wait. */
+	#waiting = false;
 	readonly #hello: Uint8Array;
 	/** Counts the bytes of the encoded messages (sizes the channel has). */
 	readonly #bytes: ChordCounter<"chord.link.bytes">;
@@ -200,16 +202,13 @@ export class Channel {
 		else this.#held.queue.push(bytes);
 	}
 
-	/**
-	 * Handles one received message; returns whether the handler handles it asynchronously, holding the next until it
-	 * settles.
-	 */
-	#handle(bytes: Uint8Array): boolean {
+	/** Handles one received message; one the handler handles asynchronously holds the next until it settles. */
+	#handle(bytes: Uint8Array): void {
 		const state = this.#state;
 		try {
 			if (state.kind === "greeting") {
 				this.#greet(bytes, state.queued);
-				return false;
+				return;
 			}
 			const message = this.#decode(bytes);
 			if (message.kind === "hello") throw new Error("handshake: a second hello");
@@ -218,22 +217,22 @@ export class Channel {
 			else if (message.kind === "pong") this.#ponged();
 			else {
 				const handling = this.#handler.message(message);
-				if (handling !== undefined) {
-					this.#hold(handling);
-					return true;
-				}
+				if (handling !== undefined) this.#hold(handling);
 			}
 		} catch (error) {
 			this.#failed(error);
 		}
-		return false;
 	}
 
 	/** Holds later messages until `handling` settles, then handles them in order (each may hold again). */
 	#hold(handling: Promise<void>): void {
 		this.#held ??= { queue: [], next: 0 };
+		this.#waiting = true;
 		handling.then(
-			() => this.#release(),
+			() => {
+				this.#waiting = false;
+				this.#release();
+			},
 			(error: unknown) => this.#failed(error),
 		);
 	}
@@ -247,7 +246,8 @@ export class Channel {
 		if (held === undefined) return;
 		while (held.next < held.queue.length) {
 			if (this.#state.kind !== "open") return;
-			if (this.#handle(held.queue[held.next++]!)) {
+			this.#handle(held.queue[held.next++]!);
+			if (this.#waiting) {
 				held.queue.splice(0, held.next);
 				held.next = 0;
 				return;
