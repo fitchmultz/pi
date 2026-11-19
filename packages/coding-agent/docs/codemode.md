@@ -65,7 +65,9 @@ Calls a script makes share one nested-call queue with other scripts. A tool that
 
 Every callable tool is a method of `tools`, named by its identifier: characters that are not valid in a JavaScript identifier become `_`, so the MCP tool `mcp__dev-radius__search` is `tools.mcp__dev_radius__search`. Each method takes one object with the tool's arguments. Tools with `model-only` or `hidden` exposure are excluded.
 
-What a call resolves to depends on the tool:
+`await tools.tool_search({ query, limit?, namespace? })` is an alias for `await searchTools(query, { limit, namespace })`. Both return ranked `{ name, description }` matches for tools the script can call. Neither loads tools into the model's next request. The standalone `tool_search` tool still loads deferred matches for direct calls.
+
+What other calls resolve to depends on the tool:
 
 - Tools with an output schema resolve to a structured value. `bash` resolves to `{ output, truncated, full_output_path?, exit_code, wall_time_seconds }`, also for non-zero exit codes. Its `output` is not limited to the 2000 lines or 50KB the model sees: it holds up to 1 MiB, and longer output keeps its first and last 512 KiB around an omission marker, with `truncated` set and the full output in `full_output_path`.
 - MCP tools resolve to their `CallToolResult`, including `isError` and `structuredContent`.

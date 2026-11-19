@@ -39,6 +39,7 @@ import type { ModelRegistry } from "../../core/model-registry.ts";
 import { SETTINGS_DEFAULTS } from "../../core/settings-defaults.ts";
 import type { CodemodeMode } from "../../core/settings-manager.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "../../core/tools/tool-definition-wrapper.ts";
+import { TOOL_SEARCH_TOOL_NAME } from "../tool-search/tool.ts";
 import { loadCodemodeExecutor } from "./execute.lazy.ts";
 import { codemodeRenderers } from "./renderer.ts";
 
@@ -146,6 +147,7 @@ function describeGlobals(models: boolean): string {
 		"- Print look-ups with `await show(tools.read({ path }), tools.grep({ pattern }))`, not `text(await ...)` or `Promise.all`, which stop at the first failed call. It prints each result under its call, a failed call as `FAILED:` and its error, and returns the `Promise.allSettled` results. The calls run concurrently: keep ordered and state-changing calls out of it.",
 		"- `store(key, value)` and `load(key)` keep small JSON values across codemode calls. A value may use at most 256 KiB of JSON; keys and values together may use at most 1 MiB per session branch. Keep large data in variables or files, and delete keys with `store(key, undefined)`.",
 		"- `ALL_TOOLS`, `await searchTools(query, { limit?, namespace? })`, `await describeTool(name)`, `await describeNamespace(name)`: find unlisted tools, such as MCP tools.",
+		"- `await tools.tool_search({ query, limit?, namespace? })` returns the same ranked matches as `searchTools()` without loading tools for the model.",
 	];
 	if (models) {
 		// "docs/codemode.md" resolves through the system prompt's docs section. `models.docs()` covers
@@ -179,9 +181,9 @@ export function toCodemodeDeclaration(
 	};
 }
 
-/** Tools a script may call: every given tool except the codemode tool itself. */
+/** Scripts cannot run codemode recursively or call the session's tool loader by overriding its exposure. */
 export function getCodemodeCallableTools(tools: readonly AgentTool<any>[]): AgentTool<any>[] {
-	return tools.filter((tool) => tool.name !== CODEMODE_TOOL_NAME);
+	return tools.filter((tool) => tool.name !== CODEMODE_TOOL_NAME && tool.name !== TOOL_SEARCH_TOOL_NAME);
 }
 
 export interface CodemodeDescriptionOptions {
@@ -424,17 +426,17 @@ function prepareCodemodeLoadout(loadout: ToolLoadout, options: CodemodeToolOptio
 	};
 }
 
-/** Script globals that list or look up tools and namespaces, which the script may then call by any name. */
-const DISCOVERY_GLOBALS = /\b(searchTools|describeNamespace|describeTool|ALL_TOOLS)\b/;
+/** Script helpers that list or look up tools and namespaces, which the script may then call by any name. */
+const DISCOVERY_HELPERS = /\b(tool_search|searchTools|describeNamespace|describeTool|ALL_TOOLS)\b/;
 
 /**
  * The tools a script may call (`ToolDefinition.reachesTools`): every tool when it uses a discovery
- * global, else the words of its source, so `tools.mcp__docs__search` and
+ * helper, else the words of its source, so `tools.mcp__docs__search` and
  * `tools["mcp__docs__" + name]` both name the `mcp__docs` namespace.
  */
 function getScriptReach(code: unknown): "all" | readonly string[] {
 	if (typeof code !== "string") return [];
-	return DISCOVERY_GLOBALS.test(code) ? "all" : (code.match(/\w+/g) ?? []);
+	return DISCOVERY_HELPERS.test(code) ? "all" : (code.match(/\w+/g) ?? []);
 }
 
 export function createCodemodeToolDefinition(

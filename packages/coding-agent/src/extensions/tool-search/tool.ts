@@ -534,7 +534,7 @@ export function createToolSearchToolDefinition(
 		description: TOOL_SEARCH_DESCRIPTION,
 		promptSnippet: "Search for tools that are not loaded yet and load the matches",
 		parameters: toolSearchSchema,
-		// Searching is not something scripts need; it changes what the model sees.
+		// Scripts can search without loading tools into the model's next request.
 		exposure: "model-only",
 		// A query can match any tool that is not declared yet.
 		reachesTools: () => "all",
