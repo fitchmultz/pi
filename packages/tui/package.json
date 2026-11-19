@@ -48,6 +48,7 @@
 	},
 	"types": "./dist/index.d.ts",
 	"dependencies": {
+		"diff": "9.0.0",
 		"get-east-asian-width": "1.7.0",
 		"marked": "18.2.1",
 		"marked-cjk-friendly": "0.1.3"

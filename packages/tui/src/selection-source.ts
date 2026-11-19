@@ -1,3 +1,4 @@
+import { diffArrays } from "diff";
 import {
 	SELECTION_METADATA,
 	SELECTION_SOURCE_END,
@@ -646,92 +647,23 @@ function tokenizeForAlign(text: string): TextSegment[] {
 	return tokens;
 }
 
-const MAX_LCS_CELLS = 250_000;
-
 /** Return matched index pairs `[aIndex, bIndex]` in strictly increasing order. */
 function matchSequence(a: readonly string[], b: readonly string[]): Array<[number, number]> {
-	let prefix = 0;
-	const minLen = Math.min(a.length, b.length);
-	while (prefix < minLen && a[prefix] === b[prefix]) prefix++;
-
-	let suffix = 0;
-	while (suffix < minLen - prefix && a[a.length - 1 - suffix] === b[b.length - 1 - suffix]) suffix++;
-
 	const pairs: Array<[number, number]> = [];
-	for (let i = 0; i < prefix; i++) pairs.push([i, i]);
-
-	const aMid = a.slice(prefix, a.length - suffix);
-	const bMid = b.slice(prefix, b.length - suffix);
-	const m = aMid.length;
-	const n = bMid.length;
-
-	if (m > 0 && n > 0) {
-		if (m * n <= MAX_LCS_CELLS) {
-			const cols = n + 1;
-			const dp = new Int32Array((m + 1) * cols);
-			for (let i = m - 1; i >= 0; i--) {
-				const row = i * cols;
-				const nextRow = (i + 1) * cols;
-				for (let j = n - 1; j >= 0; j--) {
-					dp[row + j] = aMid[i] === bMid[j] ? dp[nextRow + j + 1] + 1 : Math.max(dp[nextRow + j], dp[row + j + 1]);
-				}
-			}
-			let i = 0;
-			let j = 0;
-			while (i < m && j < n) {
-				if (aMid[i] === bMid[j]) {
-					pairs.push([prefix + i, prefix + j]);
-					i++;
-					j++;
-				} else if (dp[(i + 1) * cols + j] >= dp[i * cols + j + 1]) {
-					i++;
-				} else {
-					j++;
-				}
-			}
+	let aIdx = 0;
+	let bIdx = 0;
+	for (const change of diffArrays([...a], [...b])) {
+		if (change.removed) {
+			aIdx += change.count;
+		} else if (change.added) {
+			bIdx += change.count;
 		} else {
-			// Bounded O(N log N) patience fallback for very large changed regions: match unique items and take LIS.
-			const aCounts = new Map<string, number>();
-			const bCounts = new Map<string, number>();
-			const bPos = new Map<string, number>();
-			for (let i = 0; i < m; i++) aCounts.set(aMid[i], (aCounts.get(aMid[i]) ?? 0) + 1);
-			for (let j = 0; j < n; j++) {
-				bCounts.set(bMid[j], (bCounts.get(bMid[j]) ?? 0) + 1);
-				bPos.set(bMid[j], j);
+			for (let k = 0; k < change.count; k++) {
+				pairs.push([aIdx + k, bIdx + k]);
 			}
-			const candidates: Array<[number, number]> = [];
-			for (let i = 0; i < m; i++) {
-				const key = aMid[i];
-				if (aCounts.get(key) === 1 && bCounts.get(key) === 1) {
-					candidates.push([i, bPos.get(key)!]);
-				}
-			}
-			if (candidates.length > 0) {
-				const tails: number[] = [];
-				const prev = new Int32Array(candidates.length).fill(-1);
-				for (let k = 0; k < candidates.length; k++) {
-					const bIdx = candidates[k][1];
-					let lo = 0;
-					let hi = tails.length;
-					while (lo < hi) {
-						const mid = (lo + hi) >> 1;
-						if (candidates[tails[mid]][1] < bIdx) lo = mid + 1;
-						else hi = mid;
-					}
-					if (lo > 0) prev[k] = tails[lo - 1];
-					tails[lo] = k;
-				}
-				const lis: Array<[number, number]> = [];
-				for (let k = tails[tails.length - 1]; k >= 0; k = prev[k]) {
-					lis.push([prefix + candidates[k][0], prefix + candidates[k][1]]);
-				}
-				for (let k = lis.length - 1; k >= 0; k--) pairs.push(lis[k]);
-			}
+			aIdx += change.count;
+			bIdx += change.count;
 		}
-	}
-
-	for (let i = 0; i < suffix; i++) {
-		pairs.push([a.length - suffix + i, b.length - suffix + i]);
 	}
 	return pairs;
 }
