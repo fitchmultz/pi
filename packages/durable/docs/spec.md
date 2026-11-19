@@ -3285,8 +3285,9 @@ compaction summarizes is lost, and an application head can be undone (section
 A `postTools` boundary that places a `head: "self"` write (a reset) behaves as
 `final`: it also selects follow-ups, and the current run ends with its inputs
 `unanswered` with reason `reset`, because its context was cut before an answer.
-If a queued reset write is stale or refused for storage capacity, it is not
-placed and does not turn the `postTools` boundary into `final`.
+A reset write is never stale, but if a queued reset write is refused for storage
+capacity, it is not placed and does not turn the `postTools` boundary into
+`final`.
 A reset placed at a `final` boundary follows the answer, so the inputs are
 already `done`.
 
