@@ -566,32 +566,41 @@ describe("source-aware fullscreen selection", () => {
 				return true;
 			},
 		});
-		tui.addChild(new Text("0123456789abcdefghij0123456789", 0, 0));
-		tui.showOverlay(new Markdown("**overlay** text", 0, 0, defaultMarkdownTheme), {
-			width: 11,
-			anchor: "top-left",
-			offsetX: 4,
-			offsetY: 0,
-		});
+		// Base row has no selection source markers of its own; an overlay that renders wider than its declared width
+		// is truncated mid-bold-run by compositeOverlays -> sliceWithWidth, which must close the run before base text.
+		tui.addChild({ render: () => ["0123456789abcdefghij0123456789"], invalidate() {} });
+		const wideMarkdown = new Markdown("**overlay** text", 0, 0, defaultMarkdownTheme);
+		tui.showOverlay(
+			{
+				render: () => wideMarkdown.render(40),
+				invalidate: () => wideMarkdown.invalidate(),
+			},
+			{
+				width: 7,
+				anchor: "top-left",
+				offsetX: 4,
+				offsetY: 0,
+			},
+		);
 		tui.start();
 		try {
 			await terminal.waitForRender();
 			const row = terminal.getViewport()[0];
 			assert.ok(row.includes("overlay"), row);
-			// Select inside the ASCII overlay (cols 4..10 = "overlay")
+			// Select inside the truncated ASCII overlay (cols 4..10 = "overlay")
 			terminal.sendInput("\x1b[<0;5;1M");
 			terminal.sendInput("\x1b[<32;11;1M");
 			terminal.sendInput("\x1b[<0;11;1m");
 			await terminal.waitForRender();
 			assert.equal(copied, "**overlay**");
 
-			// Select base text to the right of the overlay (cols 15..19 = "fghij")
+			// Select base text to the right of the overlay (cols 15..20 = "fghij0")
 			copied = undefined;
 			terminal.sendInput("\x1b[<0;16;1M");
-			terminal.sendInput("\x1b[<32;20;1M");
-			terminal.sendInput("\x1b[<0;20;1m");
+			terminal.sendInput("\x1b[<32;21;1M");
+			terminal.sendInput("\x1b[<0;21;1m");
 			await terminal.waitForRender();
-			assert.equal(copied, "fghij");
+			assert.equal(copied, "fghij0");
 		} finally {
 			tui.stop();
 		}
