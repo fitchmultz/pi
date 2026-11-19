@@ -794,4 +794,155 @@ describe("SettingsManager", () => {
 			expect(manager.getShellPath()).toBe(homedir());
 		});
 	});
+
+	describe("refreshWorkingSessionSettings", () => {
+		// PIF-222: managed restarts must reload disk settings (including deleted keys) while preserving overrides.
+		it("reloads global and trusted project edits from disk and reverts deleted keys to defaults", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					httpIdleTimeoutMs: 120_000,
+					theme: "dark",
+					retry: { enabled: true, maxRetries: 2, baseDelayMs: 1000 },
+					enabledModels: ["old/*"],
+					packages: ["pkg-old"],
+				}),
+			);
+			writeFileSync(
+				join(projectDir, ".pi", "settings.json"),
+				JSON.stringify({ retry: { maxRetries: 4 }, shellCommandPrefix: "old-project" }),
+			);
+
+			const original = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
+			const savedLayers = {
+				global: original.getGlobalSettings(),
+				project: original.getProjectSettings(),
+			};
+
+			// Simulate external edit (e.g. chezmoi) deleting httpIdleTimeoutMs and updating nested/array keys.
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					theme: "light",
+					retry: { enabled: false, maxRetries: 6 },
+					enabledModels: ["new/*"],
+					packages: ["pkg-new"],
+				}),
+			);
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ shellCommandPrefix: "new-project" }));
+
+			const refreshedManager = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
+			const refreshed = refreshedManager.refreshWorkingSessionSettings(savedLayers);
+			refreshedManager.restoreWorkingSession(refreshed.settings, refreshed.settingsLayers);
+
+			expect(refreshed.settings.httpIdleTimeoutMs).toBeUndefined();
+			expect(refreshed.settingsLayers.global.httpIdleTimeoutMs).toBeUndefined();
+			expect(refreshedManager.getHttpIdleTimeoutMs()).toBe(DEFAULT_HTTP_IDLE_TIMEOUT_MS);
+			expect(refreshedManager.getTheme()).toBe("light");
+			expect(refreshedManager.getRetrySettings()).toMatchObject({
+				enabled: false,
+				maxRetries: 6,
+				baseDelayMs: 2000,
+			});
+			expect(refreshedManager.getEnabledModels()).toEqual(["new/*"]);
+			expect(refreshedManager.getPackages()).toEqual(["pkg-new"]);
+			expect(refreshedManager.getShellCommandPrefix()).toBe("new-project");
+
+			// Untrusted projects must ignore .pi/settings.json on disk.
+			const untrustedManager = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+			const untrustedRefreshed = untrustedManager.refreshWorkingSessionSettings({
+				global: savedLayers.global,
+				project: {},
+			});
+			untrustedManager.restoreWorkingSession(untrustedRefreshed.settings, untrustedRefreshed.settingsLayers);
+			expect(untrustedRefreshed.settingsLayers.project).toEqual({});
+			expect(untrustedManager.getShellCommandPrefix()).toBeUndefined();
+			expect(untrustedManager.getHttpIdleTimeoutMs()).toBe(DEFAULT_HTTP_IDLE_TIMEOUT_MS);
+		});
+
+		it("preserves transient applyOverrides while disk edits to other keys take effect", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					httpIdleTimeoutMs: 120_000,
+					theme: "dark",
+					retry: { enabled: true, maxRetries: 2, baseDelayMs: 1000 },
+					defaultTools: ["read", "bash"],
+					toolExposure: { "mcp__*": "deferred", calculator: "codemode" },
+				}),
+			);
+
+			const original = SettingsManager.create(projectDir, agentDir);
+			original.applyOverrides({
+				shellCommandPrefix: "transient-prefix",
+				retry: { baseDelayMs: 500 },
+				defaultTools: ["+codemode"],
+				toolExposure: { "mcp__docs__*": "hidden", calculator: "deferred" },
+			});
+			const savedLayers = {
+				global: original.getGlobalSettings(),
+				project: original.getProjectSettings(),
+				overrides: original.getOverrides(),
+			};
+
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					theme: "light",
+					retry: { enabled: false, maxRetries: 7 },
+					defaultTools: ["read", "bash", "grep"],
+					toolExposure: { "mcp__*": "direct", bash: "hidden" },
+				}),
+			);
+
+			const next = SettingsManager.create(projectDir, agentDir);
+			const refreshed = next.refreshWorkingSessionSettings(savedLayers);
+			next.restoreWorkingSession(refreshed.settings, refreshed.settingsLayers);
+
+			expect(next.getHttpIdleTimeoutMs()).toBe(DEFAULT_HTTP_IDLE_TIMEOUT_MS);
+			expect(next.getTheme()).toBe("light");
+			expect(next.getShellCommandPrefix()).toBe("transient-prefix");
+			expect(next.getRetrySettings()).toMatchObject({
+				enabled: false,
+				maxRetries: 7,
+				baseDelayMs: 500,
+			});
+			expect(next.getDefaultTools()).toEqual(["read", "bash", "grep", "codemode"]);
+			expect(next.getToolExposure("mcp__docs__search")).toBe("hidden");
+			expect(next.getToolExposure("mcp__linear__list")).toBe("direct");
+			expect(next.getToolExposure("calculator")).toBe("deferred");
+			expect(next.getToolExposure("bash")).toBe("hidden");
+			// Subsequent restarts keep the recorded overrides too.
+			expect(next.getOverrides()).toEqual(savedLayers.overrides);
+			// Persisted setter supersedes that overridden field without resurrecting it on later restarts.
+			next.setShellCommandPrefix("persisted-prefix");
+			expect(next.getOverrides().shellCommandPrefix).toBeUndefined();
+		});
+
+		it("falls back to the saved layer when disk settings.json is invalid JSON", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ httpIdleTimeoutMs: 60_000, theme: "dark" }));
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ retry: { maxRetries: 2 } }));
+
+			const original = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
+			original.applyOverrides({ shellCommandPrefix: "kept-override" });
+			const savedLayers = {
+				global: original.getGlobalSettings(),
+				project: original.getProjectSettings(),
+				overrides: original.getOverrides(),
+			};
+
+			writeFileSync(join(agentDir, "settings.json"), "{ broken json");
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ retry: { maxRetries: 8 } }));
+
+			const next = SettingsManager.create(projectDir, agentDir, { projectTrusted: true });
+			const refreshed = next.refreshWorkingSessionSettings(savedLayers);
+			next.restoreWorkingSession(refreshed.settings, refreshed.settingsLayers);
+
+			expect(next.drainErrors()).toHaveLength(1);
+			expect(next.getHttpIdleTimeoutMs()).toBe(60_000);
+			expect(next.getTheme()).toBe("dark");
+			expect(next.getRetrySettings().maxRetries).toBe(8);
+			expect(next.getShellCommandPrefix()).toBe("kept-override");
+		});
+	});
 });

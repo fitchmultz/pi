@@ -10,6 +10,7 @@ import {
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import http from "node:http";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -44,6 +45,7 @@ interface Receipt {
 	accepted?: boolean;
 	disposition?: string | null;
 	at?: number;
+	outcome?: string;
 }
 
 function fixture(rootDir = tmpdir()) {
@@ -67,6 +69,7 @@ function fixture(rootDir = tmpdir()) {
 	const status = join(root, "exit-code");
 	return {
 		root,
+		agentDir,
 		log,
 		status,
 		extension(
@@ -78,10 +81,12 @@ function fixture(rootDir = tmpdir()) {
 				failSave?: boolean;
 				holdDiscover?: boolean;
 				holdShutdown?: boolean;
+				probeUrl?: string;
 				nested?: { probe: string; command: string; exitPath: string };
 			} = {},
 		) {
-			const { restartCommand, holdWork, settledFollowup, failSave, holdDiscover, holdShutdown, nested } = options;
+			const { restartCommand, holdWork, settledFollowup, failSave, holdDiscover, holdShutdown, probeUrl, nested } =
+				options;
 			const path = join(root, `${version}.ts`);
 			writeFileSync(
 				path,
@@ -108,6 +113,11 @@ export default function(pi) {
   ${nested ? `writeFileSync(${JSON.stringify(nested.exitPath)},'primary-owned-sentinel',{mode:0o600});` : ""}
   record('start',ctx,{ppid:process.ppid, owner:ctx.managedHost?.owner.pid ?? null, at:Date.now()});
   ctx.managedHost?.ready.then((accepted) => record('host-ready',ctx,{accepted}));
+  ${
+		probeUrl
+			? `void fetch(${JSON.stringify(probeUrl)}).then((response) => response.text()).then((outcome) => record('probe',ctx,{outcome}), (error) => record('probe',ctx,{outcome:error?.cause?.code ?? String(error)}));`
+			: ""
+  }
  });
  ${
 		holdDiscover
@@ -813,4 +823,120 @@ export default function(pi) {
 		expect(readFileSync(f.status, "utf8").trim()).toBe("0");
 		expect(f.read().filter((r) => r.event === "start")).toHaveLength(1);
 	}, 60_000);
+
+	// PIF-222: live managed restart reloads disk settings (including deleted httpIdleTimeoutMs) and survives broken JSON.
+	it("reloads disk settings on managed restart and falls back cleanly on invalid disk JSON", async () => {
+		const server = http.createServer((_request, response) => {
+			const timer = setTimeout(() => response.end("ok"), 2500);
+			response.on("close", () => clearTimeout(timer));
+		});
+		await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("Probe server did not bind");
+		const probeUrl = `http://127.0.0.1:${address.port}/delayed`;
+
+		try {
+			const shortTmp =
+				process.platform === "android"
+					? join(process.env.PREFIX || resolve(dirname(process.execPath), ".."), "tmp")
+					: "/tmp";
+			const f = fixture(shortTmp);
+			const settingsPath = join(f.agentDir, "settings.json");
+			const socketPath = join(f.root, "working.sock");
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({
+					tuiMode: "regular",
+					quietStartup: true,
+					enableInstallTelemetry: false,
+					experimental: { firstTimeSetup: false },
+					httpIdleTimeoutMs: 80,
+					retry: { maxRetries: 2, baseDelayMs: 1000 },
+				}),
+			);
+
+			f.start(f.extension("v1", { probeUrl }), {
+				env: { PI_WORKING_SESSION_SOCKET: socketPath },
+			});
+			await f.wait(
+				(rows) => rows.some((row) => row.event === "settled") && rows.some((row) => row.event === "probe"),
+			);
+			expect(f.read().find((row) => row.event === "probe")?.outcome).toBe("UND_ERR_HEADERS_TIMEOUT");
+
+			// Delete httpIdleTimeoutMs and update retry + shellCommandPrefix on disk before managed restart.
+			writeFileSync(
+				settingsPath,
+				JSON.stringify({
+					tuiMode: "regular",
+					quietStartup: true,
+					enableInstallTelemetry: false,
+					experimental: { firstTimeSetup: false },
+					retry: { maxRetries: 7, baseDelayMs: 1000 },
+					shellCommandPrefix: "reloaded-prefix",
+				}),
+			);
+
+			const firstEndpoint = f.read().find((row) => row.event === "prompt")!.endpoint;
+			expect(await requestRestart(firstEndpoint, { message: "Check refreshed disk settings" })).toContain(
+				"Restart queued",
+			);
+			await f.wait(
+				(rows) =>
+					rows.filter((row) => row.event === "settled").length === 2 &&
+					rows.filter((row) => row.event === "probe").length === 2,
+			);
+			const probesAfterRefresh = f.read().filter((row) => row.event === "probe");
+			expect(probesAfterRefresh[1]?.outcome).toBe("ok");
+
+			// Inspect the live replacement worker's working session to verify refreshed layers and effective settings.
+			const acquirePath = join(f.root, "worker2.json");
+			const socket = createConnection(socketPath);
+			const reader = createInterface({ input: socket });
+			const replies = reader[Symbol.asyncIterator]();
+			try {
+				socket.write(`${JSON.stringify({ action: "acquire", path: acquirePath, boundary: "settled" })}\n`);
+				const grant = JSON.parse((await replies.next()).value!) as { ok: boolean; token: string };
+				expect(grant.ok).toBe(true);
+				const worker2State = JSON.parse(readFileSync(acquirePath, "utf8")) as {
+					settings: Record<string, unknown>;
+					settingsLayers: { global: Record<string, unknown> };
+				};
+				expect(worker2State.settings.httpIdleTimeoutMs).toBeUndefined();
+				expect(worker2State.settingsLayers.global.httpIdleTimeoutMs).toBeUndefined();
+				expect(worker2State.settings.retry).toEqual({ maxRetries: 7, baseDelayMs: 1000 });
+				expect(worker2State.settings.shellCommandPrefix).toBe("reloaded-prefix");
+				socket.write(`${JSON.stringify({ action: "release", token: grant.token })}\n`);
+				expect(JSON.parse((await replies.next()).value!)).toEqual({ ok: true });
+			} finally {
+				socket.destroy();
+				reader.close();
+			}
+
+			// Corrupt disk settings.json before a second restart; worker 3 must fall back cleanly and warn.
+			writeFileSync(settingsPath, "{ invalid json");
+			const secondEndpoint = f
+				.read()
+				.filter((row) => row.event === "prompt")
+				.at(-1)!.endpoint;
+			expect(await requestRestart(secondEndpoint, { message: "Check invalid disk JSON fallback" })).toContain(
+				"Restart queued",
+			);
+			await f.wait(
+				(rows) =>
+					rows.filter((row) => row.event === "settled").length === 3 &&
+					rows.filter((row) => row.event === "probe").length === 3,
+			);
+			const starts = f.read().filter((row) => row.event === "start");
+			expect(starts).toHaveLength(3);
+			expect(f.read().filter((row) => row.event === "probe")[2]?.outcome).toBe("ok");
+			expect(f.screen()).toContain("Invalid settings file");
+
+			f.keys("/quit", "Enter");
+			await f.wait(() => existsSync(f.status));
+			expect(readFileSync(f.status, "utf8").trim()).toBe("0");
+		} finally {
+			server.closeAllConnections();
+			await new Promise<void>((done) => server.close(() => done()));
+		}
+	}, 90_000);
 });

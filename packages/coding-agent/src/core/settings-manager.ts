@@ -281,12 +281,19 @@ export class InMemorySettingsStorage implements SettingsStorage {
 	}
 }
 
+export interface WorkingSessionSettingsLayers {
+	global: Settings;
+	project: Settings;
+	overrides?: Settings;
+}
+
 export class SettingsManager {
 	beforeMutation?: () => void;
 	runWorkingSessionActivity?: <T>(action: () => Promise<T>) => Promise<T>;
 	private storage: SettingsStorage;
 	private globalSettings: Settings;
 	private projectSettings: Settings;
+	private overrides: Settings = {};
 	private settings: Settings;
 	private projectTrusted: boolean;
 	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
@@ -487,12 +494,48 @@ export class SettingsManager {
 		return structuredClone(this.projectSettings);
 	}
 
+	getOverrides(): Settings {
+		return structuredClone(this.overrides);
+	}
+
 	/** Restore memory only. Persisted setters still write just their modified fields. */
-	restoreWorkingSession(settings: Settings, layers: { global: Settings; project: Settings }): void {
+	restoreWorkingSession(settings: Settings, layers: WorkingSessionSettingsLayers): void {
 		this.beforeMutation?.();
 		this.globalSettings = structuredClone(layers.global);
 		this.projectSettings = this.projectTrusted ? structuredClone(layers.project) : {};
+		this.overrides = layers.overrides ? structuredClone(layers.overrides) : {};
 		this.settings = structuredClone(settings);
+	}
+
+	/**
+	 * Refresh a saved working session's settings layers from this manager's loaded storage while
+	 * re-applying any recorded transient `applyOverrides()` values.
+	 * If a settings file failed to load from storage (e.g. invalid JSON), keep that scope's saved layer.
+	 */
+	refreshWorkingSessionSettings(savedLayers: WorkingSessionSettingsLayers): {
+		settings: Settings;
+		settingsLayers: WorkingSessionSettingsLayers;
+	} {
+		const global = this.globalSettingsLoadError ? structuredClone(savedLayers.global) : this.getGlobalSettings();
+		const project = this.projectTrusted
+			? this.projectSettingsLoadError
+				? structuredClone(savedLayers.project)
+				: this.getProjectSettings()
+			: {};
+		const overrides =
+			savedLayers.overrides && Object.keys(savedLayers.overrides).length > 0
+				? structuredClone(savedLayers.overrides)
+				: undefined;
+		const merged = deepMergeSettings(global, project);
+		const settings = overrides ? deepMergeSettings(merged, overrides) : merged;
+		return {
+			settings: structuredClone(settings),
+			settingsLayers: {
+				global,
+				project,
+				...(overrides ? { overrides } : {}),
+			},
+		};
 	}
 
 	/** Resource overrides are transient too; unchanged file settings retain their native origins. */
@@ -519,6 +562,7 @@ export class SettingsManager {
 		}
 
 		this.projectTrusted = trusted;
+		this.overrides = {};
 		this.modifiedProjectFields.clear();
 		this.modifiedProjectNestedFields.clear();
 
@@ -559,6 +603,7 @@ export class SettingsManager {
 		this.modifiedNestedFields.clear();
 		this.modifiedProjectFields.clear();
 		this.modifiedProjectNestedFields.clear();
+		this.overrides = {};
 
 		const projectLoad = SettingsManager.tryLoadFromStorage(this.storage, "project", this.projectTrusted);
 		if (!projectLoad.error) {
@@ -576,10 +621,20 @@ export class SettingsManager {
 	/** Apply additional overrides on top of current settings */
 	applyOverrides(overrides: Partial<Settings>): void {
 		this.beforeMutation?.();
+		this.overrides = deepMergeSettings(this.overrides, overrides);
 		this.settings = deepMergeSettings(this.settings, overrides);
 	}
 
 	private refreshSetting(field: keyof Settings, nestedKey?: string): void {
+		if (nestedKey !== undefined) {
+			const overrideNested: unknown = this.overrides[field];
+			if (isMergeableObject(overrideNested)) {
+				delete overrideNested[nestedKey];
+				if (Object.keys(overrideNested).length === 0) delete this.overrides[field];
+			}
+		} else {
+			delete this.overrides[field];
+		}
 		let value: unknown = deepMergeSettings(this.globalSettings, this.projectSettings)[field];
 		if (nestedKey !== undefined) {
 			const nested = { ...(this.settings[field] as Record<string, unknown>) };

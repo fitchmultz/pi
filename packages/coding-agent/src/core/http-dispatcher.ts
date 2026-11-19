@@ -42,11 +42,27 @@ export function formatHttpIdleTimeoutMs(timeoutMs: number): string {
 	return `${timeoutMs / 1000} sec`;
 }
 
+const appliedProxyEnv: Partial<Record<"HTTP_PROXY" | "HTTPS_PROXY", string>> = {};
+
 export function applyHttpProxySettings(httpProxy: string | undefined): void {
-	const proxy = httpProxy?.trim();
-	if (!proxy) return;
-	process.env.HTTP_PROXY ??= proxy;
-	process.env.HTTPS_PROXY ??= proxy;
+	const proxy = httpProxy?.trim() || undefined;
+	for (const key of ["HTTP_PROXY", "HTTPS_PROXY"] as const) {
+		const current = process.env[key];
+		const owned = appliedProxyEnv[key] !== undefined && current === appliedProxyEnv[key];
+		if (proxy) {
+			if (current === undefined || owned) {
+				process.env[key] = proxy;
+				appliedProxyEnv[key] = proxy;
+			} else {
+				delete appliedProxyEnv[key];
+			}
+		} else {
+			if (owned) {
+				delete process.env[key];
+			}
+			delete appliedProxyEnv[key];
+		}
+	}
 }
 
 const ignoreUndiciDispatcherError = (_error: unknown): void => {};

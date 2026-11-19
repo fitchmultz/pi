@@ -5,6 +5,7 @@ import net from "node:net";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
+import { RESTART_HANDOFF_ENV } from "../../src/cli/restart-protocol.ts";
 import { ENV_AGENT_DIR } from "../../src/config.ts";
 import { DefaultResourceLoader } from "../../src/core/resource-loader.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
@@ -309,6 +310,190 @@ export default async function() {
 			} finally {
 				h.cleanup();
 				await Promise.all([savedProxy.close(), diskProxy.close(), callerProxy.close()]);
+			}
+		},
+		15000,
+	);
+
+	// PIF-222: managed restart handoffs reload disk settings while keeping transient overrides and single-pass loading.
+	it.each(["disk-refresh", "transient-override", "invalid-disk-json"] as const)(
+		"handles managed restart handoff settings cleanly: %s",
+		async (scenario) => {
+			const savedProxy = await proxy("saved A");
+			const diskProxy = await proxy("disk B");
+			const initialTimeout = scenario === "transient-override" ? 5000 : 10;
+			const h = await createHarness({ settings: { httpProxy: savedProxy.url, httpIdleTimeoutMs: initialTimeout } });
+			try {
+				const agentDir = join(h.tempDir, "agent");
+				mkdirSync(agentDir);
+				mkdirSync(join(h.tempDir, ".pi"));
+				const oldLayerObservation = join(h.tempDir, "old-layer-loaded");
+				const newLayerObservation = join(h.tempDir, "new-layer-loaded");
+				const transientObservation = join(h.tempDir, "transient-ext-loaded");
+				writeFileSync(
+					join(h.tempDir, "old-layer.ts"),
+					`import {writeFileSync} from "node:fs"; export default function() { writeFileSync(${JSON.stringify(oldLayerObservation)}, "old"); }`,
+				);
+				writeFileSync(
+					join(h.tempDir, "new-layer.ts"),
+					`import {writeFileSync} from "node:fs"; export default function() { writeFileSync(${JSON.stringify(newLayerObservation)}, "new"); }`,
+				);
+				const transientExtension = join(h.tempDir, "transient-ext.ts");
+				writeFileSync(
+					transientExtension,
+					`import {writeFileSync} from "node:fs"; export default function() { writeFileSync(${JSON.stringify(transientObservation)}, "transient"); }`,
+				);
+
+				writeFileSync(
+					join(agentDir, "settings.json"),
+					JSON.stringify({ httpProxy: savedProxy.url, httpIdleTimeoutMs: initialTimeout }),
+				);
+				writeFileSync(join(h.tempDir, ".pi", "settings.json"), JSON.stringify({ extensions: ["../old-layer.ts"] }));
+
+				const model = h.session.modelRuntime.getModel("anthropic", "claude-sonnet-4-5");
+				if (!model) throw new Error("Native capture model missing");
+				const observation = join(h.tempDir, "factory.json");
+				const extension = join(h.tempDir, "factory.ts");
+				writeFileSync(
+					extension,
+					`import {existsSync, readFileSync, writeFileSync} from "node:fs";
+export default async function() {
+	if (!process.env.NATIVE_RESTART_PROBE) return;
+	const previous = existsSync(${JSON.stringify(observation)}) ? JSON.parse(readFileSync(${JSON.stringify(observation)}, "utf8")) : { calls: 0 };
+	const route = await fetch("http://native-bootstrap.invalid/probe").then(response => response.text());
+	let delayed;
+	try { delayed = await fetch("http://native-bootstrap.invalid/timeout").then(response => response.text()); }
+	catch (error) { delayed = error.cause?.code ?? String(error); }
+	writeFileSync(${JSON.stringify(observation)}, JSON.stringify({
+		calls: previous.calls + 1,
+		http: process.env.HTTP_PROXY,
+		route,
+		delayed,
+	}));
+}`,
+				);
+
+				const loader = new DefaultResourceLoader({
+					cwd: h.tempDir,
+					agentDir,
+					settingsManager: h.settingsManager,
+					additionalExtensionPaths: [extension],
+					noContextFiles: true,
+				});
+				await loader.reload();
+				h.session.modelRuntime.setOffline(true);
+				const initial = await createAgentSession({
+					cwd: h.tempDir,
+					agentDir,
+					model,
+					modelRuntime: h.session.modelRuntime,
+					settingsManager: h.settingsManager,
+					resourceLoader: loader,
+					sessionManager: SessionManager.inMemory(h.tempDir),
+				});
+				const statePath = join(h.tempDir, "working-session.json");
+				try {
+					if (scenario === "transient-override") {
+						h.settingsManager.applyOverrides({
+							httpIdleTimeoutMs: 10,
+							extensions: [transientExtension],
+						});
+					}
+					const hold = await initial.session.acquireWorkingSession();
+					hold.state.launch!.trustProject = true;
+					hold.state.settingsLayers.project.extensions = ["../old-layer.ts"];
+					if (scenario !== "transient-override") {
+						hold.state.settings.extensions = ["../old-layer.ts"];
+					}
+					writeFileSync(statePath, JSON.stringify(hold.state));
+					await hold.release();
+				} finally {
+					initial.session.dispose();
+				}
+
+				// Edit disk settings after capture, simulating external updates before replacement worker boot.
+				if (scenario === "disk-refresh") {
+					// Delete httpIdleTimeoutMs and switch httpProxy + project extension on disk.
+					writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ httpProxy: diskProxy.url }));
+					writeFileSync(
+						join(h.tempDir, ".pi", "settings.json"),
+						JSON.stringify({ extensions: ["../new-layer.ts"] }),
+					);
+				} else if (scenario === "transient-override") {
+					writeFileSync(
+						join(agentDir, "settings.json"),
+						JSON.stringify({ httpProxy: diskProxy.url, httpIdleTimeoutMs: 5000 }),
+					);
+					writeFileSync(join(h.tempDir, ".pi", "settings.json"), JSON.stringify({ extensions: [] }));
+				} else {
+					writeFileSync(join(agentDir, "settings.json"), "{ invalid json");
+					writeFileSync(
+						join(h.tempDir, ".pi", "settings.json"),
+						JSON.stringify({ extensions: ["../new-layer.ts"] }),
+					);
+				}
+
+				const savedState = JSON.parse(readFileSync(statePath, "utf8")) as { header: { id: string } };
+				const env: NodeJS.ProcessEnv = {
+					...process.env,
+					[ENV_AGENT_DIR]: agentDir,
+					PI_OFFLINE: "1",
+					NATIVE_RESTART_PROBE: "1",
+					[RESTART_HANDOFF_ENV]: JSON.stringify({
+						sessionId: savedState.header.id,
+						sessionFile: join(h.tempDir, "session.jsonl"),
+						workingSession: statePath,
+					}),
+				};
+				for (const key of [
+					"HTTP_PROXY",
+					"HTTPS_PROXY",
+					"http_proxy",
+					"https_proxy",
+					"ALL_PROXY",
+					"all_proxy",
+					"NO_PROXY",
+					"no_proxy",
+				])
+					delete env[key];
+
+				const result = await runCli(["--working-session", statePath, "--help"], h.tempDir, env);
+				expect(result.signal).toBeNull();
+				expect(result.code, result.stderr).toBe(0);
+				const observed = JSON.parse(readFileSync(observation, "utf8"));
+				expect(observed.calls).toBe(1);
+				if (scenario === "disk-refresh") {
+					expect(result.stderr).toBe("");
+					expect(observed).toEqual({
+						calls: 1,
+						http: diskProxy.url,
+						route: "disk B",
+						delayed: "disk B",
+					});
+					expect(existsSync(newLayerObservation)).toBe(true);
+					expect(existsSync(oldLayerObservation)).toBe(false);
+				} else if (scenario === "transient-override") {
+					expect(result.stderr).toBe("");
+					expect(observed).toEqual({
+						calls: 1,
+						http: diskProxy.url,
+						route: "disk B",
+						delayed: "UND_ERR_HEADERS_TIMEOUT",
+					});
+					expect(existsSync(transientObservation)).toBe(true);
+				} else {
+					expect(result.stderr).toContain("Invalid settings file");
+					expect(observed).toEqual({
+						calls: 1,
+						http: savedProxy.url,
+						route: "saved A",
+						delayed: "UND_ERR_HEADERS_TIMEOUT",
+					});
+					expect(existsSync(newLayerObservation)).toBe(true);
+				}
+			} finally {
+				h.cleanup();
+				await Promise.all([savedProxy.close(), diskProxy.close()]);
 			}
 		},
 		15000,
