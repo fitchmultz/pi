@@ -155,8 +155,11 @@ changes, and never modifies `value`. A value no rule applies to stays as it is. 
 Three passes run in order:
 
 1. **Optional nulls.** A `null` in an optional property whose schema rejects `null` is dropped, as if omitted. In an
-   `anyOf`/`oneOf` that rejects the value as it is, the nulls are dropped for the first branch that then accepts the
-   value after conversion, so a branch's optional `null` is not converted into a value (`"null"` for a string).
+   `anyOf`/`oneOf` whose enclosing schema rejects the value as it is, the nulls are dropped for the first branch that
+   removes at least one optional `null` and whose resulting value the enclosing schema (including sibling properties,
+   `allOf` members, and any combined union) accepts after whole-schema conversion — even if a different union branch
+   matches the converted result — so an optional `null` is not turned into a value (`"null"` for a string) and `oneOf`
+   or sibling constraints are not broken.
 2. **Conversions**, ported from TypeBox 1.3.27's `Value.Convert` and keyed on JSON Schema keywords (the first that
    applies to a schema): `$ref` follows the reference; `const` and `enum` take the member the value converts to;
    `anyOf`/`oneOf` keep a value one branch accepts, else take the first branch's conversion the whole schema

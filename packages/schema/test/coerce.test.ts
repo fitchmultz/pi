@@ -199,6 +199,159 @@ describe("pass 1: optional nulls", () => {
 			expect(coerceValue(nullableBranch, { value: null })).toEqual({ value: null });
 		},
 	);
+
+	it("keeps a branch null when dropping it would fail the enclosing oneOf", () => {
+		const schema = {
+			oneOf: [
+				{ type: "object", properties: { a: { type: "string" }, b: { type: "number" } } },
+				{ type: "object", properties: { b: { type: "number" } }, additionalProperties: false },
+			],
+		};
+		expect(compile(schema, { coerce: true }).parse({ a: null, b: "5" })).toEqual({
+			ok: true,
+			value: { a: "null", b: 5 },
+		});
+	});
+
+	it("respects combined anyOf and oneOf constraints when dropping branch nulls", () => {
+		const guarded = {
+			anyOf: [{ type: "object", properties: { a: { type: "string" }, b: { type: "number" } } }],
+			oneOf: [
+				{ type: "object", properties: { a: { type: "string" }, b: { type: "number" } } },
+				{ type: "object", properties: { b: { type: "number" } }, additionalProperties: false },
+			],
+		};
+		expect(compile(guarded, { coerce: true }).parse({ a: null, b: "5" })).toEqual({
+			ok: true,
+			value: { a: "null", b: 5 },
+		});
+
+		const combined = {
+			anyOf: [{ type: "object", properties: { tag: { const: "x" } }, required: ["tag"] }],
+			oneOf: [
+				{ type: "object", properties: { a: { type: "string" } } },
+				{ type: "object", properties: { b: { type: "number" } }, required: ["b"] },
+			],
+		};
+		expect(compile(combined, { coerce: true }).parse({ tag: "x", a: null })).toEqual({
+			ok: true,
+			value: { tag: "x" },
+		});
+	});
+
+	it("drops branch nulls when sibling union properties also need conversion", () => {
+		const schema = {
+			type: "object",
+			oneOf: [
+				{ type: "object", properties: { a: { type: "string" } } },
+				{ type: "object", properties: { b: { type: "boolean" } }, required: ["b"] },
+			],
+			properties: { c: { type: "integer" } },
+			required: ["c"],
+		};
+		expect(compile(schema, { coerce: true }).parse({ a: null, c: "2" })).toEqual({
+			ok: true,
+			value: { c: 2 },
+		});
+	});
+
+	it("drops branch nulls when enclosing allOf requires coerced sibling properties", () => {
+		const schema = {
+			allOf: [
+				{
+					type: "object",
+					properties: { c: { type: "integer" } },
+					required: ["c"],
+					additionalProperties: false,
+				},
+			],
+			oneOf: [
+				{ type: "object", properties: { a: { type: "string" } }, additionalProperties: true },
+				{ type: "object", properties: { b: { type: "boolean" } }, required: ["b"] },
+			],
+		};
+		expect(compile(schema, { coerce: true }).parse({ a: null, c: "2" })).toEqual({
+			ok: true,
+			value: { c: 2 },
+		});
+	});
+
+	it("does not let an earlier non-matching union branch prevent a later branch from dropping optional null", () => {
+		for (const keyword of ["oneOf", "anyOf"] as const) {
+			const validator = compile(
+				{
+					[keyword]: [
+						{ type: "object", properties: { b: { type: "boolean" } }, required: ["b"] },
+						{ type: "object", properties: { a: { type: "string" } }, additionalProperties: true },
+					],
+				},
+				{ coerce: true },
+			);
+			expect(validator.parse({ a: null, x: 1 }), keyword).toEqual({ ok: true, value: { x: 1 } });
+		}
+	});
+
+	it("probes dropBranchNulls with the real enclosing conversion so viable null drops avoid oneOf conflicts", () => {
+		const schema = {
+			allOf: [{ type: "object", properties: { c: { type: "integer" } }, required: ["c"] }],
+			oneOf: [
+				{ type: "object", properties: { a: { type: "string" }, b: { type: "number" } } },
+				{ type: "object", properties: { a: { type: "integer" } }, required: ["a"] },
+				{ type: "object", properties: { a: { type: "string" } } },
+			],
+		};
+		expect(compile(schema, { coerce: true }).parse({ a: null, b: "5", c: "2" })).toEqual({
+			ok: true,
+			value: { b: "5", c: 2 },
+		});
+	});
+
+	it("accepts a dropped branch null when another union branch accepts the whole-schema conversion", () => {
+		for (const keyword of ["oneOf", "anyOf"] as const) {
+			const validator = compile(
+				{
+					[keyword]: [
+						{
+							type: "object",
+							properties: { a: { type: "string" } },
+							required: ["a"],
+							additionalProperties: false,
+						},
+						{ type: "object", properties: { a: { type: "integer" }, c: { type: "object" } } },
+					],
+				},
+				{ coerce: true },
+			);
+			expect(validator.parse({ a: "5", c: null }), keyword).toEqual({ ok: true, value: { a: "5" } });
+		}
+	});
+
+	it("clears scratch memo state when pass 1 throws on a reusable validator", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				first: { anyOf: [{ $ref: "#/$defs/Item" }, { type: "null" }] },
+				second: { type: "string" },
+			},
+			$defs: {
+				Item: { type: "object", properties: { n: { type: "number" } }, required: ["n"] },
+			},
+		};
+		const validator = compile(schema, { coerce: true });
+		const item = { n: "1" };
+		const throwing = {
+			first: item,
+			get second(): string {
+				throw new Error("boom");
+			},
+		};
+		expect(() => validator.parse(throwing)).toThrow("boom");
+		item.n = "2";
+		expect(validator.parse({ first: item, second: "ok" })).toEqual({
+			ok: true,
+			value: { first: { n: 2 }, second: "ok" },
+		});
+	});
 });
 
 describe("pass 2: TypeBox's conversion rules on JSON Schema", () => {
