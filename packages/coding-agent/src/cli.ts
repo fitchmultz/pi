@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import { enableCompileCache } from "node:module";
 import { setupCli } from "./cli/setup.ts";
 import { runBackgroundCommandWorker } from "./extensions/background-command/jobs.ts";
 import { main } from "./main.ts";
 
+enableCompileCache();
 if (process.argv[2] === "--internal-background-command") {
 	runBackgroundCommandWorker(process.argv[3]).catch((error) => {
 		console.error(error instanceof Error ? error.message : error);

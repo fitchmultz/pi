@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, realpathSync, rmdirSync, rmSync, statSync } from "node:fs";
+import { enableCompileCache, getCompileCacheDir, constants as moduleConstants } from "node:module";
 import { constants } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
@@ -58,12 +59,28 @@ function splitNodeOptions(text: string): string[] {
 	return args;
 }
 
-function readNodeOptions(env: NodeJS.ProcessEnv): string | undefined {
-	if (env.NODE_OPTIONS !== undefined) return env.NODE_OPTIONS;
+function readEnv(env: NodeJS.ProcessEnv, name: string): string | undefined {
+	if (env[name] !== undefined) return env[name];
 	for (const [key, value] of Object.entries(env)) {
-		if (key.toUpperCase() === "NODE_OPTIONS") return value;
+		if (key.toUpperCase() === name) return value;
 	}
 	return undefined;
+}
+
+function getWorkerCompileCacheDir(env: NodeJS.ProcessEnv): string | undefined {
+	if (readEnv(env, "NODE_DISABLE_COMPILE_CACHE") !== undefined) return undefined;
+	if (readEnv(env, "NODE_COMPILE_CACHE")) return undefined;
+	const result = enableCompileCache();
+	const { ENABLED, ALREADY_ENABLED } = moduleConstants.compileCacheStatus;
+	if ((result.status !== ENABLED && result.status !== ALREADY_ENABLED) || !result.directory) {
+		return undefined;
+	}
+	// When compile cache was already enabled in this process, Node returns the versioned
+	// subdirectory (<base>/<version-tag>) equal to getCompileCacheDir(). Passing that as
+	// NODE_COMPILE_CACHE would double-nest the version tag in the child, so unwrap to the
+	// base directory.
+	const activeDir = getCompileCacheDir();
+	return activeDir && result.directory === activeDir ? dirname(result.directory) : result.directory;
 }
 
 function isMaxSemiSpaceSizeToken(token: string): boolean {
@@ -196,6 +213,13 @@ export async function superviseCli(
 	delete env[RESTART_HANDOFF_ENV];
 	delete env[MANAGED_CLI_ENV];
 	delete env[MANAGED_PROTOCOL_ENV];
+	const workerCompileCacheDir = getWorkerCompileCacheDir(env);
+	if (workerCompileCacheDir) {
+		for (const key of Object.keys(env)) {
+			if (key.toUpperCase() === "NODE_COMPILE_CACHE") delete env[key];
+		}
+		env.NODE_COMPILE_CACHE = workerCompileCacheDir;
+	}
 	const signals: NodeJS.Signals[] =
 		process.platform === "win32" ? ["SIGINT", "SIGTERM"] : ["SIGINT", "SIGTERM", "SIGHUP"];
 	const removers = signals.map((signal) => {
@@ -223,7 +247,7 @@ export async function superviseCli(
 			let exitIntent = false;
 			const workerId = randomUUID();
 			let completed: CompletedWorkingSession | undefined;
-			const workerExecArgv = getWorkerExecArgv(options.execArgv ?? process.execArgv, readNodeOptions(env));
+			const workerExecArgv = getWorkerExecArgv(options.execArgv ?? process.execArgv, readEnv(env, "NODE_OPTIONS"));
 			child = spawn(process.execPath, [...workerExecArgv, launch.worker, ...launch.args], {
 				stdio: ["inherit", "inherit", "inherit", "ipc"],
 				env: {
