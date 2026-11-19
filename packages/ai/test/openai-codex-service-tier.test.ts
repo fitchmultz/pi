@@ -74,7 +74,17 @@ describe("Codex Standard service tier fallback", () => {
 			maxRetries: 0,
 		}).result();
 
-		expect(result).toMatchObject({ stopReason: "stop", usage: { cost: { input: 1, output: 2, total: 3 } } });
+		expect(result).toMatchObject({
+			stopReason: "stop",
+			usage: { cost: { input: 1, output: 2, total: 3 } },
+			diagnostics: [
+				{
+					type: "service_tier_fallback",
+					error: { code: rejection.code, message: expect.stringContaining(rejection.message) },
+					details: { rejectedTier: tier },
+				},
+			],
+		});
 		expect(fetch).toHaveBeenCalledTimes(2);
 		const first = httpRequestBody(fetch.mock.calls[0][1]?.body);
 		const second = httpRequestBody(fetch.mock.calls[1][1]?.body);
@@ -174,7 +184,18 @@ describe("Codex Standard service tier fallback", () => {
 			fetch,
 		}).result();
 
-		expect(result).toMatchObject({ stopReason: "stop", responseId: "resp_success", usage: { cost: { total: 3 } } });
+		expect(result).toMatchObject({
+			stopReason: "stop",
+			responseId: "resp_success",
+			usage: { cost: { total: 3 } },
+			diagnostics: [
+				{
+					type: "service_tier_fallback",
+					error: { code: rejection.code, message: expect.stringContaining(rejection.message) },
+					details: { rejectedTier: "priority" },
+				},
+			],
+		});
 		expect(requests).toHaveLength(2);
 		expect(requests[0]).toHaveProperty("service_tier", "priority");
 		expect(requests[1]).not.toHaveProperty("service_tier");

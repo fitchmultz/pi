@@ -135,7 +135,7 @@ function isRetryableError(status: number, errorText: string): boolean {
 	return /rate.?limit|overloaded|service.?unavailable|upstream.?connect|connection.?refused/i.test(errorText);
 }
 
-function isNonStandardServiceTier(tier: RequestBody["service_tier"]): boolean {
+function isNonStandardServiceTier(tier: RequestBody["service_tier"]) {
 	return tier != null && tier !== "default" && tier !== "auto";
 }
 
@@ -301,15 +301,19 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				websocketRequestId,
 			);
 			let bodyJson = JSON.stringify(body);
-			const fallBackToStandardTier = (code: string | undefined): boolean => {
+			const fallBackToStandardTier = (error: CodexApiError): boolean => {
 				if (
-					code !== SERVICE_TIER_NOT_ALLOWED_CODE ||
+					error.code !== SERVICE_TIER_NOT_ALLOWED_CODE ||
 					!isNonStandardServiceTier(body.service_tier) ||
 					options?.signal?.aborted ||
 					output.content.length > 0
 				) {
 					return false;
 				}
+				appendAssistantMessageDiagnostic(
+					output,
+					createAssistantMessageDiagnostic("service_tier_fallback", error, { rejectedTier: body.service_tier }),
+				);
 				// Keep the hook's payload intact. The omitted tier also prevents a second fallback.
 				const { service_tier: _rejectedTier, ...standardBody } = body;
 				body = standardBody;
@@ -368,7 +372,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						return;
 					} catch (error) {
 						const aborted = options?.signal?.aborted;
-						if (error instanceof CodexApiError && fallBackToStandardTier(error.code)) {
+						if (error instanceof CodexApiError && fallBackToStandardTier(error)) {
 							continue;
 						}
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
@@ -461,7 +465,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					}
 				} catch (error) {
 					if (error instanceof CodexApiError) {
-						if (!fallBackToStandardTier(error.code)) throw error;
+						if (!fallBackToStandardTier(error)) throw error;
 						sseRequest = encodeSSERequest(sseUrl, sseHeaders, bodyJson);
 						continue;
 					}
@@ -502,7 +506,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						options,
 					);
 				} catch (error) {
-					if (!(error instanceof CodexApiError) || !fallBackToStandardTier(error.code)) throw error;
+					if (!(error instanceof CodexApiError) || !fallBackToStandardTier(error)) throw error;
 					sseRequest = encodeSSERequest(sseUrl, sseHeaders, bodyJson);
 					continue;
 				}
