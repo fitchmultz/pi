@@ -204,9 +204,7 @@ export class Coercer {
 			const candidate = this.dropOptionalNulls(value, branch, base);
 			if (candidate === value) continue;
 			const converted = this.coerceTypes(this.convert(schema, base, candidate), schema, base);
-			if (this.passes(branch, base, converted) === true && this.passes(schema, base, converted) === true) {
-				return candidate;
-			}
+			if (this.passes(schema, base, converted) === true) return candidate;
 		}
 		return value;
 	}

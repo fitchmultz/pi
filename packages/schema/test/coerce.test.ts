@@ -306,6 +306,26 @@ describe("pass 1: optional nulls", () => {
 		});
 	});
 
+	it("accepts a dropped branch null when another union branch accepts the whole-schema conversion", () => {
+		for (const keyword of ["oneOf", "anyOf"] as const) {
+			const validator = compile(
+				{
+					[keyword]: [
+						{
+							type: "object",
+							properties: { a: { type: "string" } },
+							required: ["a"],
+							additionalProperties: false,
+						},
+						{ type: "object", properties: { a: { type: "integer" }, c: { type: "object" } } },
+					],
+				},
+				{ coerce: true },
+			);
+			expect(validator.parse({ a: "5", c: null }), keyword).toEqual({ ok: true, value: { a: "5" } });
+		}
+	});
+
 	it("clears scratch memo state when pass 1 throws on a reusable validator", () => {
 		const schema = {
 			type: "object",
