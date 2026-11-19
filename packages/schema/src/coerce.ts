@@ -197,14 +197,12 @@ export class Coercer {
 	private dropBranchNulls(schema: SchemaObject, value: object, branches: readonly unknown[], base: string): unknown {
 		for (const branch of branches) {
 			const candidate = this.dropOptionalNulls(value, branch, base);
-			let converted = this.coerceTypes(
+			const branchCoerced = this.coerceTypes(
 				this.convertMembers(schema, base, this.convert(branch, base, candidate)),
 				branch,
 				base,
 			);
-			if (isPlainObject(converted) && typesOf(schema).includes("object")) {
-				converted = this.coerceProperties(converted, schema, base);
-			}
+			const converted = this.coerceTypes(branchCoerced, schema, base);
 			if (this.passes(schema, base, converted) === true) return candidate;
 		}
 		return value;

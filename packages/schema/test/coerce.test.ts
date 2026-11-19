@@ -255,6 +255,27 @@ describe("pass 1: optional nulls", () => {
 		});
 	});
 
+	it("drops branch nulls when enclosing allOf requires coerced sibling properties", () => {
+		const schema = {
+			allOf: [
+				{
+					type: "object",
+					properties: { c: { type: "integer" } },
+					required: ["c"],
+					additionalProperties: false,
+				},
+			],
+			oneOf: [
+				{ type: "object", properties: { a: { type: "string" } }, additionalProperties: true },
+				{ type: "object", properties: { b: { type: "boolean" } }, required: ["b"] },
+			],
+		};
+		expect(compile(schema, { coerce: true }).parse({ a: null, c: "2" })).toEqual({
+			ok: true,
+			value: { c: 2 },
+		});
+	});
+
 	it("clears scratch memo state when pass 1 throws on a reusable validator", () => {
 		const schema = {
 			type: "object",
