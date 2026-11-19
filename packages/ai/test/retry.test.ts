@@ -189,8 +189,8 @@ describe("provider retry classification", () => {
 		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
 	});
 
-	it.each(["MALFORMED_FUNCTION_CALL", "MALFORMED_RESPONSE", "UNEXPECTED_TOOL_CALL"])(
-		"retries Gemini malformed generation finish reason %s",
+	it.each(["MALFORMED_FUNCTION_CALL", "MALFORMED_RESPONSE", "PROHIBITED_CONTENT", "UNEXPECTED_TOOL_CALL"])(
+		"retries transient Gemini generation finish reason %s",
 		(rawStopReason) => {
 			expect(
 				isRetryableAssistantError({
@@ -224,7 +224,6 @@ describe("provider retry classification", () => {
 	it.each([
 		"Provider stopped with: SAFETY",
 		"Provider stopped with: BLOCKLIST",
-		"Provider stopped with: PROHIBITED_CONTENT",
 		"Provider stopped with: RECITATION",
 		"Provider stopped with: TOO_MANY_TOOL_CALLS",
 		"Provider stopped with: OTHER",
