@@ -75,16 +75,6 @@ vi.mock("@google/genai", () => {
 			ANY: "ANY",
 			VALIDATED: "VALIDATED",
 		},
-		HarmBlockThreshold: {
-			BLOCK_NONE: "BLOCK_NONE",
-			OFF: "OFF",
-		},
-		HarmCategory: {
-			HARM_CATEGORY_HARASSMENT: "HARM_CATEGORY_HARASSMENT",
-			HARM_CATEGORY_HATE_SPEECH: "HARM_CATEGORY_HATE_SPEECH",
-			HARM_CATEGORY_SEXUALLY_EXPLICIT: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-			HARM_CATEGORY_DANGEROUS_CONTENT: "HARM_CATEGORY_DANGEROUS_CONTENT",
-		},
 		GoogleGenAI,
 		ResourceScope: {
 			COLLECTION: "COLLECTION",
@@ -266,34 +256,5 @@ describe("Google Generative AI user agent", () => {
 
 	it("lets explicit headers override the default User-Agent", async () => {
 		expect((await captureGoogleHeaders({ "User-Agent": "custom-agent" }))["User-Agent"]).toBe("custom-agent");
-	});
-});
-
-describe("Google safetySettings defaults", () => {
-	it("defaults the four standard harm categories to OFF and allows explicit overrides", async () => {
-		googleGenAiMock.finishReason = "STOP";
-		let defaultPayload: { config?: { safetySettings?: unknown[] } } | undefined;
-		await streamGoogleGenerativeAi(getModel("google", "gemini-2.5-flash"), context, {
-			apiKey: "test-api-key",
-			onPayload: (payload) => {
-				defaultPayload = payload as { config?: { safetySettings?: unknown[] } };
-			},
-		}).result();
-		expect(defaultPayload?.config?.safetySettings).toEqual([
-			{ category: "HARM_CATEGORY_HARASSMENT", threshold: "OFF" },
-			{ category: "HARM_CATEGORY_HATE_SPEECH", threshold: "OFF" },
-			{ category: "HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold: "OFF" },
-			{ category: "HARM_CATEGORY_DANGEROUS_CONTENT", threshold: "OFF" },
-		]);
-
-		let customPayload: { config?: { safetySettings?: unknown[] } } | undefined;
-		await streamGoogleGenerativeAi(getModel("google", "gemini-2.5-flash"), context, {
-			apiKey: "test-api-key",
-			safetySettings: [],
-			onPayload: (payload) => {
-				customPayload = payload as { config?: { safetySettings?: unknown[] } };
-			},
-		}).result();
-		expect(customPayload?.config?.safetySettings).toEqual([]);
 	});
 });

@@ -10,10 +10,7 @@ import {
 	type GenerateContentParameters,
 	type GoogleGenAI,
 	ThinkingLevel as GoogleSdkThinkingLevel,
-	HarmBlockThreshold,
-	HarmCategory,
 	type Part,
-	type SafetySetting,
 	type ThinkingConfig,
 } from "@google/genai";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
@@ -55,15 +52,7 @@ export interface GoogleOptions extends StreamOptions {
 		budgetTokens?: number; // -1 for dynamic, 0 to disable
 		level?: GoogleApiThinkingLevel;
 	};
-	safetySettings?: SafetySetting[];
 }
-
-const DEFAULT_GOOGLE_SAFETY_SETTINGS: SafetySetting[] = [
-	{ category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.OFF },
-	{ category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.OFF },
-	{ category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.OFF },
-	{ category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.OFF },
-];
 
 // Counter for generating unique tool call IDs
 let toolCallCounter = 0;
@@ -317,7 +306,6 @@ function buildParams(
 	const config: GenerateContentConfig = {
 		// Pi owns retry/continuation; do not silently resume inside the SDK.
 		automaticContinuation: false,
-		safetySettings: options.safetySettings ?? DEFAULT_GOOGLE_SAFETY_SETTINGS.map((setting) => ({ ...setting })),
 		...(options.temperature !== undefined && { temperature: options.temperature }),
 		...(options.maxTokens !== undefined && { maxOutputTokens: options.maxTokens }),
 		...(systemInstruction && { systemInstruction: sanitizeSurrogates(systemInstruction) }),
