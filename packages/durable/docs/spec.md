@@ -3164,6 +3164,7 @@ Admission and terminal transitions:
 | input or other write, busy or non-empty inbox | `queued` | append inbox item |
 | boundary places user item | `placed`, with entry | add ID to current or successor run |
 | boundary places write | `done`, with entry | append entry |
+| boundary refuses oversized queued item | `unanswered`, reason `input_too_large` | remove inbox item; leave head unchanged |
 | run answers | input or continue `done`, with required answer entry | remove `run`, or hand it to a successor; with `afterRun` hooks selected, keep `run` until the tasks they ask for are terminal |
 | run answers with `onYield` tasks | stays `placed` until they are terminal, then as above or a continuation | keep `run` with `run.yield` (section 8.3) |
 | run fails or its task aborts | input `unanswered`, with reason; `done` with the answer when it ends in `yield` | remove `run`; inbox per `afterFailedRun` below |
@@ -3281,9 +3282,11 @@ resets, which make older cuts stale; an application edit placed while a
 compaction summarizes is lost, and an application head can be undone (section
 12).
 
-A `postTools` boundary that selects a `head: "self"` write (a reset) behaves as
+A `postTools` boundary that places a `head: "self"` write (a reset) behaves as
 `final`: it also selects follow-ups, and the current run ends with its inputs
 `unanswered` with reason `reset`, because its context was cut before an answer.
+If a queued reset write is stale or refused for storage capacity, it is not
+placed and does not turn the `postTools` boundary into `final`.
 A reset placed at a `final` boundary follows the answer, so the inputs are
 already `done`.
 

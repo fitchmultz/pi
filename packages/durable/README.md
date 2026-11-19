@@ -677,10 +677,10 @@ A continue is never queued: it throws `ConversationBusy` while a run is working,
 
 SQLite checks the exact encoded rows before admitting an input or write submission. A known size refusal throws `StorageCapacityError`
 without accepting a submission or changing history or the inbox; reduce the input or entry data and retry, including
-with the same `requestId`. An already queued input whose entry cannot fit when placed instead settles `unanswered`
-with reason `input_too_large`. Submit its corrected replacement with a new `requestId`. Other eligible queued inputs
-continue, and the answer or tool work at that boundary is preserved. Checks apply to each encoded row, not the
-combined inbox size. Actual commit failures still fail the Session.
+with the same `requestId`. An already queued input or write whose entry cannot fit when placed instead settles `unanswered`
+with reason `input_too_large` (leaving `boundary.head` unchanged and not resetting a `postTools` run). Submit its corrected
+replacement with a new `requestId`. Other eligible queued items continue, and the answer or tool work at that boundary is
+preserved. Checks apply to each encoded row, not the combined inbox size. Actual commit failures still fail the Session.
 
 An input is placed as a `pi.user` entry. To show it as something else, give it an `entry` with your kind and data; the model still sees `content` as the user message:
 
