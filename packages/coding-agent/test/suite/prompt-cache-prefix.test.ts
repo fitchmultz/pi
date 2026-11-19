@@ -118,7 +118,10 @@ it.each([
 				},
 				async (context) => {
 					await capture(context);
-					return step("inspect page", "return await tools.browse({});");
+					return step(
+						"inspect page",
+						'const [match] = await tools.tool_search({ query: "inspect page" }); return await tools[match.name]({});',
+					);
 				},
 				async (context) => {
 					await capture(context);

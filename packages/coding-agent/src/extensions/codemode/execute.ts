@@ -31,7 +31,12 @@ import type { SessionEntry } from "../../core/session-manager.ts";
 import { formatSize, sliceHead, sliceTail } from "../../core/tools/truncate.ts";
 import { combineUsage } from "../../core/usage-totals.ts";
 import { writeOutputFile } from "../../utils/output-files.ts";
-import { Bm25Ranker, createToolSearchDocument, DEFAULT_TOOL_SEARCH_LIMIT } from "../tool-search/tool.ts";
+import {
+	Bm25Ranker,
+	createToolSearchDocument,
+	DEFAULT_TOOL_SEARCH_LIMIT,
+	TOOL_SEARCH_TOOL_NAME,
+} from "../tool-search/tool.ts";
 import {
 	CODEMODE_BACKGROUND_COMPLETION_TYPE,
 	CODEMODE_DOCS_PATH,
@@ -532,8 +537,8 @@ function showCallText(output: CodemodeOutputItem[], uncut: readonly UncutValue[]
 }
 
 /**
- * Run one script. Without a session context (a plain Agent or a direct call) scripts cannot call
- * tools, `store()` starts empty, and writes are dropped.
+ * Run one script. Without a session context (a plain Agent or a direct call) there are no session
+ * tools to call, `store()` starts empty, and writes are dropped.
  */
 export async function executeCodemode(
 	toolCallId: string,
@@ -695,10 +700,11 @@ function startScript(
 
 		let sandbox: CodemodeSandbox | undefined;
 		try {
+			const { searchTool, globals } = createDiscovery(callable, samples, options);
 			sandbox = new CodemodeSandbox({
-				tools: sandboxTools,
+				tools: [searchTool, ...sandboxTools],
 				globals: [
-					...createDiscoveryGlobals(callable, samples, options),
+					...globals,
 					...(options.models && ctx
 						? createModelGlobals(ctx.modelRegistry, toolCallId, calls, publish, addModelUsage, addGeneratedImages)
 						: []),
@@ -782,37 +788,48 @@ function isNamespaceName(namespace: ToolNamespace, query: string): boolean {
 }
 
 /**
- * `searchTools()`, `describeTool()`, and `describeNamespace()`: ranked search and lookup over the
- * script's nested tools and their namespaces.
+ * Discover the script's nested tools without loading tools into the model's next request.
  */
-function createDiscoveryGlobals(
+function createDiscovery(
 	tools: readonly AgentTool<any>[],
 	samples: ReadonlyMap<string, string>,
 	options: CodemodeToolOptions,
-): CodemodeTool[] {
+): { searchTool: CodemodeTool; globals: CodemodeTool[] } {
 	const ranker = new Bm25Ranker();
 	const entry = (name: string) => ({ name: toCodemodeIdentifier(name), description: samples.get(name) ?? "" });
-	return [
+	const search = (caller: string, query: unknown, searchOptions: ScriptValue) => {
+		if (typeof query !== "string") throw new Error(`${caller} expects a query string`);
+		const limit = searchOptions?.limit ?? DEFAULT_TOOL_SEARCH_LIMIT;
+		if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
+			throw new Error(`${caller} limit must be a positive integer`);
+		}
+		const namespace = searchOptions?.namespace;
+		if (namespace !== undefined && namespace !== null && typeof namespace !== "string") {
+			throw new Error(`${caller} namespace must be a string`);
+		}
+		const documents = tools.flatMap((tool) => {
+			const toolNamespace = options.getToolNamespace?.(tool.name);
+			if (namespace && (!toolNamespace || !isNamespaceName(toolNamespace, namespace))) return [];
+			return [createToolSearchDocument(tool, toolNamespace)];
+		});
+		return ranker.rank(query, documents, limit).map((match) => entry(match.name));
+	};
+	const searchTool: CodemodeTool = {
+		name: TOOL_SEARCH_TOOL_NAME,
+		description:
+			"`await tools.tool_search({ query, limit?, namespace? })` finds callable tools without loading them. Returns `{ name, description }[]`.",
+		execute: (input) => {
+			const args = input as ScriptValue;
+			return search("tools.tool_search()", args?.query, args);
+		},
+	};
+	const globals: CodemodeTool[] = [
 		{
 			name: "searchTools",
 			spread: true,
 			execute: (args) => {
-				const [query, searchOptions] = args as [unknown, { limit?: unknown; namespace?: unknown } | undefined];
-				if (typeof query !== "string") throw new Error("searchTools() expects a query string");
-				const limit = searchOptions?.limit ?? DEFAULT_TOOL_SEARCH_LIMIT;
-				if (typeof limit !== "number" || !Number.isInteger(limit) || limit <= 0) {
-					throw new Error("searchTools() limit must be a positive integer");
-				}
-				const namespace = searchOptions?.namespace;
-				if (namespace !== undefined && namespace !== null && typeof namespace !== "string") {
-					throw new Error("searchTools() namespace must be a string");
-				}
-				const documents = tools.flatMap((tool) => {
-					const toolNamespace = options.getToolNamespace?.(tool.name);
-					if (namespace && (!toolNamespace || !isNamespaceName(toolNamespace, namespace))) return [];
-					return [createToolSearchDocument(tool, toolNamespace)];
-				});
-				return ranker.rank(query, documents, limit).map((match) => entry(match.name));
+				const [query, searchOptions] = args as [unknown, ScriptValue];
+				return search("searchTools()", query, searchOptions);
 			},
 		},
 		{
@@ -821,6 +838,7 @@ function createDiscoveryGlobals(
 			execute: (args) => {
 				const [name] = args as unknown[];
 				if (typeof name !== "string") throw new Error("describeTool() expects a tool name");
+				if (name === searchTool.name) return searchTool.description;
 				const tool = tools.find(
 					(candidate) => candidate.name === name || toCodemodeIdentifier(candidate.name) === name,
 				);
@@ -851,6 +869,7 @@ function createDiscoveryGlobals(
 			},
 		},
 	];
+	return { searchTool, globals };
 }
 
 /**
