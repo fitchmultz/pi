@@ -202,8 +202,10 @@ export class Coercer {
 				branch,
 				base,
 			);
-			const converted = this.coerceTypes(branchCoerced, schema, base);
-			if (this.passes(schema, base, converted) === true) return candidate;
+			const converted = this.coerceTypes(branchCoerced, schema, base, branches);
+			if (this.passes(branch, base, converted) === true && this.passes(schema, base, converted) === true) {
+				return candidate;
+			}
 		}
 		return value;
 	}
@@ -362,13 +364,17 @@ export class Coercer {
 	// Pass 3: primitive coercion by type
 	// ---------------------------------------------------------------------------------------------------------------
 
-	private coerceTypes(value: unknown, schema: unknown, base: string): unknown {
+	private coerceTypes(value: unknown, schema: unknown, base: string, skipUnionBranches?: readonly unknown[]): unknown {
 		if (!isSchemaObject(schema)) return value;
 		const b = this.baseOf(schema, base);
 		let next = value;
 		if (Array.isArray(schema.allOf)) for (const member of schema.allOf) next = this.coerceTypes(next, member, b);
-		if (Array.isArray(schema.anyOf)) next = this.coerceUnion(next, schema.anyOf, b);
-		if (Array.isArray(schema.oneOf)) next = this.coerceUnion(next, schema.oneOf, b);
+		if (Array.isArray(schema.anyOf) && schema.anyOf !== skipUnionBranches) {
+			next = this.coerceUnion(next, schema.anyOf, b);
+		}
+		if (Array.isArray(schema.oneOf) && schema.oneOf !== skipUnionBranches) {
+			next = this.coerceUnion(next, schema.oneOf, b);
+		}
 		const types = typesOf(schema);
 		const matchesUnionMember = types.length > 1 && types.some((type) => matchesType(next, type));
 		if (types.length > 0 && !matchesUnionMember) {

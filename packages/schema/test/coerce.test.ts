@@ -276,6 +276,21 @@ describe("pass 1: optional nulls", () => {
 		});
 	});
 
+	it("does not let an earlier non-matching union branch prevent a later branch from dropping optional null", () => {
+		for (const keyword of ["oneOf", "anyOf"] as const) {
+			const validator = compile(
+				{
+					[keyword]: [
+						{ type: "object", properties: { b: { type: "boolean" } }, required: ["b"] },
+						{ type: "object", properties: { a: { type: "string" } }, additionalProperties: true },
+					],
+				},
+				{ coerce: true },
+			);
+			expect(validator.parse({ a: null, x: 1 }), keyword).toEqual({ ok: true, value: { x: 1 } });
+		}
+	});
+
 	it("clears scratch memo state when pass 1 throws on a reusable validator", () => {
 		const schema = {
 			type: "object",
