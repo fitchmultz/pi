@@ -46,4 +46,13 @@ describe("background shell permission guards", () => {
 			nextOffset: null,
 		});
 	});
+
+	it("does not enable strict constrainedSampling on its multiplexed optional-field schema", async () => {
+		h = await createHarness({ extensionFactories: [backgroundCommand] });
+		await h.session.bindExtensions({ mode: "print" });
+		const definition = h.session.getToolDefinition("background_command");
+		expect(definition).toBeDefined();
+		expect(definition?.constrainedSampling).toBeUndefined();
+		expect((definition?.parameters as { required?: string[] } | undefined)?.required).toEqual(["action"]);
+	});
 });

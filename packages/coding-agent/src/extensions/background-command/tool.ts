@@ -65,7 +65,6 @@ export function createBackgroundCommandTool(
 				: ["Print-mode runs can exit before a job finishes; use bash when that run needs the result."]),
 		],
 		parameters: schema,
-		constrainedSampling: { type: "json_schema", strict: "prefer" },
 		async execute(_id, params, signal, _update, ctx) {
 			signal?.throwIfAborted();
 			if ((params.offset ?? 0) < 0) throw new Error("offset must be >= 0");
