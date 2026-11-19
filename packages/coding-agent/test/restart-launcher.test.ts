@@ -595,11 +595,14 @@ process.send({ type: 'pi:ready' });`,
 		expect(parentCacheDir).toBeTypeOf("string");
 		const receipts = f.read();
 		expect(receipts).toHaveLength(5);
-		// Initial worker and restarted worker both inherit the base cache dir and resolve the same versioned dir.
+		// Initial worker and restarted worker both inherit the base cache dir and resolve the same versioned dir
+		// (Node 22 includes V8 flags like --max-semi-space-size=8 in the tag hash, so the worker's tag can differ from Vitest's).
 		for (const receipt of [receipts[0]!, receipts[1]!]) {
 			expect(receipt.compileCacheEnv).toBe(dirname(parentCacheDir!));
-			expect(receipt.compileCacheDir).toBe(parentCacheDir);
+			expect(receipt.compileCacheDir).toBeTypeOf("string");
+			expect(dirname(receipt.compileCacheDir!)).toBe(dirname(parentCacheDir!));
 		}
+		expect(receipts[1]!.compileCacheDir).toBe(receipts[0]!.compileCacheDir);
 		// Explicit caller NODE_COMPILE_CACHE is preserved untouched.
 		expect(receipts[2]?.compileCacheEnv).toBe(customCacheDir);
 		expect(receipts[2]?.compileCacheDir).toBeTypeOf("string");
