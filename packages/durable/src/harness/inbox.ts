@@ -73,7 +73,7 @@ export async function prepareBoundary(tx: Tx, conversationId: ConversationId, mo
 
 /**
  * Place the queued items a boundary selects (spec §6): every write, the first or all steers, and at `final` the first
- * or all follow-ups. A selected reset turns a `postTools` boundary into `final`. Writes are placed first and user
+ * or all follow-ups. A placed reset turns a `postTools` boundary into `final`. Writes are placed first and user
  * items after them, each in ID order, so user items queued before a reset run in the new context. A write whose head
  * targets an entry before the active range, including a range started earlier in this commit, is stale. Selected and
  * stale items are removed positionally.
@@ -87,12 +87,11 @@ export async function applyBoundary(
 ): Promise<BoundaryResult> {
 	const { conversationId, inbox } = boundary;
 	const items = inbox.items;
-	const reset = hasQueuedReset(items);
-	const final = at === "final" || reset;
 	const writes = items.flatMap((item, index) => (item.mode === "write" ? [index] : []));
 
 	// `appendEntry()` copies the drafts' values; the items are removed only afterwards.
 	let first: EntryId | undefined;
+	let reset = false;
 	for (const index of writes) {
 		const item = items[index] as Draft<Extract<InboxItem, { mode: "write" }>>;
 		const draft = item.entry as unknown as EntryDraft;
@@ -100,11 +99,22 @@ export async function applyBoundary(
 			tx.settleSubmission(item.id, { status: "unanswered", reason: "stale" });
 			continue;
 		}
-		const entry = await tx.appendEntry(conversationId, draft);
-		if (draft.head !== undefined) boundary.head = draft.head === "self" ? entry.id : draft.head;
+		let entry: EntryRecord;
+		try {
+			entry = await tx.appendEntry(conversationId, draft, { admission: true });
+		} catch (error) {
+			if (!(error instanceof StorageCapacityError) || item.id === admitting) throw error;
+			tx.settleSubmission(item.id, { status: "unanswered", reason: "input_too_large", detail: error.message });
+			continue;
+		}
+		if (draft.head !== undefined) {
+			boundary.head = draft.head === "self" ? entry.id : draft.head;
+			if (draft.head === "self") reset = true;
+		}
 		tx.placeSubmission(item.id, entry.id);
 		first ??= entry.id;
 	}
+	const final = at === "final" || reset;
 	const placed: SubmissionId[] = [];
 	const placedModes = new Set<"steer" | "followUp">();
 	const removed = [...writes];

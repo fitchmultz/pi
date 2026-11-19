@@ -64,8 +64,10 @@ for (const scenario of [
 			]);
 			const models = createModels();
 			models.setProvider(faux.provider);
+			const storage = await openDurableObjectSqliteStorage(state.storage, { prefix: "admission_" });
+			const checkAdmission = vi.spyOn(storage, "checkAdmission");
 			const harness = await Harness.open(
-				await openDurableObjectSqliteStorage(state.storage, { prefix: "admission_" }),
+				storage,
 				{ models, registry: createRegistry(), settings: { followUpMode: "one-at-a-time" } },
 				context,
 			);
@@ -115,9 +117,11 @@ for (const scenario of [
 				const viewChanged = vi.fn();
 				const view = await harness.observeConversation(root.id, { advance: viewChanged, end: () => {} }, context);
 				try {
+					checkAdmission.mockClear();
 					await expect(root.submit({ ...draft, requestId: "correctable" }, context)).rejects.toMatchObject({
 						name: "StorageCapacityError",
 					});
+					expect(checkAdmission).toHaveBeenCalledTimes(1);
 					expect(viewChanged).not.toHaveBeenCalled();
 					expect(
 						await root.commit((tx) => tx.submissionByRequest(root.id, "correctable"), context),
@@ -127,7 +131,9 @@ for (const scenario of [
 					const corrected: SubmissionDraft = write
 						? { type: "write", entry: { kind: "test.write", head: "self", data: { body: "corrected" } } }
 						: { type: "input", content: "corrected" };
+					checkAdmission.mockClear();
 					const next = await root.submit({ ...corrected, requestId: "correctable" }, context);
+					expect(checkAdmission).toHaveBeenCalledTimes(1);
 					expect((await next.wait(context)).status).toBe("done");
 					expect(faux.state.callCount).toBe((busy ? 1 : 0) + (write ? 0 : 1));
 				} finally {

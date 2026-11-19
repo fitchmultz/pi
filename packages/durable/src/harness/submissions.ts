@@ -66,7 +66,7 @@ export class Submissions {
 	async submit(conversationId: ConversationId, draft: SubmissionDraft, context: Context): Promise<Submission> {
 		const { id } = await this.#traced(conversationId, draft, context, (span) =>
 			this.#session.commitWith(
-				(tx) => admitSubmission(tx, conversationId, draft, this.#now(), this.#queueModes(), span),
+				(tx) => admitSubmission(tx, conversationId, draft, this.#now(), this.#queueModes(), span, false),
 				withTelemetry(span, context),
 				undefined,
 				{ admission: true },
@@ -217,7 +217,8 @@ function checkInputEntry(entry: InputEntry): void {
  * queued items and starts a run with them and itself, placing no entry of its own. An idle conversation with queued
  * items queues it behind them and runs a final boundary. Otherwise idle input places its entry (`pi.user`, or the
  * input's own) and starts a run, and an idle write appends its entry and settles `done`, or `stale` when its head
- * reaches before the active range. `entryAdmission` is disabled for post-effect writes that must commit with their usage.
+ * reaches before the active range. `entryAdmission` is disabled when the enclosing commit already runs batch admission
+ * (`Submissions.submit()`) or for post-effect writes that must commit with their usage.
  */
 export async function admitSubmission(
 	tx: Tx,
