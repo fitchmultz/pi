@@ -299,7 +299,7 @@ describe("builtin providers", () => {
 			expect(systemContents, `${provider}/${modelId}`).toEqual(["base prompt", "mid-convo update"]);
 		}
 
-		// Local/custom OpenAI-compatible servers retain mid-convo detection.
+		// Local/custom OpenAI-compatible servers default to false unless opted in via compat.
 		for (const [provider, modelId] of [
 			["llama.cpp", "deepseek-v4.1-flash"],
 			["ds4", "glm-5.3-flash"],
@@ -316,8 +316,13 @@ describe("builtin providers", () => {
 				contextWindow: 128000,
 				maxTokens: 4096,
 			};
-			const systemContents = await captureSystemMessages(localModel);
-			expect(systemContents, `${provider}/${modelId}`).toEqual(["base prompt", "mid-convo update"]);
+			expect(await captureSystemMessages(localModel), `${provider}/${modelId} default`).toEqual([
+				"base prompt\n\nmid-convo update",
+			]);
+			expect(
+				await captureSystemMessages({ ...localModel, compat: { supportsMidConvoSystemMessages: true } }),
+				`${provider}/${modelId} opt-in`,
+			).toEqual(["base prompt", "mid-convo update"]);
 		}
 	});
 

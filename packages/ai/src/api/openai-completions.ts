@@ -1599,30 +1599,6 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | str
 	}
 }
 
-// Built-in third-party gateway/catalog providers whose models must explicitly opt in to
-// mid-conversation system messages via the generated catalog rather than ID substring heuristics.
-const UNVERIFIED_MID_CONVO_PROVIDERS: ReadonlySet<string> = new Set([
-	"ant-ling",
-	"baseten",
-	"cerebras",
-	"cloudflare-ai-gateway",
-	"cloudflare-workers-ai",
-	"fireworks",
-	"github-copilot",
-	"groq",
-	"huggingface",
-	"nvidia",
-	"opencode",
-	"opencode-go",
-	"openrouter",
-	"qwen-token-plan",
-	"qwen-token-plan-cn",
-	"qwen-token-plan-individual",
-	"qwen-token-plan-individual-cn",
-	"together",
-	"vercel-ai-gateway",
-]);
-
 /**
  * Auto-detect compatibility settings from provider name and baseUrl.
  * Used as the base when model.compat is not set; explicit model.compat
@@ -1675,32 +1651,6 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		isZai;
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
-	const isThirdPartyGateway =
-		UNVERIFIED_MID_CONVO_PROVIDERS.has(provider) ||
-		isOpenRouter ||
-		isTogether ||
-		isNvidia ||
-		isCloudflareWorkersAI ||
-		isCloudflareAiGateway ||
-		isCerebras ||
-		isAntLing ||
-		baseUrl.includes("inference.baseten.co") ||
-		baseUrl.includes("router.huggingface.co") ||
-		baseUrl.includes("opencode.ai") ||
-		baseUrl.includes("api.fireworks.ai") ||
-		baseUrl.includes("chutes.ai") ||
-		baseUrl.includes("qwencloudapi.com") ||
-		baseUrl.includes("qianwenaiapi.com") ||
-		baseUrl.includes("githubcopilot.com") ||
-		baseUrl.includes("api.groq.com") ||
-		baseUrl.includes("ai-gateway.vercel.sh");
-	const lowerModelId = model.id.toLowerCase();
-	const isMidConvoCapableOpenAIModel =
-		!isThirdPartyGateway &&
-		(lowerModelId.includes("deepseek-v4.1") ||
-			lowerModelId.includes("deepseek-v4-pro") ||
-			(isDeepSeek && lowerModelId === "deepseek-flash") ||
-			lowerModelId.includes("glm-5.3"));
 	const isOpenRouterDeveloperRoleModel =
 		isOpenRouter && (model.id.startsWith("anthropic/") || model.id.startsWith("openai/"));
 	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
@@ -1740,7 +1690,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		// OpenAI compatibility alone does not imply strict JSON-schema tool support.
 		supportsStrictMode: false,
 		supportsOpenAIGrammarTools: false,
-		supportsMidConvoSystemMessages: isMidConvoCapableOpenAIModel,
+		supportsMidConvoSystemMessages: false,
 		supportsMidConvoToolAdditions: false,
 		supportsMidConvoToolChanges: false,
 		supportsPromptProgress: provider === "llama.cpp" || provider === "ds4",

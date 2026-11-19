@@ -604,12 +604,12 @@ describe("transcript system messages", () => {
 	});
 
 	test.each([
-		["local-maya", "deepseek-v4.1-flash", true],
-		["local-glm", "glm-5.3-flash", true],
-		["local-glm", "glm-5.2", false],
+		["local-maya", "deepseek-v4.1-flash"],
+		["local-glm", "glm-5.3-flash"],
+		["local-glm", "glm-5.2"],
 	] as const)(
-		"auto-detects mid-conversation system message support for %s/%s as %s",
-		async (provider, id, expectedMidConvo) => {
+		"defaults mid-conversation system message support to false for %s/%s unless opted in via compat",
+		async (provider, id) => {
 			const model: Model<"openai-completions"> = {
 				...modelBase,
 				id,
@@ -617,17 +617,23 @@ describe("transcript system messages", () => {
 				api: "openai-completions",
 				provider,
 			};
-			const payload = await capturePayload<{
+			const defaultPayload = await capturePayload<{
 				messages: Array<{ role: string; content?: string }>;
 			}>(model, additionContext);
-			const systemContents = payload.messages
-				.filter((message) => message.role === "system" || message.role === "developer")
-				.map((message) => message.content);
-			if (expectedMidConvo) {
-				expect(systemContents).toEqual(["base prompt", "updated guidance"]);
-			} else {
-				expect(systemContents).toEqual(["base prompt\n\nupdated guidance"]);
-			}
+			expect(
+				defaultPayload.messages
+					.filter((message) => message.role === "system" || message.role === "developer")
+					.map((message) => message.content),
+			).toEqual(["base prompt\n\nupdated guidance"]);
+
+			const optedInPayload = await capturePayload<{
+				messages: Array<{ role: string; content?: string }>;
+			}>({ ...model, compat: { supportsMidConvoSystemMessages: true } }, additionContext);
+			expect(
+				optedInPayload.messages
+					.filter((message) => message.role === "system" || message.role === "developer")
+					.map((message) => message.content),
+			).toEqual(["base prompt", "updated guidance"]);
 		},
 	);
 
