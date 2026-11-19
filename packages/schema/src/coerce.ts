@@ -51,8 +51,13 @@ export class Coercer {
 	/** `value` coerced: a copy along the changed paths only, or `value` itself when nothing changes. */
 	coerce(value: unknown): unknown {
 		const base = this.c.r.rootBase;
-		const withoutNulls = this.dropOptionalNulls(value, this.schema, base);
-		return this.coerceTypes(this.convertOnly(withoutNulls), this.schema, base);
+		try {
+			const withoutNulls = this.dropOptionalNulls(value, this.schema, base);
+			return this.coerceTypes(this.convert(this.schema, base, withoutNulls), this.schema, base);
+		} finally {
+			this.memo = undefined;
+			this.cuts = 0;
+		}
 	}
 
 	/** Pass 2 alone, as TypeBox's `Value.Convert` (the TypeBox conformance tests run it). */
@@ -116,26 +121,35 @@ export class Coercer {
 	private dropOptionalNulls(value: unknown, schema: unknown, base: string): unknown {
 		if (!isSchemaObject(schema)) return value;
 		const b = this.baseOf(schema, base);
-		const branches = Array.isArray(schema.anyOf)
-			? schema.anyOf
-			: Array.isArray(schema.oneOf)
-				? schema.oneOf
-				: undefined;
-		if (
-			branches !== undefined &&
-			typeof value === "object" &&
-			value !== null &&
-			this.passes(schema, b, value) !== true
-		) {
-			value = this.dropBranchNulls(value, branches, b);
-		}
 		if (Array.isArray(value)) {
-			return mapItems(value, (item, i) => {
-				const itemSchema = itemSchemaAt(schema, i);
-				return itemSchema === undefined ? item : this.dropOptionalNulls(item, itemSchema, b);
-			});
+			if (schema.items !== undefined || Array.isArray(schema.prefixItems)) {
+				value = mapItems(value, (item, i) => {
+					const itemSchema = itemSchemaAt(schema, i);
+					return itemSchema === undefined ? item : this.dropOptionalNulls(item, itemSchema, b);
+				});
+			}
+		} else if (isPlainObject(value)) {
+			value = this.dropPropertyNulls(value, schema, b);
 		}
-		if (!isPlainObject(value)) return value;
+		if (typeof value === "object" && value !== null && this.passes(schema, b, value) !== true) {
+			if (Array.isArray(schema.anyOf)) value = this.dropBranchNulls(schema, value, schema.anyOf, b);
+			if (
+				Array.isArray(schema.oneOf) &&
+				typeof value === "object" &&
+				value !== null &&
+				this.passes(schema, b, value) !== true
+			) {
+				value = this.dropBranchNulls(schema, value, schema.oneOf, b);
+			}
+		}
+		return value;
+	}
+
+	private dropPropertyNulls(
+		value: Record<string, unknown>,
+		schema: SchemaObject,
+		base: string,
+	): Record<string, unknown> {
 		const properties = isSchemaObject(schema.properties) ? schema.properties : {};
 		const patterns = isSchemaObject(schema.patternProperties)
 			? Object.entries(schema.patternProperties).map(([pattern, item]) => [sharedRegex(pattern), item] as const)
@@ -152,12 +166,12 @@ export class Coercer {
 		for (const [key, property] of Object.entries(properties)) {
 			if (!Object.hasOwn(value, key)) continue;
 			const isRef = isSchemaObject(property) && typeof property.$ref === "string";
-			if (value[key] === null && !required.has(key) && !isRef && this.passes(property, b, null) === false) {
+			if (value[key] === null && !required.has(key) && !isRef && this.passes(property, base, null) === false) {
 				out ??= { ...value };
 				delete out[key];
 				continue;
 			}
-			set(key, this.dropOptionalNulls(value[key], property, b));
+			set(key, this.dropOptionalNulls(value[key], property, base));
 		}
 		// Values of pattern and additional properties are walked for their own optional nulls; the keys themselves
 		// are not optional properties, so they stay.
@@ -167,24 +181,31 @@ export class Coercer {
 				for (const [pattern, item] of patterns) {
 					if (!pattern.test(key)) continue;
 					matched = true;
-					set(key, this.dropOptionalNulls((out ?? value)[key], item, b));
+					set(key, this.dropOptionalNulls((out ?? value)[key], item, base));
 				}
-				if (!matched && additional !== undefined) set(key, this.dropOptionalNulls(value[key], additional, b));
+				if (!matched && additional !== undefined) set(key, this.dropOptionalNulls(value[key], additional, base));
 			}
 		}
 		return out ?? value;
 	}
 
 	/**
-	 * `value` with the optional nulls of the first branch that accepts it once they are dropped and it is converted, so
-	 * pass 2 does not turn them into values (`"null"` for a string). The caller skips a union that accepts `value` as
-	 * it is, so a nullable branch's nulls stay.
+	 * `value` with the optional nulls of the first branch whose dropped and converted result the whole union accepts, so
+	 * pass 2 does not turn them into values (`"null"` for a string) and `oneOf` or sibling constraints are never broken.
+	 * The caller skips a union that accepts `value` as it is, so a nullable branch's nulls stay.
 	 */
-	private dropBranchNulls(value: object, branches: readonly unknown[], base: string): unknown {
+	private dropBranchNulls(schema: SchemaObject, value: object, branches: readonly unknown[], base: string): unknown {
 		for (const branch of branches) {
 			const candidate = this.dropOptionalNulls(value, branch, base);
-			const converted = this.coerceTypes(this.convert(branch, base, candidate), branch, base);
-			if (this.passes(branch, base, converted) === true) return candidate;
+			let converted = this.coerceTypes(
+				this.convertMembers(schema, base, this.convert(branch, base, candidate)),
+				branch,
+				base,
+			);
+			if (isPlainObject(converted) && typesOf(schema).includes("object")) {
+				converted = this.coerceProperties(converted, schema, base);
+			}
+			if (this.passes(schema, base, converted) === true) return candidate;
 		}
 		return value;
 	}
@@ -385,6 +406,7 @@ export class Coercer {
 			? Object.entries(schema.patternProperties).map(([pattern, item]) => [sharedRegex(pattern), item] as const)
 			: [];
 		const additional = isSchemaObject(schema.additionalProperties) ? schema.additionalProperties : undefined;
+		if (patterns.length === 0 && additional === undefined && !isSchemaObject(schema.properties)) return value;
 		let out: Record<string, unknown> | undefined;
 		const set = (key: string, next: unknown) => {
 			if (next === (out ?? value)[key]) return;
