@@ -363,6 +363,31 @@ describe("Google SDK streaming protocol", () => {
 		expect(body.tools[0].functionDeclarations[0].name).toBe("lookup");
 	});
 
+	it.each([
+		{ api: "google-generative-ai" as const, id: "gemini-4-neon", expected: ["\nuser\n"] },
+		{ api: "google-vertex" as const, id: "gemini-4-neon", expected: ["\nuser\n"] },
+		{ api: "google-generative-ai" as const, id: "gemini-4-carbon", expected: undefined },
+		{ api: "google-generative-ai" as const, id: "gemini-4-hydrogen", expected: undefined },
+	])("sets stopSequences=$expected for $api/$id", async ({ api, id, expected }) => {
+		const fetch = respond([{ candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }] }]);
+		const stream =
+			api === "google-generative-ai"
+				? streamGoogle({ ...model(api), id }, context, { apiKey: "test-key" })
+				: streamVertex({ ...model(api), id }, context, { apiKey: "test-key" });
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(fetch).toHaveBeenCalledOnce();
+		const body = JSON.parse(String(fetch.mock.calls[0][1]?.body)) as {
+			generationConfig?: { stopSequences?: string[] };
+		};
+		if (expected === undefined) {
+			expect(body.generationConfig?.stopSequences).toBeUndefined();
+		} else {
+			expect(body.generationConfig?.stopSequences).toEqual(expected);
+		}
+	});
+
 	it("rejects a pre-aborted request before payload hooks or HTTP", async () => {
 		const fetch = respond([]);
 		const controller = new AbortController();
