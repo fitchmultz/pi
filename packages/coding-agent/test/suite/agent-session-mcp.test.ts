@@ -423,7 +423,7 @@ describe("AgentSession MCP integration", () => {
 								hits: [...a.value.structuredContent.hits, ...b.value.structuredContent.hits],
 								failed: failure.isError,
 								failure: failure.content[0].text,
-								found: ALL_TOOLS.filter((tool) => tool.name.includes("search")).map((tool) => tool.name),
+								found: ALL_TOOLS.filter((tool) => tool.name.includes("search")).map((tool) => tool.name).sort(),
 							}));
 						`,
 					}),
@@ -461,7 +461,7 @@ describe("AgentSession MCP integration", () => {
 			hits: ["mcp guide", "mcp faq", "pi guide", "pi faq"],
 			failed: true,
 			failure: "server exploded",
-			found: [searchName],
+			found: [searchName, "tool_search"],
 		});
 		expect(result.content).toHaveLength(4);
 		expect(calls).toEqual(['search:{"query":"mcp"}', 'search:{"query":"pi"}', "fail:{}", "shot:{}"]);
@@ -979,17 +979,16 @@ return { docs, sameForAliases: aliases.every((alias) => JSON.stringify(alias) ==
 		expect(serversSection(harness)).toBeUndefined();
 	});
 
-	it("waits for the servers a codemode script names", async () => {
+	it.each([
+		["names directly", 'return (await tools.mcp__slow__search({ query: "q" })).structuredContent;'],
+		[
+			"discovers with tools.tool_search()",
+			'const [match] = await tools.tool_search({ query: "search the docs" }); return (await tools[match.name]({ query: "q" })).structuredContent;',
+		],
+	])("waits for the servers a codemode script %s", async (_label, code) => {
 		const { harness, calls } = await setupSlow({}, 30);
 		harness.setResponses([
-			fauxAssistantMessage(
-				[
-					fauxToolCall("codemode", {
-						code: `return (await tools.mcp__slow__search({ query: "q" })).structuredContent;`,
-					}),
-				],
-				{ stopReason: "toolUse" },
-			),
+			fauxAssistantMessage([fauxToolCall("codemode", { code })], { stopReason: "toolUse" }),
 			fauxAssistantMessage("done"),
 		]);
 
@@ -1080,19 +1079,23 @@ return [...new Set(await Promise.all(names.map(async (name) => (await describeNa
 		expect(nestedToolNames(harness)).toEqual(["mcp__docs__search"]);
 	});
 
-	it("finds tools from scripts with searchTools() and describeTool()", async () => {
+	it("finds tools from scripts with tools.tool_search(), searchTools(), and describeTool()", async () => {
 		const { harness, calls } = await setup("codemode");
 		harness.setResponses([
 			fauxAssistantMessage(
 				[
 					fauxToolCall("codemode", {
 						code: `
-							const [match] = await searchTools("search the docs", { limit: 1 });
-							const none = await searchTools("docs", { namespace: "mcp__other" });
+							const matches = await tools.tool_search({ query: "search the docs", limit: 1, namespace: "docs" });
+							const legacy = await searchTools("search the docs", { limit: 1, namespace: "docs" });
+							const none = await tools.tool_search({ query: "docs", namespace: "mcp__other" });
+							const [match] = matches;
 							const declaration = await describeTool(match.name);
 							const result = await tools[match.name]({ query: "found" });
 							text(JSON.stringify({
 								name: match.name,
+								sameAsLegacy: JSON.stringify(matches) === JSON.stringify(legacy),
+								count: matches.length,
 								sameAsAllTools: ALL_TOOLS.find((tool) => tool.name === match.name).description === match.description,
 								none: none.length,
 								declared: declaration.includes("codemode tool declaration:"),
@@ -1110,9 +1113,11 @@ return [...new Set(await Promise.all(names.map(async (name) => (await describeNa
 		await harness.session.prompt("go");
 
 		const result = toolResult(harness, "codemode");
-		expect(result.isError).toBe(false);
+		expect(result.isError, getMessageText(result)).toBe(false);
 		expect(JSON.parse((result.content[1] as { text: string }).text)).toEqual({
 			name: "mcp__docs__search",
+			sameAsLegacy: true,
+			count: 1,
 			sameAsAllTools: true,
 			none: 0,
 			declared: true,
@@ -1120,6 +1125,7 @@ return [...new Set(await Promise.all(names.map(async (name) => (await describeNa
 			hits: ["found guide", "found faq"],
 		});
 		expect(calls).toEqual(['search:{"query":"found"}']);
+		expect(harness.session.getActiveToolNames()).toEqual(["codemode"]);
 	});
 
 	it("activates tool_search for deferred MCP tools and keeps loaded tools declared on the branch", async () => {
