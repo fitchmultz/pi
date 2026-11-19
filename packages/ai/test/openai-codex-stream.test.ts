@@ -234,6 +234,85 @@ describe("openai-codex streaming", () => {
 		expect(result.usage.cost.total).toBeGreaterThan(0);
 	});
 
+	it("falls back cleanly when a response.failed event omits response", async () => {
+		const model: Model<"openai-codex-responses"> = {
+			id: "test",
+			name: "test",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10000,
+			maxTokens: 1000,
+		};
+		const result = await streamOpenAICodexResponses(model, normalizeContext({ messages: [] }), {
+			apiKey: mockToken(),
+			transport: "sse",
+			fetch: async () => new Response(`data: ${JSON.stringify({ type: "response.failed" })}\n\n`),
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Codex response failed");
+	});
+
+	it.each([
+		[{ type: "error", code: "server_error", message: "boom" }, "Codex error: boom"],
+		[{ type: "error", code: "server_error" }, "Codex error: server_error"],
+	])("does not double-prefix Codex stream error events: %j", async (event, expectedMessage) => {
+		const model: Model<"openai-codex-responses"> = {
+			id: "test",
+			name: "test",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10000,
+			maxTokens: 1000,
+		};
+		const result = await streamOpenAICodexResponses(model, normalizeContext({ messages: [] }), {
+			apiKey: mockToken(),
+			transport: "sse",
+			fetch: async () => new Response(`data: ${JSON.stringify(event)}\n\n`),
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe(expectedMessage);
+	});
+
+	it.each([
+		[
+			{ error: { code: "usage_limit_reached", plan_type: "Plus", message: "raw limit message" } },
+			"You have hit your ChatGPT usage limit (plus plan).",
+		],
+		[{ error: { code: "invalid_request_error", message: "Bad request payload" } }, "Bad request payload"],
+	])("preserves HTTP 400 error formatting without prepending raw error codes: %j", async (body, expectedMessage) => {
+		const model: Model<"openai-codex-responses"> = {
+			id: "test",
+			name: "test",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10000,
+			maxTokens: 1000,
+		};
+		const result = await streamOpenAICodexResponses(model, normalizeContext({ messages: [] }), {
+			apiKey: mockToken(),
+			transport: "sse",
+			fetch: async () =>
+				new Response(JSON.stringify(body), {
+					status: 400,
+					headers: { "content-type": "application/json" },
+				}),
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe(expectedMessage);
+	});
+
 	it("streams SSE responses and forwards raw provider events", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-codex-stream-"));
 		process.env.PI_CODING_AGENT_DIR = tempDir;

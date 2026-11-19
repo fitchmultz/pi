@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { lazyApi } from "../src/api/lazy.ts";
+import { stream as streamOpenAICompletions } from "../src/api/openai-completions.ts";
 import { envApiKeyAuth } from "../src/auth/helpers.ts";
 import type { AuthContext, AuthEvent } from "../src/auth/types.ts";
 import { getModel as getCompatModel, getModels as getCompatModels } from "../src/compat.ts";
@@ -221,6 +222,107 @@ describe("builtin providers", () => {
 			expect(models.getModel(provider, modelId), `${provider}/${modelId}`).not.toHaveProperty(
 				"compat.supportsMidConvoSystemMessages",
 			);
+		}
+	});
+
+	it("does not enable mid-conversation system messages via detectCompat for unverified third-party gateway models", async () => {
+		const models = builtinModels();
+		const midConvoContext = normalizeContext({
+			messages: [
+				{ role: "system", content: "base prompt", timestamp: 1 },
+				{ role: "user", content: "turn 1", timestamp: 2 },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "ok" }],
+					api: "openai-completions",
+					provider: "test",
+					model: "test",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 3,
+				},
+				{ role: "system", content: "mid-convo update", timestamp: 4 },
+				{ role: "user", content: "turn 2", timestamp: 5 },
+			],
+		});
+
+		const captureSystemMessages = async (model: Model<"openai-completions">): Promise<string[]> => {
+			let payload: { messages: Array<{ role: string; content?: string }> } | undefined;
+			const s = streamOpenAICompletions(model, midConvoContext, {
+				apiKey: "test-key",
+				onPayload: (p) => {
+					payload = p as { messages: Array<{ role: string; content?: string }> };
+				},
+				fetch: async () => new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } }),
+			});
+			await s.result();
+			return (payload?.messages ?? [])
+				.filter((m) => m.role === "system" || m.role === "developer")
+				.map((m) => m.content ?? "");
+		};
+
+		const unverifiedGatewayModels = [
+			["baseten", "deepseek-ai/DeepSeek-V4-Pro-0813"],
+			["baseten", "zai-org/GLM-5.3"],
+			["huggingface", "deepseek-ai/DeepSeek-V4.1-Flash"],
+			["huggingface", "zai-org/GLM-5.3"],
+			["nvidia", "z-ai/glm-5.3-flash"],
+			["opencode", "deepseek-v4.1-flash"],
+			["opencode", "glm-5.3"],
+			["opencode-go", "deepseek-v4-pro"],
+			["opencode-go", "glm-5.3-flash"],
+			["together", "deepseek-ai/DeepSeek-V4.1-Flash"],
+			["together", "zai-org/GLM-5.3"],
+		] as const;
+
+		for (const [provider, modelId] of unverifiedGatewayModels) {
+			const model = models.getModel(provider, modelId) as Model<"openai-completions">;
+			expect(model, `${provider}/${modelId}`).toBeDefined();
+			const systemContents = await captureSystemMessages(model);
+			expect(systemContents, `${provider}/${modelId}`).toEqual(["base prompt\n\nmid-convo update"]);
+		}
+
+		// First-party verified models still keep mid-convo system messages separate.
+		for (const [provider, modelId] of [
+			["deepseek", "deepseek-flash"],
+			["zai", "glm-5.3"],
+		] as const) {
+			const model = models.getModel(provider, modelId) as Model<"openai-completions">;
+			const systemContents = await captureSystemMessages(model);
+			expect(systemContents, `${provider}/${modelId}`).toEqual(["base prompt", "mid-convo update"]);
+		}
+
+		// Local/custom OpenAI-compatible servers default to false unless opted in via compat.
+		for (const [provider, modelId] of [
+			["llama.cpp", "deepseek-v4.1-flash"],
+			["ds4", "glm-5.3-flash"],
+		] as const) {
+			const localModel: Model<"openai-completions"> = {
+				id: modelId,
+				name: modelId,
+				api: "openai-completions",
+				provider,
+				baseUrl: "http://127.0.0.1:8080/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 4096,
+			};
+			expect(await captureSystemMessages(localModel), `${provider}/${modelId} default`).toEqual([
+				"base prompt\n\nmid-convo update",
+			]);
+			expect(
+				await captureSystemMessages({ ...localModel, compat: { supportsMidConvoSystemMessages: true } }),
+				`${provider}/${modelId} opt-in`,
+			).toEqual(["base prompt", "mid-convo update"]);
 		}
 	});
 

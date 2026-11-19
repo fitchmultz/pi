@@ -1651,22 +1651,6 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		isZai;
 
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
-	const isQwenTokenPlan =
-		provider === "qwen-token-plan" ||
-		provider === "qwen-token-plan-cn" ||
-		provider === "qwen-token-plan-individual" ||
-		provider === "qwen-token-plan-individual-cn";
-	const lowerModelId = model.id.toLowerCase();
-	const isMidConvoCapableOpenAIModel =
-		!isOpenRouter &&
-		!isQwenTokenPlan &&
-		provider !== "github-copilot" &&
-		!isCloudflareWorkersAI &&
-		!isCloudflareAiGateway &&
-		(lowerModelId.includes("deepseek-v4.1") ||
-			lowerModelId.includes("deepseek-v4-pro") ||
-			(isDeepSeek && lowerModelId === "deepseek-flash") ||
-			lowerModelId.includes("glm-5.3"));
 	const isOpenRouterDeveloperRoleModel =
 		isOpenRouter && (model.id.startsWith("anthropic/") || model.id.startsWith("openai/"));
 	const cacheControlFormat = provider === "openrouter" && model.id.startsWith("anthropic/") ? "anthropic" : undefined;
@@ -1706,7 +1690,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		// OpenAI compatibility alone does not imply strict JSON-schema tool support.
 		supportsStrictMode: false,
 		supportsOpenAIGrammarTools: false,
-		supportsMidConvoSystemMessages: isMidConvoCapableOpenAIModel,
+		supportsMidConvoSystemMessages: false,
 		supportsMidConvoToolAdditions: false,
 		supportsMidConvoToolChanges: false,
 		supportsPromptProgress: provider === "llama.cpp" || provider === "ds4",

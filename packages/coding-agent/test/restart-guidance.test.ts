@@ -437,6 +437,7 @@ describe("actual managed restart guidance", () => {
 		const [parentCompletions, forkedCompletions] = await payloads(
 			[f.requests[0], child.requests[0]],
 			"openai-completions",
+			{ supportsMidConvoSystemMessages: true },
 		);
 		expect(forkedCompletions.messages?.slice(0, parentCompletions.messages?.length)).toEqual(
 			parentCompletions.messages,
@@ -445,9 +446,7 @@ describe("actual managed restart guidance", () => {
 			'Removed system prompt section \\"restart\\".',
 		);
 		// An API without them gets every later system message folded into the leading one.
-		const [parent, forked] = await payloads([f.requests[0], child.requests[0]], "openai-completions", {
-			supportsMidConvoSystemMessages: false,
-		});
+		const [parent, forked] = await payloads([f.requests[0], child.requests[0]], "openai-completions");
 		expect(JSON.stringify(parent.messages?.[0])).toContain("<restart>");
 		expect(JSON.stringify(forked.messages?.[0])).not.toContain("<restart>");
 	});
