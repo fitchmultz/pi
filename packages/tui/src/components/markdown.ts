@@ -752,9 +752,7 @@ export class Markdown implements Component {
 		if (selectionDocument) {
 			selectionDocument.sources.length = 0;
 			selectionDocument.text = this.text;
-			selectionDocument.complete = true;
 		}
-		const mapSource = selectionDocument !== undefined;
 
 		// Don't render anything if there's no actual text
 		if (!text || text.trim() === "") {
@@ -769,11 +767,9 @@ export class Markdown implements Component {
 		}
 
 		// Replace tabs with 3 spaces for consistent rendering
-		const aligned = mapSource ? alignSourceText(this.text, text) : undefined;
-		if (selectionDocument && aligned) {
-			selectionDocument.complete = aligned.complete;
-		}
-		const transformedSource = aligned?.source ?? new SourceText(text);
+		const alignedSource = selectionDocument ? alignSourceText(this.text, text) : undefined;
+		const mapSource = alignedSource !== undefined;
+		const transformedSource = alignedSource ?? new SourceText(text);
 		const normalizedSource = transformedSource.replace(/\r\n?/g, "\n").replace(/\t/g, "   ");
 		const normalizedText = normalizedSource.text;
 
@@ -812,15 +808,11 @@ export class Markdown implements Component {
 			const mapped =
 				tokenOffset >= 0
 					? normalizedSource.slice(tokenOffset, tokenOffset + token.raw.length)
-					: new SourceText(token.raw, [], true);
+					: new SourceText(token.raw, []);
 			const hasSpans = tokenOffset >= 0 && mapped.spans.length > 0;
-			const hasMappedSource = mapSource && hasSpans;
-			if (selectionDocument && !hasMappedSource && token.type !== "space") {
-				selectionDocument.complete = false;
-			}
 			const originalStart = hasSpans ? mapped.spans[0].sourceStart : 0;
 			const originalEnd = hasSpans ? mapped.spans[mapped.spans.length - 1].sourceEnd : 0;
-			const original = hasMappedSource ? this.text.slice(originalStart, originalEnd) : "";
+			const original = hasSpans ? this.text.slice(originalStart, originalEnd) : token.raw;
 			const nextTokenType = tokens[i + 1]?.type;
 			const blockKey = `${hasSpans ? originalStart : `unmapped:${i}`}\0${token.raw}\0${original}`;
 			const reused = reuseBlocks && !blocks.has(blockKey) ? previousBlocks?.get(blockKey) : undefined;
@@ -828,25 +820,27 @@ export class Markdown implements Component {
 			if (
 				block.width !== width ||
 				block.nextTokenType !== nextTokenType ||
-				!!block.source !== hasMappedSource ||
+				!!block.source !== mapSource ||
 				(block.source && block.source.offset !== originalStart)
 			) {
-				this.blockSource = hasMappedSource
-					? new MarkdownSource(
-							original,
-							new SourceText(
-								mapped.text,
-								mapped.spans.map((span) => ({
-									...span,
-									sourceStart: span.sourceStart - originalStart,
-									sourceEnd: span.sourceEnd - originalStart,
-								})),
-							),
-							token,
-							selectionDocument,
-							originalStart,
-						)
-					: undefined;
+				this.blockSource =
+					mapSource && selectionDocument
+						? new MarkdownSource(
+								original,
+								new SourceText(
+									mapped.text,
+									mapped.spans.map((span) => ({
+										...span,
+										sourceStart: span.sourceStart - originalStart,
+										sourceEnd: span.sourceEnd - originalStart,
+									})),
+									mapped.allowUnmappedDecorations,
+								),
+								token,
+								selectionDocument,
+								originalStart,
+							)
+						: undefined;
 				this.renderBlock(block, token, nextTokenType, width, contentWidth);
 				block.source = this.blockSource;
 				this.blockSource = undefined;

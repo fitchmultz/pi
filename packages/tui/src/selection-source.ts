@@ -19,16 +19,16 @@ interface SourceSpan {
 export class SourceText {
 	readonly text: string;
 	readonly spans: readonly SourceSpan[];
-	readonly unmapped: boolean;
+	readonly allowUnmappedDecorations: boolean;
 
 	constructor(
 		text: string,
 		spans: readonly SourceSpan[] = [{ start: 0, end: text.length, sourceStart: 0, sourceEnd: text.length }],
-		unmapped = false,
+		allowUnmappedDecorations = false,
 	) {
 		this.text = text;
 		this.spans = spans;
-		this.unmapped = unmapped;
+		this.allowUnmappedDecorations = allowUnmappedDecorations;
 	}
 
 	slice(start: number, end = this.text.length): SourceText {
@@ -46,7 +46,7 @@ export class SourceText {
 				...(identity ? {} : { atomic: true }),
 			});
 		}
-		return new SourceText(this.text.slice(start, end), spans, this.unmapped);
+		return new SourceText(this.text.slice(start, end), spans, this.allowUnmappedDecorations);
 	}
 
 	replace(pattern: RegExp, replacement: string): SourceText {
@@ -89,7 +89,7 @@ export class SourceText {
 		for (const [index, line] of text.split("\n").entries()) {
 			const raw = rawLines[firstLine + index] ?? "";
 			const start = raw.lastIndexOf(line);
-			if (start < 0) return new SourceText(text, [], true);
+			if (start < 0) return new SourceText(text, []);
 			if (index > 0) parts.push(this.slice(offset - 1, offset));
 			parts.push(this.slice(offset + start, offset + start + line.length));
 			offset += raw.length + 1;
@@ -100,9 +100,9 @@ export class SourceText {
 	static concat(parts: readonly SourceText[]): SourceText {
 		let text = "";
 		const spans: SourceSpan[] = [];
-		let unmapped = false;
+		let allowUnmappedDecorations = false;
 		for (const part of parts) {
-			if (part.unmapped) unmapped = true;
+			if (part.allowUnmappedDecorations) allowUnmappedDecorations = true;
 			for (const span of part.spans) {
 				const start = text.length + span.start;
 				const end = text.length + span.end;
@@ -127,7 +127,7 @@ export class SourceText {
 			}
 			text += part.text;
 		}
-		return new SourceText(text, spans, unmapped);
+		return new SourceText(text, spans, allowUnmappedDecorations);
 	}
 }
 
@@ -161,7 +161,6 @@ const PROMPT_MARKER = /^\x1b\]133;[ABC](?:\x07|\x1b\\)$/;
 /** Original document and the source blocks owned by its current rendered frame. */
 export class SelectionDocument {
 	text: string;
-	complete = true;
 	readonly sources: SelectionSource[] = [];
 
 	constructor(text = "") {
@@ -203,7 +202,7 @@ export class SelectionSource {
 	annotate(styled: string, source: SourceText): string {
 		if (source.text.includes("\x1b")) source = stripAnsiSourceText(source);
 		if (!source.spans.length) {
-			if (source.unmapped && stripTerminalSequences(styled).trim()) this.fullyMapped = false;
+			if (!source.allowUnmappedDecorations && stripTerminalSequences(styled).trim()) this.fullyMapped = false;
 			return styled;
 		}
 		for (const span of source.spans) this.contentRanges.push({ start: span.sourceStart, end: span.sourceEnd });
@@ -487,7 +486,6 @@ export function copySelectionSource(lines: readonly string[], selection: readonl
 function copyDocumentSelection(document: SelectionDocument, parts: readonly SelectedSource[]): string {
 	const selected = new Map(parts.map((part) => [part.source, part.source.select(part.ranges)]));
 	if (
-		document.complete &&
 		parts.some((part) => part.ranges.length > 0) &&
 		document.sources.every((source) => (selected.get(source) ?? source.select([])).complete)
 	)
@@ -813,10 +811,12 @@ function alignRange(
 /**
  * Map transformed Markdown text back to positions in `original` while ignoring injected ANSI codes and
  * preserving atomic replacements (e.g. status pills) and unmapped visual decorations (e.g. prefix icons).
+ * Returns `undefined` when the transform omits, truncates, or replaces original content with unrelated text,
+ * so callers fall back to displayed-cell copying instead of resurrecting omitted source text.
  */
-export function alignSourceText(original: string, transformed: string): { source: SourceText; complete: boolean } {
+export function alignSourceText(original: string, transformed: string): SourceText | undefined {
 	if (transformed === original) {
-		return { source: new SourceText(transformed), complete: true };
+		return new SourceText(transformed);
 	}
 	const origLines = splitLinesWithOffsets(original);
 	const transLines = splitLinesWithOffsets(transformed);
@@ -864,8 +864,6 @@ export function alignSourceText(original: string, transformed: string): { source
 		alignHunk(origLines.length, transLines.length);
 	}
 
-	return {
-		source: new SourceText(transformed, spans),
-		complete: spans.length > 0 && !stats.deletedNonWhitespace,
-	};
+	if (spans.length === 0 || stats.deletedNonWhitespace) return undefined;
+	return new SourceText(transformed, spans, true);
 }
