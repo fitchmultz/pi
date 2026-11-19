@@ -151,10 +151,12 @@ export interface CompactionEntry<T = unknown> extends SessionEntryBase {
 	 */
 	systemMessage?: SystemMessage;
 	/**
-	 * Tools that differ from the list in `systemMessage` at this compaction boundary. It follows
-	 * `systemMessage` in the compacted context and carries tool changes only. Absent when the
-	 * tools did not change, and with a provider summary block: `providerSummary` then records the
-	 * tools that the summarized messages changed, and later tool changes stay among the kept entries.
+	 * Tool changes carried by this compaction entry. On standard compactions, it follows
+	 * `systemMessage` in the compacted context and lists tools that differ from `systemMessage`
+	 * (excluding any idle `tool_search`-loaded tools pruned at this boundary). On entries with a
+	 * provider summary block, `providerSummary` records summarized tool changes and `toolUpdate`
+	 * is present only when idle search-loaded tools were pruned, carrying only `toolsRemoved`
+	 * and projected after `compactionSummary`. Absent when no net changes remain.
 	 */
 	toolUpdate?: SystemMessage;
 	/** Provider-written summary block requested with this compaction, and the record of that request. */
@@ -535,8 +537,8 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
  * of `messages`, unchanged, and `toolUpdate` restates the tools that differ from it. A context
  * that is compacted again keeps the same list, and its update keeps the definitions it already had
  * in their order, followed by the newer ones. The prompt text and sections of `systemMessage` are
- * the current ones. Replaying both messages gives the prompt and the tools, in the same order,
- * that replaying every system message of `messages` gives.
+ * the current ones. Replaying both messages gives the prompt and the post-compaction active tools
+ * in order (matching every system message of `messages` minus any `prunedToolNames`).
  *
  * The first system message is not always the first message: a message that an extension sent
  * before the first prompt is stored ahead of the system message that the first prompt declares.
@@ -802,8 +804,9 @@ function projectContextEntries(
 
 /**
  * Project a context that starts with a provider summary block: the leading system message with the
- * block, the tools the summarized conversation changed, the kept entries, the summary, then the
- * entries after the compaction.
+ * block, the tools the summarized conversation changed, the kept entries, the summary (followed by
+ * any post-summary `toolUpdate` pruning idle search-loaded tools), then the entries after the
+ * compaction.
  */
 function projectSummaryBlockEntries(
 	compaction: SummaryBlockEntry,

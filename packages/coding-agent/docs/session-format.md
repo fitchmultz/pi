@@ -291,13 +291,13 @@ Entries normally form one tree, but navigation APIs can create multiple roots:
 1. Extracts current model and thinking level settings from the full path
 2. Converts selected entries to messages:
    - `message` -> stored `AgentMessage`
-   - `compaction` -> its `systemMessage`, its `toolUpdate` when present, then `compactionSummary`. With a provider summary block: its `systemMessage`, which carries the block as `providerSummary`, then a system message with the tool changes of the summarized messages, if any; `compactionSummary` follows the kept entries
+   - `compaction` -> its `systemMessage`, its `toolUpdate` when present, then `compactionSummary`. With a provider summary block: its `systemMessage`, which carries the block as `providerSummary`, then a system message with the tool changes of the summarized messages, if any; `compactionSummary` follows the kept entries, followed by `toolUpdate` when compaction pruned idle `tool_search`-loaded tools
    - `branch_summary` -> `branchSummary`
    - `custom_message` -> `CustomMessage`
    - `context_edit` -> no context message of its own
    - `usage` and `custom` -> no context message
 
-The compaction summary replaces entries before `firstKeptEntryId`. Pre-compaction system messages are folded into the compaction entry's `systemMessage` and `toolUpdate` rather than replayed from the retained range. Retained non-system entries and all entries after the compaction remain available to the LLM. With a provider summary block, the retained range keeps its system messages. Only the tool changes of the system messages before the first retained message are stored on the entry, in `providerSummary`; Pi states prompt changes among them again before the next request.
+The compaction summary replaces entries before `firstKeptEntryId`. Pre-compaction system messages are folded into the compaction entry's `systemMessage` and `toolUpdate` (omitting any idle `tool_search`-loaded tools pruned at compaction) rather than replayed from the retained range. Retained non-system entries and all entries after the compaction remain available to the LLM. With a provider summary block, the retained range keeps its system messages; tool changes of the system messages before the first retained message are stored in `providerSummary`, any idle `tool_search`-loaded tool removals are stored in `toolUpdate` (projected after `compactionSummary`), and Pi states prompt changes among the summarized messages again before the next request.
 
 ## Parsing Example
 
