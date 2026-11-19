@@ -1259,44 +1259,6 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
-	it("preserves cached Kitty images and clears stale text when the viewport resizes", async () => {
-		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
-		const terminal = new RecordingTerminal(20, 4);
-		const tui = new TuiAltScreen(terminal);
-		const imageId = 12345;
-		const imageLine = encodeKitty("AAAA", { columns: 2, rows: 1, imageId, moveCursor: false });
-		registerKittyImageMetadata({ imageId, columns: 2, rows: 1, widthPx: 10, heightPx: 10 });
-		let lines = [imageLine, "old text", "stale row", "footer"];
-		tui.setLayoutRoot({ render: () => lines, invalidate: () => {} });
-		try {
-			tui.start();
-			await terminal.waitForRender();
-			assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b_Ga=T")));
-			const eventCount = terminal.events.length;
-
-			lines = [imageLine, "new text"];
-			terminal.resize(20, 3);
-			await terminal.waitForRender();
-
-			const redraw = terminal.events
-				.slice(eventCount)
-				.filter((event): event is { type: "write"; data: string } => event.type === "write")
-				.map((event) => event.data)
-				.join("");
-			// Erase-display can delete uploaded images in real terminals, leaving placement-only redraws blank.
-			assert.ok(!redraw.includes("\x1b[2J"));
-			assert.ok(redraw.includes(`a=p,q=2,C=1,c=2,r=1,i=${imageId}`));
-			assert.ok(!redraw.includes("\x1b_Ga=T"));
-			assert.deepStrictEqual(
-				terminal.getViewport().map((line) => line.trimEnd()),
-				["", "new text", ""],
-			);
-		} finally {
-			tui.stop();
-			resetCapabilitiesCache();
-		}
-	});
-
 	it("redraws Kitty images after writes to covered rows", async () => {
 		// Regression test for #10319: in WezTerm, a scrollbar update below an unchanged image anchor erased its cells.
 		let tui: TuiAltScreen | undefined;
@@ -1344,10 +1306,12 @@ describe("TuiAltScreen", () => {
 			const imageId = 12010;
 			const imageLine = encodeKitty("AAAA", { columns: 2, rows: 3, imageId, moveCursor: false });
 			registerKittyImageMetadata({ imageId, columns: 2, rows: 3, widthPx: 100, heightPx: 100 });
+			let lines = ["before", imageLine, "", "", "after"];
 			tui = new TuiAltScreen(terminal);
-			tui.setLayoutRoot({ render: () => ["before", imageLine, "", "", "after"], invalidate: () => {} });
+			tui.setLayoutRoot({ render: () => lines, invalidate: () => {} });
 			tui.start();
 			await terminal.waitForRender();
+			assert.ok(terminal.events.some((event) => event.type === "write" && event.data.includes("\x1b_Ga=T")));
 			const eventCount = terminal.events.length;
 
 			terminal.resize(20, 8);
@@ -1361,6 +1325,24 @@ describe("TuiAltScreen", () => {
 			assert.ok(!redrawWrites.includes("\x1b_Ga=T"));
 			assert.ok(!redrawWrites.includes("\x1b[2J"));
 			assert.ok(terminal.getViewport().some((line) => line.trimEnd() === "after"));
+
+			// Without ED 2, shrinking the viewport and content must still clear stale rows below the new frame.
+			const shrinkEventCount = terminal.events.length;
+			lines = [imageLine, "", "", "new text"];
+			terminal.resize(20, 5);
+			await terminal.waitForRender();
+			const shrinkWrites = terminal.events
+				.slice(shrinkEventCount)
+				.filter((event): event is { type: "write"; data: string } => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			assert.ok(shrinkWrites.includes(`a=p,q=2,C=1,c=2,r=3,i=${imageId}`));
+			assert.ok(!shrinkWrites.includes("\x1b_Ga=T"));
+			assert.ok(!shrinkWrites.includes("\x1b[2J"));
+			assert.deepStrictEqual(
+				terminal.getViewport().map((line) => line.trimEnd()),
+				["", "", "", "new text", ""],
+			);
 		} finally {
 			tui?.stop();
 			resetCapabilitiesCache();
@@ -1963,6 +1945,7 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 		const focusLossEventCount = terminal.events.length;
 		terminal.sendInput("\x1b[O");
+		terminal.sendInput("\x1b[I");
 		await terminal.waitForRender();
 		const focusLossWrites = terminal.events
 			.slice(focusLossEventCount)

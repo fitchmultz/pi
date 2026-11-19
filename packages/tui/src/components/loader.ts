@@ -18,8 +18,8 @@ export class Loader extends Text {
 	private frames = [...DEFAULT_FRAMES];
 	private intervalMs = DEFAULT_INTERVAL_MS;
 	private currentFrame = 0;
-	private intervalId: NodeJS.Timeout | undefined;
-	private readonly ui: TUI;
+	private intervalId: NodeJS.Timeout | null = null;
+	private ui: TUI | null = null;
 	private renderIndicatorVerbatim = false;
 	private spinnerColorFn: (str: string) => string;
 	private messageColorFn: (str: string) => string;
@@ -46,19 +46,14 @@ export class Loader extends Text {
 
 	start(): void {
 		this.updateDisplay();
-		clearInterval(this.intervalId);
-		this.intervalId =
-			this.frames.length > 1
-				? setInterval(() => {
-						this.currentFrame = (this.currentFrame + 1) % this.frames.length;
-						this.updateDisplay();
-					}, this.intervalMs)
-				: undefined;
+		this.restartAnimation();
 	}
 
 	stop(): void {
-		clearInterval(this.intervalId);
-		this.intervalId = undefined;
+		if (this.intervalId) {
+			clearInterval(this.intervalId);
+			this.intervalId = null;
+		}
 	}
 
 	setMessage(message: string): void {
@@ -79,6 +74,17 @@ export class Loader extends Text {
 		this.start();
 	}
 
+	private restartAnimation(): void {
+		this.stop();
+		if (this.frames.length <= 1) {
+			return;
+		}
+		this.intervalId = setInterval(() => {
+			this.currentFrame = (this.currentFrame + 1) % this.frames.length;
+			this.updateDisplay();
+		}, this.intervalMs);
+	}
+
 	protected getRenderedIndicator(): string {
 		const frame = this.frames[this.currentFrame] ?? "";
 		return this.renderIndicatorVerbatim ? frame : this.spinnerColorFn(frame);
@@ -88,6 +94,8 @@ export class Loader extends Text {
 		const renderedFrame = this.getRenderedIndicator();
 		const indicator = renderedFrame.length > 0 ? `${renderedFrame} ` : "";
 		this.setText(`${indicator}${this.messageColorFn(this.message)}`);
-		this.ui.requestRender();
+		if (this.ui) {
+			this.ui.requestRender();
+		}
 	}
 }
