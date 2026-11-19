@@ -99,6 +99,28 @@ describe("syntax highlight renderer", () => {
 		expect(rendered).toContain("[keyword:const]");
 		expect(rendered).toContain("[number:1]");
 	});
+
+	it("defaults ignoreIllegals to true while honoring explicit false", () => {
+		const malformedJson = '{ "a": 1, trailing }';
+		const testTheme = {
+			attr: (text: string) => `[attr:${text}]`,
+			number: (text: string) => `[number:${text}]`,
+		};
+
+		const defaultHighlighted = highlight(malformedJson, {
+			language: "json",
+			theme: testTheme,
+		});
+		expect(defaultHighlighted).toContain('[attr:"a"]');
+		expect(defaultHighlighted).toContain("[number:1]");
+
+		const strictHighlighted = highlight(malformedJson, {
+			language: "json",
+			ignoreIllegals: false,
+			theme: testTheme,
+		});
+		expect(strictHighlighted).toBe(malformedJson);
+	});
 });
 
 describe("theme syntax highlighting", () => {

@@ -669,6 +669,33 @@ describe("SessionManager session file creation", () => {
 		expect(readFileSync(file, "utf8")).toBe("unrelated\n");
 	});
 
+	it("rolls back memory state when first creation fails with EEXIST and does not flush rejected entries later", () => {
+		const file = join(tempDir, "explicit-rollback.jsonl");
+		const session = SessionManager.open(file, tempDir);
+		const setupId = session.appendModelChange("anthropic", "claude-sonnet-4-5");
+		// Populate activeBranch cache before the colliding first-creation append.
+		expect(session.buildSessionContext().messages).toEqual([]);
+
+		writeFileSync(file, "unrelated\n");
+		const eexist = expect.objectContaining({ code: "EEXIST" });
+
+		expect(() => session.appendMessage(userMsg("rejected first"))).toThrow(eexist);
+		expect(session.getLeafId()).toBe(setupId);
+		expect(session.getEntries().map((entry) => entry.id)).toEqual([setupId]);
+		expect(session.buildSessionContext().messages).toEqual([]);
+		expect(readFileSync(file, "utf8")).toBe("unrelated\n");
+
+		// Removing the colliding file and appending later must not silently flush the previously rejected entry.
+		rmSync(file);
+		const acceptedId = session.appendMessage(userMsg("accepted after removal"));
+		expect(session.getLeafId()).toBe(acceptedId);
+		expect(session.buildSessionContext().messages).toMatchObject([{ content: "accepted after removal" }]);
+
+		const reopened = SessionManager.open(file, tempDir);
+		expect(reopened.getLeafId()).toBe(acceptedId);
+		expect(reopened.buildSessionContext().messages).toMatchObject([{ content: "accepted after removal" }]);
+	});
+
 	const canDenyWrites = process.platform !== "win32" && process.getuid?.() !== 0;
 	const eacces = expect.objectContaining({ code: "EACCES" });
 

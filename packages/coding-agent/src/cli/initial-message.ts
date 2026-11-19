@@ -13,6 +13,18 @@ export interface InitialMessageResult {
 	initialImages?: ImageContent[];
 }
 
+function joinInitialMessageParts(parts: readonly string[]): string {
+	let combined = parts[0];
+	for (let i = 1; i < parts.length; i++) {
+		const next = parts[i];
+		const trailingNewlines = combined.match(/(?:\r?\n)+$/)?.[0].match(/\n/g)?.length ?? 0;
+		const leadingNewlines = next.match(/^(?:\r?\n)+/)?.[0].match(/\n/g)?.length ?? 0;
+		const separator = "\n".repeat(Math.max(0, 2 - trailingNewlines - leadingNewlines));
+		combined += separator + next;
+	}
+	return combined;
+}
+
 /**
  * Combine stdin content, @file text, and the first CLI message into a single
  * initial prompt for non-interactive mode.
@@ -24,7 +36,7 @@ export function buildInitialMessage({
 	stdinContent,
 }: InitialMessageInput): InitialMessageResult {
 	const parts: string[] = [];
-	if (stdinContent !== undefined) {
+	if (stdinContent) {
 		parts.push(stdinContent);
 	}
 	if (fileText) {
@@ -37,7 +49,7 @@ export function buildInitialMessage({
 	}
 
 	return {
-		initialMessage: parts.some((part) => part.trim().length > 0) ? parts.join("\n\n") : undefined,
+		initialMessage: parts.some((part) => part.trim().length > 0) ? joinInitialMessageParts(parts) : undefined,
 		initialImages: fileImages && fileImages.length > 0 ? fileImages : undefined,
 	};
 }

@@ -6,6 +6,7 @@ export async function applyProviderRegistrations(
 	runtime: ExtensionRuntime,
 	modelRuntime: ModelRuntime,
 	onModelsChanged?: () => void,
+	options?: { refresh?: "always" | "on-change" },
 ): Promise<ExtensionError[]> {
 	const errors: ExtensionError[] = [];
 	let changed = false;
@@ -35,6 +36,6 @@ export async function applyProviderRegistrations(
 	changed =
 		runtime.bindProviderAuthFallbacks((id, fallback) => modelRuntime.registerProviderAuthFallback(id, fallback)) ||
 		changed;
-	if (changed) await modelRuntime.refresh({ allowNetwork: false });
+	if (changed || options?.refresh === "always") await modelRuntime.refresh({ allowNetwork: false });
 	return errors;
 }

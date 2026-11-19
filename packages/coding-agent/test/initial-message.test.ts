@@ -23,6 +23,17 @@ describe("buildInitialMessage", () => {
 		expect(parsed.messages).toEqual([]);
 	});
 
+	test("avoids triple newlines when stdin already ends with a newline", () => {
+		const parsed = createArgs(["Summarize the text given"]);
+		const result = buildInitialMessage({
+			parsed,
+			stdinContent: "README contents\n",
+		});
+
+		expect(result.initialMessage).toBe("README contents\n\nSummarize the text given");
+		expect(parsed.messages).toEqual([]);
+	});
+
 	test("uses stdin as the initial prompt when no CLI message is present", () => {
 		const parsed = createArgs();
 		const result = buildInitialMessage({
@@ -42,8 +53,33 @@ describe("buildInitialMessage", () => {
 			fileText: "file\n",
 		});
 
-		expect(result.initialMessage).toBe("stdin\n\n\nfile\n\n\nExplain it");
+		expect(result.initialMessage).toBe("stdin\n\nfile\n\nExplain it");
 		expect(parsed.messages).toEqual(["Second message"]);
+	});
+
+	test("does not pile up extra blank lines when parts already carry blank-line boundaries", () => {
+		const result = buildInitialMessage({
+			parsed: createArgs(["\nExplain it"]),
+			stdinContent: "stdin\n\n",
+			fileText: "file\n",
+		});
+		expect(result.initialMessage).toBe("stdin\n\nfile\n\nExplain it");
+	});
+
+	test("ignores empty stdin when a CLI message is present", () => {
+		const result = buildInitialMessage({
+			parsed: createArgs(["Explain it"]),
+			stdinContent: "",
+		});
+		expect(result.initialMessage).toBe("Explain it");
+	});
+
+	test("preserves non-empty whitespace stdin when a CLI message is present", () => {
+		const result = buildInitialMessage({
+			parsed: createArgs(["Count the spaces"]),
+			stdinContent: "  ",
+		});
+		expect(result.initialMessage).toBe("  \n\nCount the spaces");
 	});
 
 	test("does not start a turn for whitespace-only combined input", () => {

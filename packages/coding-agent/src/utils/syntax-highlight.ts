@@ -215,7 +215,7 @@ export function highlight(code: string, options: HighlightOptions = {}): string 
 	const html = options.language
 		? hljs.highlight(code, {
 				language: options.language,
-				ignoreIllegals: options.ignoreIllegals ?? false,
+				ignoreIllegals: options.ignoreIllegals ?? true,
 			}).value
 		: hljs.highlightAuto(code, options.languageSubset).value;
 	return renderHighlightedHtml(html, options.theme);
