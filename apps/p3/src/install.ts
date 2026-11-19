@@ -30,16 +30,19 @@ const SOURCE_FLAGS = ["--conditions=source", "--disable-warning=ExperimentalWarn
  * - `--optimize-for-size`: a smaller heap and young generation in a burst of turns, for a few percent of CPU;
  * - `--max-semi-space-size=4`: a young generation of at most 4 MiB a semi-space;
  * - `--gc-memory-reducer-start-delay-ms=8000` (owner, 2026-11-18, mem-audit): V8 starts shrinking the heap 8 s after
- *   work, not 30 s as Node 26's V8 does; 8000 is Node 24's own default, so the flag changes nothing there and the same
- *   list serves every Node p3 runs on (on Node 26, after a burst of turns 37.2 instead of 43.0 MiB).
- * Every Node p3 supports (24.4.0 and newer, `minimum-node.ts`) knows each of them: `test/install.test.ts` starts the
- * Node it runs on with them, and the release tests run on Node 24 and 26.
+ *   work, not 30 s as Node 26's V8 does by default (after a burst of turns 37.2 instead of 43.0 MiB);
+ * - `--managed-zone-memory` (owner, 2026-11-18, mem-audit): V8 pools the zone memory of its compilers itself instead of
+ *   taking it from malloc, so glibc keeps less freed memory (after five subagents 37.3 instead of 44.8 MiB). An
+ *   ordinary V8 flag staged for shipping (v8 commit 277d16f12e01, bug issues.chromium.org/409953791), off by default.
+ * Every Node p3 runs on (`minimum-node.ts`: 26.3.1 and newer) knows each of them: `test/install.test.ts` checks that
+ * the Node it runs on lists and accepts them.
  */
 export const WORKER_V8_FLAGS: readonly string[] = [
 	"--liftoff-only",
 	"--optimize-for-size",
 	"--max-semi-space-size=4",
 	"--gc-memory-reducer-start-delay-ms=8000",
+	"--managed-zone-memory",
 ];
 
 /**

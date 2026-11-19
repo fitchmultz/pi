@@ -2,7 +2,7 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`942842439e1f1d65f68a61857ddb7590b80c5a92` (2026-11-18), 323 commits after official v1.5.2.
+`653f332b6fe22e2e927dd3d553d20234a3de27f0` (2026-11-19), 337 commits after official v1.5.2.
 It is upstream plus the features below. Everything else follows upstream behavior and APIs.
 
 Supported and tested desktop platforms are Apple Silicon macOS and Linux (x64/arm64).
@@ -10,7 +10,8 @@ Android/Termux device functionality is retained. Windows and Intel macOS are not
 
 Each integration record documents its baseline, conflict decisions and verification, newest first:
 
-- [2026-11-18](docs/upstream-sync-2026-11-18.md), the current baseline
+- [2026-11-19](docs/upstream-sync-2026-11-19.md), the current baseline
+- [2026-11-18](docs/upstream-sync-2026-11-18.md)
 - [2026-11-13](docs/upstream-sync-2026-11-13.md)
 - [v1.5.2](docs/upstream-sync-1.5.2.md), including official v1.5.2
 - [2026-11-10](docs/upstream-sync-2026-11-10.md), including official v1.5.1

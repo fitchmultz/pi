@@ -1,6 +1,6 @@
 // Where p3's files are and how its processes start (`src/install.ts`): the session worker's V8 flags, which a Node
-// that does not know one of them refuses at the worker's start ("bad option"). Run on each Node p3 supports (the
-// release tests run on Node 24 and 26).
+// that does not know one of them refuses at the worker's start ("bad option"). Checked on the Node that runs the
+// tests.
 
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";

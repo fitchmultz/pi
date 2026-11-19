@@ -162,32 +162,42 @@
    transform, slowly (160ms a frame against pi's 80ms) and in the icons' colour, so many running agents stay calm.
    The strip starts at the box's left edge, left to right in any writing direction, so the box shows one whole frame
    at each step; every strip's delay puts it on the page's one clock (PiDots), so running items step together. Still
-   on its first frame without motion. */
+   on its first frame without motion. A frame is drawn, not a font's glyph: Android 10's braille font puts ⠸'s dots in
+   the left column, so that frame jumped. Each frame is a braille cell, a 2×4 grid of 2px dots 2px apart in a 16px
+   box, centred across and on the box's bottom edge (where the font's dots sat), all in whole pixels: every frame's
+   dots sit on the same pixels, and the strip steps by whole pixels. */
 .pi-dots {
+	--pi-frame: 16px;
+	--pi-dot: 2px;
 	display: inline-block;
 	flex: none;
-	width: 1em;
-	height: 1.2em;
+	width: var(--pi-frame);
+	height: var(--pi-frame);
 	overflow: hidden;
 	direction: ltr;
 	color: var(--semantic-color-icon-secondary);
-	font-family: var(--mono);
-	font-size: 1.15em;
-	line-height: 1.2em;
 }
 .pi-dots-strip {
 	display: flex;
-	width: 10em;
+	width: calc(10 * var(--pi-frame));
 	animation: pi-dots 1.6s steps(10) infinite;
 }
 .pi-dots-strip > span {
+	display: grid;
 	flex: none;
-	width: 1em;
-	text-align: center;
+	grid-template: repeat(4, var(--pi-dot)) / repeat(2, var(--pi-dot));
+	gap: var(--pi-dot);
+	place-content: end center;
+	width: var(--pi-frame);
+	height: var(--pi-frame);
+}
+.pi-dots-strip i {
+	border-radius: 50%;
+	background: currentColor;
 }
 @keyframes pi-dots {
 	to {
-		translate: -10em 0;
+		translate: calc(-10 * var(--pi-frame)) 0;
 	}
 }
 @media (prefers-reduced-motion: reduce) {
@@ -232,7 +242,8 @@
 /* Forced colours replace backgrounds with the canvas's: the dots keep theirs, or they would vanish. */
 @media (forced-colors: active) {
 	.unread-dot,
-	.failed-dot {
+	.failed-dot,
+	.pi-dots-strip i {
 		forced-color-adjust: none;
 	}
 }
@@ -597,4 +608,57 @@
 	font-weight: var(--fw-strong);
 	letter-spacing: 0.04em;
 	text-transform: uppercase;
+}
+
+/* A project's ⋯ (its commands): with a fine pointer it shows while the row is hovered or has keyboard focus, laid out
+   at rest so nothing moves; on touch screens a long press on the row opens the same commands, so it is not shown. */
+.nav-row > .nav-control.group-options {
+	opacity: 0;
+}
+.nav-row:is(:hover, :has(:focus-visible)) > .nav-control.group-options,
+.archived-project > .nav-control.group-options {
+	opacity: 1;
+}
+@media (pointer: coarse) {
+	.sidebar-group .nav-row > .nav-control.group-options {
+		display: none;
+	}
+}
+
+/* Drag and drop (drag.ts): the dragged row's name follows the pointer; a project's group or the sessions without a
+   project are filled while a session would land there; a line shows where a dragged project would go. */
+.sidebar-drag-ghost {
+	position: fixed;
+	inset: 0 auto auto 0;
+	z-index: 1000;
+	max-width: 240px;
+	padding: var(--s1) var(--s2);
+	overflow: hidden;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--bg);
+	color: var(--text);
+	font-size: var(--semantic-typography-ui-secondary-font-size);
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	pointer-events: none;
+}
+body.sidebar-dragging,
+body.sidebar-dragging * {
+	cursor: grabbing;
+	user-select: none;
+}
+.sidebar-group.drop-into > .nav-row,
+.sidebar-section.headless.drop-into {
+	background: var(--hover);
+}
+.sidebar-group.drop-before > .nav-row {
+	box-shadow: inset 0 2px 0 var(--text);
+}
+.sidebar-group.drop-after {
+	box-shadow: inset 0 -2px 0 var(--text);
+}
+/* While dragging, the sessions without a project take a drop even when there are none. */
+body.sidebar-dragging .sidebar-section.headless {
+	min-height: var(--nav-row);
 }
