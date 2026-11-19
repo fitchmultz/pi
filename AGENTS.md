@@ -50,6 +50,7 @@ These publication restrictions apply to `earendil-works/pi` and take precedence 
 - Default to upstream public APIs and architecture. Preserve approved outcomes, not old fork mechanisms: replace equivalent behavior and delete the redundant path.
 - Adapt only approved differences that upstream does not cover; do not disable upstream capabilities to preserve fork internals.
 - Behavior, cache stability, and safety requirements take precedence over old API or test shapes. Ask only about material unresolved behavior differences; do not reopen settled decisions without new evidence.
+- After fork changes merge to `fitchmultz/pi` `main`, update [`skills/pi-development/SKILL.md`](https://github.com/fitchmultz/pi-agent-skills/blob/main/skills/pi-development/SKILL.md) in `fitchmultz/pi-agent-skills` (including `metadata.fork-source` and any affected `references/`) to match the merged revision.
 
 ## Code Quality
 
