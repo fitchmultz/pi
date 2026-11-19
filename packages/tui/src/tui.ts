@@ -613,9 +613,7 @@ export abstract class TuiBase extends Container implements TUI {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
-	private static readonly UNFOCUSED_MIN_RENDER_INTERVAL_MS = 250;
 	private terminalFocused = true;
-	private dispatchingInput = false;
 	private terminalFocusListeners = new Set<(focused: boolean) => void>();
 	private showHardwareCursor = false;
 	private clearOnShrink = false;
@@ -1096,10 +1094,6 @@ export abstract class TuiBase extends Container implements TUI {
 			return;
 		}
 		this.terminalFocused = focused;
-		if (focused && this.renderRequested && !this.stopped) {
-			this.cancelRenderTimer();
-			this.scheduleRender();
-		}
 		for (const listener of this.terminalFocusListeners) {
 			listener(focused);
 		}
@@ -1167,12 +1161,6 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Request a frame for a change that leaves component output unchanged, such as a scroll position. */
 	protected requestViewRender(): void {
-		// Input while the terminal is unfocused, such as a wheel over a background window, is interactive: it must
-		// not wait out the unfocused render interval.
-		if (this.dispatchingInput && !this.terminalFocused) {
-			this.requestImmediateRender();
-			return;
-		}
 		if (this.stopped || this.renderRequested) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
@@ -1208,11 +1196,8 @@ export abstract class TuiBase extends Container implements TUI {
 		if (this.stopped || this.renderTimer || !this.renderRequested) {
 			return;
 		}
-		const minInterval = this.terminalFocused
-			? TuiBase.MIN_RENDER_INTERVAL_MS
-			: TuiBase.UNFOCUSED_MIN_RENDER_INTERVAL_MS;
 		const elapsed = performance.now() - this.lastRenderAt;
-		const delay = Math.max(0, minInterval - elapsed);
+		const delay = Math.max(0, TuiBase.MIN_RENDER_INTERVAL_MS - elapsed);
 		this.renderTimer = setTimeout(() => {
 			this.renderTimer = undefined;
 			if (this.stopped || !this.renderRequested) {
@@ -1229,16 +1214,6 @@ export abstract class TuiBase extends Container implements TUI {
 
 	/** Dispatch terminal input through the same listeners and focused component, including held input. */
 	dispatchInput(data: string): void {
-		const wasDispatching = this.dispatchingInput;
-		this.dispatchingInput = true;
-		try {
-			this.dispatchInputInternal(data);
-		} finally {
-			this.dispatchingInput = wasDispatching;
-		}
-	}
-
-	private dispatchInputInternal(data: string): void {
 		if (this.consumeTerminalColorResponse(data)) {
 			return;
 		}

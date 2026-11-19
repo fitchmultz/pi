@@ -1,4 +1,3 @@
-import { setTimeout as delay } from "node:timers/promises";
 import type { Component, Terminal, TUI, WheelScrollLines } from "@earendil-works/pi-tui";
 import { Container, getKeybindings, isViewportTUI, ScrollView, setKeybindings, Text } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -182,7 +181,7 @@ describe("createInteractiveTui", () => {
 		expect([terminal.startCount, terminal.stopCount]).toEqual([2, 2]);
 	});
 
-	it("rebinds an unmounted embedded WorkingStatusIndicator across switchTuiMode while /settings replaces the editor", async () => {
+	it("keeps the working spinner live while unfocused after a fullscreen renderer switch", async () => {
 		const terminal = new RecordingTerminal(40, 8);
 		const renderer = createInteractiveTui({
 			tuiMode: "regular",
@@ -228,6 +227,9 @@ describe("createInteractiveTui", () => {
 			extensionTerminalInputSubscriptions: new Set<never>(),
 		}) as SwitchContext;
 		context.ui = createInteractiveTuiReference(() => context.renderer);
+		const onFocusChange = vi.fn<(focused: boolean) => void>();
+		const unsubscribe = context.ui.onTerminalFocusChange?.(onFocusChange);
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 		const indicator = new WorkingStatusIndicator(
 			context.ui,
 			"Working",
@@ -246,18 +248,27 @@ describe("createInteractiveTui", () => {
 			expect(switchTuiMode.call(context, "fullscreen", false)).toBe(true);
 			await terminal.waitForRender();
 
+			expect(indicator.renderInBorder(30)).toBe("1 Working");
 			terminal.sendInput("\x1b[O");
+			expect(onFocusChange.mock.calls).toEqual([[false]]);
 			expect(context.ui.isTerminalFocused?.()).toBe(false);
-			await delay(35);
-			const pausedFrame = indicator.renderInBorder(30);
-			await delay(120);
-			expect(indicator.renderInBorder(30)).toBe(pausedFrame);
+
+			vi.advanceTimersByTime(25);
+			expect(indicator.renderInBorder(30)).toBe("2 Working");
+			vi.advanceTimersByTime(25);
+			expect(indicator.renderInBorder(30)).toBe("3 Working");
 
 			terminal.sendInput("\x1b[I");
-			await delay(80);
-			expect(indicator.renderInBorder(30)).not.toBe(pausedFrame);
+			expect(onFocusChange.mock.calls).toEqual([[false], [true]]);
+			expect(context.ui.isTerminalFocused?.()).toBe(true);
+			unsubscribe?.();
+			terminal.sendInput("\x1b[O");
+			expect(context.ui.isTerminalFocused?.()).toBe(false);
+			expect(onFocusChange).toHaveBeenCalledTimes(2);
 		} finally {
+			unsubscribe?.();
 			indicator.dispose();
+			vi.useRealTimers();
 			context.renderer.stop();
 		}
 	});
