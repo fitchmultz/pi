@@ -195,9 +195,10 @@ export class Coercer {
 	}
 
 	/**
-	 * `value` with the optional nulls of the first branch whose dropped and converted result the whole union accepts, so
-	 * pass 2 does not turn them into values (`"null"` for a string) and `oneOf` or sibling constraints are never broken.
-	 * The caller skips a union that accepts `value` as it is, so a nullable branch's nulls stay.
+	 * `value` with the optional nulls of the first branch that drops at least one null and whose resulting value the
+	 * enclosing schema (including sibling properties, `allOf`, and any combined union) accepts after whole-schema
+	 * conversion, so pass 2 does not turn them into values (`"null"` for a string) and `oneOf` or sibling constraints
+	 * are never broken. The caller skips a schema that accepts `value` as it is, so a nullable branch's nulls stay.
 	 */
 	private dropBranchNulls(schema: SchemaObject, value: object, branches: readonly unknown[], base: string): unknown {
 		for (const branch of branches) {
