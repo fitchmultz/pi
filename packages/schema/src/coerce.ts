@@ -131,7 +131,12 @@ export class Coercer {
 		} else if (isPlainObject(value)) {
 			value = this.dropPropertyNulls(value, schema, b);
 		}
-		if (typeof value === "object" && value !== null && this.passes(schema, b, value) !== true) {
+		if (
+			typeof value === "object" &&
+			value !== null &&
+			(Array.isArray(schema.anyOf) || Array.isArray(schema.oneOf)) &&
+			this.passes(schema, b, value) !== true
+		) {
 			if (Array.isArray(schema.anyOf)) value = this.dropBranchNulls(schema, value, schema.anyOf, b);
 			if (
 				Array.isArray(schema.oneOf) &&
@@ -197,12 +202,8 @@ export class Coercer {
 	private dropBranchNulls(schema: SchemaObject, value: object, branches: readonly unknown[], base: string): unknown {
 		for (const branch of branches) {
 			const candidate = this.dropOptionalNulls(value, branch, base);
-			const branchCoerced = this.coerceTypes(
-				this.convertMembers(schema, base, this.convert(branch, base, candidate)),
-				branch,
-				base,
-			);
-			const converted = this.coerceTypes(branchCoerced, schema, base, branches);
+			if (candidate === value) continue;
+			const converted = this.coerceTypes(this.convert(schema, base, candidate), schema, base);
 			if (this.passes(branch, base, converted) === true && this.passes(schema, base, converted) === true) {
 				return candidate;
 			}
@@ -364,17 +365,13 @@ export class Coercer {
 	// Pass 3: primitive coercion by type
 	// ---------------------------------------------------------------------------------------------------------------
 
-	private coerceTypes(value: unknown, schema: unknown, base: string, skipUnionBranches?: readonly unknown[]): unknown {
+	private coerceTypes(value: unknown, schema: unknown, base: string): unknown {
 		if (!isSchemaObject(schema)) return value;
 		const b = this.baseOf(schema, base);
 		let next = value;
 		if (Array.isArray(schema.allOf)) for (const member of schema.allOf) next = this.coerceTypes(next, member, b);
-		if (Array.isArray(schema.anyOf) && schema.anyOf !== skipUnionBranches) {
-			next = this.coerceUnion(next, schema.anyOf, b);
-		}
-		if (Array.isArray(schema.oneOf) && schema.oneOf !== skipUnionBranches) {
-			next = this.coerceUnion(next, schema.oneOf, b);
-		}
+		if (Array.isArray(schema.anyOf)) next = this.coerceUnion(next, schema.anyOf, b);
+		if (Array.isArray(schema.oneOf)) next = this.coerceUnion(next, schema.oneOf, b);
 		const types = typesOf(schema);
 		const matchesUnionMember = types.length > 1 && types.some((type) => matchesType(next, type));
 		if (types.length > 0 && !matchesUnionMember) {
