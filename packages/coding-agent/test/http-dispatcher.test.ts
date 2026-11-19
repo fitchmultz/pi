@@ -56,6 +56,22 @@ describe("http proxy settings", () => {
 		expect(process.env.HTTP_PROXY).toBeUndefined();
 		expect(process.env.HTTPS_PROXY).toBeUndefined();
 	});
+
+	it("updates and clears setting-owned proxy env vars without touching caller-provided ones", () => {
+		process.env.HTTP_PROXY = "http://caller-http:8080";
+
+		applyHttpProxySettings("http://settings-a:7890");
+		expect(process.env.HTTP_PROXY).toBe("http://caller-http:8080");
+		expect(process.env.HTTPS_PROXY).toBe("http://settings-a:7890");
+
+		applyHttpProxySettings("http://settings-b:7890");
+		expect(process.env.HTTP_PROXY).toBe("http://caller-http:8080");
+		expect(process.env.HTTPS_PROXY).toBe("http://settings-b:7890");
+
+		applyHttpProxySettings(undefined);
+		expect(process.env.HTTP_PROXY).toBe("http://caller-http:8080");
+		expect(process.env.HTTPS_PROXY).toBeUndefined();
+	});
 });
 
 describe("http dispatcher", () => {

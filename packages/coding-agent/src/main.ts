@@ -697,7 +697,18 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(1);
 	}
 	const agentDir = saved?.launch?.agentDir ?? getAgentDir();
-	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+	const trustStore = new ProjectTrustStore(agentDir);
+	const savedProjectTrusted = saved
+		? (saved.launch?.trustProject ?? (hasTrustRequiringProjectResources(cwd) ? false : (trustStore.get(cwd) ?? true)))
+		: undefined;
+	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, {
+		projectTrusted: saved && handoff ? savedProjectTrusted : false,
+	});
+	if (saved && handoff) {
+		const refreshed = bootstrapSettingsManager.refreshWorkingSessionSettings(saved.settings, saved.settingsLayers);
+		saved.settings = refreshed.settings;
+		saved.settingsLayers = refreshed.settingsLayers;
+	}
 	if (saved) bootstrapSettingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
 	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher(saved ? bootstrapSettingsManager.getHttpIdleTimeoutMs() : undefined);
@@ -795,7 +806,11 @@ export async function main(args: string[], options?: MainOptions) {
 		: runMigrations(cwd);
 	time("runMigrations");
 
-	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
+	const startupSettingsManager = SettingsManager.create(
+		cwd,
+		agentDir,
+		saved ? { projectTrusted: savedProjectTrusted } : undefined,
+	);
 	if (saved) startupSettingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
 	const startupSettingsDiagnostics = collectSettingsDiagnostics(startupSettingsManager);
 
@@ -862,7 +877,6 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	time("createSessionManager");
 
-	const trustStore = new ProjectTrustStore(agentDir);
 	const sessionCwd = sessionManager.getCwd();
 	const autoTrustOnReloadCwd =
 		parsed.projectTrustOverride === undefined && !hasTrustRequiringProjectResources(sessionCwd)

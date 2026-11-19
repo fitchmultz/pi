@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ScrollViewScrollbar, TerminalCapabilities, WheelScrollLines } from "@earendil-works/pi-tui";
@@ -153,6 +154,96 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	const toolExposure = mergeToolExposure(base.toolExposure, overrides.toolExposure);
 	if (toolExposure !== undefined) merged.toolExposure = toolExposure;
 	return merged as Settings;
+}
+
+function extractDefaultToolsOverride(
+	base: string[] | undefined,
+	effective: string[] | undefined,
+): string[] | undefined {
+	if (effective === undefined || isDeepStrictEqual(base, effective)) return undefined;
+	if (
+		Array.isArray(base) &&
+		Array.isArray(effective) &&
+		effective.length > base.length &&
+		base.every((entry, index) => effective[index] === entry)
+	) {
+		const suffix = effective.slice(base.length);
+		if (suffix.every(isToolModifier)) return suffix;
+	}
+	return structuredClone(effective);
+}
+
+function extractToolExposureOverride(base: unknown, effective: unknown): unknown {
+	if (effective === undefined) return undefined;
+	if (!isMergeableObject(base) || !isMergeableObject(effective)) {
+		return isDeepStrictEqual(base, effective) ? undefined : structuredClone(effective);
+	}
+	// mergeToolExposure places overriding keys first and preserves untouched base keys at the tail.
+	const baseIndex = new Map<string, number>(Object.keys(base).map((key, index) => [key, index]));
+	const effectiveEntries = Object.entries(effective);
+	let overrideEnd = effectiveEntries.length;
+	let maxBaseIndex = Number.POSITIVE_INFINITY;
+	for (let index = effectiveEntries.length - 1; index >= 0; index--) {
+		const [key, value] = effectiveEntries[index]!;
+		const position = baseIndex.get(key);
+		if (position === undefined || position >= maxBaseIndex || !isDeepStrictEqual(value, base[key])) {
+			break;
+		}
+		maxBaseIndex = position;
+		overrideEnd = index;
+	}
+	if (overrideEnd === 0) return undefined;
+	const overrides: Record<string, unknown> = {};
+	for (let index = 0; index < overrideEnd; index++) {
+		const [key, value] = effectiveEntries[index]!;
+		overrides[key] = structuredClone(value);
+	}
+	return overrides;
+}
+
+function extractObjectOverrides(
+	base: Record<string, unknown>,
+	effective: Record<string, unknown>,
+	skipKeys?: ReadonlySet<string>,
+): Record<string, unknown> | undefined {
+	let overrides: Record<string, unknown> | undefined;
+	for (const key of Object.keys(effective)) {
+		if (skipKeys?.has(key)) continue;
+		const effectiveValue = effective[key];
+		if (effectiveValue === undefined) continue;
+		const baseValue = Object.hasOwn(base, key) ? base[key] : undefined;
+		if (isMergeableObject(baseValue) && isMergeableObject(effectiveValue)) {
+			const nested = extractObjectOverrides(baseValue, effectiveValue);
+			if (nested !== undefined) {
+				overrides ??= {};
+				overrides[key] = nested;
+			}
+			continue;
+		}
+		if (!isDeepStrictEqual(baseValue, effectiveValue)) {
+			overrides ??= {};
+			overrides[key] = structuredClone(effectiveValue);
+		}
+	}
+	return overrides;
+}
+
+const SPECIAL_MERGE_SETTINGS_KEYS = new Set(["defaultTools", "toolExposure"]);
+
+function extractSettingsOverrides(base: Settings, effective: Settings): Partial<Settings> | undefined {
+	const overrides = extractObjectOverrides(
+		base as Record<string, unknown>,
+		effective as Record<string, unknown>,
+		SPECIAL_MERGE_SETTINGS_KEYS,
+	);
+	const defaultTools = extractDefaultToolsOverride(base.defaultTools, effective.defaultTools);
+	const toolExposure = extractToolExposureOverride(base.toolExposure, effective.toolExposure);
+	if (defaultTools === undefined && toolExposure === undefined) return overrides as Partial<Settings> | undefined;
+	return {
+		...(overrides ?? {}),
+		...(defaultTools !== undefined ? { defaultTools } : {}),
+		...(toolExposure !== undefined ? { toolExposure } : {}),
+	} as Partial<Settings>;
 }
 
 function parseTimeoutSetting(value: unknown, settingName: string): number | undefined {
@@ -396,7 +487,10 @@ export class SettingsManager {
 		if (!content) {
 			return {};
 		}
-		const settings = JSON.parse(stripBom(content));
+		const settings: unknown = JSON.parse(stripBom(content));
+		if (!isMergeableObject(settings)) {
+			throw new Error("Settings file must contain a JSON object");
+		}
 		return SettingsManager.migrateSettings(settings);
 	}
 
@@ -493,6 +587,32 @@ export class SettingsManager {
 		this.globalSettings = structuredClone(layers.global);
 		this.projectSettings = this.projectTrusted ? structuredClone(layers.project) : {};
 		this.settings = structuredClone(settings);
+	}
+
+	/**
+	 * Refresh a saved working session's settings layers from this manager's loaded storage while
+	 * preserving any transient `applyOverrides()` differences present in `savedSettings`.
+	 * If a settings file failed to load from storage (e.g. invalid JSON), keep that scope's saved layer.
+	 */
+	refreshWorkingSessionSettings(
+		savedSettings: Settings,
+		savedLayers: { global: Settings; project: Settings },
+	): { settings: Settings; settingsLayers: { global: Settings; project: Settings } } {
+		const savedProject = this.projectTrusted ? savedLayers.project : {};
+		const savedBase = deepMergeSettings(savedLayers.global, savedProject);
+		const overrides = extractSettingsOverrides(savedBase, savedSettings);
+		const global = this.globalSettingsLoadError ? structuredClone(savedLayers.global) : this.getGlobalSettings();
+		const project = this.projectTrusted
+			? this.projectSettingsLoadError
+				? structuredClone(savedLayers.project)
+				: this.getProjectSettings()
+			: {};
+		const merged = deepMergeSettings(global, project);
+		const settings = overrides ? deepMergeSettings(merged, overrides) : merged;
+		return {
+			settings: structuredClone(settings),
+			settingsLayers: { global, project },
+		};
 	}
 
 	/** Resource overrides are transient too; unchanged file settings retain their native origins. */
@@ -658,9 +778,14 @@ export class SettingsManager {
 		modifiedNestedFields: Map<keyof Settings, Set<string>>,
 	): void {
 		this.storage.withLock(scope, (current) => {
-			const currentFileSettings = current
-				? SettingsManager.migrateSettings(JSON.parse(stripBom(current)) as Record<string, unknown>)
-				: {};
+			let currentFileSettings: Settings = {};
+			if (current) {
+				const parsed: unknown = JSON.parse(stripBom(current));
+				if (!isMergeableObject(parsed)) {
+					throw new Error("Settings file must contain a JSON object");
+				}
+				currentFileSettings = SettingsManager.migrateSettings(parsed);
+			}
 			const mergedSettings: Settings = { ...currentFileSettings };
 			for (const field of modifiedFields) {
 				const value = scopedSettings[field];
