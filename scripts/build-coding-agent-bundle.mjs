@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -172,7 +172,7 @@ const mainResult = await build({
 	...commonBuildOptions(),
 	entryNames: "[name]",
 	entryPoints: {
-		"cli-worker": join(codingAgentDistDir, "cli.js"),
+		"cli-runtime": join(codingAgentDistDir, "cli.js"),
 		index: join(codingAgentDistDir, "index.js"),
 		"rpc-entry": join(codingAgentDistDir, "rpc-entry.js"),
 	},
@@ -277,9 +277,20 @@ for (const [label, metafile, suffix, maxBytes] of [
 
 const metafiles = [cliResult.metafile, mainResult.metafile, lazyResult.metafile, codemodeWorkerResult.metafile];
 validateExternalImports(metafiles);
+// Enable V8 compile caching before loading the ESM runtime graph so direct
+// cli-worker launches (without the supervisor's NODE_COMPILE_CACHE) also cache
+// the bundled chunks.
+const cliWorker = `#!/usr/bin/env node
+import { createRequire, enableCompileCache } from "node:module";
+
+enableCompileCache();
+createRequire(import.meta.url)("./cli-runtime.js");
+`;
+writeFileSync(join(bundleDir, "cli-worker.js"), cliWorker);
 chmodSync(join(bundleDir, "cli.js"), 0o755);
+chmodSync(join(bundleDir, "cli-worker.js"), 0o755);
 chmodSync(join(bundleDir, "rpc-entry.js"), 0o755);
 
-const files = new Set(metafiles.flatMap((metafile) => Object.keys(metafile.outputs))).size;
-const mib = outputBytes(metafiles) / (1024 * 1024);
+const files = new Set(metafiles.flatMap((metafile) => Object.keys(metafile.outputs))).size + 1;
+const mib = (outputBytes(metafiles) + cliWorker.length) / (1024 * 1024);
 console.log(`Built ${relative(repoRoot, bundleDir)} (${files} files, ${mib.toFixed(1)} MiB)`);

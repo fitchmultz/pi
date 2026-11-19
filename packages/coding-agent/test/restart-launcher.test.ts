@@ -10,8 +10,9 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { getCompileCacheDir } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getRestartArgs, getRestartRuntimeWorker, runCliLauncher, superviseCli } from "../src/cli/launcher.ts";
 import { parseRestartCommand, parseRestartRequest } from "../src/cli/restart-protocol.ts";
@@ -37,6 +38,8 @@ interface Receipt {
 	pid: number;
 	args: string[];
 	execArgv: string[];
+	compileCacheEnv?: string;
+	compileCacheDir?: string;
 	handoff?: { sessionId: string; workingSession: string; message?: string; failure?: string };
 }
 
@@ -73,8 +76,9 @@ async function fixture() {
 				`
 import { appendFileSync, existsSync, unlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { getCompileCacheDir } from 'node:module';
 const handoff = process.env.PI_RESTART_HANDOFF ? JSON.parse(process.env.PI_RESTART_HANDOFF) : undefined;
-appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(name)}, pid: process.pid, args: process.argv.slice(2), execArgv: process.execArgv, handoff }) + '\\n');
+appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(name)}, pid: process.pid, args: process.argv.slice(2), execArgv: process.execArgv, compileCacheEnv: process.env.NODE_COMPILE_CACHE, compileCacheDir: getCompileCacheDir(), handoff }) + '\\n');
 const select = (name) => { if (existsSync(${JSON.stringify(selector)})) unlinkSync(${JSON.stringify(selector)}); symlinkSync(${JSON.stringify(root)} + '/' + name + '/dist/bundle/cli.js', ${JSON.stringify(selector)}); };
 const session = ${JSON.stringify(session)};
 ${session.workingSession === defaultArtifact ? "session.workingSession += '-' + process.pid;" : ""}
@@ -548,6 +552,94 @@ process.send({ type: 'pi:ready' });`,
 		expect(receipts[2]?.execArgv).toEqual(["--max_semi_space_size=24"]);
 		expect(receipts[3]?.execArgv).toEqual([]);
 		expect(receipts[4]?.execArgv).toEqual([]);
+	});
+	it("propagates NODE_COMPILE_CACHE to spawned workers unless configured or disabled by caller env", async () => {
+		const f = await fixture();
+		const a = f.release("A", 'if (!handoff) { select("B"); restart(); } else ready();');
+		f.release("B", "ready();");
+		const single = f.release("single", "ready();");
+		f.select(a);
+
+		const cleanEnv = { ...process.env };
+		delete cleanEnv.NODE_COMPILE_CACHE;
+		delete cleanEnv.NODE_DISABLE_COMPILE_CACHE;
+		const customCacheDir = join(f.root, "custom-compile-cache");
+
+		expect(
+			await superviseCli(getRestartRuntimeWorker(a), [], {
+				invocationPath: f.selector,
+				execArgv: [],
+				env: cleanEnv,
+			}),
+		).toBe(0);
+		expect(
+			await superviseCli(getRestartRuntimeWorker(single), [], {
+				execArgv: [],
+				env: { ...cleanEnv, NODE_COMPILE_CACHE: customCacheDir },
+			}),
+		).toBe(0);
+		expect(
+			await superviseCli(getRestartRuntimeWorker(single), [], {
+				execArgv: [],
+				env: { ...cleanEnv, NODE_DISABLE_COMPILE_CACHE: "1" },
+			}),
+		).toBe(0);
+		expect(
+			await superviseCli(getRestartRuntimeWorker(single), [], {
+				execArgv: [],
+				env: { ...cleanEnv, NODE_DISABLE_COMPILE_CACHE: "" },
+			}),
+		).toBe(0);
+
+		const parentCacheDir = getCompileCacheDir();
+		expect(parentCacheDir).toBeTypeOf("string");
+		const receipts = f.read();
+		expect(receipts).toHaveLength(5);
+		// Initial worker and restarted worker both inherit the base cache dir and resolve the same versioned dir
+		// (Node 22 includes V8 flags like --max-semi-space-size=8 in the tag hash, so the worker's tag can differ from Vitest's).
+		for (const receipt of [receipts[0]!, receipts[1]!]) {
+			expect(receipt.compileCacheEnv).toBe(dirname(parentCacheDir!));
+			expect(receipt.compileCacheDir).toBeTypeOf("string");
+			expect(dirname(receipt.compileCacheDir!)).toBe(dirname(parentCacheDir!));
+		}
+		expect(receipts[1]!.compileCacheDir).toBe(receipts[0]!.compileCacheDir);
+		// Explicit caller NODE_COMPILE_CACHE is preserved untouched.
+		expect(receipts[2]?.compileCacheEnv).toBe(customCacheDir);
+		expect(receipts[2]?.compileCacheDir).toBeTypeOf("string");
+		expect(dirname(receipts[2]!.compileCacheDir!)).toBe(customCacheDir);
+		// Explicit NODE_DISABLE_COMPILE_CACHE (including empty string) disables compile cache in the worker.
+		for (const receipt of [receipts[3]!, receipts[4]!]) {
+			expect(receipt.compileCacheEnv).toBeUndefined();
+			expect(receipt.compileCacheDir).toBeUndefined();
+		}
+	});
+	it("propagates the base compile cache dir without double-nesting through cli-launcher.ts", async () => {
+		const f = await fixture();
+		const a = f.release("A", "ready();");
+		const isolatedTmp = join(f.root, "tmp");
+		mkdirSync(isolatedTmp, { recursive: true });
+		const entry = join(f.root, "launch-compile-cache.mjs");
+		writeFileSync(
+			entry,
+			`
+process.argv = [process.execPath, ${JSON.stringify(join(a, "dist", "bundle", "cli.js"))}];
+await import(${JSON.stringify(new URL("../src/cli-launcher.ts", import.meta.url).href)});
+`,
+		);
+		const env: NodeJS.ProcessEnv = { ...process.env, TMPDIR: isolatedTmp, TMP: isolatedTmp, TEMP: isolatedTmp };
+		delete env.NODE_COMPILE_CACHE;
+		delete env.NODE_DISABLE_COMPILE_CACHE;
+		const child = spawn(process.execPath, [entry], { env, stdio: "ignore" });
+		const code = await new Promise<number | null>((resolve, reject) => {
+			child.once("error", reject);
+			child.once("exit", (exitCode) => resolve(exitCode));
+		});
+		expect(code).toBe(0);
+		const [receipt] = f.read();
+		const expectedBase = join(isolatedTmp, "node-compile-cache");
+		expect(receipt?.compileCacheEnv).toBe(expectedBase);
+		expect(receipt?.compileCacheDir).toBeTypeOf("string");
+		expect(dirname(receipt!.compileCacheDir!)).toBe(expectedBase);
 	});
 	it.skipIf(process.platform === "win32")(
 		"preserves the committed launcher exit code when terminal hangup delivers SIGHUP during exit teardown",
