@@ -2744,7 +2744,10 @@ describe("openai-codex streaming", () => {
 		const secondBody = sentBodies[1] as { input: unknown[]; previous_response_id?: string; store?: boolean };
 		expect(firstBody.store).toBe(false);
 		expect(firstBody.previous_response_id).toBeUndefined();
-		expect(firstBody.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Use the tool" }] }]);
+		expect(firstBody.input).toEqual([
+			{ role: "developer", content: "You are a helpful assistant." },
+			{ role: "user", content: [{ type: "input_text", text: "Use the tool" }] },
+		]);
 		expect(secondBody.store).toBe(false);
 		expect(secondBody.previous_response_id).toBe("resp_1");
 		expect(secondBody.input).toEqual([
@@ -2963,7 +2966,7 @@ describe("openai-codex streaming", () => {
 			expect(sentBodies[1].previous_response_id).toBe("resp_1");
 			expect(sentBodies[1].input).toEqual([{ role: "user", content: [{ type: "input_text", text: "Now finish" }] }]);
 			expect(sentBodies[2].previous_response_id).toBeUndefined();
-			expect(sentBodies[2].input).toHaveLength(3);
+			expect(sentBodies[2].input).toHaveLength(4);
 			expect(sentBodies[2].input.at(-1)).toEqual({
 				role: "user",
 				content: [{ type: "input_text", text: "Now finish" }],
@@ -3158,9 +3161,10 @@ describe("openai-codex streaming", () => {
 		expect(capturedEncoding).toBe("zstd");
 		expect(capturedBody).toBeInstanceOf(Uint8Array);
 		const decoded = JSON.parse(Buffer.from(zstdDecompressSync(capturedBody as Uint8Array)).toString("utf8")) as {
-			input: Array<{ content: Array<{ text: string }> }>;
+			input: Array<{ role: string; content: string | Array<{ text: string }> }>;
 		};
-		expect(decoded.input[0].content[0].text).toBe(largeText);
+		expect(decoded.input[0]).toEqual({ role: "developer", content: "You are a helpful assistant." });
+		expect((decoded.input[1].content as Array<{ text: string }>)[0].text).toBe(largeText);
 
 		capturedEncoding = null;
 		capturedBody = undefined;
@@ -3310,5 +3314,98 @@ describe("openai-codex streaming", () => {
 		const result = await resultPromise;
 		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 		expect(codexRequests).toBe(4);
+	});
+
+	it("sends the leading system prompt in input and omits top-level instructions", async () => {
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-6.2-astra",
+			name: "GPT-6.2 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272000,
+			maxTokens: 128000,
+			compat: {
+				supportsMidConvoSystemMessages: true,
+				supportsAdditionalTools: true,
+				supportsToolSearch: true,
+			},
+		};
+		const capture = async (
+			targetModel: Model<"openai-codex-responses">,
+			context: ReturnType<typeof normalizeContext>,
+		) => {
+			let payload: Record<string, unknown> | undefined;
+			const result = await streamOpenAICodexResponses(targetModel, context, {
+				apiKey: mockToken(),
+				transport: "sse",
+				onPayload: (body) => {
+					payload = structuredClone(body) as Record<string, unknown>;
+					throw new Error("payload captured");
+				},
+			}).result();
+			expect(result.errorMessage).toContain("payload captured");
+			if (!payload) throw new Error("Expected payload");
+			return payload;
+		};
+
+		const initialTools = [
+			{
+				name: "read_file",
+				description: "Read a file",
+				parameters: Type.Object({ path: Type.String() }),
+			},
+		];
+		const turn1 = await capture(
+			model,
+			normalizeContext({
+				systemPrompt: "Follow every workspace rule.",
+				tools: initialTools,
+				messages: [{ role: "user", content: "First question", timestamp: 1 }],
+			}),
+		);
+		expect(turn1).not.toHaveProperty("instructions");
+		expect(turn1.input).toEqual([
+			{
+				type: "additional_tools",
+				role: "developer",
+				tools: [
+					{
+						type: "function",
+						name: "read_file",
+						description: "Read a file",
+						parameters: Type.Object({ path: Type.String() }),
+						strict: null,
+					},
+				],
+			},
+			{ role: "developer", content: "Follow every workspace rule." },
+			{ role: "user", content: [{ type: "input_text", text: "First question" }] },
+		]);
+
+		const noSystem = await capture(
+			model,
+			normalizeContext({
+				messages: [{ role: "user", content: "No system prompt", timestamp: 2 }],
+			}),
+		);
+		expect(noSystem).not.toHaveProperty("instructions");
+		expect(noSystem.input).toEqual([{ role: "user", content: [{ type: "input_text", text: "No system prompt" }] }]);
+
+		const nonReasoning = await capture(
+			{ ...model, reasoning: false },
+			normalizeContext({
+				systemPrompt: "Use system role.",
+				messages: [{ role: "user", content: "Hello", timestamp: 3 }],
+			}),
+		);
+		expect(nonReasoning).not.toHaveProperty("instructions");
+		expect(nonReasoning.input).toEqual([
+			{ role: "system", content: "Use system role." },
+			{ role: "user", content: [{ type: "input_text", text: "Hello" }] },
+		]);
 	});
 });
