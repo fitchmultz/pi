@@ -1,23 +1,30 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
 	AssistantEntry,
 	ConversationBusy,
 	defineEntry,
+	defineTool,
 	type EntryId,
 	GenerationTask,
+	InboxDoc,
 	LiveDoc,
+	StorageCapacityError,
+	type StorageWrite,
 	type SubmissionCreate,
+	type SubmissionDraft,
 	type SubmissionId,
 	type SubmissionRecord,
 	UserEntry,
 } from "@earendil-works/pi-durable";
+import { obj } from "@earendil-works/pi-schema";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionImpl } from "../src/session/session.ts";
 import { openNodeSqliteStorage } from "../src/storage/sqlite/node.ts";
 import { allEntries, chatSetup, openChat, unanswered } from "./chat-support.ts";
+import { addTool } from "./harness-support.ts";
 import { ControlledStorage, context, LateResolvingStorage } from "./session-support.ts";
 import { deferred } from "./task-support.ts";
 
@@ -332,6 +339,199 @@ describe("submissions", () => {
 		const submission = await root.submit({ type: "input", content: "hello" }, context);
 		await submission.wait(context);
 		expect(settled.has(submission.id)).toBe(true);
+		await harness.close(context);
+	});
+
+	it("settles an unstoreable queued write at boundary placement without failing the Session or advancing head", async () => {
+		class EntryCapacityStorage extends ControlledStorage {
+			async checkAdmission(writes: readonly StorageWrite[]): Promise<boolean> {
+				return !writes.some((write) => write.type === "entry" && write.value.kind === "test.oversized-write");
+			}
+		}
+		const setup = chatSetup();
+		const release = deferred();
+		const reached = deferred();
+		setup.faux.setResponses([
+			async () => {
+				reached.resolve();
+				await release.promise;
+				return fauxAssistantMessage("first answer");
+			},
+			fauxAssistantMessage("next answer"),
+		]);
+		const { harness, root } = await openChat(new EntryCapacityStorage(), setup);
+		const first = await root.submit({ type: "input", content: "first" }, context);
+		await reached.promise;
+		const firstRecord = await first.status(context);
+		if (firstRecord.type !== "input" || firstRecord.status !== "placed") {
+			throw new Error(`Unexpected ${firstRecord.status}`);
+		}
+		const oversized = await root.submit(
+			{ type: "write", entry: { kind: "test.oversized-write", head: "self", data: { body: "too big" } } },
+			context,
+		);
+		// Targets an entry before the failed reset would have landed: must stay valid if `boundary.head` did not advance.
+		const after = await root.submit(
+			{ type: "write", entry: { kind: "test.after-write", head: firstRecord.entry } },
+			context,
+		);
+		const next = await root.submit({ type: "input", content: "next" }, context);
+		expect((await oversized.status(context)).status).toBe("queued");
+
+		release.resolve();
+		expect((await first.wait(context)).status).toBe("done");
+		expect(await oversized.wait(context)).toMatchObject({
+			status: "unanswered",
+			reason: "input_too_large",
+			detail: expect.any(String),
+		});
+		expect(await after.wait(context)).toMatchObject({ status: "done", entry: expect.any(Number) });
+		expect((await next.wait(context)).status).toBe("done");
+		expect(await harness.snapshot(InboxDoc, root.id, context)).toEqual({ items: [] });
+		const entries = await allEntries(root);
+		expect(entries.some((entry) => entry.kind === "test.oversized-write")).toBe(false);
+		expect(entries.some((entry) => entry.kind === "test.after-write")).toBe(true);
+		expect(setup.reports).toEqual([]);
+		await harness.close(context);
+	});
+
+	it("does not falsely reset a run at postTools when a queued reset write fails capacity", async () => {
+		class EntryCapacityStorage extends ControlledStorage {
+			async checkAdmission(writes: readonly StorageWrite[]): Promise<boolean> {
+				return !writes.some((write) => write.type === "entry" && write.value.kind === "test.oversized-reset");
+			}
+		}
+		const setup = chatSetup();
+		const toolStarted = deferred();
+		const releaseTool = deferred();
+		const Pause = defineTool({
+			name: "pause",
+			description: "pause",
+			parameters: obj({}),
+			async execute() {
+				toolStarted.resolve();
+				await releaseTool.promise;
+				return { output: [] };
+			},
+		});
+		addTool(setup.registry, Pause);
+		setup.faux.setResponses([
+			fauxAssistantMessage([fauxToolCall("pause", {}, { id: "c1" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("run answer"),
+			fauxAssistantMessage("followUp answer"),
+		]);
+		const { harness, root } = await openChat(new EntryCapacityStorage(), setup);
+		const first = await root.submit({ type: "input", content: "first" }, context);
+		await toolStarted.promise;
+		const oversizedReset = await root.submit(
+			{ type: "write", entry: { kind: "test.oversized-reset", head: "self" } },
+			context,
+		);
+		const followUp = await root.submit({ type: "input", content: "after", whenBusy: "followUp" }, context);
+
+		releaseTool.resolve();
+		expect(await oversizedReset.wait(context)).toMatchObject({ status: "unanswered", reason: "input_too_large" });
+		expect((await first.wait(context)).status).toBe("done");
+		expect((await followUp.wait(context)).status).toBe("done");
+		expect(await harness.snapshot(InboxDoc, root.id, context)).toEqual({ items: [] });
+		expect(setup.faux.state.callCount).toBe(3);
+		expect(setup.reports).toEqual([]);
+		await harness.close(context);
+	});
+
+	it("rethrows StorageCapacityError when an admitting write fails boundary placement on a non-empty idle inbox", async () => {
+		class EntryCapacityStorage extends ControlledStorage {
+			async checkAdmission(writes: readonly StorageWrite[]): Promise<boolean> {
+				return !writes.some((write) => write.type === "entry" && write.value.kind === "test.oversized-write");
+			}
+		}
+		const setup = chatSetup();
+		const busy = unanswered();
+		setup.faux.setResponses([busy.step, fauxAssistantMessage("kept answer")]);
+		const { harness, root } = await openChat(new EntryCapacityStorage(), setup);
+		const first = await root.submit({ type: "input", content: "first" }, context);
+		await busy.reached;
+		// `onAbort: "keep"` leaves a queued item in `InboxDoc` once the conversation becomes idle after abort.
+		const kept = await root.submit({ type: "input", content: "kept", onAbort: "keep" }, context);
+		await root.abort(context);
+		expect((await first.wait(context)).status).toBe("unanswered");
+		expect((await kept.status(context)).status).toBe("queued");
+
+		const oversizedDraft: SubmissionDraft = {
+			type: "write",
+			requestId: "oversized-admitting",
+			entry: { kind: "test.oversized-write", head: "self" },
+		};
+		// Both `submit(draft, context)` and `submit(tx, draft)` must reject directly, not settle `unanswered`.
+		await expect(root.submit(oversizedDraft, context)).rejects.toBeInstanceOf(StorageCapacityError);
+		await expect(root.commit((tx) => root.submit(tx, oversizedDraft), context)).rejects.toBeInstanceOf(
+			StorageCapacityError,
+		);
+		expect(
+			await root.commit((tx) => tx.submissionByRequest(root.id, "oversized-admitting"), context),
+		).toBeUndefined();
+		expect((await kept.status(context)).status).toBe("queued");
+		expect(await harness.snapshot(InboxDoc, root.id, context)).toMatchObject({ items: [{ id: kept.id }] });
+
+		const valid = await root.submit({ type: "write", entry: { kind: "test.valid-write", head: "self" } }, context);
+		expect((await valid.wait(context)).status).toBe("done");
+		expect((await kept.wait(context)).status).toBe("done");
+		expect(setup.reports).toEqual([]);
+		await harness.close(context);
+	});
+
+	it("runs checkAdmission once on idle Conversation.submit() while still refusing oversized entries", async () => {
+		class CountingAdmissionStorage extends ControlledStorage {
+			checks: (readonly StorageWrite[])[] = [];
+			refuseEntry = false;
+			async checkAdmission(writes: readonly StorageWrite[]): Promise<boolean> {
+				this.checks.push(writes);
+				if (this.refuseEntry && writes.some((write) => write.type === "entry")) return false;
+				return true;
+			}
+		}
+		const storage = new CountingAdmissionStorage();
+		const setup = chatSetup();
+		setup.faux.setResponses([fauxAssistantMessage("ok")]);
+		const { harness, root } = await openChat(storage, setup);
+
+		storage.checks = [];
+		const display = await root.submit({ type: "write", entry: { kind: "note", data: { text: "display" } } }, context);
+		expect((await display.wait(context)).status).toBe("done");
+		expect(storage.checks).toHaveLength(1);
+
+		storage.checks = [];
+		const idleWrite = await root.submit({ type: "write", entry: { kind: "marker", head: "self" } }, context);
+		expect((await idleWrite.wait(context)).status).toBe("done");
+		expect(storage.checks).toHaveLength(1);
+
+		storage.checks = [];
+		const idleInput = await root.submit({ type: "input", content: "hello" }, context);
+		expect((await idleInput.wait(context)).status).toBe("done");
+		expect(storage.checks).toHaveLength(1);
+
+		// Refusal semantics remain intact on every idle path with a single checkAdmission call.
+		storage.refuseEntry = true;
+		const drafts: readonly SubmissionDraft[] = [
+			{ type: "write", requestId: "refused-display", entry: { kind: "note", data: { text: "big" } } },
+			{ type: "write", requestId: "refused-write", entry: { kind: "marker", head: "self" } },
+			{ type: "input", requestId: "refused-input", content: "big" },
+		];
+		for (const draft of drafts) {
+			storage.checks = [];
+			await expect(root.submit(draft, context)).rejects.toBeInstanceOf(StorageCapacityError);
+			expect(storage.checks).toHaveLength(1);
+			expect(await root.commit((tx) => tx.submissionByRequest(root.id, draft.requestId!), context)).toBeUndefined();
+		}
+
+		// Transaction form `submit(tx, draft)` still checks entry admission when the caller omits `{ admission: true }`.
+		storage.checks = [];
+		await expect(
+			root.commit((tx) => root.submit(tx, { type: "input", content: "big in tx" }), context),
+		).rejects.toBeInstanceOf(StorageCapacityError);
+		expect(storage.checks).toHaveLength(1);
+
+		expect(setup.reports).toEqual([]);
 		await harness.close(context);
 	});
 });
