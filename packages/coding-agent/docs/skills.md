@@ -40,7 +40,7 @@ Use relative paths from the skill directory when referring to bundled files. Pi 
 
 ## Understand how skills load
 
-At startup, Pi scans configured skill locations and adds each skill’s name, description, and path to the system prompt. It does not add the full instructions.
+At startup, Pi scans configured skill locations and adds each visible skill's name, full description, and path to `<available_skills>` in the system prompt. Skills that share a directory (`<root>/<name>/SKILL.md`) or flat (`<root>/<name>.md`) root are grouped under a shared path header when two or more skills share that root; singletons and mismatched names appear inline with their full path. Pi does not add the full instructions until the skill is read.
 
 When a task matches, the model reads `SKILL.md` and follows its instructions. This keeps detailed guidance out of context until it is needed. A model might fail to load a relevant skill, so use `/skill:name` when you need to force it.
 
@@ -50,7 +50,7 @@ Arguments after `/skill:name` are appended to the loaded instructions as a user 
 /skill:pdf-tools extract report.pdf
 ```
 
-Set `disable-model-invocation: true` in frontmatter when a skill should be available only through its explicit command. The `enableSkillCommands` [setting](settings.md) controls whether skill commands appear in interactive command discovery; manually entered `/skill:name` commands still work.
+Set `disable-model-invocation: true` in frontmatter when a skill should be available only through its explicit command, or override visibility per user or project with [`skillExposure`](settings.md#skill-exposure) (`"manual"` omits a skill from `<available_skills>` while keeping `/skill:name` expansion and autocomplete; `"direct"` overrides `disable-model-invocation: true`). The `enableSkillCommands` [setting](settings.md) controls whether skill commands appear in interactive command discovery; manually entered `/skill:name` commands still work.
 
 <a id="choose-where-it-loads"></a>
 

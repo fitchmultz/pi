@@ -233,10 +233,34 @@ Resource paths in user settings resolve from the agent directory. Paths in proje
 | `prompts` | `string[]` | `[]` | Prompt-template files or directories. |
 | `themes` | `string[]` | `[]` | Theme files or directories. |
 | `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands. |
+| `skillExposure` | object | unset | Control which discovered skills appear in `<available_skills>`. See [Skill exposure](#skill-exposure). |
 
 Resource arrays support glob exclusions with `!pattern`, exact inclusion with `+path`, and exact exclusion with `-path`. Pi loads resources listed in both user-level and project settings.
 
 The built-in extensions are named `builtin:background-command`, `builtin:mcp`, `builtin:llama.cpp`, `builtin:codemode`, and `builtin:tool-search` in `extensions`. They load by default; `-builtin:mcp` disables one. A `+builtin:<name>` or `-builtin:<name>` entry in project settings overrides the user setting. `pi config` lists them under Built-in. `--no-extensions` disables them too, and `-e builtin:<name>` loads one explicitly.
+
+### Skill exposure
+
+`skillExposure` controls whether discovered skills are listed in the system prompt's `<available_skills>` section without changing which skills are loaded. Use it to keep rarely needed skills out of every request while keeping `/skill:<name>` available:
+
+```json
+{
+  "skillExposure": {
+    "release": "manual",
+    "internal-*": "manual",
+    "internal-deploy": "direct"
+  }
+}
+```
+
+Keys are skill names or patterns where `*` matches any characters. An exact name wins over patterns; among patterns, the first match wins. Project entries replace user entries with the same key, and project patterns match before user patterns. Skills without a matching entry keep their frontmatter `disable-model-invocation` setting.
+
+| Value | Behavior |
+|---|---|
+| `direct` | Listed in `<available_skills>`, even when the skill's frontmatter sets `disable-model-invocation: true`. |
+| `manual` | Omitted from `<available_skills>`. Remains loaded for `/skill:<name>` expansion and autocomplete. |
+
+`/reload` applies changes to `skillExposure` when rebuilding the system prompt.
 
 ## Updates, telemetry, and warnings
 

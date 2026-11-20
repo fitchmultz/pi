@@ -294,10 +294,42 @@ function loadSkillFromFile(
 	};
 }
 
+interface SkillRootGroup {
+	key: string;
+	header: string;
+}
+
+function getSkillRootGroup(skill: Skill): SkillRootGroup | undefined {
+	if (skill.name.length === 0) return undefined;
+	const fileName = basename(skill.filePath);
+	const parentDir = dirname(skill.filePath);
+	if (fileName === "SKILL.md" && basename(parentDir) === skill.name) {
+		const rootDir = dirname(parentDir);
+		if (rootDir !== parentDir) {
+			return {
+				key: `dir:${rootDir}`,
+				header: join(rootDir, "<name>", "SKILL.md"),
+			};
+		}
+	}
+	if (fileName === `${skill.name}.md`) {
+		return {
+			key: `flat:${parentDir}`,
+			header: join(parentDir, "<name>.md"),
+		};
+	}
+	return undefined;
+}
+
+function normalizeSkillDescription(description: string): string {
+	return description.replace(/\s+/g, " ").trim();
+}
+
 /**
  * Format skills for inclusion in a system prompt.
- * Uses XML format per Agent Skills standard.
- * See: https://agentskills.io/integrate-skills
+ * Groups skills sharing a directory (`<root>/<name>/SKILL.md`) or flat (`<root>/<name>.md`)
+ * layout when at least two skills share a root, and emits singletons and mismatched-name skills
+ * inline with their full path.
  *
  * Skills with disableModelInvocation=true are excluded from the prompt
  * (they can only be invoked explicitly via /skill:name commands).
@@ -312,39 +344,54 @@ export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "b
 		return "";
 	}
 
-	const lines = [
-		"\n\nThe following skills provide specialized instructions for specific tasks.",
+	const loadInstruction =
 		fileReadTool === "read"
 			? "Use the read tool to load a skill's file when the task matches its description."
 			: fileReadTool === "bash"
 				? "Use bash to load a skill's file when the task matches its description."
-				: "Load a skill's file when the task matches its description.",
-		"Apply loaded skills without rereading them for every file or step. Reload a skill when it changes or its full instructions are no longer in context.",
-		"Resolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.",
+				: "Load a skill's file when the task matches its description.";
+
+	const lines = [
+		"\n\nThe following skills provide specialized instructions for specific tasks.",
+		`${loadInstruction} Do not reread unless changed or out of context. Resolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.`,
 		"",
 		"<available_skills>",
 	];
 
+	const groups = new Map<string, { header: string; skills: Skill[] }>();
+	const skillGroups: Array<SkillRootGroup | undefined> = [];
+
 	for (const skill of visibleSkills) {
-		lines.push("  <skill>");
-		lines.push(`    <name>${escapeXml(skill.name)}</name>`);
-		lines.push(`    <description>${escapeXml(skill.description)}</description>`);
-		lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
-		lines.push("  </skill>");
+		const group = getSkillRootGroup(skill);
+		skillGroups.push(group);
+		if (!group) continue;
+		const existing = groups.get(group.key);
+		if (existing) {
+			existing.skills.push(skill);
+		} else {
+			groups.set(group.key, { header: group.header, skills: [skill] });
+		}
+	}
+
+	for (let i = 0; i < visibleSkills.length; i++) {
+		const skill = visibleSkills[i];
+		const group = skillGroups[i];
+		if (!group || (groups.get(group.key)?.skills.length ?? 0) < 2) {
+			lines.push(`- ${skill.name} (${skill.filePath}): ${normalizeSkillDescription(skill.description)}`);
+		}
+	}
+
+	for (const group of groups.values()) {
+		if (group.skills.length < 2) continue;
+		lines.push(`[${group.header}]`);
+		for (const skill of group.skills) {
+			lines.push(`- ${skill.name}: ${normalizeSkillDescription(skill.description)}`);
+		}
 	}
 
 	lines.push("</available_skills>");
 
 	return lines.join("\n");
-}
-
-function escapeXml(str: string): string {
-	return str
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;")
-		.replace(/'/g, "&apos;");
 }
 
 export interface LoadSkillsOptions {

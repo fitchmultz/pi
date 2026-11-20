@@ -227,106 +227,158 @@ describe("skills", () => {
 			expect(result).toBe("");
 		});
 
-		it("should format skills as XML", () => {
+		it("should format a singleton skill inline inside <available_skills>", () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "test-skill",
 					description: "A test skill.",
-					filePath: "/path/to/skill/SKILL.md",
-					baseDir: "/path/to/skill",
+					filePath: "/path/to/test-skill/SKILL.md",
+					baseDir: "/path/to/test-skill",
 				}),
 			];
 
 			const result = formatSkillsForPrompt(skills);
+			const listStart = result.indexOf("<available_skills>");
+			const introText = result.substring(0, listStart);
 
+			expect(introText).toContain("The following skills provide specialized instructions for specific tasks.");
+			expect(introText).toContain("Use the read tool to load a skill's file when the task matches its description.");
+			expect(introText).toContain(
+				"Resolve relative paths against the skill's directory (parent of SKILL.md). Use absolute paths in tool calls.",
+			);
 			expect(result).toContain("<available_skills>");
 			expect(result).toContain("</available_skills>");
-			expect(result).toContain("<skill>");
-			expect(result).toContain("<name>test-skill</name>");
-			expect(result).toContain("<description>A test skill.</description>");
-			expect(result).toContain("<location>/path/to/skill/SKILL.md</location>");
+			expect(result).toContain("- test-skill (/path/to/test-skill/SKILL.md): A test skill.");
+			expect(result).not.toContain("[/path/to/<name>/SKILL.md]");
 		});
 
-		it("should include intro text before XML", () => {
+		it("should group directory-layout and flat-layout roots with 2+ skills and keep singletons/mismatches inline", () => {
+			const skills: Skill[] = [
+				createTestSkill({
+					name: "alpha",
+					description: "Alpha directory skill.",
+					filePath: "/shared/skills/alpha/SKILL.md",
+					baseDir: "/shared/skills/alpha",
+				}),
+				createTestSkill({
+					name: "solo",
+					description: "Only skill in its root.",
+					filePath: "/solo/solo/SKILL.md",
+					baseDir: "/solo/solo",
+				}),
+				createTestSkill({
+					name: "flat-one",
+					description: "First flat skill.",
+					filePath: "/shared/skills/flat-one.md",
+					baseDir: "/shared/skills",
+				}),
+				createTestSkill({
+					name: "mismatch-dir",
+					description: "Parent dir differs from name.",
+					filePath: "/shared/skills/other-folder/SKILL.md",
+					baseDir: "/shared/skills/other-folder",
+				}),
+				createTestSkill({
+					name: "beta",
+					description: "Beta directory skill.",
+					filePath: "/shared/skills/beta/SKILL.md",
+					baseDir: "/shared/skills/beta",
+				}),
+				createTestSkill({
+					name: "flat-two",
+					description: "Second flat skill.",
+					filePath: "/shared/skills/flat-two.md",
+					baseDir: "/shared/skills",
+				}),
+				createTestSkill({
+					name: "mismatch-flat",
+					description: "Filename differs from name.",
+					filePath: "/shared/skills/renamed.md",
+					baseDir: "/shared/skills",
+				}),
+			];
+
+			const result = formatSkillsForPrompt(skills);
+			const body = result.slice(result.indexOf("<available_skills>"));
+
+			expect(body).toBe(
+				[
+					"<available_skills>",
+					"- solo (/solo/solo/SKILL.md): Only skill in its root.",
+					"- mismatch-dir (/shared/skills/other-folder/SKILL.md): Parent dir differs from name.",
+					"- mismatch-flat (/shared/skills/renamed.md): Filename differs from name.",
+					"[/shared/skills/<name>/SKILL.md]",
+					"- alpha: Alpha directory skill.",
+					"- beta: Beta directory skill.",
+					"[/shared/skills/<name>.md]",
+					"- flat-one: First flat skill.",
+					"- flat-two: Second flat skill.",
+					"</available_skills>",
+				].join("\n"),
+			);
+		});
+
+		it("should normalize multiline descriptions without truncating characters", () => {
+			const longTail = "detail ".repeat(40).trim();
+			const skills: Skill[] = [
+				createTestSkill({
+					name: "test-skill",
+					description: `  Line one with <special> & "quotes" 'single'.\n\tLine two.\n\n${longTail}  `,
+					filePath: "/path/to/test-skill/SKILL.md",
+					baseDir: "/path/to/test-skill",
+				}),
+			];
+
+			const result = formatSkillsForPrompt(skills);
+
+			expect(result).toContain(
+				`- test-skill (/path/to/test-skill/SKILL.md): Line one with <special> & "quotes" 'single'. Line two. ${longTail}`,
+			);
+		});
+
+		it("should adapt the load instruction for read, bash, and indirect readers", () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "test-skill",
 					description: "A test skill.",
-					filePath: "/path/to/skill/SKILL.md",
-					baseDir: "/path/to/skill",
+					filePath: "/path/to/test-skill/SKILL.md",
+					baseDir: "/path/to/test-skill",
 				}),
 			];
 
-			const result = formatSkillsForPrompt(skills);
-			const xmlStart = result.indexOf("<available_skills>");
-			const introText = result.substring(0, xmlStart);
-
-			expect(introText).toContain("The following skills provide specialized instructions");
-			expect(introText).toContain("Use the read tool to load a skill's file");
+			expect(formatSkillsForPrompt(skills, "read")).toContain(
+				"\nUse the read tool to load a skill's file when the task matches its description.",
+			);
+			expect(formatSkillsForPrompt(skills, "bash")).toContain(
+				"\nUse bash to load a skill's file when the task matches its description.",
+			);
+			expect(formatSkillsForPrompt(skills, "indirect")).toContain(
+				"\nLoad a skill's file when the task matches its description.",
+			);
 		});
 
-		it("should escape XML special characters", () => {
-			const skills: Skill[] = [
-				createTestSkill({
-					name: "test-skill",
-					description: 'A skill with <special> & "characters".',
-					filePath: "/path/to/skill/SKILL.md",
-					baseDir: "/path/to/skill",
-				}),
-			];
-
-			const result = formatSkillsForPrompt(skills);
-
-			expect(result).toContain("&lt;special&gt;");
-			expect(result).toContain("&amp;");
-			expect(result).toContain("&quot;characters&quot;");
-		});
-
-		it("should format multiple skills", () => {
-			const skills: Skill[] = [
-				createTestSkill({
-					name: "skill-one",
-					description: "First skill.",
-					filePath: "/path/one/SKILL.md",
-					baseDir: "/path/one",
-				}),
-				createTestSkill({
-					name: "skill-two",
-					description: "Second skill.",
-					filePath: "/path/two/SKILL.md",
-					baseDir: "/path/two",
-				}),
-			];
-
-			const result = formatSkillsForPrompt(skills);
-
-			expect(result).toContain("<name>skill-one</name>");
-			expect(result).toContain("<name>skill-two</name>");
-			expect((result.match(/<skill>/g) || []).length).toBe(2);
-		});
-
-		it("should exclude skills with disableModelInvocation from prompt", () => {
+		it("should exclude skills with disableModelInvocation before grouping", () => {
 			const skills: Skill[] = [
 				createTestSkill({
 					name: "visible-skill",
 					description: "A visible skill.",
-					filePath: "/path/visible/SKILL.md",
-					baseDir: "/path/visible",
+					filePath: "/path/visible-skill/SKILL.md",
+					baseDir: "/path/visible-skill",
 				}),
 				createTestSkill({
 					name: "hidden-skill",
 					description: "A hidden skill.",
-					filePath: "/path/hidden/SKILL.md",
-					baseDir: "/path/hidden",
+					filePath: "/path/hidden-skill/SKILL.md",
+					baseDir: "/path/hidden-skill",
 					disableModelInvocation: true,
 				}),
 			];
 
 			const result = formatSkillsForPrompt(skills);
 
-			expect(result).toContain("<name>visible-skill</name>");
-			expect(result).not.toContain("<name>hidden-skill</name>");
-			expect((result.match(/<skill>/g) || []).length).toBe(1);
+			expect(result).toContain("- visible-skill (/path/visible-skill/SKILL.md): A visible skill.");
+			expect(result).not.toContain("hidden-skill");
+			expect(result).not.toContain("[/path/<name>/SKILL.md]");
 		});
 
 		it("should return empty string when all skills have disableModelInvocation", () => {

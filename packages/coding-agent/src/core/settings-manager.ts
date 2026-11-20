@@ -24,6 +24,7 @@ import type {
 	QuietStartup,
 	SessionShareDestination,
 	Settings,
+	SkillExposure,
 	ThinkingBudgetsSettings,
 	TransportSetting,
 	TuiMode,
@@ -50,6 +51,7 @@ export type {
 	RetrySettings,
 	SessionShareDestination,
 	Settings,
+	SkillExposure,
 	TerminalSettings,
 	ThinkingBudgetsSettings,
 	TransportSetting,
@@ -133,6 +135,24 @@ export function getToolExposureSetting(toolExposure: unknown, toolName: string):
 	return isToolExposure(exposure) ? exposure : undefined;
 }
 
+const SKILL_EXPOSURES: readonly string[] = ["direct", "manual"] satisfies SkillExposure[];
+
+function isSkillExposure(value: unknown): value is SkillExposure {
+	return typeof value === "string" && SKILL_EXPOSURES.includes(value);
+}
+
+/**
+ * The exposure a `skillExposure` setting gives a skill, or undefined when no entry gives it one.
+ * The skill's entry is the one with its exact name, else the first matching pattern.
+ */
+export function getSkillExposureSetting(skillExposure: unknown, skillName: string): SkillExposure | undefined {
+	// Settings files are not validated: another shape has no entries, and an entry with another
+	// value gives no exposure.
+	if (!isMergeableObject(skillExposure)) return undefined;
+	const exposure = findToolEntry(skillExposure, skillName);
+	return isSkillExposure(exposure) ? exposure : undefined;
+}
+
 /**
  * Merge `toolExposure` of two settings layers. An entry replaces the inherited entry with the same
  * key. The overriding layer's entries come first, so its patterns match before inherited ones.
@@ -152,6 +172,8 @@ function deepMergeSettings(base: Settings, overrides: Settings): Settings {
 	if (defaultTools !== undefined) merged.defaultTools = defaultTools;
 	const toolExposure = mergeToolExposure(base.toolExposure, overrides.toolExposure);
 	if (toolExposure !== undefined) merged.toolExposure = toolExposure;
+	const skillExposure = mergeToolExposure(base.skillExposure, overrides.skillExposure);
+	if (skillExposure !== undefined) merged.skillExposure = skillExposure;
 	return merged as Settings;
 }
 
@@ -1577,6 +1599,11 @@ export class SettingsManager {
 	/** The exposure the `toolExposure` setting gives a tool, or undefined when no entry gives it one. */
 	getToolExposure(toolName: string): ToolExposure | undefined {
 		return getToolExposureSetting(this.settings.toolExposure, toolName);
+	}
+
+	/** The exposure the `skillExposure` setting gives a skill, or undefined when no entry gives it one. */
+	getSkillExposure(skillName: string): SkillExposure | undefined {
+		return getSkillExposureSetting(this.settings.skillExposure, skillName);
 	}
 
 	setEnabledModels(patterns: string[] | undefined): void {
