@@ -1,9 +1,6 @@
 // OpenAI GPT models: facts that hold on every host that serves them.
 
 import type { Api, Model, ModelCost } from "../../src/types.ts";
-
-export { OPENAI_MID_CONVO_EFFORT_MODEL_IDS } from "../../src/api/openai-prompt-cache.ts";
-
 import { type ChatModel, mergeCompat, mergeThinking } from "../define.ts";
 import { roundCost } from "../sources/models-dev.ts";
 
@@ -54,6 +51,19 @@ export const OPENAI_TOOL_SEARCH_MODEL_IDS = new Set([
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
+	"gpt-6-astra",
+	"gpt-6-sol",
+	"gpt-6-luna",
+	"gpt-6.1-sol",
+	"gpt-6.1-terra",
+	"gpt-6.2-astra",
+	"gpt-6.2-sol",
+]);
+// OpenAI documents configuration_update for the GPT-6 family; the Codex backend applies it to the
+// same models (verified November 2026).
+// https://developers.openai.com/api/docs/guides/reasoning
+/** Models that take reasoning effort changes as configuration_update input items. */
+export const OPENAI_MID_CONVO_EFFORT_MODEL_IDS = new Set([
 	"gpt-6-astra",
 	"gpt-6-sol",
 	"gpt-6-luna",

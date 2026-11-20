@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `mcpServerSummary(description, instructions)`, a server's one-line summary for the system prompt as pi's coding agent shows it: the first line of the configured `description`, else of the server's `initialize` instructions.
-
 ### Changed
 
 - Reduced repeated copying when assembling SSE events.
@@ -14,6 +10,12 @@
 ### Fixed
 
 - Fixed `McpClient.connect()` reporting success after the connection closed during initialization. It now rejects with `McpConnectionClosedError`, keeps the client closed, and notifies close listeners only once.
+
+## [1.6.0] - 2026-11-20
+
+### Added
+
+- Added `mcpServerSummary(description, instructions)`, a server's one-line summary for the system prompt as pi's coding agent shows it: the first line of the configured `description`, else of the server's `initialize` instructions.
 
 ## [1.5.2] - 2026-11-10
 

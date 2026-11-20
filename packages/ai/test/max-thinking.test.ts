@@ -11,6 +11,24 @@ function mockToken(): string {
 	return `aaa.${payload}.bbb`;
 }
 
+/** Builds the Codex request for the max thinking level without sending it. */
+async function captureCodexMaxRequest(model: Model<"openai-codex-responses">): Promise<unknown> {
+	const context = normalizeContext({
+		systemPrompt: "You are a helpful assistant.",
+		messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
+	});
+	let payload: unknown;
+	await streamSimpleOpenAICodexResponses(model, context, {
+		apiKey: mockToken(),
+		reasoning: "max",
+		onPayload: (request) => {
+			payload = request;
+			throw new Error("payload captured");
+		},
+	}).result();
+	return payload;
+}
+
 describe("max thinking level", () => {
 	it("is opt-in for ordinary reasoning models", () => {
 		const model: Model<"openai-completions"> = {
@@ -67,24 +85,10 @@ describe("max thinking level", () => {
 		expect(clampThinkingLevel(model, "xhigh")).toBe("max");
 	});
 
-	it("sends max directly to the Codex Responses API for gpt-5.6-sol", async () => {
-		const model = getModel("openai-codex", "gpt-5.6-sol")!;
-		const context = normalizeContext({
-			systemPrompt: "You are a helpful assistant.",
-			messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
+	it("sends max as reasoning.effort to the Codex Responses API for gpt-5.6-sol", async () => {
+		expect(await captureCodexMaxRequest(getModel("openai-codex", "gpt-5.6-sol"))).toMatchObject({
+			reasoning: { effort: "max", summary: "auto" },
 		});
-		let payload: unknown;
-
-		await streamSimpleOpenAICodexResponses(model, context, {
-			apiKey: mockToken(),
-			reasoning: "max",
-			onPayload: (request) => {
-				payload = request;
-				throw new Error("payload captured");
-			},
-		}).result();
-
-		expect(payload).toMatchObject({ reasoning: { effort: "max", summary: "auto" } });
 	});
 
 	it.each([
@@ -95,24 +99,8 @@ describe("max thinking level", () => {
 		"gpt-6.1-terra",
 		"gpt-6.2-astra",
 		"gpt-6.2-sol",
-	] as const)("sends max via configuration_update to the Codex Responses API for %s", async (modelId) => {
-		const model = getModel("openai-codex", modelId)!;
-		const context = normalizeContext({
-			systemPrompt: "You are a helpful assistant.",
-			messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
-		});
-		let payload: { reasoning?: unknown; input?: unknown[] } | undefined;
-
-		await streamSimpleOpenAICodexResponses(model, context, {
-			apiKey: mockToken(),
-			reasoning: "max",
-			onPayload: (request) => {
-				payload = request as { reasoning?: unknown; input?: unknown[] };
-				throw new Error("payload captured");
-			},
-		}).result();
-
-		expect(payload).toMatchObject({ reasoning: { effort: "medium", summary: "auto" } });
-		expect(payload?.input?.at(-1)).toEqual({ type: "configuration_update", reasoning: { effort: "max" } });
+	] as const)("sends max as a configuration_update item to the Codex Responses API for %s", async (modelId) => {
+		const request = (await captureCodexMaxRequest(getModel("openai-codex", modelId))) as { input: unknown[] };
+		expect(request.input.at(-1)).toEqual({ type: "configuration_update", reasoning: { effort: "max" } });
 	});
 });

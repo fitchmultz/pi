@@ -1,6 +1,5 @@
 import type { AnyModel } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
-import { OPENAI_MID_CONVO_EFFORT_MODEL_IDS } from "./openai-prompt-cache.ts";
 
 /** Workers AI direct endpoint. */
 export const CLOUDFLARE_WORKERS_AI_BASE_URL =
@@ -34,6 +33,15 @@ const OPENAI_ADDITIONAL_TOOLS_MODEL_IDS = new Set([
 	"gpt-5.6-sol",
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
+	"gpt-6-astra",
+	"gpt-6-sol",
+	"gpt-6-luna",
+	"gpt-6.1-sol",
+	"gpt-6.1-terra",
+	"gpt-6.2-astra",
+	"gpt-6.2-sol",
+]);
+const OPENAI_MID_CONVO_EFFORT_MODEL_IDS = new Set([
 	"gpt-6-astra",
 	"gpt-6-sol",
 	"gpt-6-luna",
