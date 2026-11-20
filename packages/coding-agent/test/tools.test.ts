@@ -72,6 +72,32 @@ function createTinyBmp1x1Red24bpp(): Buffer {
 	return buffer;
 }
 
+function createGitExclusionFixture(root: string, needle = "PIF248_NEEDLE"): void {
+	mkdirSync(join(root, ".git", "hooks"), { recursive: true });
+	mkdirSync(join(root, ".git", "rr-cache", "abc"), { recursive: true });
+	mkdirSync(join(root, "subrepo", ".git"), { recursive: true });
+	mkdirSync(join(root, "worktree"), { recursive: true });
+	mkdirSync(join(root, ".hidden"), { recursive: true });
+	mkdirSync(join(root, ".github", "workflows"), { recursive: true });
+	mkdirSync(join(root, "foo.git"), { recursive: true });
+	mkdirSync(join(root, "other"), { recursive: true });
+
+	writeFileSync(join(root, ".git", "config"), `[core]\n\t# ${needle}\n`);
+	writeFileSync(join(root, ".git", "hooks", "pre-commit"), `#!/bin/sh\n# ${needle}\n`);
+	writeFileSync(join(root, ".git", "hooks", "hook.ts"), `export const hook = "${needle}";\n`);
+	writeFileSync(join(root, ".git", "rr-cache", "abc", "preimage"), `${needle}\n`);
+	writeFileSync(join(root, "subrepo", ".git", "config"), `[core]\n\t# ${needle}\n`);
+	writeFileSync(join(root, "subrepo", ".git", "hook.ts"), `export const sub = "${needle}";\n`);
+	writeFileSync(join(root, "worktree", ".git"), `gitdir: /tmp/main/.git/worktrees/wt # ${needle}\n`);
+	writeFileSync(join(root, ".hidden", "secret.txt"), `${needle}\n`);
+	writeFileSync(join(root, ".github", "workflows", "ci.yml"), `name: ${needle}\n`);
+	writeFileSync(join(root, ".gitignore"), `# ${needle}\n*.ignored\n`);
+	writeFileSync(join(root, ".gitconfig"), `# ${needle}\n`);
+	writeFileSync(join(root, ".gitkeep"), `${needle}\n`);
+	writeFileSync(join(root, "foo.git", "file.ts"), `export const ok = "${needle}";\n`);
+	writeFileSync(join(root, "other", "excluded.ts"), `export const other = "${needle}";\n`);
+}
+
 describe("Coding Agent Tools", () => {
 	let testDir: string;
 
@@ -1358,6 +1384,86 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result)).toContain("No matches found");
 			expect(existsSync(marker)).toBe(false);
 		});
+
+		it("should exclude .git directories and worktree .git files by default and across non-git globs", async () => {
+			createGitExclusionFixture(testDir);
+			const scopedGrep = createGrepTool(testDir);
+			const expectedNonGitFiles = [
+				".gitconfig",
+				".github/workflows/ci.yml",
+				".gitignore",
+				".gitkeep",
+				".hidden/secret.txt",
+				"foo.git/file.ts",
+			];
+
+			const extractFiles = (output: string): string[] =>
+				output
+					.split("\n")
+					.filter(Boolean)
+					.map((line) => line.split(":")[0])
+					.sort();
+
+			for (const glob of [undefined, "*", "**/*", "!.git/**"]) {
+				const result = await scopedGrep.execute(`test-call-grep-git-default-${glob ?? "none"}`, {
+					pattern: "PIF248_NEEDLE",
+					...(glob ? { glob } : {}),
+				});
+				expect(extractFiles(getTextOutput(result))).toEqual([...expectedNonGitFiles, "other/excluded.ts"].sort());
+			}
+
+			const tsOnly = await scopedGrep.execute("test-call-grep-git-ts-glob", {
+				pattern: "PIF248_NEEDLE",
+				glob: "*.ts",
+			});
+			expect(extractFiles(getTextOutput(tsOnly))).toEqual(["foo.git/file.ts", "other/excluded.ts"]);
+
+			const negatedOther = await scopedGrep.execute("test-call-grep-git-negated-glob", {
+				pattern: "PIF248_NEEDLE",
+				glob: "!other/**",
+			});
+			expect(extractFiles(getTextOutput(negatedOther))).toEqual(expectedNonGitFiles);
+		});
+
+		it("should allow explicit .git targeting via path or glob", async () => {
+			createGitExclusionFixture(testDir);
+			const scopedGrep = createGrepTool(testDir);
+
+			const gitDir = await scopedGrep.execute("test-call-grep-explicit-git-dir", {
+				pattern: "PIF248_NEEDLE",
+				path: ".git",
+			});
+			const gitDirOutput = getTextOutput(gitDir);
+			expect(gitDirOutput).toContain("config:2:");
+			expect(gitDirOutput).toContain("hooks/pre-commit:2:");
+			expect(gitDirOutput).toContain("rr-cache/abc/preimage:1:");
+
+			const gitHooks = await scopedGrep.execute("test-call-grep-explicit-git-hooks", {
+				pattern: "PIF248_NEEDLE",
+				path: ".git/hooks",
+			});
+			expect(getTextOutput(gitHooks)).toContain("pre-commit:2:");
+
+			const gitConfig = await scopedGrep.execute("test-call-grep-explicit-git-config", {
+				pattern: "PIF248_NEEDLE",
+				path: ".git/config",
+			});
+			expect(getTextOutput(gitConfig)).toContain("config:2:");
+
+			const worktreeGitFile = await scopedGrep.execute("test-call-grep-explicit-worktree-git", {
+				pattern: "PIF248_NEEDLE",
+				path: "worktree/.git",
+			});
+			expect(getTextOutput(worktreeGitFile)).toContain(".git:1: gitdir:");
+
+			for (const glob of [".git/config", "./.git/config"]) {
+				const gitGlob = await scopedGrep.execute(`test-call-grep-explicit-git-glob-${glob}`, {
+					pattern: "PIF248_NEEDLE",
+					glob,
+				});
+				expect(getTextOutput(gitGlob)).toBe(".git/config:2: \t# PIF248_NEEDLE");
+			}
+		});
 	});
 
 	describe("find tool", () => {
@@ -1515,6 +1621,104 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(over)).toBe("a.txt\n\n[1 results limit reached]");
 			expect(over.details).toEqual({ resultLimitReached: 1 });
 			expect(requestedLimits).toEqual([3, 2]);
+		});
+
+		it("should exclude .git directories and worktree .git files by default", async () => {
+			createGitExclusionFixture(testDir);
+			const scopedFind = createFindTool(testDir);
+
+			for (const pattern of ["*", "**/*"]) {
+				const result = await scopedFind.execute(`test-call-find-git-default-${pattern}`, { pattern });
+				const lines = getTextOutput(result)
+					.split("\n")
+					.map((line) => line.trim())
+					.filter(Boolean);
+
+				expect(lines).toContain(".hidden/secret.txt");
+				expect(lines).toContain(".github/workflows/ci.yml");
+				expect(lines).toContain(".gitignore");
+				expect(lines).toContain(".gitconfig");
+				expect(lines).toContain(".gitkeep");
+				expect(lines).toContain("foo.git/file.ts");
+				expect(
+					lines.some(
+						(line) =>
+							line === ".git" ||
+							line === ".git/" ||
+							line.startsWith(".git/") ||
+							line.includes("/.git/") ||
+							line.endsWith("/.git"),
+					),
+				).toBe(false);
+			}
+		});
+
+		it("should allow explicit .git targeting via path or pattern", async () => {
+			createGitExclusionFixture(testDir);
+			const scopedFind = createFindTool(testDir);
+
+			const gitDir = await scopedFind.execute("test-call-find-explicit-git-dir", {
+				pattern: "*",
+				path: ".git",
+			});
+			const gitDirLines = getTextOutput(gitDir).split("\n");
+			expect(gitDirLines).toContain("config");
+			expect(gitDirLines).toContain("hooks/pre-commit");
+			expect(gitDirLines).toContain("rr-cache/abc/preimage");
+
+			const gitHooks = await scopedFind.execute("test-call-find-explicit-git-hooks", {
+				pattern: "*",
+				path: ".git/hooks",
+			});
+			expect(getTextOutput(gitHooks).split("\n")).toContain("pre-commit");
+
+			const gitPattern = await scopedFind.execute("test-call-find-explicit-git-pattern", {
+				pattern: ".git/**",
+			});
+			const gitPatternLines = getTextOutput(gitPattern).split("\n");
+			expect(gitPatternLines).toContain(".git/config");
+			expect(gitPatternLines).toContain(".git/hooks/pre-commit");
+			expect(gitPatternLines).toContain(".git/rr-cache/abc/preimage");
+		});
+
+		it("should pass .git ignore globs to custom glob operations unless path or pattern targets .git", async () => {
+			const observedIgnores: Array<{ pattern: string; ignore: string[] }> = [];
+			const operations: FindOperations = {
+				exists: () => true,
+				glob: (pattern, _cwd, options) => {
+					observedIgnores.push({ pattern, ignore: options.ignore });
+					return [];
+				},
+			};
+			const tool = createFindToolDefinition(testDir, { operations });
+
+			for (const input of [
+				{ pattern: "*" },
+				{ pattern: "**/*" },
+				{ pattern: ".github/**" },
+				{ pattern: ".gitignore" },
+				{ pattern: ".gitconfig" },
+				{ pattern: ".gitkeep" },
+				{ pattern: "foo.git/**" },
+				{ pattern: "!.git/**" },
+			]) {
+				await tool.execute("test-call-find-custom-git-exclude", input, undefined, undefined, fakeCtx(testDir));
+				expect(observedIgnores.at(-1)?.ignore).toEqual(["**/node_modules/**", "**/.git", "**/.git/**"]);
+			}
+
+			for (const input of [
+				{ pattern: ".git" },
+				{ pattern: ".git/**" },
+				{ pattern: "./.git/**" },
+				{ pattern: ".git/config" },
+				{ pattern: "**/.git/config" },
+				{ pattern: "subrepo/.git/*" },
+				{ pattern: "*", path: ".git" },
+				{ pattern: "*", path: ".git/hooks" },
+			]) {
+				await tool.execute("test-call-find-custom-git-target", input, undefined, undefined, fakeCtx(testDir));
+				expect(observedIgnores.at(-1)?.ignore).toEqual(["**/node_modules/**"]);
+			}
 		});
 	});
 
