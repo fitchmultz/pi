@@ -125,7 +125,7 @@ function normalizeGlobSegment(segment: string): string {
 function expandGlobBraces(pattern: string, maxVariants = 64): string[] {
 	const variants = [pattern];
 	for (let i = 0; i < variants.length && variants.length < maxVariants; ) {
-		const match = /^([^{]*)\{([^{}]*,[^{}]*)\}(.*)$/.exec(variants[i]);
+		const match = /^([^{]*)\{([^{}]+)\}(.*)$/.exec(variants[i]);
 		if (!match) {
 			i++;
 			continue;
