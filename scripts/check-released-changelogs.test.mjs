@@ -65,3 +65,17 @@ test("fails when an entry was removed from a released section", (t) => {
 	assert.equal(result.status, 1);
 	assert.match(result.stderr, /- - Fixed the first bug/);
 });
+
+test("compares against the synced workspace version tag even when a newer tag exists", (t) => {
+	const root = releasedRepository(t);
+	const git = (...args) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+	const prev = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+	writeChangelog(root, `# Changelog\n\n## [2.0.0] - 2026-02-01\n\n### Added\n\n- Newer release\n\n${RELEASED}`);
+	git("add", ".");
+	git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "Release v2.0.0");
+	git("tag", "v2.0.0");
+	git("reset", "--hard", prev);
+	const result = check(root);
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stdout, /match v1\.0\.0/);
+});
