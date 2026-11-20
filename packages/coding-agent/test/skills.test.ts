@@ -252,6 +252,27 @@ describe("skills", () => {
 			expect(result).not.toContain("[/path/to/<name>/SKILL.md]");
 		});
 
+		it("should neutralize closing catalog tags inside descriptions and paths", () => {
+			const skills: Skill[] = [
+				createTestSkill({
+					name: "xml-editor",
+					description: "Edit </available_skills> blocks and </SKILLS> sections & keep <tag> intact.",
+					filePath: "/path/</available_skills>/xml-editor/SKILL.md",
+					baseDir: "/path/</available_skills>/xml-editor",
+				}),
+			];
+
+			const result = formatSkillsForPrompt(skills);
+			const inner = result.slice(
+				result.indexOf("<available_skills>") + "<available_skills>".length,
+				result.lastIndexOf("</available_skills>"),
+			);
+			expect(inner).not.toMatch(/<\/(?:available_skills|skills)>/i);
+			expect(inner).toContain("&lt;/available_skills&gt;");
+			expect(inner).toContain("&lt;/SKILLS&gt;");
+			expect(inner).toContain("& keep <tag> intact.");
+		});
+
 		it("should group directory-layout and flat-layout roots with 2+ skills and keep singletons/mismatches inline", () => {
 			const skills: Skill[] = [
 				createTestSkill({

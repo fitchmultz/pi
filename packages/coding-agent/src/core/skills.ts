@@ -322,7 +322,11 @@ function getSkillRootGroup(skill: Skill): SkillRootGroup | undefined {
 }
 
 function normalizeSkillDescription(description: string): string {
-	return description.replace(/\s+/g, " ").trim();
+	return neutralizeCatalogTags(description.replace(/\s+/g, " ").trim());
+}
+
+function neutralizeCatalogTags(text: string): string {
+	return text.replace(/<\/(available_skills|skills)>/gi, "&lt;/$1&gt;");
 }
 
 /**
@@ -377,13 +381,15 @@ export function formatSkillsForPrompt(skills: Skill[], fileReadTool: "read" | "b
 		const skill = visibleSkills[i];
 		const group = skillGroups[i];
 		if (!group || (groups.get(group.key)?.skills.length ?? 0) < 2) {
-			lines.push(`- ${skill.name} (${skill.filePath}): ${normalizeSkillDescription(skill.description)}`);
+			lines.push(
+				`- ${skill.name} (${neutralizeCatalogTags(skill.filePath)}): ${normalizeSkillDescription(skill.description)}`,
+			);
 		}
 	}
 
 	for (const group of groups.values()) {
 		if (group.skills.length < 2) continue;
-		lines.push(`[${group.header}]`);
+		lines.push(`[${neutralizeCatalogTags(group.header)}]`);
 		for (const skill of group.skills) {
 			lines.push(`- ${skill.name}: ${normalizeSkillDescription(skill.description)}`);
 		}
