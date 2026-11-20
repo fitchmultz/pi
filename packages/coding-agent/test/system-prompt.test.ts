@@ -114,20 +114,22 @@ describe("buildSystemPrompt", () => {
 		});
 
 		test("supports platform formatting, shell basename extraction, and omitted shell", () => {
-			const linuxWithPathShell = buildSystemPromptSections({
+			expect(resolveHostEnvironmentInfo({ shellPath: "/Users/private-user/bin/bash/" }).shell).toBe("bash");
+			expect(resolveHostEnvironmentInfo({ shellPath: "C:\\Program Files\\Git\\bin\\bash.exe" }).shell).toBe(
+				"bash.exe",
+			);
+
+			const linux = buildSystemPromptSections({
 				cwd: "/workspace",
 				host: {
 					platform: "linux",
 					release: "6.8.0",
 					arch: "x64",
-					shell: "/Users/private-user/bin/bash",
+					shell: "bash",
 					nodeVersion: "v24.1.0",
 				},
 			});
-			expect(linuxWithPathShell.host).toBe(
-				"<host>\nOS: Linux (linux 6.8.0, x64)\nShell: bash\nNode: v24.1.0\n</host>",
-			);
-			expect(linuxWithPathShell.host).not.toContain("private-user");
+			expect(linux.host).toBe("<host>\nOS: Linux (linux 6.8.0, x64)\nShell: bash\nNode: v24.1.0\n</host>");
 
 			const withoutShell = buildSystemPromptSections({
 				cwd: "/workspace",

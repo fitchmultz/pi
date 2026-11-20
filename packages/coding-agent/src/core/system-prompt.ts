@@ -3,6 +3,7 @@
  */
 
 import { release } from "node:os";
+import { win32 as win32Path } from "node:path";
 import { getSystemMessageText } from "@earendil-works/pi-ai";
 import { getStablePackageDir } from "../config.ts";
 import { getShellConfig } from "../utils/shell.ts";
@@ -86,28 +87,10 @@ const HOST_PLATFORM_LABELS: Record<string, string> = {
 	win32: "Windows",
 };
 
-function extractShellBasename(shellPath: string | undefined): string | undefined {
-	const trimmed = shellPath?.trim();
-	if (!trimmed) return undefined;
-	const normalized = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
-	const lastSlash = normalized.lastIndexOf("/");
-	const base = lastSlash === -1 ? normalized : normalized.slice(lastSlash + 1);
-	return base || undefined;
-}
-
-function resolveDefaultShellBasename(): string | undefined {
-	try {
-		const shell = extractShellBasename(getShellConfig().shell);
-		if (shell) return shell;
-	} catch {
-		// Fall back to SHELL when default shell resolution is unavailable.
-	}
-	return extractShellBasename(process.env.SHELL);
-}
-
 /** Resolve static, per-process host environment facts for the `<host>` system prompt section. */
 export function resolveHostEnvironmentInfo(options?: ResolveHostEnvironmentOptions): HostEnvironmentInfo {
-	const shell = extractShellBasename(options?.shellPath) ?? resolveDefaultShellBasename();
+	const rawShell = options?.shellPath?.trim() || getShellConfig().shell.trim();
+	const shell = rawShell ? win32Path.basename(rawShell) : undefined;
 	return {
 		platform: process.platform,
 		release: release(),
@@ -131,8 +114,7 @@ function formatHostOsLine(host: HostEnvironmentInfo): string {
 
 function formatHostSection(host: HostEnvironmentInfo): string {
 	const lines = [formatHostOsLine(host)];
-	const shell = extractShellBasename(host.shell);
-	if (shell) lines.push(`Shell: ${shell}`);
+	if (host.shell) lines.push(`Shell: ${host.shell}`);
 	lines.push(`Node: ${host.nodeVersion}`);
 	return lines.join("\n");
 }
