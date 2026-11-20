@@ -2509,7 +2509,11 @@ export class AgentSession {
 		const loaderSystemPrompt = this._resourceLoader.getSystemPrompt();
 		const loaderAppendSystemPrompt = this._resourceLoader.getAppendSystemPrompt();
 		const appendSystemPrompt = loaderAppendSystemPrompt.length > 0 ? loaderAppendSystemPrompt.join("\n\n") : "";
-		const loadedSkills = this._resourceLoader.getSkills().skills;
+		const loadedSkills = this._resourceLoader.getSkills().skills.map((skill) => {
+			const exposure = this.settingsManager.getSkillExposure(skill.name);
+			if (exposure === undefined) return skill;
+			return { ...skill, disableModelInvocation: exposure === "manual" };
+		});
 		const loadedContextFiles = this._resourceLoader.getAgentsFiles().agentsFiles;
 
 		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({

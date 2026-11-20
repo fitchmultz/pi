@@ -545,6 +545,24 @@
       },
       "description": "Exposure of registered tools, replacing the exposure each tool registered with. Keys are tool names or patterns where * matches any characters; an exact name wins over patterns, and among patterns the first match wins."
     },
+    "skillExposure": {
+      "type": "object",
+      "patternProperties": {
+        "^.*$": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "direct"
+            },
+            {
+              "type": "string",
+              "const": "manual"
+            }
+          ]
+        }
+      },
+      "description": "Visibility of discovered skills in the system prompt. \"direct\" lists the skill in <available_skills> (overriding frontmatter disable-model-invocation: true); \"manual\" omits it from the system prompt while keeping /skill:<name> expansion and autocomplete. Keys are skill names or patterns where * matches any characters; an exact name wins over patterns, and among patterns the first match wins."
+    },
     "doubleEscapeAction": {
       "anyOf": [
         {

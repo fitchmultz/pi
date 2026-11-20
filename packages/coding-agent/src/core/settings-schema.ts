@@ -177,6 +177,9 @@ const ToolExposureSchema = Type.Union([
 	Type.Literal("hidden"),
 ]);
 
+/** How a discovered skill is exposed to the model in `<available_skills>`. */
+const SkillExposureSchema = Type.Union([Type.Literal("direct"), Type.Literal("manual")]);
+
 const PackageSourceSchema = Type.Union(
 	[
 		Type.String({ description: "Load all resources from the package." }),
@@ -373,6 +376,12 @@ export const SettingsSchema = Type.Object(
 					"Exposure of registered tools, replacing the exposure each tool registered with. Keys are tool names or patterns where * matches any characters; an exact name wins over patterns, and among patterns the first match wins.",
 			}),
 		),
+		skillExposure: Type.Optional(
+			Type.Record(Type.String(), SkillExposureSchema, {
+				description:
+					'Visibility of discovered skills in the system prompt. "direct" lists the skill in <available_skills> (overriding frontmatter disable-model-invocation: true); "manual" omits it from the system prompt while keeping /skill:<name> expansion and autocomplete. Keys are skill names or patterns where * matches any characters; an exact name wins over patterns, and among patterns the first match wins.',
+			}),
+		),
 		doubleEscapeAction: Type.Optional(
 			Type.Union([Type.Literal("fork"), Type.Literal("tree"), Type.Literal("none")], {
 				description: "Action for double-escape with an empty editor.",
@@ -521,6 +530,7 @@ export type FullscreenExitOutput = NonNullable<SettingsInput["fullscreenExitOutp
 export type TuiMode = NonNullable<SettingsInput["tuiMode"]>;
 export type CacheWarmingMode = NonNullable<SettingsInput["cacheWarming"]>;
 export type CompactView = NonNullable<SettingsInput["compactView"]>;
+export type SkillExposure = Static<typeof SkillExposureSchema>;
 export interface Settings extends Omit<SettingsInput, "queueMode" | "retry" | "skills" | "websockets"> {
 	retry?: RetrySettings;
 	skills?: string[];
