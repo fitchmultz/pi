@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * Fails when a released section of a published package's CHANGELOG.md differs from the newest release tag.
+ * Fails when a released section of a published package's CHANGELOG.md differs from the release tag
+ * matching the workspace package version that this tree is synced to.
  *
  * A branch that adds an entry under `## [Unreleased]` and is merged after a release lands the entry under the release's
- * heading: the diff anchors on the lines around it, which the release left under `## [x.y.z]`. The newest tag's file
+ * heading: the diff anchors on the lines around it, which the release left under `## [x.y.z]`. The synced tag's file
  * holds every released section as released, so one comparison per changelog covers them all.
- * CI runs this after fetching the newest tag; `npm run check` does not.
+ * CI runs this after fetching the synced release tag; `npm run check` does not.
  */
 
 import { execFileSync } from "node:child_process";
@@ -16,14 +17,24 @@ import { getPublicWorkspacePackages } from "./release-packages.mjs";
 
 const RELEASED_HEADING = /^## \[\d+\.\d+\.\d+\]/m;
 
-const tag = git(["tag", "--list", "v*.*.*", "--sort=-v:refname"]).split("\n")[0];
+const publicPackages = getPublicWorkspacePackages();
+const versions = [...new Set(publicPackages.map((pkg) => pkg.version).filter(Boolean))];
+if (versions.length !== 1) {
+	console.error(`Expected one shared public package version, found: ${versions.join(", ") || "none"}.`);
+	process.exit(1);
+}
+const expectedTag = `v${versions[0]}`;
+const matchingTags = git(["tag", "--list", expectedTag]).split("\n").filter(Boolean);
+const tag = matchingTags[0];
 if (!tag) {
-	console.error("No release tag found. Fetch the newest one: git fetch --depth=1 origin refs/tags/<tag>:refs/tags/<tag>");
+	console.error(
+		`Release tag ${expectedTag} not found. Fetch it from upstream: git fetch --depth=1 https://github.com/earendil-works/pi.git refs/tags/${expectedTag}:refs/tags/${expectedTag}`,
+	);
 	process.exit(1);
 }
 
 let failed = false;
-for (const { directory } of getPublicWorkspacePackages()) {
+for (const { directory } of publicPackages) {
 	const path = join(directory, "CHANGELOG.md").replaceAll("\\", "/");
 	if (!existsSync(path)) continue;
 	const tagged = gitFileAt(tag, path);
