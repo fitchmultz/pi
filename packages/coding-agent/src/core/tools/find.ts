@@ -6,7 +6,7 @@ import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { localMissingPathLookup, withMissingPathHint } from "./missing-path.ts";
-import { pathExists, resolveToCwd } from "./path-utils.ts";
+import { hasGitPathSegment, pathExists, resolveToCwd, targetsGitPath } from "./path-utils.ts";
 import { findRenderers } from "./renderers/find.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
@@ -114,6 +114,13 @@ export function createFindToolDefinition(
 						// fd treats --max-results 0 as unlimited, so a limit below 1 means 1.
 						const effectiveLimit = Math.max(1, Math.floor(limit ?? DEFAULT_LIMIT));
 						const ops = customOps ?? defaultFindOperations;
+						// On Windows `\` is a path separator, so native patterns like 'src\**\*.ts' are
+						// normalized to '/' (#9262). On POSIX `\` stays a glob escape character.
+						// fd's full paths never contain "/./", so "./src/*.ts" would find nothing; drop the "./".
+						let effectivePattern = (
+							process.platform === "win32" ? pattern.replaceAll("\\", "/") : pattern
+						).replace(/^(?:\.\/)+/, "");
+						const excludeGit = !targetsGitPath(effectivePattern) && !hasGitPathSegment(searchPath);
 
 						// If custom operations provide glob(), use that instead of fd.
 						if (customOps?.glob) {
@@ -131,7 +138,7 @@ export function createFindToolDefinition(
 							}
 							// One result past the limit tells "exactly N matches" apart from "more than N".
 							const results = await ops.glob(pattern, searchPath, {
-								ignore: ["**/node_modules/**", "**/.git/**"],
+								ignore: excludeGit ? ["**/node_modules/**", "**/.git", "**/.git/**"] : ["**/node_modules/**"],
 								limit: effectiveLimit + 1,
 							});
 							if (signal?.aborted) {
@@ -190,6 +197,7 @@ export function createFindToolDefinition(
 						}
 
 						const args: string[] = ["--color=never", "--hidden"];
+						if (excludeGit) args.push("--exclude", ".git");
 
 						// fd normally ignores .gitignore outside git repos, so keep --no-require-git
 						// there. Inside repos, use fd's default git-aware behavior so parent
@@ -209,11 +217,6 @@ export function createFindToolDefinition(
 
 						// fd --glob matches against the basename unless --full-path is set; in --full-path
 						// mode it matches against the absolute candidate path.
-						// On Windows `\` is a path separator, so native patterns like 'src\**\*.ts' are
-						// normalized to '/' (#9262). On POSIX `\` stays a glob escape character.
-						let effectivePattern = process.platform === "win32" ? pattern.replaceAll("\\", "/") : pattern;
-						// fd's full paths never contain "/./", so "./src/*.ts" would find nothing; drop the "./".
-						effectivePattern = effectivePattern.replace(/^(?:\.\/)+/, "");
 						const isPathPattern = effectivePattern.includes("/");
 						// fd's smart case: an all-lowercase pattern matches case-insensitively.
 						const ignoreCase = effectivePattern === effectivePattern.toLowerCase();

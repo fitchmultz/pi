@@ -6,7 +6,7 @@ import { type Static, Type } from "typebox";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import { localMissingPathLookup, withMissingPathHint } from "./missing-path.ts";
-import { resolveToCwd } from "./path-utils.ts";
+import { resolveToCwd, targetsGitPath } from "./path-utils.ts";
 import { grepRenderers } from "./renderers/grep.ts";
 import { type TypeBoxAgentTool, wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import {
@@ -170,7 +170,18 @@ export function createGrepToolDefinition(
 						if (ignoreCase) args.push("--ignore-case");
 						if (literal) args.push("--fixed-strings");
 						// rg never matches a leading "./" ("./src/*.ts" finds nothing), so drop it; "!" negates.
-						if (glob) args.push("--glob", glob.replace(/^(!?)(?:\.\/)+/, "$1"));
+						const normalizedGlob = glob
+							? (process.platform === "win32" ? glob.replaceAll("\\", "/") : glob).replace(
+									/^(!?)(?:\.\/)+/,
+									"$1",
+								)
+							: undefined;
+						if (normalizedGlob) args.push("--glob", normalizedGlob);
+						// Exclude .git directories and worktree/submodule .git files after any user glob,
+						// because rg gives later --glob flags higher precedence.
+						if (!(normalizedGlob && targetsGitPath(normalizedGlob))) {
+							args.push("--glob", "!.git");
+						}
 						// rg emits the surrounding lines as `context` events, so no matched file is ever read here (#9276).
 						if (contextValue > 0) args.push("--context", String(contextValue));
 						// rg roots --glob at its own cwd, so a directory search runs inside searchPath (#11807).

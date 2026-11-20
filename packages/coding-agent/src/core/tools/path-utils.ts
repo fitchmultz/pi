@@ -116,3 +116,21 @@ export async function resolveReadPathAsync(filePath: string, cwd: string): Promi
 
 	return resolved;
 }
+
+/**
+ * Return true when a glob pattern explicitly targets a `.git` directory or file.
+ */
+export function targetsGitPath(pattern: string): boolean {
+	const normalized = (process.platform === "win32" ? pattern.replaceAll("\\", "/") : pattern).replace(
+		/^(!?)(?:\.\/)+/,
+		"$1",
+	);
+	return !normalized.startsWith("!") && /(?:^|\/)\.git(?:\/|$)/.test(normalized);
+}
+
+/**
+ * Return true when a path contains a `.git` path segment.
+ */
+export function hasGitPathSegment(searchPath: string): boolean {
+	return searchPath.split(/[\\/]/).includes(".git");
+}
