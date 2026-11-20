@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Breaking Changes
-
-- `Component.render()` now returns `readonly string[]`, and `Container.render()` returns the same cached array while its children are unchanged, like `Text`, `Markdown`, and `Box` already did. Code that modifies render output in place, including `super.render()` in a `Container` subclass, must copy it first ([#9549](https://github.com/earendil-works/pi/issues/9549))
-
 ### Added
 
 - Added `stripSelectionMetadata()` for components that render a `Text` or `Markdown` inside a fullscreen frame without retaining the instance. It preserves terminal styling.
@@ -22,11 +18,6 @@
 ### Fixed
 
 - Fixed fullscreen source-aware Markdown selection falling back to raw terminal cells when a `Markdown` `transform` (such as display-only styling, icons, or status pills) modifies the rendered text.
-- Fixed fullscreen Kitty images disappearing after a full redraw such as a window resize. Clearing the screen made Kitty free the cached image data that the redraw then tried to reuse ([#12010](https://github.com/earendil-works/pi/issues/12010))
-- Fixed text after a multi-row inline image in Markdown drawing over the image when the image's rows were joined with hard line breaks ([#12017](https://github.com/earendil-works/pi/issues/12017))
-- Fixed Kitty and iTerm2 images covering overlays drawn over them. An image that an overlay overlaps by row and column is now removed while the overlay is open and drawn again when it closes. Images beside an overlay, such as a sidebar, stay visible ([#11584](https://github.com/earendil-works/pi/issues/11584))
-- Fixed fullscreen scrolling re-rendering the whole transcript on every wheel event and key press, which saturated a CPU core in long sessions; scroll frames now reuse the previous output ([#9549](https://github.com/earendil-works/pi/issues/9549))
-- Fixed containers copying every rendered line on every frame, and sped up column slicing for ASCII and other text without combining characters ([#9549](https://github.com/earendil-works/pi/issues/9549))
 - Fixed `Text` and `Markdown` returning private selection annotations from `render()` to callers outside a fullscreen frame, such as tests, HTML export and `TuiMainScreen`. They now add annotations only while `TuiAltScreen` renders a frame, so other callers get plain lines without calling `stripSelectionMetadata()`.
 - Fixed inline math stripping dollar signs, braces and shell operators from quoted shell arguments.
 - Fixed Markdown rendering of very long single-line text, which crashed with a native regular-expression stack overflow while checking for Setext headings.
@@ -38,6 +29,26 @@
 - Fixed `wrapTextWithAnsi()` adding a blank row after a line that fills the width when a space follows it and then a word longer than the width, or nothing else on that line. This affected text with an active style or hyperlink and, in a fullscreen frame, all `Text` and `Markdown` text.
 - Fixed fullscreen rendering and `Loader` animation slowing or stopping when the terminal loses focus.
 - Fixed Markdown OSC 8 linkification swallowing trailing CJK punctuation, inline codespans calling `theme.code()` multiple times (duplicating theme delimiters), fullscreen selection copies miscomputing block offsets after HTML comments containing matching text, and `sliceWithWidth()`'s ASCII fast path dropping or leaking selection source markers across sliced overlay rows.
+
+## [1.6.0] - 2026-11-20
+
+### Breaking Changes
+
+- `Component.render()` now returns `readonly string[]`, and `Container.render()` returns the same cached array while its children are unchanged, like `Text`, `Markdown`, and `Box` already did. Code that modifies render output in place, including `super.render()` in a `Container` subclass, must copy it first ([#9549](https://github.com/earendil-works/pi/issues/9549))
+
+### Added
+
+- Added `TUI.setSuspendSignalHandler()`, which sets a handler called when the process receives `SIGTSTP` while the TUI owns the terminal, from `start()` until `stop()`. The `SIGTSTP` listener is removed on `stop()`, so a child that owns the terminal afterwards is suspended normally ([#12283](https://github.com/earendil-works/pi/pull/12283) by [@haoqixu](https://github.com/haoqixu))
+
+### Fixed
+
+- Fixed fullscreen Kitty images disappearing after a full redraw such as a window resize. Clearing the screen made Kitty free the cached image data that the redraw then tried to reuse ([#12010](https://github.com/earendil-works/pi/issues/12010))
+- Fixed text after a multi-row inline image in Markdown drawing over the image when the image's rows were joined with hard line breaks ([#12017](https://github.com/earendil-works/pi/issues/12017))
+- Fixed Kitty and iTerm2 images covering overlays drawn over them. An image that an overlay overlaps by row and column is now removed while the overlay is open and drawn again when it closes. Images beside an overlay, such as a sidebar, stay visible ([#11584](https://github.com/earendil-works/pi/issues/11584))
+- Fixed fullscreen scrolling re-rendering the whole transcript on every wheel event and key press, which saturated a CPU core in long sessions; scroll frames now reuse the previous output ([#9549](https://github.com/earendil-works/pi/issues/9549))
+- Fixed containers copying every rendered line on every frame, and sped up column slicing for ASCII and other text without combining characters ([#9549](https://github.com/earendil-works/pi/issues/9549))
+- Fixed Enter on an autocomplete menu submitting the prompt when the completed text started with `/`, such as a Tab path menu for an absolute path (`look at /tmp/fi`) or a slash command argument (`/open /tm`). Enter now submits only from the slash command name menu ([#12309](https://github.com/earendil-works/pi/issues/12309), [#12312](https://github.com/earendil-works/pi/pull/12312) by [@acmerfight](https://github.com/acmerfight))
+- Fixed `SettingsList` with `enableSearch` moving the selection back to the first entry when Left, Right, Home or End moved the cursor in the search field without changing the query ([#12245](https://github.com/earendil-works/pi/issues/12245))
 
 ## [1.5.2] - 2026-11-10
 

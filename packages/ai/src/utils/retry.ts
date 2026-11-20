@@ -56,9 +56,14 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"rate.?limit",
 	"too many requests",
 	// Status codes must not be part of a longer word or number, e.g. a request id or byte count (#11057).
-	"(?<![a-z0-9])(?:429|500|502|503|504|520|524)(?![a-z0-9])",
+	// 520, 524 and 525 are Cloudflare's: an unknown error, a timeout, and a failed TLS
+	// handshake between Cloudflare and the provider's origin, usually while it restarts.
+	"(?<![a-z0-9])(?:429|500|502|503|504|520|524|525)(?![a-z0-9])",
 	// Also matches "The service is temporarily unavailable" (#10965).
 	"service.?(?:is.?)?(?:temporarily.?)?unavailable",
+	// Gateway wording such as "The provider is temporarily unavailable. Retry shortly." (#12227).
+	// "temporarily" is required: a plain "provider unavailable" is often a lasting routing error.
+	"provider.?(?:is.?)?temporarily.?unavailable",
 	"server.?error",
 	"internal.?error",
 
@@ -127,6 +132,11 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	// Magpie gateway relaying a dropped upstream Anthropic stream, e.g.
 	// "Claude Code's stream from Anthropic was cut short after the reply had begun" (#11879).
 	"cut short after the reply had begun",
+	// Gateway mid-stream failures relayed as SSE `event: error` frames without a
+	// status code, e.g. "The provider ended the response before it was complete." (#12227).
+	"ended the response before it was complete",
+	"connection to the provider was reset",
+	"reported a failure while generating the response",
 	// Node ERR_HTTP2_STREAM_CANCEL: the HTTP/2 session died before the request was
 	// sent, e.g. after the Bedrock SDK's 5-minute session timeout (#10379).
 	"pending stream has been canceled",

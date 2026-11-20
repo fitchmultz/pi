@@ -135,8 +135,9 @@ export default defineProvider({
 		// those models accept `prompt_cache_options`; older models reject the parameter.
 		// https://developers.openai.com/api/docs/guides/prompt-caching
 		if (model.cost.cacheWrite > 0) mergeCompat(responsesModel, { supportsExplicitPromptCacheMode: true });
-		if (OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id))
+		if (OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id)) {
 			mergeCompat(responsesModel, { supportsMidConvoEffort: true });
+		}
 		withInputLimits(model, { maxRequestBytes: 512 * 1024 * 1024, images: { maxPerRequest: 1500 } });
 	},
 });
