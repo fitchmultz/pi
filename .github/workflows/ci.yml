@@ -62,11 +62,11 @@ jobs:
       - name: Public package consumer installs
         run: ./test.sh -- npm run check:package-install
 
-      # The checkout has no tags; the released changelog sections mirror upstream's newest release tag.
-      - name: Fetch the newest release tag
+      # The checkout has no tags; compare released changelog sections against the upstream release tag this fork is synced to.
+      - name: Fetch the synced release tag
         run: |
           upstream_repo="https://github.com/earendil-works/pi.git"
-          tag=$(git ls-remote --tags --sort=-v:refname "$upstream_repo" 'v*.*.*' | grep -v '\^{}' | head -1 | sed 's#.*refs/tags/##')
+          tag="v$(node -p 'JSON.parse(require("node:fs").readFileSync("packages/coding-agent/package.json","utf8")).version')"
           git fetch --depth=1 "$upstream_repo" "refs/tags/$tag:refs/tags/$tag"
 
       - name: Check released changelog sections
