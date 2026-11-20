@@ -2,9 +2,29 @@
  * System prompt construction and project context loading
  */
 
+import { release } from "node:os";
 import { getSystemMessageText } from "@earendil-works/pi-ai";
 import { getStablePackageDir } from "../config.ts";
+import { getShellConfig } from "../utils/shell.ts";
 import { formatSkillsForPrompt, type Skill } from "./skills.ts";
+
+export interface HostEnvironmentInfo {
+	/** Operating system platform (for example `process.platform`: `"darwin"`, `"linux"`). */
+	platform: string;
+	/** Operating system kernel/version release (for example `os.release()`). */
+	release: string;
+	/** CPU architecture (for example `process.arch`: `"arm64"`, `"x64"`). */
+	arch: string;
+	/** Shell executable basename (for example `"bash"`, `"zsh"`), omitted when unavailable. */
+	shell?: string;
+	/** Node.js runtime version (for example `process.version`: `"v24.22.3"`). */
+	nodeVersion: string;
+}
+
+export interface ResolveHostEnvironmentOptions {
+	/** Configured shell path (for example `settings.shellPath`). */
+	shellPath?: string;
+}
 
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces the default prefix). */
@@ -30,6 +50,8 @@ export interface BuildSystemPromptOptions {
 	sections?: Record<string, string>;
 	/** Working directory. */
 	cwd: string;
+	/** Static host environment metadata for the `<host>` section. Defaults to current process info. */
+	host?: HostEnvironmentInfo;
 	/** Pre-loaded context files. */
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
@@ -56,6 +78,65 @@ export type NormalizedBuildSystemPromptOptions = BuildSystemPromptOptions & {
 export type SystemPromptSections = Record<string, string>;
 
 const SYSTEM_PROMPT_SECTION_NAME = /^[a-z][a-z0-9_-]*$/;
+
+const HOST_PLATFORM_LABELS: Record<string, string> = {
+	darwin: "macOS",
+	linux: "Linux",
+	android: "Android",
+	win32: "Windows",
+};
+
+function extractShellBasename(shellPath: string | undefined): string | undefined {
+	const trimmed = shellPath?.trim();
+	if (!trimmed) return undefined;
+	const normalized = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
+	const lastSlash = normalized.lastIndexOf("/");
+	const base = lastSlash === -1 ? normalized : normalized.slice(lastSlash + 1);
+	return base || undefined;
+}
+
+function resolveDefaultShellBasename(): string | undefined {
+	try {
+		const shell = extractShellBasename(getShellConfig().shell);
+		if (shell) return shell;
+	} catch {
+		// Fall back to SHELL when default shell resolution is unavailable.
+	}
+	return extractShellBasename(process.env.SHELL);
+}
+
+/** Resolve static, per-process host environment facts for the `<host>` system prompt section. */
+export function resolveHostEnvironmentInfo(options?: ResolveHostEnvironmentOptions): HostEnvironmentInfo {
+	const shell = extractShellBasename(options?.shellPath) ?? resolveDefaultShellBasename();
+	return {
+		platform: process.platform,
+		release: release(),
+		arch: process.arch,
+		...(shell ? { shell } : {}),
+		nodeVersion: process.version,
+	};
+}
+
+function formatHostOsLine(host: HostEnvironmentInfo): string {
+	const label = Object.hasOwn(HOST_PLATFORM_LABELS, host.platform) ? HOST_PLATFORM_LABELS[host.platform] : undefined;
+	if (label) {
+		const details = host.release
+			? `${host.platform} ${host.release}, ${host.arch}`
+			: `${host.platform}, ${host.arch}`;
+		return `OS: ${label} (${details})`;
+	}
+	const details = host.release ? `${host.release}, ${host.arch}` : host.arch;
+	return `OS: ${host.platform} (${details})`;
+}
+
+function formatHostSection(host: HostEnvironmentInfo): string {
+	const lines = [formatHostOsLine(host)];
+	const shell = extractShellBasename(host.shell);
+	if (shell) lines.push(`Shell: ${shell}`);
+	lines.push(`Node: ${host.nodeVersion}`);
+	return lines.join("\n");
+}
+
 /** Normalize prompt input into the mutable, collection-complete shape exposed to extensions. */
 export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOptions): NormalizedBuildSystemPromptOptions {
 	return {
@@ -71,6 +152,7 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 		appendSystemPrompt: input.appendSystemPrompt ?? "",
 		sections: { ...(input.sections ?? {}) },
 		cwd: input.cwd,
+		host: input.host ? { ...input.host } : undefined,
 		contextFiles: (input.contextFiles ?? []).map((file) => ({ ...file })),
 		skills: (input.skills ?? []).map((skill) => ({ ...skill })),
 	};
@@ -137,6 +219,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		appendSystemPrompt,
 		sections: customSections,
 		cwd,
+		host,
 		contextFiles,
 		skills,
 	} = options;
@@ -180,6 +263,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		if (skillsPrompt) promptSections.skills = skillsPrompt;
 	}
 	promptSections.cwd = cwd.replace(/\\/g, "/");
+	promptSections.host = formatHostSection(host ?? resolveHostEnvironmentInfo());
 	for (const [name, content] of Object.entries(customSections)) {
 		if (content) promptSections[name] = content;
 	}

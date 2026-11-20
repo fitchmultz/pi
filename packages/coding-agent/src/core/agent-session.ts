@@ -168,6 +168,7 @@ import {
 	diffSystemPromptSections,
 	type NormalizedBuildSystemPromptOptions,
 	normalizeBuildSystemPromptOptions,
+	resolveHostEnvironmentInfo,
 } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
@@ -2518,6 +2519,7 @@ export class AgentSession {
 
 		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
 			cwd: this._cwd,
+			host: resolveHostEnvironmentInfo({ shellPath: this.settingsManager.getShellPath() }),
 			skills: loadedSkills,
 			contextFiles: loadedContextFiles,
 			customPrompt: loaderSystemPrompt,

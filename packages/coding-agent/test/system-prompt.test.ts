@@ -1,11 +1,11 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, release, tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, test } from "vitest";
 import { type ForkReleaseReceipt, getStablePackageDir } from "../src/config.ts";
 import type { Skill } from "../src/core/skills.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
-import { buildSystemPrompt } from "../src/core/system-prompt.ts";
+import { buildSystemPrompt, buildSystemPromptSections, resolveHostEnvironmentInfo } from "../src/core/system-prompt.ts";
 
 const testSkill: Skill = {
 	name: "test-skill",
@@ -77,6 +77,118 @@ describe("buildSystemPrompt", () => {
 				'<project_context>\nProject-specific instructions and guidelines:\n\n<project_instructions path="/tmp/AGENTS.md">',
 			);
 			expect(prompt).toContain("<cwd>\n/tmp\n</cwd>");
+		});
+	});
+
+	describe("host section", () => {
+		test("emits <host> directly after <cwd> without modifying <cwd>", () => {
+			const host = {
+				platform: "darwin",
+				release: "24.4.0",
+				arch: "arm64",
+				shell: "zsh",
+				nodeVersion: "v24.22.3",
+			};
+			const prompt = buildSystemPrompt({
+				cwd: "/workspace/project",
+				host,
+				selectedTools: [],
+				contextFiles: [],
+				skills: [],
+			});
+			const sections = buildSystemPromptSections({
+				cwd: "/workspace/project",
+				host,
+				selectedTools: [],
+				contextFiles: [],
+				skills: [],
+			});
+
+			expect(sections.cwd).toBe("<cwd>\n/workspace/project\n</cwd>");
+			expect(sections.host).toBe("<host>\nOS: macOS (darwin 24.4.0, arm64)\nShell: zsh\nNode: v24.22.3\n</host>");
+			const keys = Object.keys(sections);
+			expect(keys.indexOf("host")).toBe(keys.indexOf("cwd") + 1);
+			expect(prompt).toContain(
+				"<cwd>\n/workspace/project\n</cwd>\n\n<host>\nOS: macOS (darwin 24.4.0, arm64)\nShell: zsh\nNode: v24.22.3\n</host>",
+			);
+		});
+
+		test("supports platform formatting, shell basename extraction, and omitted shell", () => {
+			const linuxWithPathShell = buildSystemPromptSections({
+				cwd: "/workspace",
+				host: {
+					platform: "linux",
+					release: "6.8.0",
+					arch: "x64",
+					shell: "/Users/private-user/bin/bash",
+					nodeVersion: "v24.1.0",
+				},
+			});
+			expect(linuxWithPathShell.host).toBe(
+				"<host>\nOS: Linux (linux 6.8.0, x64)\nShell: bash\nNode: v24.1.0\n</host>",
+			);
+			expect(linuxWithPathShell.host).not.toContain("private-user");
+
+			const withoutShell = buildSystemPromptSections({
+				cwd: "/workspace",
+				host: {
+					platform: "freebsd",
+					release: "14.1-RELEASE",
+					arch: "x64",
+					nodeVersion: "v24.1.0",
+				},
+			});
+			expect(withoutShell.host).toBe("<host>\nOS: freebsd (14.1-RELEASE, x64)\nNode: v24.1.0\n</host>");
+			expect(withoutShell.host).not.toContain("Shell:");
+		});
+
+		test("defaults to static current-process host metadata without leaking hostname, username, or env", () => {
+			const sentinelEnvKey = "PI_HOST_SECTION_TEST_SECRET";
+			const sentinelEnvValue = "super-secret-env-value-98765";
+			process.env[sentinelEnvKey] = sentinelEnvValue;
+			try {
+				const info = resolveHostEnvironmentInfo();
+				expect(info.platform).toBe(process.platform);
+				expect(info.release).toBe(release());
+				expect(info.arch).toBe(process.arch);
+				expect(info.nodeVersion).toBe(process.version);
+				if (info.shell !== undefined) {
+					expect(info.shell).not.toContain("/");
+					expect(info.shell).not.toContain("\\");
+				}
+
+				const first = buildSystemPrompt({ cwd: "/workspace", selectedTools: [], contextFiles: [], skills: [] });
+				const second = buildSystemPrompt({ cwd: "/workspace", selectedTools: [], contextFiles: [], skills: [] });
+				expect(second).toBe(first);
+
+				const sections = buildSystemPromptSections({
+					cwd: "/workspace",
+					selectedTools: [],
+					contextFiles: [],
+					skills: [],
+				});
+				const hostSection = sections.host;
+				expect(hostSection).toBeDefined();
+				expect(hostSection).toContain(process.platform);
+				expect(hostSection).toContain(process.arch);
+				expect(hostSection).toContain(process.version);
+				expect(hostSection).not.toContain(sentinelEnvKey);
+				expect(hostSection).not.toContain(sentinelEnvValue);
+
+				const hostLines = hostSection!.split("\n").slice(1, -1);
+				expect(hostLines.every((line) => /^(OS|Shell|Node): /.test(line))).toBe(true);
+
+				const currentHostname = hostname();
+				if (currentHostname.length > 3 && !hostSection!.includes(process.platform + currentHostname)) {
+					expect(hostSection).not.toContain(currentHostname);
+				}
+				const currentUser = userInfo().username;
+				if (currentUser.length > 3 && currentUser !== "node" && currentUser !== "bash") {
+					expect(hostSection).not.toContain(currentUser);
+				}
+			} finally {
+				delete process.env[sentinelEnvKey];
+			}
 		});
 	});
 
