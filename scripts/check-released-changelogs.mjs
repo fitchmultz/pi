@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * Fails when a released section of a published package's CHANGELOG.md differs from the upstream release tag
- * that this tree is synced to (derived from `packages/coding-agent/package.json`).
+ * Fails when a released section of a published package's CHANGELOG.md differs from the release tag
+ * matching the workspace package version that this tree is synced to.
  *
  * A branch that adds an entry under `## [Unreleased]` and is merged after a release lands the entry under the release's
  * heading: the diff anchors on the lines around it, which the release left under `## [x.y.z]`. The synced tag's file
@@ -17,7 +17,13 @@ import { getPublicWorkspacePackages } from "./release-packages.mjs";
 
 const RELEASED_HEADING = /^## \[\d+\.\d+\.\d+\]/m;
 
-const expectedTag = `v${JSON.parse(readFileSync("packages/coding-agent/package.json", "utf8")).version}`;
+const publicPackages = getPublicWorkspacePackages();
+const versions = [...new Set(publicPackages.map((pkg) => pkg.version).filter(Boolean))];
+if (versions.length !== 1) {
+	console.error(`Expected one shared public package version, found: ${versions.join(", ") || "none"}.`);
+	process.exit(1);
+}
+const expectedTag = `v${versions[0]}`;
 const matchingTags = git(["tag", "--list", expectedTag]).split("\n").filter(Boolean);
 const tag = matchingTags[0];
 if (!tag) {
@@ -28,7 +34,7 @@ if (!tag) {
 }
 
 let failed = false;
-for (const { directory } of getPublicWorkspacePackages()) {
+for (const { directory } of publicPackages) {
 	const path = join(directory, "CHANGELOG.md").replaceAll("\\", "/");
 	if (!existsSync(path)) continue;
 	const tagged = gitFileAt(tag, path);
