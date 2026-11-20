@@ -1456,7 +1456,7 @@ describe("Coding Agent Tools", () => {
 			});
 			expect(getTextOutput(worktreeGitFile)).toContain(".git:1: gitdir:");
 
-			for (const glob of [".git/config", "./.git/config"]) {
+			for (const glob of [".git/config", "./.git/config", "[.]git/config", "\\.git/config", "{other,.git}/config"]) {
 				const gitGlob = await scopedGrep.execute(`test-call-grep-explicit-git-glob-${glob}`, {
 					pattern: "PIF248_NEEDLE",
 					glob,
@@ -1710,6 +1710,9 @@ describe("Coding Agent Tools", () => {
 				{ pattern: ".git" },
 				{ pattern: ".git/**" },
 				{ pattern: "./.git/**" },
+				{ pattern: "[.]git/**" },
+				{ pattern: "\\.git/**" },
+				{ pattern: "{src,.git}/**" },
 				{ pattern: ".git/config" },
 				{ pattern: "**/.git/config" },
 				{ pattern: "subrepo/.git/*" },

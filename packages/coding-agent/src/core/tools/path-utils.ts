@@ -117,6 +117,29 @@ export async function resolveReadPathAsync(filePath: string, cwd: string): Promi
 	return resolved;
 }
 
+function normalizeGlobSegment(segment: string): string {
+	const unescaped = process.platform === "win32" ? segment : segment.replace(/\\(.)/g, "$1");
+	return unescaped.replace(/\[(.)\]/g, "$1");
+}
+
+function expandGlobBraces(pattern: string, maxVariants = 64): string[] {
+	const variants = [pattern];
+	for (let i = 0; i < variants.length && variants.length < maxVariants; ) {
+		const match = /^([^{]*)\{([^{}]*,[^{}]*)\}(.*)$/.exec(variants[i]);
+		if (!match) {
+			i++;
+			continue;
+		}
+		const [, prefix, inner, suffix] = match;
+		const replacements = inner
+			.split(",")
+			.slice(0, maxVariants - variants.length + 1)
+			.map((alt) => `${prefix}${alt}${suffix}`);
+		variants.splice(i, 1, ...replacements);
+	}
+	return variants;
+}
+
 /**
  * Return true when a glob pattern explicitly targets a `.git` directory or file.
  */
@@ -125,7 +148,13 @@ export function targetsGitPath(pattern: string): boolean {
 		/^(!?)(?:\.\/)+/,
 		"$1",
 	);
-	return !normalized.startsWith("!") && /(?:^|\/)\.git(?:\/|$)/.test(normalized);
+	if (normalized.startsWith("!")) return false;
+	return expandGlobBraces(normalized).some((variant) =>
+		variant
+			.replace(/^(?:\.\/)+/, "")
+			.split("/")
+			.some((segment) => normalizeGlobSegment(segment) === ".git"),
+	);
 }
 
 /**
