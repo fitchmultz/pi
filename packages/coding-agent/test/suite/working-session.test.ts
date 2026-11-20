@@ -1440,6 +1440,13 @@ describe("Native working sessions", () => {
 				{ mode: { kind: "host", data: undefined } },
 				{ steering: [undefined] },
 				{ prompt: { ...hold.state.prompt, toolGuidelines: { invalid: [undefined] } } },
+				{ prompt: { ...hold.state.prompt, host: { platform: 5 } } },
+				{
+					prompt: {
+						...hold.state.prompt,
+						host: { platform: "linux", release: "6", arch: "arm64", nodeVersion: "24", shell: 5 },
+					},
+				},
 				{ steeringMode: undefined },
 			].map((invalid) => ({ ...incoming, ...invalid }));
 			const inputs: unknown[] =

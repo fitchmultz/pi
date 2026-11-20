@@ -221,6 +221,11 @@ function message(value: unknown, path: string, role?: AgentMessage["role"]): voi
 function prompt(value: unknown, path: string): void {
 	if (!record(value)) fail(path);
 	if (typeof value.cwd !== "string" || !isAbsolute(value.cwd)) fail(`${path}.cwd`);
+	if (value.host !== undefined) {
+		if (!record(value.host)) fail(`${path}.host`);
+		fields(value.host, `${path}.host`, "string", "platform", "release", "arch", "nodeVersion");
+		optionalFields(value.host, `${path}.host`, "string", "shell");
+	}
 	optionalFields(value, path, "string", "customPrompt", "forceSystemPrompt");
 	fields(value, path, "string", "appendSystemPrompt");
 	for (const key of ["selectedTools", "promptGuidelines"]) if (!strings(value[key])) fail(`${path}.${key}`);
