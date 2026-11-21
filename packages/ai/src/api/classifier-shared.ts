@@ -1,6 +1,6 @@
 import { calculateCost } from "../models.ts";
 import type { ClassifierApi, ClassifierModel, ClassifierOptions, ProviderHeaders, Usage } from "../types.ts";
-import { headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
+import { hasCredentialHeader, headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 
@@ -57,15 +57,6 @@ function requestHeaders(
 	);
 }
 
-function hasHeader(headers: ProviderHeaders | undefined, name: string): boolean {
-	if (!headers) return false;
-	const expected = name.toLowerCase();
-	for (const [key, value] of Object.entries(headers)) {
-		if (key.toLowerCase() === expected && value !== null && value.trim().length > 0) return true;
-	}
-	return false;
-}
-
 /**
  * Posts one JSON classifier request with bearer auth, or with the credential header the caller
  * already set, `onPayload`/`onResponse` hooks, a fresh timeout per attempt, and provider retries.
@@ -82,10 +73,8 @@ export async function postClassifierRequest(
 	authHeaders?: Record<string, string>,
 ): Promise<unknown> {
 	// Gateways such as Cloudflare AI Gateway send the credential in a header instead of an API key,
-	// which the chat APIs accept too.
-	const hasCredentialHeader =
-		hasHeader(options?.headers, "authorization") || hasHeader(options?.headers, "cf-aig-authorization");
-	if (!options || (!options.apiKey && !hasCredentialHeader)) {
+	// which the OpenAI chat APIs accept through the same check.
+	if (!options || (!options.apiKey && !hasCredentialHeader(options.headers))) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
 	const apiKey = options.apiKey;
