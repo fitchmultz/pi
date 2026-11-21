@@ -291,6 +291,14 @@ export function isRetryableAssistantError(message: AssistantMessage): boolean {
 	}
 	const errorMessage = message.errorMessage;
 	if (!errorMessage) return false;
-	if (NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorMessage)) return false;
+	if (isProviderLimitError(errorMessage)) return false;
 	return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
+}
+
+/**
+ * Whether provider error text reports an exhausted quota, budget, billing or plan limit. A retry
+ * cannot succeed until the limit resets, usually hours later, or the account owner raises it.
+ */
+export function isProviderLimitError(errorText: string): boolean {
+	return NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN.test(errorText);
 }

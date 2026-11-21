@@ -202,6 +202,41 @@ describe("Google Decisions", () => {
 		expect(missing.errorMessage).toContain("did not return an answer for primitive_violation");
 	});
 
+	it("fails a spending-cap 429 after one request and still retries an ordinary 429", async () => {
+		// The body Google returned through Cloudflare AI Gateway once the billing account reached its cap.
+		const spendingCap = JSON.stringify({
+			error: {
+				message:
+					"Your billing account has exceeded its monthly spending cap. Please go to AI Studio at https://ai.studio/billing to manage your billing. Learn more at https://ai.google.dev/gemini-api/docs/billing#tier-spend-caps. ",
+				code: "too_many_requests",
+			},
+		});
+		const capped = vi.fn(async () => new Response(spendingCap, { status: 429, headers: { "retry-after": "0" } }));
+		const throttled = vi
+			.fn(async () => Response.json({ answers: wireAnswers }))
+			.mockResolvedValueOnce(
+				Response.json(
+					{
+						error: {
+							code: 429,
+							message: "Resource has been exhausted (e.g. check quota).",
+							status: "RESOURCE_EXHAUSTED",
+						},
+					},
+					{ status: 429, headers: { "retry-after": "0" } },
+				),
+			);
+
+		const cappedResult = await classify(model, context, { apiKey: "secret", fetch: capped });
+		const throttledResult = await classify(model, context, { apiKey: "secret", fetch: throttled });
+
+		expect(capped).toHaveBeenCalledOnce();
+		expect(cappedResult.stopReason).toBe("error");
+		expect(cappedResult.errorMessage).toContain("exceeded its monthly spending cap");
+		expect(throttled).toHaveBeenCalledTimes(2);
+		expect(throttledResult.stopReason).toBe("stop");
+	});
+
 	it("rejects models for other classifier APIs, missing API keys, and excessive image counts", async () => {
 		const fetch = vi.fn(async () => Response.json({ answers: wireAnswers }));
 		const otherApi = await classify({ ...model, api: "openai-decisions" }, context, { apiKey: "secret", fetch });

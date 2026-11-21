@@ -45,6 +45,29 @@ describe("provider request retries", () => {
 		expect(request).toHaveBeenCalledTimes(1);
 	});
 
+	it("does not retry SDK errors that report a provider limit in their parsed body or message", async () => {
+		// The OpenAI SDK keeps the parsed body in `error`; @google/genai folds it into the message.
+		const openai = Object.assign(providerError(429, { "retry-after-ms": "0" }), {
+			error: {
+				message: "You exceeded your current quota, please check your plan and billing details.",
+				type: "insufficient_quota",
+				code: "insufficient_quota",
+			},
+		});
+		const google = Object.assign(
+			new Error(
+				'got status: 429 Too Many Requests. {"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details.","status":"RESOURCE_EXHAUSTED"}}',
+			),
+			{ status: 429, headers: undefined },
+		);
+
+		for (const error of [openai, google]) {
+			const request = vi.fn<() => Promise<string>>().mockRejectedValue(error);
+			await expect(retryProviderRequest(request, { maxRetries: 2 })).rejects.toBe(error);
+			expect(request).toHaveBeenCalledTimes(1);
+		}
+	});
+
 	it("rejects a provider-requested retry delay above the limit", async () => {
 		const request = vi.fn<() => Promise<string>>().mockRejectedValue(providerError(429, { "retry-after": "277403" }));
 
