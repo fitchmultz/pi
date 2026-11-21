@@ -154,11 +154,28 @@ function replaceFileAtomically(sourcePath, destinationPath, mode) {
 
 function saveCachedTermuxCompiler(compilerCacheRoot, cacheKey, binary) {
 	const entryDir = join(compilerCacheRoot, cacheKey);
-	ensurePrivateDirectory(entryDir);
-	replaceFileAtomically(binary, join(entryDir, "tsc"), 0o755);
-	for (const entry of readdirSync(compilerCacheRoot)) {
+	try {
+		ensurePrivateDirectory(entryDir);
+		replaceFileAtomically(binary, join(entryDir, "tsc"), 0o755);
+	} catch (error) {
+		console.warn(`Could not save cached Termux compiler at ${entryDir}: ${error instanceof Error ? error.message : String(error)}`);
+		return;
+	}
+	let entries;
+	try {
+		entries = readdirSync(compilerCacheRoot);
+	} catch (error) {
+		console.warn(`Could not list Termux compiler cache at ${compilerCacheRoot}: ${error instanceof Error ? error.message : String(error)}`);
+		return;
+	}
+	for (const entry of entries) {
 		if (entry === cacheKey) continue;
-		rmSync(join(compilerCacheRoot, entry), { recursive: true, force: true });
+		const oldEntry = join(compilerCacheRoot, entry);
+		try {
+			rmSync(oldEntry, { recursive: true, force: true });
+		} catch (error) {
+			console.warn(`Could not remove old Termux compiler cache entry ${oldEntry}: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 }
 

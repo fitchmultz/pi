@@ -941,6 +941,25 @@ func main() { fmt.Println(${JSON.stringify(`Version ${version}`)}) }
 				() => prepareTermuxCompiler(fourthWorkdir, tools, { ...f.env, PATH: otherGoBin, npm_config_offline: "true" }, f.cache),
 				/Command failed: go mod download/,
 			);
+
+			// An unwritable private cache root must warn without failing a verified rebuild.
+			if (process.getuid?.() !== 0) {
+				const readOnlyCache = join(f.root, "readonly-cache");
+				const readOnlyCompilerCache = join(readOnlyCache, "termux-compiler");
+				mkdirSync(readOnlyCompilerCache, { recursive: true, mode: 0o700 });
+				chmodSync(readOnlyCompilerCache, 0o500);
+				const warn = t.mock.method(console, "warn", () => {});
+				try {
+					const fifthWorkdir = join(f.root, "fifth-workdir");
+					prepareTermuxWorkdir(fifthWorkdir, secondLock);
+					prepareTermuxCompiler(fifthWorkdir, tools, { ...f.env, npm_config_offline: "true" }, readOnlyCache);
+					assert.equal(execFileSync(join(fifthWorkdir, "node_modules/.bin/tsc"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.4");
+					assert.match(String(warn.mock.calls[0]?.arguments[0]), /Could not save cached Termux compiler/);
+				} finally {
+					warn.mock.restore();
+					chmodSync(readOnlyCompilerCache, 0o700);
+				}
+			}
 		}
 		const compiler = join(firstWorkdir, "node_modules/.termux-compiler");
 		rmSync(compiler, { recursive: true, force: true });
