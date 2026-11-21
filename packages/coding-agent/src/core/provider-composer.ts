@@ -319,19 +319,21 @@ function applyModelsJson(
 		throw new Error(`Provider ${providerId}: "baseUrl" is required when "oauth" is set.`);
 	}
 	const hasOverrides = config.modelOverrides && Object.keys(config.modelOverrides).length > 0;
+	const hasClassifierOverrides = config.classifierOverrides && Object.keys(config.classifierOverrides).length > 0;
 	if (
 		!config.models?.length &&
 		!config.baseUrl &&
 		!config.headers &&
 		!config.compat &&
 		!hasOverrides &&
+		!hasClassifierOverrides &&
 		!config.apiKey &&
 		!config.oauth &&
 		config.authHeader === undefined &&
 		config.preferLocalLoopback === undefined
 	) {
 		throw new Error(
-			`Provider ${providerId}: must specify "baseUrl", "headers", "compat", "modelOverrides", or "models".`,
+			`Provider ${providerId}: must specify "baseUrl", "headers", "compat", "modelOverrides", "classifierOverrides", or "models".`,
 		);
 	}
 
@@ -535,8 +537,9 @@ function rawModelHeaders(
 	config: ModelsJsonProvider | undefined,
 	extension: ProviderConfigInput | undefined,
 ): Record<string, string> | undefined {
-	// models.json definitions and overrides are chat-only. Extension definitions
-	// are matched by operation and id so colliding models cannot share headers.
+	// models.json definitions and modelOverrides are chat-only; classifierOverrides apply only to
+	// classifier models. Extension definitions are matched by operation and id so colliding models
+	// cannot share headers.
 	const chatDefinition = isModelType(model, "chat")
 		? config?.models?.find((entry) => entry.id === model.id)
 		: undefined;
@@ -545,6 +548,7 @@ function rawModelHeaders(
 	);
 	const headers = {
 		...(isModelType(model, "chat") ? config?.modelOverrides?.[model.id]?.headers : undefined),
+		...(isModelType(model, "classifier") ? config?.classifierOverrides?.[model.id]?.headers : undefined),
 		...chatDefinition?.headers,
 		...extensionModel?.headers,
 	};

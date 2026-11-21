@@ -65,7 +65,12 @@ const referenceArtifacts: readonly ReferenceArtifact[] = [
 				heading: "Providers",
 				intro: "Each key under `providers` is a provider ID. A built-in provider ID changes that provider. Any other ID adds a provider, which needs `baseUrl` and an `api` at provider or model level.",
 				schema: ModelsJsonSchemas.provider,
-				links: { models: "#models", modelOverrides: "#model-overrides", compat: "#compatibility" },
+				links: {
+					models: "#models",
+					modelOverrides: "#model-overrides",
+					classifierOverrides: "#classifier-overrides",
+					compat: "#compatibility",
+				},
 			},
 			{
 				heading: "Models",
@@ -78,6 +83,11 @@ const referenceArtifacts: readonly ReferenceArtifact[] = [
 				intro: "Each `modelOverrides` key is the ID of a built-in or extension model. Unknown IDs are ignored. Object fields, such as `cost`, merge with the model's value field by field; other fields replace it.",
 				schema: ModelsJsonSchemas.modelOverride,
 				links: { inputLimits: "#input-limits", compat: "#compatibility" },
+			},
+			{
+				heading: "Classifier overrides",
+				intro: "`models` and `modelOverrides` change chat models only. Each `classifierOverrides` key is the ID of one of the provider's [classifier models](models.md#use-classifier-models), such as `gemini-decision-1` on `google`, and unknown IDs are ignored. Its `headers` are sent with that classifier model's requests only, in addition to the provider's `headers`, and replace a provider header of the same name. A chat model with the same ID does not receive them.",
+				schema: ModelsJsonSchemas.classifierOverride,
 			},
 			{
 				heading: "Input limits",

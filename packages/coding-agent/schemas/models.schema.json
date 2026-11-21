@@ -383,6 +383,25 @@
                   }
                 }
               }
+            },
+            "classifierOverrides": {
+              "type": "object",
+              "patternProperties": {
+                "^.*$": {
+                  "type": "object",
+                  "properties": {
+                    "headers": {
+                      "type": "object",
+                      "patternProperties": {
+                        "^.*$": {
+                          "type": "string"
+                        }
+                      },
+                      "description": "Request headers. Values resolve like apiKey."
+                    }
+                  }
+                }
+              }
             }
           }
         }

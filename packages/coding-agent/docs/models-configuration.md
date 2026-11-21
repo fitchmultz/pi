@@ -23,6 +23,7 @@ Each key under `providers` is a provider ID. A built-in provider ID changes that
 | `preferLocalLoopback` | boolean | `false` | Whether plain http:// baseUrls resolving to this machine's own interfaces should connect via loopback (127.0.0.1 / [::1]) when reachable. |
 | `models` | [`object[]`](#models) |  |  |
 | `modelOverrides` | [object](#model-overrides) |  |  |
+| `classifierOverrides` | [object](#classifier-overrides) |  |  |
 
 ## Models
 
@@ -87,6 +88,14 @@ Each `modelOverrides` key is the ID of a built-in or extension model. Unknown ID
 | `samplingParamsByThinkingLevel` | object |  | samplingParams per thinking level, merged over samplingParams. |
 | `headers` | object |  | Request headers. Values resolve like apiKey. |
 | `compat` | [object](#compatibility) |  | Provider and model compatibility overrides. |
+
+## Classifier overrides
+
+`models` and `modelOverrides` change chat models only. Each `classifierOverrides` key is the ID of one of the provider's [classifier models](models.md#use-classifier-models), such as `gemini-decision-1` on `google`, and unknown IDs are ignored. Its `headers` are sent with that classifier model's requests only, in addition to the provider's `headers`, and replace a provider header of the same name. A chat model with the same ID does not receive them.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `headers` | object |  | Request headers. Values resolve like apiKey. |
 
 ## Input limits
 

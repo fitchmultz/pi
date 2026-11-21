@@ -119,4 +119,44 @@ describe("ModelRuntime classifiers", () => {
 		]);
 		expect(request.headers.has("typesafe-danger-zone-images")).toBe(false);
 	});
+
+	it("sends classifierOverrides headers with that classifier only, not with the chat model of the same ID", async () => {
+		vi.stubEnv("CLASSIFIER_MAX_ATTEMPTS", "1");
+		// OpenAI lists GPT-6 Luna both as a Decisions classifier and as a chat model. The provider
+		// entry sets nothing else, so classifierOverrides alone must configure it.
+		const runtime = await createRuntime({
+			providers: {
+				openai: {
+					classifierOverrides: {
+						"gpt-6-luna": { headers: { "cf-aig-max-attempts": "$CLASSIFIER_MAX_ATTEMPTS" } },
+					},
+				},
+			},
+		});
+		await runtime.setRuntimeApiKey("openai", "secret");
+
+		let classifierHeaders: Headers | undefined;
+		const result = await runtime.classify(runtime.getModelOfType("classifier", "openai", "gpt-6-luna")!, context, {
+			fetch: async (input, init) => {
+				classifierHeaders = new Request(input, init).headers;
+				return Response.json({ answers: [{ name: "approved", type: "predicate", probability: 0.8 }] });
+			},
+		});
+		expect(result.answers.approved).toEqual({ type: "bool", probability: 0.8 });
+		expect(classifierHeaders?.get("cf-aig-max-attempts")).toBe("1");
+
+		let chatHeaders: Headers | undefined;
+		await runtime.complete(
+			runtime.getModel("openai", "gpt-6-luna")!,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				fetch: async (input, init) => {
+					chatHeaders = new Request(input, init).headers;
+					return Response.json({ error: { message: "rejected" } }, { status: 401 });
+				},
+			},
+		);
+		expect(chatHeaders?.get("authorization")).toBe("Bearer secret");
+		expect(chatHeaders?.has("cf-aig-max-attempts")).toBe(false);
+	});
 });
