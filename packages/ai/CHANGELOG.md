@@ -5,6 +5,7 @@
 ### Added
 
 - Added the `google-decisions` classifier API for Google's Gemini Decisions API (`POST /v1beta/decisions`), with `gemini-decision-1` as a multimodal classifier model of the `google` provider.
+- Added GPT-6 Luna as an `openai-decisions` classifier on Cloudflare AI Gateway's `/openai` passthrough (`cloudflare-ai-gateway/gpt-6-luna`), with OpenAI's limits and pricing. It authenticates with the gateway token, so it is available while the `openai` provider uses Sign in with ChatGPT. OpenAI Decisions and System One requests accept an `authorization` or `cf-aig-authorization` header in place of an API key, as the chat APIs do.
 - Added GPT-6.2 Astra and GPT-6.2 Sol on Cloudflare AI Gateway's `/openai` passthrough, with OpenAI's limits and pricing and the mid-conversation system message and additional-tools defaults of the other GPT-6 models.
 - Added Claude Fable 5.2 on Cloudflare AI Gateway, including adaptive thinking and mid-conversation system, tool, and effort updates. Fable 5.2 requests on Anthropic and Cloudflare AI Gateway omit `temperature`.
 - Added optional non-secret `AssistantMessage.cacheIdentity` metadata for provider-scoped credential and cache-owner diagnostics.

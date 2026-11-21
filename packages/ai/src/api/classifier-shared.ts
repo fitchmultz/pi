@@ -41,24 +41,35 @@ export function requiredNumber(label: string, value: unknown, field: string): nu
 
 function requestHeaders(
 	model: ClassifierModel<ClassifierApi>,
-	apiKey: string,
+	apiKey: string | undefined,
 	optionsHeaders?: ProviderHeaders,
 	identity?: ClientIdentity,
 	authHeaders?: Record<string, string>,
 ): Record<string, string> {
+	const auth = authHeaders ?? (apiKey ? { authorization: `Bearer ${apiKey}` } : {});
 	return (
 		providerHeadersToRecord(
 			getIdentityHeaders(model, identity),
-			{ ...(authHeaders ?? { authorization: `Bearer ${apiKey}` }), "content-type": "application/json" },
+			{ ...auth, "content-type": "application/json" },
 			model.headers,
 			optionsHeaders,
 		) ?? {}
 	);
 }
 
+function hasHeader(headers: ProviderHeaders | undefined, name: string): boolean {
+	if (!headers) return false;
+	const expected = name.toLowerCase();
+	for (const [key, value] of Object.entries(headers)) {
+		if (key.toLowerCase() === expected && value !== null && value.trim().length > 0) return true;
+	}
+	return false;
+}
+
 /**
- * Posts one JSON classifier request with bearer auth, `onPayload`/`onResponse` hooks, a fresh
- * timeout per attempt, and provider retries. Returns the parsed response body; throws on failure.
+ * Posts one JSON classifier request with bearer auth, or with the credential header the caller
+ * already set, `onPayload`/`onResponse` hooks, a fresh timeout per attempt, and provider retries.
+ * Returns the parsed response body; throws on failure.
  * `noRetryStatuses` lists HTTP statuses that fail at once although they are normally retried.
  */
 export async function postClassifierRequest(
@@ -70,7 +81,13 @@ export async function postClassifierRequest(
 	noRetryStatuses?: readonly number[],
 	authHeaders?: Record<string, string>,
 ): Promise<unknown> {
-	if (!options?.apiKey) throw new Error(`No API key for provider: ${model.provider}`);
+	// Gateways such as Cloudflare AI Gateway send the credential in a header instead of an API key,
+	// which the chat APIs accept too.
+	const hasCredentialHeader =
+		hasHeader(options?.headers, "authorization") || hasHeader(options?.headers, "cf-aig-authorization");
+	if (!options || (!options.apiKey && !hasCredentialHeader)) {
+		throw new Error(`No API key for provider: ${model.provider}`);
+	}
 	const apiKey = options.apiKey;
 	let payload = body;
 	const transformed = await options.onPayload?.(payload, model);

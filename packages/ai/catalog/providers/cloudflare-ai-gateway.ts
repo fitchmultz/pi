@@ -7,6 +7,7 @@ import {
 import type { Model } from "../../src/types.ts";
 import { type ChatModel, defineProvider, mergeCompat, modelsDevModels } from "../define.ts";
 import { enableOpenAiGrammarTools, OPENAI_STANDARD_COSTS, withOpenAiLongContextPricing } from "../families/openai.ts";
+import { OPENAI_DECISIONS_MODELS } from "./openai.ts";
 
 /** models.dev lists gateway models as `<upstream>/<id>`; route each upstream to its passthrough. */
 function routeGatewayModel(model: ChatModel): ChatModel | undefined {
@@ -91,6 +92,14 @@ export default defineProvider({
 		});
 		return [...models, ...fable, ...gpt62, ...mirrored];
 	},
+	// The /openai passthrough also serves OpenAI's Decisions API. Reuse OpenAI's entry: the
+	// gateway passes OpenAI usage through at OpenAI list prices.
+	classifiers: () =>
+		OPENAI_DECISIONS_MODELS.map((model) => ({
+			...model,
+			provider: "cloudflare-ai-gateway",
+			baseUrl: CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
+		})),
 	compat: {
 		"openai-completions": {
 			supportsStore: false,
