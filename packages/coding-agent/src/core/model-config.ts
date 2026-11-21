@@ -92,6 +92,10 @@ const ModelOverrideSchema = Type.Object({
 	compat: Type.Optional(ProviderCompatSchema),
 });
 
+const ClassifierOverrideSchema = Type.Object({
+	headers: Type.Optional(HeadersSchema),
+});
+
 const ProviderConfigSchema = Type.Object({
 	name: Type.Optional(Type.String({ minLength: 1, description: "Display name." })),
 	baseUrl: Type.Optional(
@@ -125,6 +129,7 @@ const ProviderConfigSchema = Type.Object({
 	),
 	models: Type.Optional(Type.Array(ModelDefinitionSchema)),
 	modelOverrides: Type.Optional(Type.Record(Type.String(), ModelOverrideSchema)),
+	classifierOverrides: Type.Optional(Type.Record(Type.String(), ClassifierOverrideSchema)),
 });
 
 const ModelsConfigProperties = {
@@ -141,6 +146,7 @@ export const ModelsJsonSchemas = {
 	provider: ProviderConfigSchema,
 	model: ModelDefinitionSchema,
 	modelOverride: ModelOverrideSchema,
+	classifierOverride: ClassifierOverrideSchema,
 };
 
 const validateModelsConfig = Compile(ModelsConfigSchema);

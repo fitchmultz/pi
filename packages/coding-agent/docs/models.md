@@ -220,6 +220,23 @@ When the service reports token counts, as all System One services do, `result.us
 
 Extensions call classifiers through `ctx.modelRegistry.classify()`, without codemode. [Virtual models](virtual-models.md#route-requests) can use them to route requests; see the `jev-router.ts` example.
 
+A provider's `headers` in `models.json` reach all of its models, and `modelOverrides` changes chat models only. To send headers with one classifier model, use the provider's `classifierOverrides`. For example, a [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/configuration/request-handling/) in front of `google` can retry failed requests. This configuration makes the gateway try each Gemini Decision 1 request only once, while Google's chat models keep the gateway's retries:
+
+```json
+{
+  "providers": {
+    "google": {
+      "baseUrl": "https://gateway.ai.cloudflare.com/v1/<account-id>/<gateway-id>/google-ai-studio/v1beta",
+      "classifierOverrides": {
+        "gemini-decision-1": { "headers": { "cf-aig-max-attempts": "1" } }
+      }
+    }
+  }
+}
+```
+
+See [Classifier overrides](models-configuration.md#classifier-overrides).
+
 ## Use image models
 
 Image models generate images from a prompt and optional input images. Pi lists OpenRouter's image models, such as `google/gemini-2.5-flash-image` and `black-forest-labs/flux.2-pro`, under the `openrouter` provider; they use the same `OPENROUTER_API_KEY` or `/login` credential as its chat models.
