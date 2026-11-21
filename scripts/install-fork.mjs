@@ -21,6 +21,12 @@ import { produceArtifactSet } from "./package-artifacts.mjs";
 const receiptFile = "fork-release.json";
 const restartWorker = "dist/bundle/cli-worker.js";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const termuxCompilerModule = "github.com/microsoft/typescript-go";
+const termuxCompilerWatcherPath = "internal/fswatch/fanotify_linux.go";
+const termuxCompilerPatchPattern = /func fanotifyAvailable\(\) bool \{[\s\S]*?\n\}/;
+const termuxCompilerPatchReplacement = "func fanotifyAvailable() bool {\n\treturn false\n}";
+const termuxCompilerBuildArgs = ["build", "-mod=readonly", "-buildvcs=false", "-trimpath", "-tags=noembed"];
+const termuxCompilerTarget = "./cmd/tsgo";
 
 function run(command, args, options = {}) {
 	console.log(`$ ${[command, ...args].join(" ")}`);
@@ -73,7 +79,90 @@ export function isolatedEnvironment(home, tools, cacheDir) {
 	};
 }
 
-export function prepareTermuxCompiler(source, tools, env) {
+function ensurePrivateDirectory(path) {
+	mkdirSync(path, { recursive: true, mode: 0o700 });
+	const stats = lstatSync(path);
+	if (!stats.isDirectory() || (stats.mode & 0o077) !== 0) {
+		throw new Error(`Expected private directory ${path}; set its permissions to 700 or choose another --cache-dir.`);
+	}
+}
+
+function readGoVersion(env, cwd) {
+	const result = spawnSync("go", ["env", "GOVERSION"], { cwd, env, encoding: "utf8" });
+	if (result.error || result.status !== 0) return undefined;
+	const version = result.stdout?.trim();
+	return version || undefined;
+}
+
+function termuxCompilerCacheSpec({ version, gitHead, goEnv }) {
+	const specHash = createHash("sha256").update(JSON.stringify({
+		version,
+		gitHead,
+		module: termuxCompilerModule,
+		goos: goEnv.GOOS,
+		goarch: goEnv.GOARCH,
+		cgoEnabled: goEnv.CGO_ENABLED,
+		watcherPath: termuxCompilerWatcherPath,
+		patchPattern: termuxCompilerPatchPattern.source,
+		patchReplacement: termuxCompilerPatchReplacement,
+		buildArgs: termuxCompilerBuildArgs,
+		target: termuxCompilerTarget,
+	})).digest("hex").slice(0, 16);
+	return `${gitHead.slice(0, 12)}-${specHash}-`;
+}
+
+function termuxCompilerCacheKey(specPrefix, goVersion) {
+	if (!goVersion) return undefined;
+	const goHash = createHash("sha256").update(goVersion).digest("hex").slice(0, 12);
+	return `${specPrefix}${goHash}`;
+}
+
+function cachedCompilerBinary(compilerCacheRoot, entry) {
+	const entryDir = join(compilerCacheRoot, entry);
+	try {
+		if (!lstatSync(entryDir).isDirectory()) return undefined;
+		const candidate = join(entryDir, "tsc");
+		return lstatSync(candidate).isFile() ? candidate : undefined;
+	} catch (error) {
+		if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+		throw error;
+	}
+}
+
+function findCachedTermuxCompiler(compilerCacheRoot, specPrefix, cacheKey) {
+	if (cacheKey) return cachedCompilerBinary(compilerCacheRoot, cacheKey);
+	// When Go is unavailable, reuse a cached compiler built for the same pinned source, target, and recipe.
+	const pattern = new RegExp(`^${specPrefix}[a-f0-9]{12}$`);
+	for (const entry of readdirSync(compilerCacheRoot).sort()) {
+		if (!pattern.test(entry)) continue;
+		const candidate = cachedCompilerBinary(compilerCacheRoot, entry);
+		if (candidate) return candidate;
+	}
+	return undefined;
+}
+
+function replaceFileAtomically(sourcePath, destinationPath, mode) {
+	const temporary = join(dirname(destinationPath), `.${basename(destinationPath)}.${randomUUID()}.tmp`);
+	try {
+		copyFileSync(sourcePath, temporary);
+		chmodSync(temporary, mode);
+		renameSync(temporary, destinationPath);
+	} finally {
+		rmSync(temporary, { force: true });
+	}
+}
+
+function saveCachedTermuxCompiler(compilerCacheRoot, cacheKey, binary) {
+	const entryDir = join(compilerCacheRoot, cacheKey);
+	ensurePrivateDirectory(entryDir);
+	replaceFileAtomically(binary, join(entryDir, "tsc"), 0o755);
+	for (const entry of readdirSync(compilerCacheRoot)) {
+		if (entry === cacheKey) continue;
+		rmSync(join(compilerCacheRoot, entry), { recursive: true, force: true });
+	}
+}
+
+export function prepareTermuxCompiler(source, tools, env, cacheDir) {
 	// TypeScript 7 has no Android package. Use the lockfile-pinned Linux compiler.
 	const name = `@typescript/typescript-linux-${process.arch}`;
 	const key = `node_modules/${name}`;
@@ -92,39 +181,58 @@ export function prepareTermuxCompiler(source, tools, env) {
 	});
 	const binary = join(directory, key, "lib/tsc");
 	const probe = spawnSync(binary, ["--version"], { env, encoding: "utf8" });
+	let cacheTarget;
 	if (probe.stderr?.startsWith("SIGSYS:") && probe.stderr.includes("fanotifyAvailable")) {
-		console.log("Android blocked the compiler's fanotify probe; rebuilding the pinned source (requires Go >=1.26).");
 		const { gitHead } = JSON.parse(readFileSync(join(directory, key, "package.json"), "utf8"));
 		if (!/^[a-f0-9]{40}$/.test(gitHead ?? "")) throw new Error("Missing pinned TypeScript source commit");
-		const goEnv = { ...env, GOOS: process.platform === "android" ? "android" : "linux",
+		const goEnv = {
+			...env,
+			GOOS: process.platform === "android" ? "android" : "linux",
 			GOARCH: process.arch === "x64" ? "amd64" : process.arch,
 			CGO_ENABLED: process.platform === "android" && process.arch === "x64" ? "1" : "0",
 			GOTOOLCHAIN: "local", GOWORK: "off", GOFLAGS: "-modcacherw",
-			GOPATH: join(directory, "go"), GOCACHE: join(directory, "go-cache") };
-		const downloaded = JSON.parse(run("go", ["mod", "download", "-json", `github.com/microsoft/typescript-go@${gitHead}`], {
-			cwd: directory, env: goEnv, stdio: "pipe",
-		}));
-		if (downloaded.Origin?.Hash !== gitHead || !downloaded.Sum || !downloaded.Dir) {
-			throw new Error("Downloaded TypeScript source does not match the pinned commit");
+			GOPATH: join(directory, "go"), GOCACHE: join(directory, "go-cache"),
+		};
+		const compilerCacheRoot = cacheDir ? join(resolve(cacheDir), "termux-compiler") : undefined;
+		let cachedBinary;
+		if (compilerCacheRoot) {
+			ensurePrivateDirectory(compilerCacheRoot);
+			const specPrefix = termuxCompilerCacheSpec({ version: locked.version, gitHead, goEnv });
+			const cacheKey = termuxCompilerCacheKey(specPrefix, readGoVersion(goEnv, directory));
+			cachedBinary = findCachedTermuxCompiler(compilerCacheRoot, specPrefix, cacheKey);
+			if (!cachedBinary && cacheKey) cacheTarget = { compilerCacheRoot, cacheKey };
 		}
-		const buildSource = join(directory, "source");
-		rmSync(buildSource, { recursive: true, force: true });
-		cpSync(downloaded.Dir, buildSource, { recursive: true });
-		const watcher = join(buildSource, "internal/fswatch/fanotify_linux.go");
-		const contents = readFileSync(watcher, "utf8");
-		const patched = contents.replace(/func fanotifyAvailable\(\) bool \{[\s\S]*?\n\}/, "func fanotifyAvailable() bool {\n\treturn false\n}");
-		if (patched === contents) throw new Error("Cannot disable the compiler's fanotify probe");
-		// ponytail: build-only compiler uses inotify; use an official Android artifact when published.
-		chmodSync(watcher, 0o644);
-		writeFileSync(watcher, patched);
-		const compiled = join(directory, "tsc");
-		run("go", ["build", "-mod=readonly", "-buildvcs=false", "-trimpath", "-tags=noembed", "-o", compiled, "./cmd/tsgo"], {
-			cwd: buildSource, env: goEnv,
-		});
-		renameSync(compiled, binary);
+		if (cachedBinary) {
+			console.log("Android blocked the compiler's fanotify probe; reusing cached Termux compiler.");
+			replaceFileAtomically(cachedBinary, binary, 0o755);
+		} else {
+			console.log("Android blocked the compiler's fanotify probe; rebuilding the pinned source (requires Go >=1.26).");
+			const downloaded = JSON.parse(run("go", ["mod", "download", "-json", `${termuxCompilerModule}@${gitHead}`], {
+				cwd: directory, env: goEnv, stdio: "pipe",
+			}));
+			if (downloaded.Origin?.Hash !== gitHead || !downloaded.Sum || !downloaded.Dir) {
+				throw new Error("Downloaded TypeScript source does not match the pinned commit");
+			}
+			const buildSource = join(directory, "source");
+			rmSync(buildSource, { recursive: true, force: true });
+			cpSync(downloaded.Dir, buildSource, { recursive: true });
+			const watcher = join(buildSource, termuxCompilerWatcherPath);
+			const contents = readFileSync(watcher, "utf8");
+			const patched = contents.replace(termuxCompilerPatchPattern, termuxCompilerPatchReplacement);
+			if (patched === contents) throw new Error("Cannot disable the compiler's fanotify probe");
+			// ponytail: build-only compiler uses inotify; use an official Android artifact when published.
+			chmodSync(watcher, 0o644);
+			writeFileSync(watcher, patched);
+			const compiled = join(directory, "tsc");
+			run("go", [...termuxCompilerBuildArgs, "-o", compiled, termuxCompilerTarget], {
+				cwd: buildSource, env: goEnv,
+			});
+			renameSync(compiled, binary);
+		}
 	}
 	const version = run(binary, ["--version"], { env, stdio: "pipe" });
 	if (version !== `Version ${locked.version}`) throw new Error(`Unexpected compiler version: ${version}`);
+	if (cacheTarget) saveCachedTermuxCompiler(cacheTarget.compilerCacheRoot, cacheTarget.cacheKey, binary);
 	replaceSymlink(binary, join(source, "node_modules/.bin/tsc"));
 }
 
@@ -378,7 +486,7 @@ model-data snapshot using create-source-archive.sh and build:offline. An optiona
 No fetch or model generation. npm may download frozen dependencies. Requires macOS,
 Linux or Termux, Node 22.23.5+ (22.x), 24.22.3+ (24.x), or >=26.13.1 with npm
 installed alongside it, Git, bash, tar, gzip, and tmux. Termux also needs Go >=1.26
-when Android blocks the compiler's fanotify probe.
+when Android blocks the compiler's fanotify probe and no cached compiler matches.
 
 --source-archive <file> Use a frozen source archive and adjacent source.commit
 --stage                 Build/install/validate without changing the selector
@@ -390,10 +498,11 @@ when Android blocks the compiler's fanotify probe.
                         except legacy, selected, .previous and visibly running ones
 --releases <directory>  Default: ~/.local/share/pi-fork/releases
 --selector <symlink>    Default: ~/.local/share/npm-global/lib/node_modules/${codingAgentName}
---cache-dir <directory> Private npm state shared by builds. Default: ~/.cache/pi-fork
+--cache-dir <directory> Private cache state shared by builds. Default: ~/.cache/pi-fork
                         npm-cache/ holds integrity-checked packages; npm-logs/<attempt>/
-                        keeps a failed build's npm debug logs. Remove either when no
-                        update or installation is running.
+                        keeps a failed build's npm debug logs; termux-compiler/<key>/tsc
+                        caches a rebuilt Termux TypeScript compiler. Remove any of them
+                        when no update or installation is running.
 -h, --help              Show this help
 
 Examples: node scripts/install-fork.mjs --ref HEAD --stage
@@ -464,9 +573,10 @@ export async function main(args = process.argv.slice(2)) {
 		return result;
 	}
 	const tools = resolveBuildTools();
+	const cacheDir = resolve(options["cache-dir"]);
 	const root = mkdtempSync(join(tmpdir(), "pi-fork-install-"));
 	try {
-		const env = isolatedEnvironment(join(root, "home"), tools, resolve(options["cache-dir"]));
+		const env = isolatedEnvironment(join(root, "home"), tools, cacheDir);
 		const git = (args) => run("git", args, { cwd: repoRoot, env, stdio: "pipe" });
 		const commit = git(["rev-parse", "--verify", "--end-of-options", `${options.ref}^{commit}`]);
 		const version = JSON.parse(git(["show", `${commit}:packages/coding-agent/package.json`])).version;
@@ -507,7 +617,7 @@ export async function main(args = process.argv.slice(2)) {
 			writeFileSync(join(directory, "source.commit"), `${commit}\n`);
 			run("tmux", ["-V"], { env }); // Missing tmux must fail, not silently skip the acceptance tests.
 			run(tools.node, [tools.npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"], { cwd: source, env });
-			if (process.platform === "android") prepareTermuxCompiler(source, tools, env);
+			if (process.platform === "android") prepareTermuxCompiler(source, tools, env, cacheDir);
 			run(tools.node, [tools.npm, "run", "build:offline"], { cwd: source, env });
 			const artifactSet = produceArtifactSet({
 				repoRoot: source, outDir: join(directory, "artifacts"), build: false,

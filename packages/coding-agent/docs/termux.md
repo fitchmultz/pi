@@ -58,10 +58,17 @@ pkg install nodejs git bash tar gzip tmux golang
 Use Node.js 22.23.5+ (22.x), 24.22.3+ (24.x), or >=26.13.1 with its adjacent npm.
 Update Node.js before running the fork updater; it does not update Node itself.
 Go >=1.26 is needed only if Android
-blocks the TypeScript compiler's fanotify probe. The installer first tries the
-lockfile-pinned Linux compiler; on that specific failure it rebuilds the package's
-pinned source commit with fanotify disabled. It never changes the root lockfile
-or runs dependency lifecycle scripts.
+blocks the TypeScript compiler's fanotify probe and no matching cached compiler
+exists yet. The installer first tries the
+lockfile-pinned Linux compiler; on that specific failure it checks
+`<cache-dir>/termux-compiler/<key>/tsc` (default
+`~/.cache/pi-fork/termux-compiler/<key>/tsc`), where `<key>` covers the pinned
+source commit, Go version, target OS/CPU, and build steps. On a cache hit it
+copies the cached binary into place and still runs the version check. On a miss
+it rebuilds the package's pinned source commit with fanotify disabled, saves the
+verified binary atomically to the cache, and removes older cached compiler
+entries. You can remove `termux-compiler/` when no update or installation is
+running. It never changes the root lockfile or runs dependency lifecycle scripts.
 
 From a fork checkout, with unused selector and executable locations:
 
