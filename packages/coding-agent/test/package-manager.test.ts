@@ -3310,10 +3310,11 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			mkdirSync(join(userGitRoot, "github.com", ".pi", "notes"), { recursive: true });
 			createNpmPackage(userNpmRoot, "transitive-dep");
 
-			// Unlisted git checkouts (including SSH host alias, dot-prefixed backup, and non-standard depth).
+			// Unlisted git checkouts (including SSH host alias, dot-prefixed backup, deep subgroup, and non-standard depth).
 			const userLeftoverGit = createGitCheckout(userGitRoot, "github.com/old-owner/leftover-repo");
 			const aliasLeftoverGit = createGitCheckout(userGitRoot, "github.com-work/team/alias-repo");
 			const backupLeftoverGit = createGitCheckout(userGitRoot, "github.com/owner/.backup-repo");
+			const deepLeftoverGit = createGitCheckout(userGitRoot, "gitlab.com/a/b/c/d/e/deep-repo");
 			const strayLeftoverGit = createGitCheckout(userGitRoot, "stray-repo");
 			const projectLeftoverGit = createGitCheckout(projectGitRoot, "github.com/old-owner/project-leftover");
 
@@ -3350,6 +3351,12 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 					scope: "user",
 					type: "git",
 					installedPath: backupLeftoverGit,
+				},
+				{
+					source: "git:gitlab.com/a/b/c/d/e/deep-repo",
+					scope: "user",
+					type: "git",
+					installedPath: deepLeftoverGit,
 				},
 				{
 					source: "npm:@old/leftover-npm",

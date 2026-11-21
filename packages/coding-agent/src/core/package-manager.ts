@@ -81,7 +81,6 @@ function getNonInteractiveGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 const UPDATE_CHECK_CONCURRENCY = 4;
 const GIT_UPDATE_CONCURRENCY = 4;
-const MAX_GIT_SCAN_DEPTH = 6;
 
 /** Whether PI_OFFLINE is set; package installs and updates then skip all network access. */
 export function isOfflineModeEnabled(): boolean {
@@ -1160,8 +1159,8 @@ export class DefaultPackageManager implements PackageManager {
 		const resolvedRoot = resolve(gitRoot);
 		const unlisted: UnlistedPackage[] = [];
 
-		const walk = (dir: string, depth: number): void => {
-			if (depth > 0 && existsSync(join(dir, ".git"))) {
+		const walk = (dir: string, isRoot: boolean): void => {
+			if (!isRoot && existsSync(join(dir, ".git"))) {
 				if (!configuredGitPaths.has(getPathComparisonKey(dir))) {
 					const rel = toPosixPath(relative(resolvedRoot, dir));
 					const candidateSource = `git:${rel}`;
@@ -1179,9 +1178,6 @@ export class DefaultPackageManager implements PackageManager {
 				}
 				return;
 			}
-			if (depth >= MAX_GIT_SCAN_DEPTH) {
-				return;
-			}
 			let entries: Dirent[];
 			try {
 				entries = readdirSync(dir, { withFileTypes: true });
@@ -1191,11 +1187,11 @@ export class DefaultPackageManager implements PackageManager {
 			for (const entry of entries) {
 				if (!entry.isDirectory()) continue;
 				if (entry.name === ".git" || entry.name === "node_modules") continue;
-				walk(join(dir, entry.name), depth + 1);
+				walk(join(dir, entry.name), false);
 			}
 		};
 
-		walk(resolvedRoot, 0);
+		walk(resolvedRoot, true);
 		return unlisted;
 	}
 

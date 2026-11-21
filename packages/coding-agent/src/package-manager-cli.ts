@@ -368,7 +368,7 @@ Examples:
 			console.log(`${chalk.bold("Usage:")}
   ${getPackageCommandUsage("remove")}
 
-Remove a package and its source from settings.
+Remove a configured package and its source from settings, or remove an unlisted package directory on disk.
 Alias: ${APP_NAME} uninstall <source> [-l]
 
 Options:
