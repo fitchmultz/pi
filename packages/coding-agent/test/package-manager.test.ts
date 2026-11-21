@@ -3277,4 +3277,181 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			await expect(capturePromise).resolves.toBe("abc123");
 		});
 	});
+
+	describe("unlisted packages", () => {
+		function createGitCheckout(root: string, relPath: string): string {
+			const dir = join(root, ...relPath.split("/"));
+			mkdirSync(join(dir, ".git"), { recursive: true });
+			return dir;
+		}
+
+		function createNpmPackage(npmRoot: string, name: string, version = "1.0.0"): string {
+			const dir = join(npmRoot, "node_modules", ...name.split("/"));
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, "package.json"), JSON.stringify({ name, version }));
+			return dir;
+		}
+
+		it("should report only unlisted git and npm packages across user and trusted project scopes", () => {
+			settingsManager.setPackages(["git:github.com/owner/configured-repo", "npm:configured-npm"]);
+			settingsManager.setProjectPackages(["git:github.com/owner/project-repo"]);
+
+			const userGitRoot = join(agentDir, "git");
+			const projectGitRoot = join(tempDir, ".pi", "git");
+			const userNpmRoot = join(agentDir, "npm");
+			const projectNpmRoot = join(tempDir, ".pi", "npm");
+
+			// Configured packages should not be reported.
+			createGitCheckout(userGitRoot, "github.com/owner/configured-repo");
+			createGitCheckout(projectGitRoot, "github.com/owner/project-repo");
+			createNpmPackage(userNpmRoot, "configured-npm");
+
+			// Non-git metadata directories and transitive npm dependencies should not be reported.
+			mkdirSync(join(userGitRoot, "github.com", ".pi", "notes"), { recursive: true });
+			createNpmPackage(userNpmRoot, "transitive-dep");
+
+			// Unlisted git checkouts (including SSH host alias, dot-prefixed backup, and non-standard depth).
+			const userLeftoverGit = createGitCheckout(userGitRoot, "github.com/old-owner/leftover-repo");
+			const aliasLeftoverGit = createGitCheckout(userGitRoot, "github.com-work/team/alias-repo");
+			const backupLeftoverGit = createGitCheckout(userGitRoot, "github.com/owner/.backup-repo");
+			const strayLeftoverGit = createGitCheckout(userGitRoot, "stray-repo");
+			const projectLeftoverGit = createGitCheckout(projectGitRoot, "github.com/old-owner/project-leftover");
+
+			// Unlisted npm packages (scoped in user scope via package.json, unscoped in project scope without package.json).
+			const userLeftoverNpm = createNpmPackage(userNpmRoot, "@old/leftover-npm");
+			writeFileSync(
+				join(userNpmRoot, "package.json"),
+				JSON.stringify({
+					name: "pi-extensions",
+					private: true,
+					dependencies: {
+						"configured-npm": "^1.0.0",
+						"@old/leftover-npm": "^1.0.0",
+					},
+				}),
+			);
+			const projectLeftoverNpm = createNpmPackage(projectNpmRoot, "project-leftover-npm");
+
+			expect(packageManager.listUnlistedPackages()).toEqual([
+				{
+					source: "git:github.com-work/team/alias-repo",
+					scope: "user",
+					type: "git",
+					installedPath: aliasLeftoverGit,
+				},
+				{
+					source: "git:github.com/old-owner/leftover-repo",
+					scope: "user",
+					type: "git",
+					installedPath: userLeftoverGit,
+				},
+				{
+					source: "git:github.com/owner/.backup-repo",
+					scope: "user",
+					type: "git",
+					installedPath: backupLeftoverGit,
+				},
+				{
+					source: "npm:@old/leftover-npm",
+					scope: "user",
+					type: "npm",
+					installedPath: userLeftoverNpm,
+				},
+				{
+					scope: "user",
+					type: "git",
+					installedPath: strayLeftoverGit,
+				},
+				{
+					source: "git:github.com/old-owner/project-leftover",
+					scope: "project",
+					type: "git",
+					installedPath: projectLeftoverGit,
+				},
+				{
+					source: "npm:project-leftover-npm",
+					scope: "project",
+					type: "npm",
+					installedPath: projectLeftoverNpm,
+				},
+			]);
+		});
+
+		it("should skip project storage when project is untrusted", () => {
+			settingsManager.setProjectTrusted(false);
+			createGitCheckout(join(tempDir, ".pi", "git"), "github.com/old-owner/project-leftover");
+			createNpmPackage(join(tempDir, ".pi", "npm"), "project-leftover-npm");
+
+			expect(packageManager.listUnlistedPackages()).toEqual([]);
+		});
+
+		it("should remove an unlisted git package cleanly and prune empty parents", async () => {
+			const leftoverDir = createGitCheckout(join(agentDir, "git"), "github.com/old-owner/leftover-repo");
+
+			const removed = await packageManager.removeAndPersist("git:github.com/old-owner/leftover-repo");
+			expect(removed).toBe(true);
+			expect(existsSync(leftoverDir)).toBe(false);
+			expect(existsSync(join(agentDir, "git", "github.com", "old-owner"))).toBe(false);
+
+			// Removing again when neither in settings nor on disk returns false.
+			await expect(packageManager.removeAndPersist("git:github.com/old-owner/leftover-repo")).resolves.toBe(false);
+		});
+
+		it("should remove an unlisted npm package cleanly without touching transitive dependencies", async () => {
+			const userNpmRoot = join(agentDir, "npm");
+			const keptDir = createNpmPackage(userNpmRoot, "configured-npm");
+			const leftoverDir = createNpmPackage(userNpmRoot, "@old/leftover-npm");
+			const transitiveDir = createNpmPackage(userNpmRoot, "transitive-dep");
+			writeFileSync(
+				join(userNpmRoot, "package.json"),
+				JSON.stringify({
+					name: "pi-extensions",
+					private: true,
+					dependencies: {
+						"configured-npm": "^1.0.0",
+						"@old/leftover-npm": "^1.0.0",
+					},
+				}),
+			);
+			settingsManager.setPackages(["npm:configured-npm"]);
+
+			const runCommandSpy = vi
+				.spyOn(packageManager as unknown as PackageManagerInternals, "runCommand")
+				.mockImplementation(async (_command, args) => {
+					if (args[0] === "uninstall" && args[1] === "@old/leftover-npm") {
+						rmSync(leftoverDir, { recursive: true, force: true });
+						writeFileSync(
+							join(userNpmRoot, "package.json"),
+							JSON.stringify({
+								name: "pi-extensions",
+								private: true,
+								dependencies: { "configured-npm": "^1.0.0" },
+							}),
+						);
+					}
+				});
+
+			// A transitive dependency is neither configured nor a top-level installed package.
+			await expect(packageManager.removeAndPersist("npm:transitive-dep")).resolves.toBe(false);
+			expect(runCommandSpy).not.toHaveBeenCalled();
+			expect(existsSync(transitiveDir)).toBe(true);
+
+			// Removing the unlisted top-level npm package succeeds cleanly.
+			await expect(packageManager.removeAndPersist("npm:@old/leftover-npm")).resolves.toBe(true);
+			expect(runCommandSpy).toHaveBeenCalledTimes(1);
+			expect(existsSync(leftoverDir)).toBe(false);
+			expect(existsSync(keptDir)).toBe(true);
+
+			// Removing it again returns false.
+			await expect(packageManager.removeAndPersist("npm:@old/leftover-npm")).resolves.toBe(false);
+		});
+
+		it("should not treat a parent directory of another git checkout as an unlisted git package", async () => {
+			const nestedCheckout = createGitCheckout(join(agentDir, "git"), "gitlab.com/group/subgroup/repo");
+			settingsManager.setPackages(["git:gitlab.com/group/subgroup/repo"]);
+
+			await expect(packageManager.removeAndPersist("git:gitlab.com/group/subgroup")).resolves.toBe(false);
+			expect(existsSync(nestedCheckout)).toBe(true);
+		});
+	});
 });

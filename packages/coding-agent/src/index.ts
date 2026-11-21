@@ -252,6 +252,7 @@ export {
 } from "./core/model-runtime.ts";
 export type { ModelAllowlist, ModelUnavailability, ModelUnavailableCause } from "./core/model-unavailability.ts";
 export type {
+	ConfiguredPackage,
 	PackageInstallFailure,
 	PackageManager,
 	PathMetadata,
@@ -259,6 +260,7 @@ export type {
 	ProgressEvent,
 	ResolvedPaths,
 	ResolvedResource,
+	UnlistedPackage,
 } from "./core/package-manager.ts";
 export { DefaultPackageManager } from "./core/package-manager.ts";
 export type { ProviderAuthFallback } from "./core/provider-composer.ts";

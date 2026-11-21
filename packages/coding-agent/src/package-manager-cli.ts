@@ -431,7 +431,7 @@ Exit status: 0 on success/help, 1 on invalid options or failed update.
 			console.log(`${chalk.bold("Usage:")}
   ${getPackageCommandUsage("list")}
 
-List installed packages from user and project settings.
+List configured packages and unlisted package directories on disk.
 
 Options:
   -a, --approve      Trust project-local files for this command
@@ -859,6 +859,118 @@ function prepareWindowsNpmSelfUpdate(): void {
 	quarantineWindowsNativeDependencies(packageDir);
 }
 
+function printUnlistedPackagesPointer(packageManager: DefaultPackageManager): void {
+	const count = packageManager.listUnlistedPackages().length;
+	if (count === 0) {
+		return;
+	}
+	const noun = count === 1 ? "directory" : "directories";
+	const verb = count === 1 ? "is" : "are";
+	const pronoun = count === 1 ? "it" : "them";
+	console.log(
+		chalk.yellow(
+			`${count} unlisted package ${noun} on disk ${verb} not in settings. Run \`${APP_NAME} list\` to inspect ${pronoun}.`,
+		),
+	);
+}
+
+async function runSelfUpdateTarget(
+	settingsManager: SettingsManager,
+	selfUpdateNpmCommand: string[] | undefined,
+	force: boolean,
+): Promise<void> {
+	const configuredSelfUpdateArgv = getConfiguredSelfUpdateArgv(settingsManager.getGlobalSettings().selfUpdateCommand);
+	if (!configuredSelfUpdateArgv && getForkRelease()) {
+		await runForkUpdate({ force });
+		return;
+	}
+	// A configured command is explicit user intent, so it replaces the managed install path too.
+	const managedInstallRoot = configuredSelfUpdateArgv ? undefined : getActiveManagedInstallRoot();
+	if (managedInstallRoot && force) {
+		console.error(
+			chalk.red(
+				`Managed ${APP_NAME} installations do not support --force; rerun the installer to repair this installation.`,
+			),
+		);
+		process.exitCode = 1;
+		return;
+	}
+	const selfUpdatePlan = await getSelfUpdatePlan(force);
+	if (!selfUpdatePlan.shouldRun) {
+		return;
+	}
+	if (configuredSelfUpdateArgv) {
+		await runConfiguredSelfUpdate(configuredSelfUpdateArgv, selfUpdatePlan);
+		return;
+	}
+	if (managedInstallRoot) {
+		if (selfUpdatePlan.note) {
+			printSelfUpdateNote(selfUpdatePlan.note);
+		}
+		try {
+			console.log(chalk.dim(`Updating managed ${APP_NAME} installation...`));
+			await runManagedSelfUpdate(managedInstallRoot, selfUpdatePlan.version);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : "Unknown managed update error";
+			console.error(chalk.red(`Error: ${message}`));
+			process.exitCode = 1;
+			return;
+		}
+		console.log(chalk.green(`Updated ${APP_NAME} from ${VERSION} to ${selfUpdatePlan.version}`));
+		return;
+	}
+
+	const installMethod = detectInstallMethod();
+	if (process.platform === "win32" && installMethod !== "npm" && installMethod !== "pnpm") {
+		console.error(chalk.red(`${APP_NAME} self-update on Windows is only supported for npm and pnpm installs.`));
+		console.error(chalk.dim(`Detected install method: ${installMethod}. Update ${APP_NAME} manually.`));
+		process.exitCode = 1;
+		return;
+	}
+	const selfUpdateTarget = {
+		packageName: selfUpdatePlan.packageName,
+		installSpec: selfUpdatePlan.installSpec,
+	};
+	const selfUpdateCommand = getSelfUpdateCommand(PACKAGE_NAME, selfUpdateNpmCommand, selfUpdateTarget);
+	if (!selfUpdateCommand) {
+		printSelfUpdateUnavailable(selfUpdateNpmCommand, selfUpdateTarget);
+		process.exitCode = 1;
+		return;
+	}
+	if (selfUpdatePlan.note) {
+		printSelfUpdateNote(selfUpdatePlan.note);
+	}
+	try {
+		if (installMethod === "npm") {
+			prepareWindowsNpmSelfUpdate();
+		}
+		await runSelfUpdate(selfUpdateCommand);
+	} catch (error: unknown) {
+		const message = error instanceof Error ? error.message : "Unknown package command error";
+		console.error(chalk.red(`Error: ${message}`));
+		if (installMethod === "pnpm") {
+			printPnpmSelfUpdateMetadataHint();
+		}
+		printSelfUpdateFallback(selfUpdateCommand);
+		process.exitCode = 1;
+		return;
+	}
+	console.log(chalk.green(`Updated ${APP_NAME} from ${VERSION} to ${selfUpdatePlan.version}`));
+	// The pi.dev installer migrates global npm installs to a managed install
+	// that pins all dependencies. It does not migrate pnpm, yarn, or bun installs.
+	if (installMethod === "npm") {
+		const installerCommand =
+			process.platform === "win32"
+				? 'powershell -c "irm https://pi.dev/install.ps1 | iex"'
+				: "curl -fsSL https://pi.dev/install.sh | sh";
+		console.log();
+		console.log(chalk.yellow(`This npm installation of ${APP_NAME} does not pin its dependencies.`));
+		console.log(chalk.yellow("Run the installer to migrate to a managed installation that does:"));
+		console.log();
+		console.log(`  ${chalk.bold(installerCommand)}`);
+	}
+}
+
 export interface PackageCommandRuntimeOptions {
 	extensionFactories?: InlineExtension[];
 }
@@ -1138,10 +1250,11 @@ export async function handlePackageCommand(
 
 			case "list": {
 				const configuredPackages = packageManager.listConfiguredPackages();
+				const unlistedPackages = packageManager.listUnlistedPackages();
 				const userPackages = configuredPackages.filter((pkg) => pkg.scope === "user");
 				const projectPackages = configuredPackages.filter((pkg) => pkg.scope === "project");
 
-				if (configuredPackages.length === 0) {
+				if (configuredPackages.length === 0 && unlistedPackages.length === 0) {
 					console.log(chalk.dim("No packages installed."));
 					return true;
 				}
@@ -1166,6 +1279,34 @@ export async function handlePackageCommand(
 					console.log(chalk.bold("Project packages:"));
 					for (const pkg of projectPackages) {
 						formatPackage(pkg);
+					}
+				}
+
+				if (unlistedPackages.length > 0) {
+					if (configuredPackages.length > 0) console.log();
+					console.log(chalk.bold(chalk.yellow("Unlisted packages on disk (not in settings):")));
+					for (const pkg of unlistedPackages) {
+						const scopeSuffix = pkg.scope === "project" ? " (project)" : "";
+						if (pkg.source) {
+							console.log(`  ${pkg.source}${scopeSuffix}`);
+							console.log(chalk.dim(`    ${pkg.installedPath}`));
+						} else {
+							console.log(`  ${pkg.installedPath}${scopeSuffix}`);
+						}
+					}
+					const removable = unlistedPackages.filter((pkg) => pkg.source !== undefined);
+					if (removable.length > 0) {
+						const hasUser = removable.some((pkg) => pkg.scope === "user");
+						const hasProject = removable.some((pkg) => pkg.scope === "project");
+						const removeHint =
+							hasUser && hasProject
+								? `Remove one with \`${APP_NAME} remove <source>\` (add \`-l\` for project packages), or delete its directory manually.`
+								: hasProject
+									? `Remove one with \`${APP_NAME} remove -l <source>\`, or delete its directory manually.`
+									: `Remove one with \`${APP_NAME} remove <source>\`, or delete its directory manually.`;
+						console.log(chalk.dim(removeHint));
+					} else {
+						console.log(chalk.dim("Delete any unused directories manually."));
 					}
 				}
 
@@ -1208,100 +1349,10 @@ export async function handlePackageCommand(
 					}
 				}
 				if (updateTargetIncludesSelf(target)) {
-					const configuredSelfUpdateArgv = getConfiguredSelfUpdateArgv(
-						settingsManager.getGlobalSettings().selfUpdateCommand,
-					);
-					if (!configuredSelfUpdateArgv && getForkRelease()) {
-						await runForkUpdate({ force: options.force });
-						return true;
-					}
-					// A configured command is explicit user intent, so it replaces the managed install path too.
-					const managedInstallRoot = configuredSelfUpdateArgv ? undefined : getActiveManagedInstallRoot();
-					if (managedInstallRoot && options.force) {
-						console.error(
-							chalk.red(
-								`Managed ${APP_NAME} installations do not support --force; rerun the installer to repair this installation.`,
-							),
-						);
-						process.exitCode = 1;
-						return true;
-					}
-					const selfUpdatePlan = await getSelfUpdatePlan(options.force);
-					if (!selfUpdatePlan.shouldRun) {
-						return true;
-					}
-					if (configuredSelfUpdateArgv) {
-						await runConfiguredSelfUpdate(configuredSelfUpdateArgv, selfUpdatePlan);
-						return true;
-					}
-					if (managedInstallRoot) {
-						if (selfUpdatePlan.note) {
-							printSelfUpdateNote(selfUpdatePlan.note);
-						}
-						try {
-							console.log(chalk.dim(`Updating managed ${APP_NAME} installation...`));
-							await runManagedSelfUpdate(managedInstallRoot, selfUpdatePlan.version);
-						} catch (error: unknown) {
-							const message = error instanceof Error ? error.message : "Unknown managed update error";
-							console.error(chalk.red(`Error: ${message}`));
-							process.exitCode = 1;
-							return true;
-						}
-						console.log(chalk.green(`Updated ${APP_NAME} from ${VERSION} to ${selfUpdatePlan.version}`));
-						return true;
-					}
-
-					const installMethod = detectInstallMethod();
-					if (process.platform === "win32" && installMethod !== "npm" && installMethod !== "pnpm") {
-						console.error(
-							chalk.red(`${APP_NAME} self-update on Windows is only supported for npm and pnpm installs.`),
-						);
-						console.error(chalk.dim(`Detected install method: ${installMethod}. Update ${APP_NAME} manually.`));
-						process.exitCode = 1;
-						return true;
-					}
-					const selfUpdateTarget = {
-						packageName: selfUpdatePlan.packageName,
-						installSpec: selfUpdatePlan.installSpec,
-					};
-					const selfUpdateCommand = getSelfUpdateCommand(PACKAGE_NAME, selfUpdateNpmCommand, selfUpdateTarget);
-					if (!selfUpdateCommand) {
-						printSelfUpdateUnavailable(selfUpdateNpmCommand, selfUpdateTarget);
-						process.exitCode = 1;
-						return true;
-					}
-					if (selfUpdatePlan.note) {
-						printSelfUpdateNote(selfUpdatePlan.note);
-					}
-					try {
-						if (installMethod === "npm") {
-							prepareWindowsNpmSelfUpdate();
-						}
-						await runSelfUpdate(selfUpdateCommand);
-					} catch (error: unknown) {
-						const message = error instanceof Error ? error.message : "Unknown package command error";
-						console.error(chalk.red(`Error: ${message}`));
-						if (installMethod === "pnpm") {
-							printPnpmSelfUpdateMetadataHint();
-						}
-						printSelfUpdateFallback(selfUpdateCommand);
-						process.exitCode = 1;
-						return true;
-					}
-					console.log(chalk.green(`Updated ${APP_NAME} from ${VERSION} to ${selfUpdatePlan.version}`));
-					// The pi.dev installer migrates global npm installs to a managed install
-					// that pins all dependencies. It does not migrate pnpm, yarn, or bun installs.
-					if (installMethod === "npm") {
-						const installerCommand =
-							process.platform === "win32"
-								? 'powershell -c "irm https://pi.dev/install.ps1 | iex"'
-								: "curl -fsSL https://pi.dev/install.sh | sh";
-						console.log();
-						console.log(chalk.yellow(`This npm installation of ${APP_NAME} does not pin its dependencies.`));
-						console.log(chalk.yellow("Run the installer to migrate to a managed installation that does:"));
-						console.log();
-						console.log(`  ${chalk.bold(installerCommand)}`);
-					}
+					await runSelfUpdateTarget(settingsManager, selfUpdateNpmCommand, options.force);
+				}
+				if (updateTargetIncludesExtensions(target) && process.exitCode !== 1) {
+					printUnlistedPackagesPointer(packageManager);
 				}
 				return true;
 			}

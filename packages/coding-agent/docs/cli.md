@@ -300,8 +300,8 @@ See [Pi Packages](packages.md) for source formats, filtering, installation, and 
 | Task | Command |
 |---|---|
 | Install a package | `pi install <source>` |
-| List configured packages | `pi list` |
-| Remove a package and its settings entry | `pi remove <source>` |
+| List configured packages and unlisted package directories on disk | `pi list` |
+| Remove a configured or unlisted package and its settings entry | `pi remove <source>` |
 | Configure which package resources load | `pi config` |
 
 Add `--local` or `-l` to `install`, `remove`, `uninstall`, or `config` to use project settings instead of global settings.

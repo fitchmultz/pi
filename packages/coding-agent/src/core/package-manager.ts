@@ -2,6 +2,7 @@ import type { ChildProcess, ChildProcessByStdio } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
+	type Dirent,
 	existsSync,
 	globSync,
 	mkdirSync,
@@ -80,6 +81,7 @@ function getNonInteractiveGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 const UPDATE_CHECK_CONCURRENCY = 4;
 const GIT_UPDATE_CONCURRENCY = 4;
+const MAX_GIT_SCAN_DEPTH = 6;
 
 /** Whether PI_OFFLINE is set; package installs and updates then skip all network access. */
 export function isOfflineModeEnabled(): boolean {
@@ -158,6 +160,14 @@ export interface ConfiguredPackage {
 	installedPath?: string;
 }
 
+export interface UnlistedPackage {
+	/** Source specifier accepted by `pi remove`, when the directory maps to a valid package source. */
+	source?: string;
+	scope: "user" | "project";
+	type: "npm" | "git";
+	installedPath: string;
+}
+
 export interface PackageManager {
 	resolve(onMissing?: (source: string) => Promise<MissingSourceAction>): Promise<ResolvedPaths>;
 	install(source: string, options?: { local?: boolean }): Promise<void>;
@@ -166,6 +176,7 @@ export interface PackageManager {
 	removeAndPersist(source: string, options?: { local?: boolean }): Promise<boolean>;
 	update(source?: string): Promise<void>;
 	listConfiguredPackages(): ConfiguredPackage[];
+	listUnlistedPackages(): UnlistedPackage[];
 	resolveExtensionSources(
 		sources: string[],
 		options?: { local?: boolean; temporary?: boolean },
@@ -1093,6 +1104,230 @@ export class DefaultPackageManager implements PackageManager {
 		return configuredPackages;
 	}
 
+	listUnlistedPackages(): UnlistedPackage[] {
+		const scopes: Array<"user" | "project"> = ["user"];
+		if (this.settingsManager.isProjectTrusted()) {
+			scopes.push("project");
+		}
+
+		const unlisted: UnlistedPackage[] = [];
+		const seenPaths = new Set<string>();
+		for (const scope of scopes) {
+			const settings =
+				scope === "project" ? this.settingsManager.getProjectSettings() : this.settingsManager.getGlobalSettings();
+			const configuredGitPaths = new Set<string>();
+			const configuredNpmNames = new Set<string>();
+
+			for (const pkg of settings.packages ?? []) {
+				const parsed = this.parseSource(this.getPackageSourceString(pkg));
+				if (parsed.type === "git") {
+					configuredGitPaths.add(getPathComparisonKey(this.getGitInstallPath(parsed, scope)));
+				} else if (parsed.type === "npm") {
+					configuredNpmNames.add(parsed.name);
+				}
+			}
+
+			for (const entry of this.collectUnlistedGitPackages(scope, configuredGitPaths)) {
+				const key = getPathComparisonKey(entry.installedPath);
+				if (seenPaths.has(key)) continue;
+				seenPaths.add(key);
+				unlisted.push(entry);
+			}
+
+			for (const entry of this.collectUnlistedNpmPackages(scope, configuredNpmNames)) {
+				const key = getPathComparisonKey(entry.installedPath);
+				if (seenPaths.has(key)) continue;
+				seenPaths.add(key);
+				unlisted.push(entry);
+			}
+		}
+
+		unlisted.sort((a, b) => {
+			if (a.scope !== b.scope) return a.scope === "user" ? -1 : 1;
+			if ((a.source === undefined) !== (b.source === undefined)) return a.source === undefined ? 1 : -1;
+			const left = a.source ?? a.installedPath;
+			const right = b.source ?? b.installedPath;
+			return left < right ? -1 : left > right ? 1 : 0;
+		});
+		return unlisted;
+	}
+
+	private collectUnlistedGitPackages(scope: "user" | "project", configuredGitPaths: Set<string>): UnlistedPackage[] {
+		const gitRoot = this.getGitInstallRoot(scope);
+		if (!gitRoot || !existsSync(gitRoot)) {
+			return [];
+		}
+		const resolvedRoot = resolve(gitRoot);
+		const unlisted: UnlistedPackage[] = [];
+
+		const walk = (dir: string, depth: number): void => {
+			if (depth > 0 && existsSync(join(dir, ".git"))) {
+				if (!configuredGitPaths.has(getPathComparisonKey(dir))) {
+					const rel = toPosixPath(relative(resolvedRoot, dir));
+					const candidateSource = `git:${rel}`;
+					const parsed = this.parseSource(candidateSource);
+					const source =
+						parsed.type === "git" && pathsEqual(this.getGitInstallPath(parsed, scope), dir)
+							? candidateSource
+							: undefined;
+					unlisted.push({
+						...(source ? { source } : {}),
+						scope,
+						type: "git",
+						installedPath: dir,
+					});
+				}
+				return;
+			}
+			if (depth >= MAX_GIT_SCAN_DEPTH) {
+				return;
+			}
+			let entries: Dirent[];
+			try {
+				entries = readdirSync(dir, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			for (const entry of entries) {
+				if (!entry.isDirectory()) continue;
+				if (entry.name === ".git" || entry.name === "node_modules") continue;
+				walk(join(dir, entry.name), depth + 1);
+			}
+		};
+
+		walk(resolvedRoot, 0);
+		return unlisted;
+	}
+
+	private collectUnlistedNpmPackages(scope: "user" | "project", configuredNpmNames: Set<string>): UnlistedPackage[] {
+		const unlisted: UnlistedPackage[] = [];
+		for (const { name, installedPath } of this.collectInstalledManagedNpmPackages(scope)) {
+			if (configuredNpmNames.has(name)) continue;
+			unlisted.push({
+				source: `npm:${name}`,
+				scope,
+				type: "npm",
+				installedPath,
+			});
+		}
+		return unlisted;
+	}
+
+	private readManagedNpmDependencyNames(installRoot: string): string[] | undefined {
+		const packageJsonPath = join(installRoot, "package.json");
+		if (!existsSync(packageJsonPath)) {
+			return undefined;
+		}
+		try {
+			const parsed = JSON.parse(stripBom(readFileSync(packageJsonPath, "utf-8"))) as {
+				dependencies?: unknown;
+			};
+			if (!parsed.dependencies || typeof parsed.dependencies !== "object" || Array.isArray(parsed.dependencies)) {
+				return undefined;
+			}
+			const names = Object.keys(parsed.dependencies);
+			return names.length > 0 ? names : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private isDirectoryEntry(targetPath: string, entry: Dirent): boolean {
+		if (entry.isDirectory()) return true;
+		if (!entry.isSymbolicLink()) return false;
+		try {
+			return statSync(targetPath).isDirectory();
+		} catch {
+			return false;
+		}
+	}
+
+	private collectInstalledManagedNpmPackages(
+		scope: "user" | "project",
+	): Array<{ name: string; installedPath: string }> {
+		const installRoot = this.getNpmInstallRoot(scope, false);
+		const nodeModulesDir = join(installRoot, "node_modules");
+		if (!existsSync(nodeModulesDir)) {
+			return [];
+		}
+
+		// When package.json lists dependencies, treat those as the installed top-level packages so
+		// hoisted transitive dependencies in node_modules are not reported as unlisted packages.
+		const declaredNames = this.readManagedNpmDependencyNames(installRoot);
+		if (declaredNames) {
+			const installed: Array<{ name: string; installedPath: string }> = [];
+			for (const name of declaredNames) {
+				let installedPath: string;
+				try {
+					installedPath = this.resolveManagedPath(nodeModulesDir, ...name.split("/"));
+				} catch {
+					continue;
+				}
+				if (existsSync(installedPath)) {
+					installed.push({ name, installedPath });
+				}
+			}
+			return installed;
+		}
+
+		const installed: Array<{ name: string; installedPath: string }> = [];
+		let entries: Dirent[];
+		try {
+			entries = readdirSync(nodeModulesDir, { withFileTypes: true });
+		} catch {
+			return [];
+		}
+		for (const entry of entries) {
+			if (entry.name.startsWith(".")) continue;
+			const entryPath = join(nodeModulesDir, entry.name);
+			if (!this.isDirectoryEntry(entryPath, entry)) continue;
+			if (entry.name.startsWith("@")) {
+				let scopedEntries: Dirent[];
+				try {
+					scopedEntries = readdirSync(entryPath, { withFileTypes: true });
+				} catch {
+					continue;
+				}
+				for (const scopedEntry of scopedEntries) {
+					if (scopedEntry.name.startsWith(".")) continue;
+					const scopedPath = join(entryPath, scopedEntry.name);
+					if (!this.isDirectoryEntry(scopedPath, scopedEntry)) continue;
+					installed.push({ name: `${entry.name}/${scopedEntry.name}`, installedPath: scopedPath });
+				}
+				continue;
+			}
+			installed.push({ name: entry.name, installedPath: entryPath });
+		}
+		return installed;
+	}
+
+	private hasConfiguredPackage(source: string, scope: "user" | "project"): boolean {
+		const currentSettings =
+			scope === "project" ? this.settingsManager.getProjectSettings() : this.settingsManager.getGlobalSettings();
+		return (currentSettings.packages ?? []).some((existing) => this.packageSourcesMatch(existing, source, scope));
+	}
+
+	private hasManagedInstalledPackage(parsed: ParsedSource, scope: "user" | "project"): boolean {
+		if (parsed.type === "git") {
+			const targetDir = this.getGitInstallPath(parsed, scope);
+			return existsSync(join(targetDir, ".git"));
+		}
+		if (parsed.type === "npm") {
+			const installRoot = this.getNpmInstallRoot(scope, false);
+			const declaredNames = this.readManagedNpmDependencyNames(installRoot);
+			if (declaredNames) {
+				return declaredNames.includes(parsed.name);
+			}
+			try {
+				const nodeModulesDir = join(installRoot, "node_modules");
+				return existsSync(this.resolveManagedPath(nodeModulesDir, ...parsed.name.split("/")));
+			} catch {
+				return false;
+			}
+		}
+		return false;
+	}
+
 	async install(source: string, options?: { local?: boolean }): Promise<void> {
 		const parsed = this.parseSource(source);
 		const scope: SourceScope = options?.local ? "project" : "user";
@@ -1143,8 +1378,17 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	async removeAndPersist(source: string, options?: { local?: boolean }): Promise<boolean> {
+		const scope: "user" | "project" = options?.local ? "project" : "user";
+		this.assertProjectTrustedForScope(scope);
+		const parsed = this.parseSource(source);
+		const configured = this.hasConfiguredPackage(source, scope);
+		const installedOnDisk = this.hasManagedInstalledPackage(parsed, scope);
+		if (!configured && !installedOnDisk) {
+			return false;
+		}
 		await this.remove(source, options);
-		return this.removeSourceFromSettings(source, options);
+		const removedFromSettings = this.removeSourceFromSettings(source, options);
+		return removedFromSettings || installedOnDisk;
 	}
 
 	async update(source?: string): Promise<void> {
