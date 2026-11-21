@@ -29,6 +29,7 @@ test("runs the installer CLI through a symlinked path", (t) => {
 	symlinkSync(fileURLToPath(new URL("./install-fork.mjs", import.meta.url)), entry);
 	const output = execFileSync(tools.node, [entry, "--help"], { env: f.env, encoding: "utf8" });
 	assert.match(output, /Usage: node scripts\/install-fork\.mjs/);
+	assert.match(output, /termux-compiler\/<key>\/tsc/);
 });
 
 test("importing the installer from stdin does not run the CLI", () => {
@@ -44,7 +45,8 @@ function fixture(t) {
 	const root = mkdtempSync(join(tmpdir(), "pi-fork-selector-test-"));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const home = join(root, "home");
-	const env = isolatedEnvironment(home, tools, join(root, "cache"));
+	const cache = join(root, "cache");
+	const env = isolatedEnvironment(home, tools, cache);
 	const selector = join(root, "npm-global/lib/node_modules", name);
 	const oldPackage = join(root, "old-release");
 	mkdirSync(oldPackage);
@@ -58,7 +60,7 @@ function fixture(t) {
 		mkdirSync(dirname(path), { recursive: true });
 		writeFileSync(path, `preserve ${filename}`);
 	}
-	return { root, env, selector, oldPackage, releases: join(root, "releases") };
+	return { root, cache, env, selector, oldPackage, releases: join(root, "releases") };
 }
 
 function catalogFiles(entries = defaultCatalog) {
@@ -786,14 +788,62 @@ test("Termux isolation rejects missing PREFIX or Bash before running npm", (t) =
 	}
 });
 
+function makeTermuxCompilerLock(f, { id, version, gitHead, blocked }) {
+	const name = `@typescript/typescript-linux-${process.arch}`;
+	const sourceRoot = join(f.root, `compiler-pkg-${id}`);
+	const directory = join(sourceRoot, "packages/compiler");
+	mkdirSync(join(directory, "lib"), { recursive: true });
+	writeFileSync(join(directory, "package.json"), JSON.stringify({
+		name, version, gitHead, os: ["linux"], cpu: [process.arch],
+		scripts: { postinstall: "node -e 'process.exit(27)'" },
+	}));
+	writeFileSync(join(directory, "lib/tsc"), blocked
+		? '#!/usr/bin/env node\nconsole.error("SIGSYS: bad system call\\ninternal/fswatch.fanotifyAvailable()"); process.exit(2);\n'
+		: `#!/usr/bin/env node\nconsole.log(${JSON.stringify(`Version ${version}`)});\n`, { mode: 0o755 });
+	const artifactSet = produceArtifactSet({
+		repoRoot: sourceRoot, outDir: join(f.root, `compiler-artifacts-${id}`), build: false, source: null,
+		npmOptions: { node: tools.node, npm: tools.npm, env: f.env },
+	});
+	const tarball = artifactSet.getPackage(name).tarballPath;
+	return JSON.stringify({
+		lockfileVersion: 3,
+		packages: {
+			[`node_modules/${name}`]: {
+				version, resolved: `file:${tarball}`, optional: true, os: ["linux"], cpu: [process.arch],
+				integrity: `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`,
+			},
+		},
+	});
+}
+
+function prepareTermuxWorkdir(workdir, lock) {
+	mkdirSync(join(workdir, "node_modules/.bin"), { recursive: true });
+	writeFileSync(join(workdir, "package-lock.json"), lock);
+	symlinkSync(join(workdir, "unusable-android-wrapper"), join(workdir, "node_modules/.bin/tsc"));
+}
+
+test("Termux compiler refuses a nonprivate cache directory without changing its permissions", (t) => {
+	const f = fixture(t);
+	const compilerCache = join(f.cache, "termux-compiler");
+	mkdirSync(compilerCache, { recursive: true });
+	chmodSync(compilerCache, 0o755);
+	const lock = makeTermuxCompilerLock(f, { id: "nonprivate", version: "1.2.3", gitHead: "a".repeat(40), blocked: true });
+	const workdir = join(f.root, "workdir");
+	prepareTermuxWorkdir(workdir, lock);
+	assert.throws(
+		() => prepareTermuxCompiler(workdir, tools, { ...f.env, npm_config_offline: "true", GOPROXY: "off", GOSUMDB: "off" }, f.cache),
+		/private.*termux-compiler/,
+	);
+	assert.equal(statSync(compilerCache).mode & 0o777, 0o755);
+});
+
 for (const blocked of [false, true]) {
-	test(`Termux compiler preserves frozen inputs without scripts and allows cleanup (${blocked ? "fanotify rebuild" : "published artifact"})`, {
+	test(`Termux compiler preserves frozen inputs without scripts, caches rebuilds and allows cleanup (${blocked ? "fanotify rebuild" : "published artifact"})`, {
 		skip: blocked && process.platform === "darwin",
 	}, (t) => {
 		const f = fixture(t);
-		const name = `@typescript/typescript-linux-${process.arch}`;
-		const directory = join(f.root, "source/packages/compiler");
 		let gitHead = "a".repeat(40);
+		let secondGitHead;
 		let originalWatcher;
 		let watcher;
 		if (blocked) {
@@ -804,57 +854,114 @@ for (const blocked of [false, true]) {
 			watcher = join(module, "internal/fswatch/fanotify_linux.go");
 			originalWatcher = "package fswatch\n\nfunc init() { fanotifyAvailable() }\n\nfunc fanotifyAvailable() bool {\n\tpanic(\"forbidden fanotify probe\")\n}\n";
 			writeFileSync(watcher, originalWatcher);
-			writeFileSync(join(module, "cmd/tsgo/main.go"), `package main
+			const mainGo = join(module, "cmd/tsgo/main.go");
+			const writeMain = (version) => writeFileSync(mainGo, `package main
 import ("fmt"; _ "github.com/microsoft/typescript-go/internal/fswatch")
-func main() { fmt.Println("Version 1.2.3") }
+func main() { fmt.Println(${JSON.stringify(`Version ${version}`)}) }
 `);
 			const git = (args) => execFileSync("git", args, { cwd: module, env: f.env, encoding: "utf8" }).trim();
 			git(["init", "--quiet"]);
-			git(["add", "go.mod", "cmd", "internal"]);
-			git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "compiler fixture"]);
-			gitHead = git(["rev-parse", "HEAD"]);
 			// A file proxy lets real Go own cache permissions and checksum verification offline.
-			const version = `v0.0.0-20260101000000-${gitHead.slice(0, 12)}`;
 			const proxy = join(f.root, "proxy");
 			const versions = join(proxy, "github.com/microsoft/typescript-go/@v");
 			mkdirSync(versions, { recursive: true });
-			const info = JSON.stringify({ Version: version, Time: "2026-01-01T00:00:00Z", Origin: { Hash: gitHead } });
-			for (const query of [gitHead, version]) writeFileSync(join(versions, `${query}.info`), info);
-			writeFileSync(join(versions, `${version}.mod`), readFileSync(join(module, "go.mod")));
-			git(["archive", "--format=zip", `--prefix=github.com/microsoft/typescript-go@${version}/`, "--output", join(versions, `${version}.zip`), "HEAD"]);
+			const publishCommit = (version, timestamp) => {
+				writeMain(version);
+				git(["add", "go.mod", "cmd", "internal"]);
+				git(["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", `compiler fixture ${version}`]);
+				const head = git(["rev-parse", "HEAD"]);
+				const pseudo = `v0.0.0-${timestamp}-${head.slice(0, 12)}`;
+				const info = JSON.stringify({ Version: pseudo, Time: "2026-01-01T00:00:00Z", Origin: { Hash: head } });
+				for (const query of [head, pseudo]) writeFileSync(join(versions, `${query}.info`), info);
+				writeFileSync(join(versions, `${pseudo}.mod`), readFileSync(join(module, "go.mod")));
+				git(["archive", "--format=zip", `--prefix=github.com/microsoft/typescript-go@${pseudo}/`, "--output", join(versions, `${pseudo}.zip`), "HEAD"]);
+				return head;
+			};
+			gitHead = publishCommit("1.2.3", "20260101000000");
+			secondGitHead = publishCommit("1.2.4", "20260101000001");
 			f.env.GOPROXY = pathToFileURL(proxy).href;
 			f.env.GOSUMDB = "off";
 		}
-		mkdirSync(join(directory, "lib"), { recursive: true });
-		writeFileSync(join(directory, "package.json"), JSON.stringify({
-			name, version: "1.2.3", gitHead, os: ["linux"], cpu: [process.arch],
-			scripts: { postinstall: "node -e 'process.exit(27)'" },
-		}));
-		writeFileSync(join(directory, "lib/tsc"), blocked
-			? '#!/usr/bin/env node\nconsole.error("SIGSYS: bad system call\\ninternal/fswatch.fanotifyAvailable()"); process.exit(2);\n'
-			: '#!/usr/bin/env node\nconsole.log("Version 1.2.3");\n', { mode: 0o755 });
-		const artifactSet = produceArtifactSet({
-			repoRoot: join(f.root, "source"), outDir: join(f.root, "artifacts"), build: false, source: null,
-			npmOptions: { node: tools.node, npm: tools.npm, env: f.env },
-		});
-		const tarball = artifactSet.getPackage(name).tarballPath;
-		const lock = JSON.stringify({
-			lockfileVersion: 3,
-			packages: {
-				[`node_modules/${name}`]: {
-					version: "1.2.3", resolved: `file:${tarball}`, optional: true, os: ["linux"], cpu: [process.arch],
-					integrity: `sha512-${createHash("sha512").update(readFileSync(tarball)).digest("base64")}`,
-				},
-			},
-		});
-		writeFileSync(join(f.root, "package-lock.json"), lock);
-		mkdirSync(join(f.root, "node_modules/.bin"), { recursive: true });
-		symlinkSync(join(f.root, "unusable-android-wrapper"), join(f.root, "node_modules/.bin/tsc"));
-		prepareTermuxCompiler(f.root, tools, { ...f.env, npm_config_offline: "true" });
-		assert.equal(readFileSync(join(f.root, "package-lock.json"), "utf8"), lock);
-		assert.equal(execFileSync(join(f.root, "node_modules/.bin/tsc"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.3");
-		if (blocked) assert.equal(readFileSync(watcher, "utf8"), originalWatcher);
-		const compiler = join(f.root, "node_modules/.termux-compiler");
+		const lock = makeTermuxCompilerLock(f, { id: "1", version: "1.2.3", gitHead, blocked });
+		const firstWorkdir = join(f.root, "first-workdir");
+		prepareTermuxWorkdir(firstWorkdir, lock);
+		const compilerCache = join(f.cache, "termux-compiler");
+		if (blocked) {
+			const stale = join(compilerCache, "stale-previous-key");
+			mkdirSync(compilerCache, { recursive: true, mode: 0o700 });
+			mkdirSync(stale, { mode: 0o700 });
+			writeFileSync(join(stale, "tsc"), "stale compiler");
+		}
+		prepareTermuxCompiler(firstWorkdir, tools, { ...f.env, npm_config_offline: "true" }, f.cache);
+		assert.equal(readFileSync(join(firstWorkdir, "package-lock.json"), "utf8"), lock);
+		assert.equal(execFileSync(join(firstWorkdir, "node_modules/.bin/tsc"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.3");
+		if (!blocked) {
+			assert.equal(existsSync(compilerCache), false);
+		} else {
+			assert.equal(readFileSync(watcher, "utf8"), originalWatcher);
+			assert.equal(statSync(compilerCache).mode & 0o777, 0o700);
+			const cachedEntries = readdirSync(compilerCache);
+			assert.equal(cachedEntries.length, 1);
+			assert.notEqual(cachedEntries[0], "stale-previous-key");
+			assert.equal(lstatSync(join(compilerCache, cachedEntries[0], "tsc")).isFile(), true);
+
+			// Second run in a fresh workdir with Go unavailable must reuse the cached compiler.
+			const noGoBin = join(f.root, "no-go-bin");
+			mkdirSync(noGoBin);
+			symlinkSync(tools.node, join(noGoBin, "node"));
+			const noGoEnv = { ...f.env, PATH: noGoBin, npm_config_offline: "true" };
+			delete noGoEnv.GOPROXY;
+			delete noGoEnv.GOSUMDB;
+			assert.equal(spawnSync("go", ["version"], { env: noGoEnv }).error?.code, "ENOENT");
+			const secondWorkdir = join(f.root, "second-workdir");
+			prepareTermuxWorkdir(secondWorkdir, lock);
+			prepareTermuxCompiler(secondWorkdir, tools, noGoEnv, f.cache);
+			assert.equal(execFileSync(join(secondWorkdir, "node_modules/.bin/tsc"), ["--version"], { env: noGoEnv, encoding: "utf8" }).trim(), "Version 1.2.3");
+			assert.deepEqual(readdirSync(compilerCache), cachedEntries);
+
+			// A different pinned commit must miss the cache when Go is unavailable, then rebuild and evict the old key.
+			const secondLock = makeTermuxCompilerLock(f, { id: "2", version: "1.2.4", gitHead: secondGitHead, blocked: true });
+			const thirdWorkdir = join(f.root, "third-workdir");
+			prepareTermuxWorkdir(thirdWorkdir, secondLock);
+			assert.throws(() => prepareTermuxCompiler(thirdWorkdir, tools, noGoEnv, f.cache), /Command failed: go /);
+			prepareTermuxCompiler(thirdWorkdir, tools, { ...f.env, npm_config_offline: "true" }, f.cache);
+			assert.equal(execFileSync(join(thirdWorkdir, "node_modules/.bin/tsc"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.4");
+			const updatedEntries = readdirSync(compilerCache);
+			assert.equal(updatedEntries.length, 1);
+			assert.notEqual(updatedEntries[0], cachedEntries[0]);
+
+			// A different Go version must invalidate the cache key rather than reusing the old binary.
+			const otherGoBin = join(f.root, "other-go-bin");
+			mkdirSync(otherGoBin);
+			symlinkSync(tools.node, join(otherGoBin, "node"));
+			writeFileSync(join(otherGoBin, "go"), '#!/usr/bin/env node\nif (process.argv[2] === "env" && process.argv[3] === "GOVERSION") { console.log("go1.99.0"); process.exit(0); }\nconsole.error("simulated go rebuild miss"); process.exit(42);\n', { mode: 0o755 });
+			const fourthWorkdir = join(f.root, "fourth-workdir");
+			prepareTermuxWorkdir(fourthWorkdir, secondLock);
+			assert.throws(
+				() => prepareTermuxCompiler(fourthWorkdir, tools, { ...f.env, PATH: otherGoBin, npm_config_offline: "true" }, f.cache),
+				/Command failed: go mod download/,
+			);
+
+			// An unwritable private cache root must warn without failing a verified rebuild.
+			if (process.getuid?.() !== 0) {
+				const readOnlyCache = join(f.root, "readonly-cache");
+				const readOnlyCompilerCache = join(readOnlyCache, "termux-compiler");
+				mkdirSync(readOnlyCompilerCache, { recursive: true, mode: 0o700 });
+				chmodSync(readOnlyCompilerCache, 0o500);
+				const warn = t.mock.method(console, "warn", () => {});
+				try {
+					const fifthWorkdir = join(f.root, "fifth-workdir");
+					prepareTermuxWorkdir(fifthWorkdir, secondLock);
+					prepareTermuxCompiler(fifthWorkdir, tools, { ...f.env, npm_config_offline: "true" }, readOnlyCache);
+					assert.equal(execFileSync(join(fifthWorkdir, "node_modules/.bin/tsc"), ["--version"], { env: f.env, encoding: "utf8" }).trim(), "Version 1.2.4");
+					assert.match(String(warn.mock.calls[0]?.arguments[0]), /Could not save cached Termux compiler/);
+				} finally {
+					warn.mock.restore();
+					chmodSync(readOnlyCompilerCache, 0o700);
+				}
+			}
+		}
+		const compiler = join(firstWorkdir, "node_modules/.termux-compiler");
 		rmSync(compiler, { recursive: true, force: true });
 		assert.equal(existsSync(compiler), false);
 	});
