@@ -42,6 +42,7 @@
 
 ### Changed
 
+- `pi list` now reports installed git and npm package directories on disk that are not referenced in settings, `pi update --extensions` and `pi update --all` end with a one-line pointer to `pi list` when unlisted package directories exist (without auto-deleting them), and `pi remove <source>` now succeeds cleanly when removing an unlisted package directory instead of deleting it and exiting non-zero with `No matching package found`. See [Pi Packages](docs/packages.md#install-and-manage-packages).
 - Spawned CLI workers now inherit Node's V8 compile cache via `NODE_COMPILE_CACHE` (unless already configured or disabled with `NODE_DISABLE_COMPILE_CACHE`), and the bundled `dist/bundle/cli-worker.js` enables compile caching before loading `dist/bundle/cli-runtime.js`.
 - Foreground `bash` and `powershell` tool calls without an explicit `timeout` now stop after 300 seconds instead of running unbounded, and the timeout message says when the default limit was the cause; an explicit `timeout` still overrides it up to the existing per-command maximum. Long work belongs in `background_command`.
 - `pi.runtime` session journal entries now record `trigger: "restart"` when a worker resumes from a managed `pi restart` or `/restart` handoff, while keeping `session_start` `event.reason` as `"startup"` and preserving deferred first-run journal writes for startup rollback. Manual `--working-session` restores continue to record `trigger: "startup"`. See [Runtime record](docs/session-format.md#runtime-record-piruntime).
