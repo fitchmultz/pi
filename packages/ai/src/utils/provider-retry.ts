@@ -1,3 +1,6 @@
+import { formatProviderError, normalizeProviderError } from "./error-body.ts";
+import { isProviderLimitError } from "./retry.ts";
+
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 
 interface ProviderRetryOptions {
@@ -102,7 +105,8 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
  * request AbortSignal, so callers must invoke the SDK with `maxRetries: 0` and
  * wrap the request with this helper. Provider-requested delays above
  * `maxRetryDelayMs` fail immediately (60 seconds by default); set it to zero to
- * disable the limit.
+ * disable the limit. Errors that report an exhausted quota, budget, billing or
+ * plan limit fail at once, as `isRetryableAssistantError` treats them.
  */
 export async function retryProviderRequest<T>(
 	request: () => Promise<T>,
@@ -119,6 +123,8 @@ export async function retryProviderRequest<T>(
 			if (options.signal?.aborted) throw createAbortError();
 			if (retriesRemaining <= 0 || !isProviderError(error) || !isRetryableProviderError(error)) throw error;
 			if (error.status !== undefined && options.noRetryStatuses?.includes(error.status)) throw error;
+			// Test the text callers report, which carries the response body.
+			if (isProviderLimitError(formatProviderError(normalizeProviderError(error)))) throw error;
 
 			const retryIndex = maxRetries - retriesRemaining;
 			retriesRemaining--;

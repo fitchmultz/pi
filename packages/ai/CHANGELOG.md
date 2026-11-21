@@ -24,6 +24,7 @@
 
 - Fixed `retryAssistantCall()` retaining an abort listener after each completed backoff, causing listener buildup across repeated retries ([#10506](https://github.com/earendil-works/pi/issues/10506))
 - Fixed Cloudflare's HTTP 525 (SSL handshake failed) not being retried like its 520 and 524 errors
+- Fixed request-level retries (`retryProviderRequest`) retrying errors that report an exhausted quota, budget, billing or plan limit. SDK chat requests, OpenRouter image generation and classifiers now fail on the first such response, as assistant-turn retries do; a Google Decisions classification whose billing account had reached its spending cap took 241 s to fail. The shared pattern is exported as `isProviderLimitError()` from `@earendil-works/pi-ai/utils/retry`.
 - Fixed gateway errors such as "The provider is temporarily unavailable. Retry shortly.", "The provider ended the response before it was complete.", "The connection to the provider was reset.", and "The provider reported a failure while generating the response." not being retried ([#12227](https://github.com/earendil-works/pi/issues/12227))
 - Fixed `gemini-4-neon` intermittently omitting its end-of-turn stop token and emitting a raw `\nuser\n` turn header with hallucinated follow-up turns and tool calls by sending `stopSequences: ["\nuser\n"]` on `gemini-4-neon` requests.
 - Fixed transient Google Gemini `PROHIBITED_CONTENT` finish reasons aborting turns immediately instead of retrying through Pi's retry policy.

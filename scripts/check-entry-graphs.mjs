@@ -55,6 +55,9 @@ const BUDGETS = {
 				// Tool argument validation runs on pi-schema: its validator, coercion and format checks (the checks TypeBox's
 				// validator ran by default). TypeBox, an external package, was not counted before.
 				"./utils/validation": { maxFiles: 42, forbid: ["providers/", "api/", "packages/ai/src/index.ts"] },
+				// Request retries stop on the provider-limit errors that assistant-turn retries stop on (retry.ts with its
+				// abort and sleep helpers), matched in the error text callers report (error-body.ts with its text helper).
+				"./utils/provider-retry": { maxFiles: 6, forbid: ["providers/", "api/", "index.ts"] },
 			},
 		},
 	},
