@@ -914,6 +914,7 @@ Classifier models consume structured JSON state, and optionally images, and answ
 | `vercel-ai-gateway` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` |
 | `opencode` | `jev-1.13`, `jev-1.13-free` | `OPENCODE_API_KEY` |
 | `openai` | `gpt-6-luna` | `OPENAI_API_KEY` |
+| `cloudflare-ai-gateway` | `gpt-6-luna` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, and `CLOUDFLARE_GATEWAY_ID` |
 | `google` | `gemini-decision-1` | `GEMINI_API_KEY` |
 | `github-copilot` | `microsoft-decision-1` | `COPILOT_GITHUB_TOKEN` or GitHub Copilot OAuth |
 
@@ -974,6 +975,8 @@ Vercel AI Gateway and OpenCode list their Jev models with text input only.
 The `openai-decisions` API calls OpenAI's [Decisions API](https://developers.openai.com/api/docs/guides/decisions) (`POST /v1/decisions`). GPT-6 Luna is its only model. The state is sent as JSON text; with images, the input is one user message with the state followed by the images as data URLs (at most 128). `choice` and `score` questions map to the Decisions types of the same name. `bool` questions become `predicate` questions; predicates have no criteria field, so the meanings of true and false are appended to the instructions. If OpenAI refuses to answer a question, the whole result is an error. Usage reports input tokens only, priced at the catalog input rate with OpenAI's long-context multiplier.
 
 The endpoint needs an OpenAI API key; Sign in with ChatGPT credentials are rejected, so the `openai` provider hides `gpt-6-luna` from `getAvailableOfType('classifier')` while it uses OAuth. The API rejects inputs above 922K tokens, but requests that run longer than about five seconds, currently above roughly 600K input tokens, fail with a gateway timeout (504).
+
+The `cloudflare-ai-gateway` provider lists the same `gpt-6-luna` entry on the gateway's `/openai` passthrough. Requests authenticate to the gateway with its token (`cf-aig-authorization`) instead of an OpenAI key, so the model stays available while `openai` uses OAuth. The gateway reaches OpenAI through unified billing, a key stored in the gateway, or an `Authorization` header configured for the provider.
 
 ### Google Decisions
 

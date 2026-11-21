@@ -464,4 +464,33 @@ describe("generated model data validation", () => {
 			contextWindow: 262144,
 		});
 	});
+
+	it("adds OpenAI's Decisions classifiers to cloudflare-ai-gateway when hydrating upstream catalogs without them", () => {
+		const { dataDir, packageRoot, values } = createFixture("cloudflare-ai-gateway");
+		const catalogPath = join(packageRoot, "models.all.json");
+		const luna = {
+			type: "classifier",
+			id: "gpt-6-luna",
+			name: "GPT-6 Luna",
+			api: "openai-decisions",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			input: ["text", "image"],
+			cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 922000,
+		};
+		writeFileSync(catalogPath, JSON.stringify({ "cloudflare-ai-gateway": [values["chat:model-a"]], openai: [luna] }));
+
+		hydrateModelCatalog(packageRoot, catalogPath);
+
+		const hydrated = JSON.parse(readFileSync(join(dataDir, "cloudflare-ai-gateway.json"), "utf8")) as Record<
+			string,
+			Record<string, unknown>
+		>;
+		expect(hydrated["openai-decisions"]?.["classifier:gpt-6-luna"]).toEqual({
+			...luna,
+			provider: "cloudflare-ai-gateway",
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/openai",
+		});
+	});
 });

@@ -273,6 +273,42 @@ describe("Models with classifier models", () => {
 		expect((await withOAuth.getAvailable("openai")).some((model) => model.id === "gpt-6-luna")).toBe(true);
 	});
 
+	it("routes Cloudflare AI Gateway GPT-6 Luna to OpenAI's Decisions API with the gateway credential", async () => {
+		const credentials = new InMemoryCredentialStore();
+		await credentials.modify("cloudflare-ai-gateway", async () => ({
+			type: "api_key",
+			key: "gateway-token",
+			env: { CLOUDFLARE_ACCOUNT_ID: "account", CLOUDFLARE_GATEWAY_ID: "gateway" },
+		}));
+		const models = builtinModels({ credentials });
+		const luna = models.getModelOfType("classifier", "cloudflare-ai-gateway", "gpt-6-luna");
+		if (!luna) throw new Error("missing Cloudflare AI Gateway Decisions model");
+		// OpenAI's entry on the gateway's /openai passthrough.
+		expect(luna).toEqual({
+			...models.getModelOfType("classifier", "openai", "gpt-6-luna"),
+			provider: "cloudflare-ai-gateway",
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/openai",
+		});
+		expect(await models.getAvailableOfType("classifier", "cloudflare-ai-gateway")).toEqual([luna]);
+
+		const requests: Array<{ url: string; headers: Headers }> = [];
+		const result = await models.classify(luna, context, {
+			fetch: async (input, init) => {
+				requests.push({ url: String(input), headers: new Headers(init?.headers) });
+				return Response.json({ answers: [{ type: "predicate", name: "approved", probability: 0.8 }] });
+			},
+		});
+
+		expect(requests.map((request) => request.url)).toEqual([
+			"https://gateway.ai.cloudflare.com/v1/account/gateway/openai/decisions",
+		]);
+		// Only the gateway token, as on the gateway's chat requests.
+		expect(requests[0].headers.get("cf-aig-authorization")).toBe("Bearer gateway-token");
+		expect(requests[0].headers.has("authorization")).toBe(false);
+		expect(result.stopReason).toBe("stop");
+		expect(result.answers.approved).toEqual({ type: "bool", probability: 0.8 });
+	});
+
 	it("routes GitHub Copilot Microsoft-Decision-1 to the account's /v1/systemone endpoint", async () => {
 		const credentials = new InMemoryCredentialStore();
 		await credentials.modify("github-copilot", async () => ({

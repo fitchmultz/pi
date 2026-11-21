@@ -1,6 +1,6 @@
 import { calculateCost } from "../models.ts";
 import type { ClassifierApi, ClassifierModel, ClassifierOptions, ProviderHeaders, Usage } from "../types.ts";
-import { headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
+import { hasCredentialHeader, headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 
@@ -41,15 +41,16 @@ export function requiredNumber(label: string, value: unknown, field: string): nu
 
 function requestHeaders(
 	model: ClassifierModel<ClassifierApi>,
-	apiKey: string,
+	apiKey: string | undefined,
 	optionsHeaders?: ProviderHeaders,
 	identity?: ClientIdentity,
 	authHeaders?: Record<string, string>,
 ): Record<string, string> {
+	const auth = authHeaders ?? (apiKey ? { authorization: `Bearer ${apiKey}` } : {});
 	return (
 		providerHeadersToRecord(
 			getIdentityHeaders(model, identity),
-			{ ...(authHeaders ?? { authorization: `Bearer ${apiKey}` }), "content-type": "application/json" },
+			{ ...auth, "content-type": "application/json" },
 			model.headers,
 			optionsHeaders,
 		) ?? {}
@@ -57,8 +58,9 @@ function requestHeaders(
 }
 
 /**
- * Posts one JSON classifier request with bearer auth, `onPayload`/`onResponse` hooks, a fresh
- * timeout per attempt, and provider retries. Returns the parsed response body; throws on failure.
+ * Posts one JSON classifier request with bearer auth, or with the credential header the caller
+ * already set, `onPayload`/`onResponse` hooks, a fresh timeout per attempt, and provider retries.
+ * Returns the parsed response body; throws on failure.
  * `noRetryStatuses` lists HTTP statuses that fail at once although they are normally retried.
  */
 export async function postClassifierRequest(
@@ -70,7 +72,11 @@ export async function postClassifierRequest(
 	noRetryStatuses?: readonly number[],
 	authHeaders?: Record<string, string>,
 ): Promise<unknown> {
-	if (!options?.apiKey) throw new Error(`No API key for provider: ${model.provider}`);
+	// Gateways such as Cloudflare AI Gateway send the credential in a header instead of an API key,
+	// which the OpenAI chat APIs accept through the same check.
+	if (!options || (!options.apiKey && !hasCredentialHeader(options.headers))) {
+		throw new Error(`No API key for provider: ${model.provider}`);
+	}
 	const apiKey = options.apiKey;
 	let payload = body;
 	const transformed = await options.onPayload?.(payload, model);

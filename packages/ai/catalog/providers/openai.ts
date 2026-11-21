@@ -77,7 +77,7 @@ const GPT_5_CHAT_LATEST: Model<"openai-responses"> = {
 // requests running longer than about five seconds, currently above roughly 600K input tokens,
 // fail with a gateway timeout.
 // https://developers.openai.com/api/docs/guides/decisions
-const CLASSIFIER_MODELS: ClassifierModel<"openai-decisions">[] = [
+export const OPENAI_DECISIONS_MODELS: ClassifierModel<"openai-decisions">[] = [
 	{
 		type: "classifier",
 		id: "gpt-6-luna",
@@ -119,7 +119,7 @@ export default defineProvider({
 			}),
 			[GPT_5_CHAT_LATEST],
 		),
-	classifiers: () => CLASSIFIER_MODELS,
+	classifiers: () => OPENAI_DECISIONS_MODELS,
 	finalize: (model) => {
 		if (model.api !== "openai-responses") return;
 		const responsesModel = model as Model<"openai-responses">;

@@ -151,3 +151,34 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 			: {}),
 	};
 }
+
+/**
+ * OpenAI's Decisions classifiers as the gateway's `/openai` passthrough serves them: the same
+ * entries at the gateway's base URL, since the gateway passes OpenAI usage through at OpenAI list prices.
+ */
+export function cloudflareGatewayDecisionsModels<T extends { type?: unknown; api?: unknown }>(
+	openaiEntries: readonly T[],
+): Array<T & { provider: "cloudflare-ai-gateway"; baseUrl: string }> {
+	return openaiEntries
+		.filter((entry) => entry.type === "classifier" && entry.api === "openai-decisions")
+		.map((entry) => ({
+			...entry,
+			provider: "cloudflare-ai-gateway",
+			baseUrl: CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
+		}));
+}
+
+/**
+ * Keep OpenAI's Decisions classifiers in `cloudflare-ai-gateway` catalogs hydrated from upstream
+ * snapshots that predate them, derived from the snapshot's `openai` entries. Entries already present
+ * in the catalog win unchanged.
+ */
+export function withCloudflareGatewayDecisionsModels<T extends { type?: unknown; id?: unknown; api?: unknown }>(
+	provider: string,
+	entries: readonly T[],
+	openaiEntries: readonly T[],
+): T[] {
+	if (provider !== "cloudflare-ai-gateway") return [...entries];
+	const present = new Set(entries.filter((entry) => entry.type === "classifier").map((entry) => entry.id));
+	return [...entries, ...cloudflareGatewayDecisionsModels(openaiEntries).filter((entry) => !present.has(entry.id))];
+}

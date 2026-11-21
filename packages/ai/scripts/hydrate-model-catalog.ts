@@ -3,7 +3,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { normalizeCloudflareModel } from "../src/api/cloudflare.ts";
+import { normalizeCloudflareModel, withCloudflareGatewayDecisionsModels } from "../src/api/cloudflare.ts";
 import { withGoogleDecisionsModels } from "../src/api/google-decisions-catalog.ts";
 import { restoreKimiK3CacheWriteCost } from "../src/api/kimi.ts";
 import type { AnyModel } from "../src/types.ts";
@@ -48,6 +48,7 @@ export function hydrateModelCatalog(
 
 	const files: Record<string, string> = {};
 	const structure: ModelDataStructure = {};
+	const openaiEntries = Array.isArray(catalog.openai) ? catalog.openai.filter(isCatalogEntry) : [];
 	for (const provider of readModelDataProviderIds(packageRoot)) {
 		const models = catalog[provider];
 		if (models === undefined) throw new Error(`Model catalog is missing provider: ${provider}`);
@@ -60,7 +61,11 @@ export function hydrateModelCatalog(
 			const normalized = restoreKimiK3CacheWriteCost(normalizeCloudflareModel(model as CatalogEntry & AnyModel));
 			entries.push({ ...normalized, type: model.type });
 		}
-		const grouped = groupProviderModelData(provider, withGoogleDecisionsModels(provider, entries) as CatalogEntry[]);
+		const withForkClassifiers = withGoogleDecisionsModels(
+			provider,
+			withCloudflareGatewayDecisionsModels(provider, entries, openaiEntries),
+		);
+		const grouped = groupProviderModelData(provider, withForkClassifiers as CatalogEntry[]);
 		structure[provider] = grouped.structure;
 		files[`${provider}.json`] = `${JSON.stringify(grouped.groups)}\n`;
 	}

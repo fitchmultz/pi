@@ -2,11 +2,13 @@ import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
+	cloudflareGatewayDecisionsModels,
 	normalizeCloudflareModel,
 } from "../../src/api/cloudflare.ts";
 import type { Model } from "../../src/types.ts";
 import { type ChatModel, defineProvider, mergeCompat, modelsDevModels } from "../define.ts";
 import { enableOpenAiGrammarTools, OPENAI_STANDARD_COSTS, withOpenAiLongContextPricing } from "../families/openai.ts";
+import { OPENAI_DECISIONS_MODELS } from "./openai.ts";
 
 /** models.dev lists gateway models as `<upstream>/<id>`; route each upstream to its passthrough. */
 function routeGatewayModel(model: ChatModel): ChatModel | undefined {
@@ -91,6 +93,8 @@ export default defineProvider({
 		});
 		return [...models, ...fable, ...gpt62, ...mirrored];
 	},
+	// The /openai passthrough also serves OpenAI's Decisions API.
+	classifiers: () => cloudflareGatewayDecisionsModels(OPENAI_DECISIONS_MODELS),
 	compat: {
 		"openai-completions": {
 			supportsStore: false,
