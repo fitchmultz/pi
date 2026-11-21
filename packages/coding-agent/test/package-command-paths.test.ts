@@ -1322,4 +1322,194 @@ if(args.includes("install")) process.exit(23);
 			logSpy.mockRestore();
 		}
 	});
+
+	it("lists unlisted git and npm packages on disk alongside configured packages", async () => {
+		const configuredGitDir = join(agentDir, "git", "github.com", "owner", "configured-repo");
+		const leftoverGitDir = join(agentDir, "git", "github.com", "old-owner", "leftover-repo");
+		const leftoverNpmDir = join(agentDir, "npm", "node_modules", "@old", "leftover-npm");
+		mkdirSync(join(configuredGitDir, ".git"), { recursive: true });
+		mkdirSync(join(leftoverGitDir, ".git"), { recursive: true });
+		mkdirSync(leftoverNpmDir, { recursive: true });
+		writeFileSync(
+			join(leftoverNpmDir, "package.json"),
+			JSON.stringify({ name: "@old/leftover-npm", version: "1.0.0" }),
+		);
+		writeFileSync(
+			join(agentDir, "npm", "package.json"),
+			JSON.stringify({ name: "pi-extensions", private: true, dependencies: { "@old/leftover-npm": "^1.0.0" } }),
+		);
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ packages: ["git:github.com/owner/configured-repo"] }),
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await expect(runPackageCommandDirectly(["list"])).resolves.toBeUndefined();
+
+			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stdout).toContain("User packages:");
+			expect(stdout).toContain("git:github.com/owner/configured-repo");
+			expect(stdout).toContain("Unlisted packages on disk (not in settings):");
+			expect(stdout).toContain("git:github.com/old-owner/leftover-repo");
+			expect(stdout).toContain(leftoverGitDir);
+			expect(stdout).toContain("npm:@old/leftover-npm");
+			expect(stdout).toContain(leftoverNpmDir);
+			expect(stdout).toContain("pi remove <source>");
+			expect(process.exitCode).toBeUndefined();
+		} finally {
+			logSpy.mockRestore();
+		}
+	});
+
+	it("lists unlisted packages on disk even when no packages are configured", async () => {
+		const leftoverGitDir = join(agentDir, "git", "github.com", "old-owner", "leftover-repo");
+		mkdirSync(join(leftoverGitDir, ".git"), { recursive: true });
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await expect(runPackageCommandDirectly(["list"])).resolves.toBeUndefined();
+
+			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stdout).not.toContain("No packages installed.");
+			expect(stdout).toContain("Unlisted packages on disk (not in settings):");
+			expect(stdout).toContain("git:github.com/old-owner/leftover-repo");
+			expect(process.exitCode).toBeUndefined();
+		} finally {
+			logSpy.mockRestore();
+		}
+	});
+
+	it("ends update --extensions with a concise pointer when leftover package folders exist without deleting them", async () => {
+		const leftoverGitDir = join(agentDir, "git", "github.com", "old-owner", "leftover-repo");
+		const leftoverNpmDir = join(agentDir, "npm", "node_modules", "leftover-npm");
+		mkdirSync(join(leftoverGitDir, ".git"), { recursive: true });
+		mkdirSync(leftoverNpmDir, { recursive: true });
+		writeFileSync(join(leftoverNpmDir, "package.json"), JSON.stringify({ name: "leftover-npm", version: "1.0.0" }));
+		writeFileSync(
+			join(agentDir, "npm", "package.json"),
+			JSON.stringify({ name: "pi-extensions", private: true, dependencies: { "leftover-npm": "^1.0.0" } }),
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		try {
+			await expect(runPackageCommandDirectly(["update", "--extensions"])).resolves.toBeUndefined();
+
+			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+			expect(stdout).toContain("Packages are already up to date");
+			expect(stdout).toContain(
+				"2 unlisted package directories on disk are not in settings. Run `pi list` to inspect them.",
+			);
+			expect(existsSync(leftoverGitDir)).toBe(true);
+			expect(existsSync(leftoverNpmDir)).toBe(true);
+			expect(process.exitCode).toBeUndefined();
+		} finally {
+			logSpy.mockRestore();
+		}
+	});
+
+	it("removes an unlisted git package cleanly via pi remove", async () => {
+		const leftoverGitDir = join(agentDir, "git", "github.com", "old-owner", "leftover-repo");
+		mkdirSync(join(leftoverGitDir, ".git"), { recursive: true });
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await expect(
+				runPackageCommandDirectly(["remove", "git:github.com/old-owner/leftover-repo"]),
+			).resolves.toBeUndefined();
+
+			expect(existsSync(leftoverGitDir)).toBe(false);
+			expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+				"Removed git:github.com/old-owner/leftover-repo",
+			);
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(process.exitCode).toBeUndefined();
+
+			// A second removal reports not found and exits non-zero.
+			await expect(
+				runPackageCommandDirectly(["remove", "git:github.com/old-owner/leftover-repo"]),
+			).resolves.toBeUndefined();
+			expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+				"No matching package found for git:github.com/old-owner/leftover-repo",
+			);
+			expect(process.exitCode).toBe(1);
+		} finally {
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("ends update --all with a singular pointer after self-update finishes", async () => {
+		const leftoverGitDir = join(agentDir, "git", "github.com", "old-owner", "leftover-repo");
+		mkdirSync(join(leftoverGitDir, ".git"), { recursive: true });
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json({ version: VERSION })),
+		);
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await expect(runPackageCommandDirectly(["update", "--all"])).resolves.toBeUndefined();
+
+			const lines = logSpy.mock.calls.map(([message]) => String(message));
+			expect(lines.at(-1)).toContain(
+				"1 unlisted package directory on disk is not in settings. Run `pi list` to inspect it.",
+			);
+			expect(existsSync(leftoverGitDir)).toBe(true);
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(process.exitCode).toBeUndefined();
+		} finally {
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
+
+	it("removes an unlisted npm package cleanly via pi remove", async () => {
+		const npmRoot = join(agentDir, "npm");
+		const leftoverNpmDir = join(npmRoot, "node_modules", "@old", "leftover-npm");
+		mkdirSync(leftoverNpmDir, { recursive: true });
+		writeFileSync(
+			join(leftoverNpmDir, "package.json"),
+			JSON.stringify({ name: "@old/leftover-npm", version: "1.0.0" }),
+		);
+		writeFileSync(
+			join(npmRoot, "package.json"),
+			JSON.stringify({ name: "pi-extensions", private: true, dependencies: { "@old/leftover-npm": "^1.0.0" } }),
+		);
+		const fakeNpmPath = join(tempDir, "fake-uninstall-npm.cjs");
+		const recordPath = join(tempDir, "uninstall-args.json");
+		writeFileSync(
+			fakeNpmPath,
+			`const fs=require("node:fs");
+const args=process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(recordPath)}, JSON.stringify(args));
+if(args[0]==="uninstall" && args[1]==="@old/leftover-npm"){
+  fs.rmSync(${JSON.stringify(leftoverNpmDir)}, { recursive: true, force: true });
+  fs.writeFileSync(${JSON.stringify(join(npmRoot, "package.json"))}, JSON.stringify({ name: "pi-extensions", private: true }));
+}
+`,
+		);
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ npmCommand: [originalExecPath, fakeNpmPath] }));
+
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			await expect(runPackageCommandDirectly(["remove", "npm:@old/leftover-npm"])).resolves.toBeUndefined();
+
+			expect(JSON.parse(readFileSync(recordPath, "utf-8")) as string[]).toEqual(
+				expect.arrayContaining(["uninstall", "@old/leftover-npm"]),
+			);
+			expect(existsSync(leftoverNpmDir)).toBe(false);
+			expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+				"Removed npm:@old/leftover-npm",
+			);
+			expect(errorSpy).not.toHaveBeenCalled();
+			expect(process.exitCode).toBeUndefined();
+		} finally {
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		}
+	});
 });

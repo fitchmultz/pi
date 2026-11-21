@@ -14,7 +14,7 @@ pi install git:github.com/example/pi-tools@v1
 pi install ./local-package
 ```
 
-`pi list` shows configured packages. Use `pi remove <source>` to remove one and `pi update --extensions` to reconcile package installations. See [Command Line](cli.md#package-commands) for every package command and option.
+`pi list` shows configured packages and any installed git or npm package directories on disk that are no longer referenced in settings (for example, after editing `settings.json` directly or switching a package to a different repository). Use `pi remove <source>` (add `-l` for project packages) to remove a configured or unlisted package directory, and `pi update --extensions` to reconcile configured package installations. When unlisted package directories exist on disk, `pi update --extensions` and `pi update --all` end with a one-line pointer to `pi list` and never delete them automatically. See [Command Line](cli.md#package-commands) for every package command and option.
 
 If a configured package fails to install at startup, for example because npm cannot reach the registry, Pi warns about it, skips that package's resources, and keeps running. Pi tries to install it again on the next start or `/reload`. `pi install` and `pi update --extensions` still report the failure and exit non-zero.
 
