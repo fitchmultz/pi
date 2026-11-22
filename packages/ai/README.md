@@ -243,7 +243,7 @@ Snippets in the rest of this README assume a `models` collection set up like thi
 
 For the Gemini API (`google-generative-ai`), token cost estimates follow the returned `usageMetadata.serviceTier`, not the requested tier. Exact text-model IDs listed in Google's [Flex](https://aistudio.google.com/docs/flex-inference#supported-models) and [Priority](https://aistudio.google.com/docs/priority-inference#supported-models) documentation receive the [published price adjustment](https://aistudio.google.com/docs/pricing) after prompt-length pricing. Standard, missing or unknown tiers, and unknown model IDs retain catalog estimates. Token counts are unchanged, and `totalFromProvider` remains `false`.
 
-This adjustment applies to the `google` provider, including gateway endpoint overrides, and direct Gemini API endpoints. Google Vertex and other custom endpoints retain their catalog estimates.
+This adjustment applies to the `google` provider, direct Gemini API endpoints (`generativelanguage.googleapis.com`), and Cloudflare AI Gateway `/google-ai-studio` passthrough endpoints (regardless of provider ID). Google Vertex and other custom endpoints retain their catalog estimates.
 
 ## Providers and Models
 
@@ -980,7 +980,7 @@ The `cloudflare-ai-gateway` provider lists the same `gpt-6-luna` entry on the ga
 
 ### Google Decisions
 
-The `google-decisions` API calls Google's [Gemini Decisions API](https://ai.google.dev/gemini-api/docs/decisions) (`POST /v1beta/decisions`) with `x-goog-api-key` authentication. `gemini-decision-1` is its model (262,144 input tokens, $0.10 per million input tokens, zero output tokens). The state is sent as JSON text; with images, the input is an array starting with `{ type: "text", text }` followed by `{ type: "image", data, mime_type }` parts. `choice` and `score` questions map to the Gemini Decisions types of the same name, and `bool` questions map to `noul` (`true_description` and `false_description`). Question IDs that contain characters outside `[A-Za-z0-9_-]{1,64}` are mapped to safe wire keys and restored in `result.answers`.
+The `google-decisions` API calls Google's [Gemini Decisions API](https://ai.google.dev/gemini-api/docs/decisions) (`POST /v1beta/decisions`) with `x-goog-api-key` authentication, or with a configured credential header (`authorization` or `cf-aig-authorization`) when routed through a gateway such as Cloudflare AI Gateway. `gemini-decision-1` is its model (262,144 input tokens, $0.10 per million input tokens, zero output tokens). The state is sent as JSON text; with images, the input is an array starting with `{ type: "text", text }` followed by `{ type: "image", data, mime_type }` parts. `choice` and `score` questions map to the Gemini Decisions types of the same name, and `bool` questions map to `noul` (`true_description` and `false_description`). Question IDs that contain characters outside `[A-Za-z0-9_-]{1,64}` are mapped to safe wire keys and restored in `result.answers`.
 
 ### Chat models on llama.cpp
 
