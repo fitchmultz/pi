@@ -402,8 +402,7 @@ const OpenAIResponsesCompatProperties = {
 	}),
 	supportsLongCacheRetention: optionalCompatBoolean({
 		description:
-			'Whether the provider supports long prompt cache retention. This uses prompt_cache_options.ttl: "30m" on GPT-5.6+ and prompt_cache_retention: "24h" on earlier models.',
-		default: true,
+			'Whether the provider supports long prompt cache retention. This uses prompt_cache_options.ttl: "30m" on GPT-5.6+ and prompt_cache_retention: "24h" on earlier models. Defaults are API-specific: true on openai-responses and false on azure-openai-responses until Azure support is verified.',
 	}),
 	supportsStrictMode: optionalCompatBoolean({
 		description:
@@ -435,7 +434,7 @@ const OpenAIResponsesCompatProperties = {
 	supportsMidConvoEffort: opt(
 		bool({
 			description:
-				"Whether thinking level changes are sent as configuration_update input items instead of changing reasoning.effort, so a change keeps the prompt cache. Used by the openai-responses and openai-codex-responses APIs, and ignored with Sign in with ChatGPT on the openai provider.",
+				"Whether thinking level changes are sent as configuration_update input items instead of changing reasoning.effort, so a change keeps the prompt cache. Used by the openai-responses, openai-codex-responses, and azure-openai-responses APIs, and ignored with Sign in with ChatGPT on the openai provider.",
 			default: false,
 		}),
 	),

@@ -10,13 +10,21 @@ import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { type AzureEndpointOptions, resolveAzureConfig, resolveDeploymentName } from "./azure-openai-config.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
-import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
+import {
+	applyOpenAISessionAffinityHeaders,
+	clampOpenAIPromptCacheKey,
+	getOpenAIPromptCacheOptions,
+	getOpenAIPromptCacheRetention,
+	resolveOpenAICacheRetention,
+} from "./openai-prompt-cache.ts";
 import {
 	convertResponsesMessages,
 	convertResponsesTools,
 	getResponsesToolSupport,
+	OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
+	resolveOpenAIConfigurationUpdateEffort,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
@@ -48,6 +56,11 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 	// Start async processing
 	(async () => {
 		const deploymentName = resolveDeploymentName(model, options);
+		const configurationUpdateEffort = resolveOpenAIConfigurationUpdateEffort(
+			model,
+			options?.reasoningEffort,
+			model.compat?.supportsMidConvoEffort === true,
+		);
 
 		const output: AssistantMessage = {
 			role: "assistant",
@@ -55,6 +68,7 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 			api: "azure-openai-responses" as Api,
 			provider: model.provider,
 			model: model.id,
+			...(configurationUpdateEffort === undefined ? {} : { providerThinkingLevel: configurationUpdateEffort }),
 			usage: {
 				input: 0,
 				output: 0,
@@ -73,12 +87,21 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 			if (!apiKey) {
 				throw new Error(`No API key for provider: ${model.provider}`);
 			}
-			const client = createClient(model, apiKey, options);
+			const cacheRetention = resolveOpenAICacheRetention(options?.cacheRetention, options?.env);
+			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
+			const client = createClient(model, apiKey, options, cacheSessionId);
 			const grammarToolInputProperties = createGrammarToolInputProperties(
 				getDeclaredTools(normalizedContext.messages),
 				model.compat?.supportsOpenAIGrammarTools ?? false,
 			);
-			let params = buildParams(model, normalizedContext, options, deploymentName, grammarToolInputProperties);
+			let params = buildParams(
+				model,
+				normalizedContext,
+				options,
+				deploymentName,
+				grammarToolInputProperties,
+				configurationUpdateEffort,
+			);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
@@ -152,8 +175,14 @@ export const streamSimple: StreamFunction<"azure-openai-responses", SimpleStream
 	} satisfies AzureOpenAIResponsesOptions);
 };
 
-function createClient(model: Model<"azure-openai-responses">, apiKey: string, options?: AzureOpenAIResponsesOptions) {
+function createClient(
+	model: Model<"azure-openai-responses">,
+	apiKey: string,
+	options?: AzureOpenAIResponsesOptions,
+	sessionId?: string,
+) {
 	const headers = { ...getIdentityHeaders(model, options?.identity), ...model.headers };
+	applyOpenAISessionAffinityHeaders(headers, sessionId, model.compat?.sessionAffinityFormat ?? "openai");
 
 	if (options?.headers) {
 		Object.assign(headers, options.headers);
@@ -180,6 +209,7 @@ function buildParams(
 		getDeclaredTools(context.messages),
 		model.compat?.supportsOpenAIGrammarTools ?? false,
 	),
+	configurationUpdateEffort?: string,
 ) {
 	const supportsAdditionalTools = model.compat?.supportsAdditionalTools ?? false;
 	const supportsToolSearch = model.compat?.supportsToolSearch ?? false;
@@ -200,14 +230,22 @@ function buildParams(
 			supportsStrictMode: model.compat?.supportsStrictMode ?? true,
 			supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
 		},
+		configurationUpdateEffort,
 	});
 
+	const cacheRetention = resolveOpenAICacheRetention(options?.cacheRetention, options?.env);
+	const sendPromptCacheKey = cacheRetention !== "none" && model.compat?.promptCacheKeyMode !== "disabled";
+	const cacheCompat = {
+		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? false,
+		supportsExplicitPromptCacheMode: model.compat?.supportsExplicitPromptCacheMode ?? false,
+	};
 	const params: ResponseCreateParamsStreaming = {
 		model: deploymentName,
 		input: messages,
 		stream: true,
-		prompt_cache_key:
-			model.compat?.promptCacheKeyMode === "disabled" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId),
+		prompt_cache_key: sendPromptCacheKey ? clampOpenAIPromptCacheKey(options?.sessionId) : undefined,
+		prompt_cache_retention: getOpenAIPromptCacheRetention(cacheCompat, cacheRetention),
+		prompt_cache_options: getOpenAIPromptCacheOptions(cacheCompat, cacheRetention),
 		store: false,
 	};
 
@@ -232,9 +270,11 @@ function buildParams(
 	const reasoningEffort = options?.reasoningEffort ?? (options?.reasoningSummary ? "medium" : undefined);
 	if (model.reasoning) {
 		if (reasoningEffort) {
-			const effort = options?.reasoningEffort
+			const requestedEffort = options?.reasoningEffort
 				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
 				: reasoningEffort;
+			const effort =
+				configurationUpdateEffort === undefined ? requestedEffort : OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT;
 			const summary = options?.reasoningSummary === undefined ? "auto" : options.reasoningSummary;
 			params.reasoning = {
 				effort: effort as NonNullable<typeof params.reasoning>["effort"],

@@ -4,10 +4,8 @@ import { clampThinkingLevel } from "../models.ts";
 import type {
 	Api,
 	AssistantMessage,
-	CacheRetention,
 	Model,
 	OpenAIResponsesCompat,
-	ProviderEnv,
 	ProviderHeaders,
 	SimpleStreamOptions,
 	StreamFunction,
@@ -18,19 +16,26 @@ import { formatProviderError, normalizeProviderError } from "../utils/error-body
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { hasCredentialHeader, headersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
-import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
-import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
+import {
+	applyOpenAISessionAffinityHeaders,
+	clampOpenAIPromptCacheKey,
+	getOpenAIPromptCacheOptions,
+	getOpenAIPromptCacheRetention,
+	resolveOpenAICacheRetention,
+} from "./openai-prompt-cache.ts";
 import {
 	applyServiceTierPricing,
 	convertResponsesMessages,
 	convertResponsesTools,
 	getResponsesToolSupport,
+	OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
+	resolveOpenAIConfigurationUpdateEffort,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
@@ -39,8 +44,6 @@ const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage";
 const CHATGPT_WORKSPACE_LIMIT_HINT =
 	"You've reached your ChatGPT workspace's usage limit. Ask your workspace admin to increase it at admin.openai.com → Workspace → Usage limits.";
-// Fixed reasoning.effort while configuration_update items carry the thinking level.
-const CONFIGURATION_UPDATE_REQUEST_EFFORT = "medium";
 
 /**
  * OpenAI API keys start with `sk-`; a different credential sent directly to OpenAI
@@ -63,20 +66,6 @@ function getClientApiKey(provider: string, apiKey: string | undefined, headers: 
 
 function detectSessionAffinityFormat(model: Pick<Model<"openai-responses">, "provider" | "baseUrl">) {
 	return model.provider === "openrouter" || model.baseUrl.includes("openrouter.ai") ? "openrouter" : "openai";
-}
-
-/**
- * Resolve cache retention preference.
- * Defaults to "short" and uses PI_CACHE_RETENTION for backward compatibility.
- */
-function resolveCacheRetention(cacheRetention?: CacheRetention, env?: ProviderEnv): CacheRetention {
-	if (cacheRetention) {
-		return cacheRetention;
-	}
-	if (getProviderEnvValue("PI_CACHE_RETENTION", env) === "long") {
-		return "long";
-	}
-	return "short";
 }
 
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
@@ -103,34 +92,9 @@ function getConfigurationUpdateEffort(
 	options: OpenAIResponsesOptions | undefined,
 	compat: Required<OpenAIResponsesCompat>,
 ): string | undefined {
-	if (
-		!compat.supportsMidConvoEffort ||
-		!options?.reasoningEffort ||
-		// Sign in with ChatGPT rejects configuration_update items.
-		isChatGPTSignIn(model, options.apiKey)
-	) {
-		return undefined;
-	}
-	return model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-}
-
-function getPromptCacheRetention(
-	compat: Required<OpenAIResponsesCompat>,
-	cacheRetention: CacheRetention,
-): "24h" | undefined {
-	return cacheRetention === "long" && compat.supportsLongCacheRetention && !compat.supportsExplicitPromptCacheMode
-		? "24h"
-		: undefined;
-}
-
-function getPromptCacheOptions(
-	compat: Required<OpenAIResponsesCompat>,
-	cacheRetention: CacheRetention,
-): ResponseCreateParamsStreaming["prompt_cache_options"] {
-	if (!compat.supportsExplicitPromptCacheMode) return undefined;
-	if (cacheRetention === "none") return { mode: "explicit" };
-	if (cacheRetention === "long" && compat.supportsLongCacheRetention) return { ttl: "30m" };
-	return undefined;
+	// Sign in with ChatGPT rejects configuration_update items.
+	const enabled = compat.supportsMidConvoEffort && !isChatGPTSignIn(model, options?.apiKey);
+	return resolveOpenAIConfigurationUpdateEffort(model, options?.reasoningEffort, enabled);
 }
 
 // OpenAI Responses-specific options
@@ -178,7 +142,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 		try {
 			// Create OpenAI client
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
-			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
+			const cacheRetention = resolveOpenAICacheRetention(options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const grammarToolInputProperties = createGrammarToolInputProperties(
 				getDeclaredTools(normalizedContext.messages),
@@ -308,16 +272,7 @@ function createClient(
 		Object.assign(headers, copilotHeaders);
 	}
 
-	if (sessionId) {
-		if (compat.sessionAffinityFormat === "openrouter") {
-			headers["x-session-id"] = sessionId;
-		} else {
-			if (compat.sessionAffinityFormat === "openai") {
-				headers["session-id"] = sessionId;
-			}
-			headers["x-client-request-id"] = sessionId;
-		}
-	}
+	applyOpenAISessionAffinityHeaders(headers, sessionId, compat.sessionAffinityFormat);
 
 	// Merge options headers last so they can override defaults
 	if (optionsHeaders) {
@@ -354,7 +309,7 @@ function buildParams(
 		configurationUpdateEffort,
 	});
 
-	const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
+	const cacheRetention = resolveOpenAICacheRetention(options?.cacheRetention, options?.env);
 	const sendPromptCacheKey = cacheRetention !== "none" && compat.promptCacheKeyMode !== "disabled";
 	// Sign in with ChatGPT rejects these request fields.
 	const omitUnsupportedFields = isChatGPTSignIn(model, options?.apiKey);
@@ -363,8 +318,8 @@ function buildParams(
 		input: messages,
 		stream: true,
 		prompt_cache_key: sendPromptCacheKey ? clampOpenAIPromptCacheKey(options?.sessionId) : undefined,
-		prompt_cache_retention: omitUnsupportedFields ? undefined : getPromptCacheRetention(compat, cacheRetention),
-		prompt_cache_options: omitUnsupportedFields ? undefined : getPromptCacheOptions(compat, cacheRetention),
+		prompt_cache_retention: omitUnsupportedFields ? undefined : getOpenAIPromptCacheRetention(compat, cacheRetention),
+		prompt_cache_options: omitUnsupportedFields ? undefined : getOpenAIPromptCacheOptions(compat, cacheRetention),
 		store: false,
 	};
 
@@ -397,7 +352,8 @@ function buildParams(
 			const requestedEffort = options?.reasoningEffort
 				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
 				: reasoningEffort;
-			const effort = configurationUpdateEffort === undefined ? requestedEffort : CONFIGURATION_UPDATE_REQUEST_EFFORT;
+			const effort =
+				configurationUpdateEffort === undefined ? requestedEffort : OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT;
 			const summary = options?.reasoningSummary === undefined ? "auto" : options.reasoningSummary;
 			params.reasoning = {
 				effort: effort as NonNullable<typeof params.reasoning>["effort"],

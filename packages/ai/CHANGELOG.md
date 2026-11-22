@@ -27,6 +27,7 @@
 
 ### Fixed
 
+- Fixed `azure-openai-responses` parity with `openai-responses`: wired opt-in `compat.supportsMidConvoEffort` (`configuration_update` input items), honored `cacheRetention` (`"none"`, `"short"`, and opt-in `"long"` via `compat.supportsLongCacheRetention` / `compat.supportsExplicitPromptCacheMode`), and sent `session-id`/`x-client-request-id` session affinity headers.
 - Fixed OpenAI Responses (`openai-responses`, `openai-codex-responses`, `azure-openai-responses`) forcing `reasoning.summary: "auto"` when `reasoningSummary: null` was passed, wired `resolveSamplingParams` into `openai-codex-responses` so model and request `samplingParams` apply on Codex turns, included `cloudflare-ai-gateway` in the shared Responses tool-call provider set, and matched concrete Cloudflare AI Gateway `/openai` and `/anthropic` base URLs in `normalizeCloudflareModel()`.
 - Fixed OpenAI Responses and Codex replayed `function_call` and `custom_tool_call` items omitting `status: "completed"`, which caused Codex WebSocket-cached fallbacks to full input replay to drop reasoning items with `prefix_mismatch` and wipe the prompt cache.
 - Fixed context and compaction token estimates (`estimateMessageTokens` and `compaction.estimateTokens`) omitting `TextContent.textSignature`, where Gemini attaches thought signatures on non-tool-call turns.
