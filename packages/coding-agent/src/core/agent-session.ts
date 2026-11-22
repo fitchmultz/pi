@@ -2236,7 +2236,8 @@ export class AgentSession {
 
 	/** Base prompt options paired with the session's active model ID. */
 	private _currentBaseSystemPromptOptions(): NormalizedBuildSystemPromptOptions {
-		return this.model ? { ...this._baseSystemPromptOptions, modelId: this.model.id } : this._baseSystemPromptOptions;
+		this._baseSystemPromptOptions.modelId = this.model?.id;
+		return this._baseSystemPromptOptions;
 	}
 
 	/** Current effective system prompt, including changes not yet sent to the model. */
@@ -2526,6 +2527,7 @@ export class AgentSession {
 		this._baseSystemPromptOptions = normalizeBuildSystemPromptOptions({
 			cwd: this._cwd,
 			host: resolveHostEnvironmentInfo({ shellPath: this.settingsManager.getShellPath() }),
+			modelId: this.model?.id,
 			skills: loadedSkills,
 			contextFiles: loadedContextFiles,
 			customPrompt: loaderSystemPrompt,
