@@ -226,7 +226,7 @@ function prompt(value: unknown, path: string): void {
 		fields(value.host, `${path}.host`, "string", "platform", "release", "arch", "nodeVersion");
 		optionalFields(value.host, `${path}.host`, "string", "shell");
 	}
-	optionalFields(value, path, "string", "customPrompt", "forceSystemPrompt");
+	optionalFields(value, path, "string", "customPrompt", "forceSystemPrompt", "modelId");
 	fields(value, path, "string", "appendSystemPrompt");
 	for (const key of ["selectedTools", "promptGuidelines"]) if (!strings(value[key])) fail(`${path}.${key}`);
 	if (value.hiddenTools !== undefined && !strings(value.hiddenTools)) fail(`${path}.hiddenTools`);
