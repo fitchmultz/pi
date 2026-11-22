@@ -9,12 +9,14 @@ import {
 	FunctionCallingConfigMode,
 	type GenerateContentConfig,
 	type GenerateContentParameters,
+	type GenerateContentResponse,
 	type GoogleGenAI,
 	ThinkingLevel as GoogleSdkThinkingLevel,
 	type Part,
 	type ThinkingConfig,
 } from "@google/genai";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	AssistantMessage,
 	FetchFunction,
@@ -30,6 +32,7 @@ import type {
 	TranscriptContext,
 	Usage,
 } from "../types.ts";
+import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
@@ -42,8 +45,8 @@ import {
 	getInitialSystemMessage,
 	withoutInitialSystemMessage,
 } from "../utils/transcript.ts";
-import { resolveJsonSchemaStrictSampling, resolveStrictJsonSchema } from "./constrained-sampling.ts";
-import { transformMessages } from "./transform-messages.ts";
+import { prefersJsonSchemaStrictSampling, resolveStrictJsonSchema } from "./constrained-sampling.ts";
+import { canReplayGoogleThoughtSignature, transformMessages } from "./transform-messages.ts";
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
 
@@ -61,6 +64,55 @@ export interface GoogleOptions extends StreamOptions {
 let toolCallCounter = 0;
 
 const MAX_HEADER_TIMEOUT_MS = 0x7fffffff;
+// 16 x 64K tokens spans Gemini 4's full 1M unified context window while bounding malformed loops.
+const MAX_CONTINUATION_HOPS = 16;
+
+const GOOGLE_STRICT_TOOL_ERROR_PATTERNS = [
+	/too many states/i,
+	/nesting depth/i,
+	/constraint (?:is |has )?too (?:large|complex|many)/i,
+	/grammar is too large/i,
+	/(?:parameters_json_schema|parametersJsonSchema|function_declarations|functionDeclarations|VALIDATED)/i,
+];
+
+const GOOGLE_STRICT_TOOL_NON_SCHEMA_EXCLUSIONS = [
+	/thought_signature/i,
+	/input token count/i,
+	/continuation token/i,
+	/api key/i,
+];
+
+const sessionsOverGoogleStrictToolLimits = new Set<string>();
+const MAX_SESSIONS_OVER_GOOGLE_STRICT_TOOL_LIMITS = 10_000;
+
+function markGoogleStrictToolLimitsExceeded(sessionId: string | undefined): void {
+	if (sessionId === undefined) return;
+	sessionsOverGoogleStrictToolLimits.add(sessionId);
+	if (sessionsOverGoogleStrictToolLimits.size > MAX_SESSIONS_OVER_GOOGLE_STRICT_TOOL_LIMITS) {
+		const oldest = sessionsOverGoogleStrictToolLimits.values().next().value;
+		if (oldest !== undefined) sessionsOverGoogleStrictToolLimits.delete(oldest);
+	}
+}
+
+function hasExceededGoogleStrictToolLimits(sessionId: string | undefined): boolean {
+	return sessionId !== undefined && sessionsOverGoogleStrictToolLimits.has(sessionId);
+}
+
+registerSessionResourceCleanup((sessionId) => {
+	if (sessionId) sessionsOverGoogleStrictToolLimits.delete(sessionId);
+	else sessionsOverGoogleStrictToolLimits.clear();
+});
+
+function isGoogleStrictToolRejectionError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const status = "status" in error ? (error as { status?: unknown }).status : undefined;
+	if (status !== 400) return false;
+	const message = error.message;
+	if (GOOGLE_STRICT_TOOL_NON_SCHEMA_EXCLUSIONS.some((pattern) => pattern.test(message))) {
+		return false;
+	}
+	return GOOGLE_STRICT_TOOL_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
 
 function createGoogleFetch(
 	api: GoogleApiType,
@@ -147,19 +199,46 @@ export function streamGoogle(
 				lastFailedHeaders = headers;
 			});
 			const client = createClient(googleFetch);
-			let params = buildParams(model, normalizedContext, options);
-			const nextParams = await options?.onPayload?.(params, model);
-			if (nextParams !== undefined) {
-				params = nextParams as GenerateContentParameters;
+			let disablePreferredStrictTools = hasExceededGoogleStrictToolLimits(options?.sessionId);
+			let baseParams: GenerateContentParameters;
+			let googleStream: AsyncGenerator<GenerateContentResponse>;
+			for (;;) {
+				const built = buildParams(model, normalizedContext, options, { disablePreferredStrictTools });
+				baseParams = built.params;
+				const nextParams = await options?.onPayload?.(baseParams, model);
+				if (nextParams !== undefined) {
+					baseParams = nextParams as GenerateContentParameters;
+				}
+				try {
+					googleStream = await retryGoogleRequest(
+						() => {
+							lastFailedHeaders = undefined;
+							return client.models.generateContentStream(baseParams);
+						},
+						options,
+						() => lastFailedHeaders,
+					);
+					break;
+				} catch (error) {
+					// Only downgrade a rejected request before the stream starts.
+					if (
+						options?.signal?.aborted ||
+						disablePreferredStrictTools ||
+						!built.hasPreferredStrictTools ||
+						!isGoogleStrictToolRejectionError(error)
+					) {
+						throw error;
+					}
+					disablePreferredStrictTools = true;
+					markGoogleStrictToolLimitsExceeded(options?.sessionId);
+					appendAssistantMessageDiagnostic(output, {
+						type: "google_strict_tools_fallback",
+						timestamp: Date.now(),
+						error: { message: error instanceof Error ? error.message : String(error) },
+						details: { reason: "strict_tool_schema_rejected" },
+					});
+				}
 			}
-			const googleStream = await retryGoogleRequest(
-				() => {
-					lastFailedHeaders = undefined;
-					return client.models.generateContentStream(params);
-				},
-				options,
-				() => lastFailedHeaders,
-			);
 
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
@@ -186,130 +265,250 @@ export function streamGoogle(
 				}
 				currentBlock = null;
 			};
-			for await (const chunk of googleStream) {
-				await options?.onProviderStreamEvent?.(chunk, model);
-				// @google/genai documents GenerateContentResponse.responseId as an output-only field
-				// used to identify each response. Keep the first non-empty one from the stream.
-				output.responseId ||= chunk.responseId;
-				const blockReason = chunk.promptFeedback?.blockReason;
-				if (blockReason && blockReason !== BlockedReason.BLOCKED_REASON_UNSPECIFIED) {
-					promptBlockReason = blockReason;
-					promptBlockMessage = chunk.promptFeedback?.blockReasonMessage;
-				}
-				const candidate = chunk.candidates?.[0];
-				if (candidate?.content?.parts) {
-					for (const part of candidate.content.parts) {
-						if (part.text !== undefined) {
-							const isThinking = isThinkingPart(part);
-							if (
-								!currentBlock ||
-								(isThinking && currentBlock.type !== "thinking") ||
-								(!isThinking && currentBlock.type !== "text")
-							) {
-								endCurrentBlock();
-								if (isThinking) {
-									currentBlock = { type: "thinking", thinking: "", thinkingSignature: undefined };
-									output.content.push(currentBlock);
-									stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
+
+			// Across continuation hops, prompt tokens stay anchored to Hop 1 so downstream context
+			// sizing and overflow detection see the true context window, while output/reasoning
+			// tokens and billed costs sum every hop.
+			let initialPromptUsage: { input: number; cacheRead: number; promptTokens: number } | undefined;
+			let priorOutputTokens = 0;
+			let priorReasoningTokens = 0;
+			const priorCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+			let previousContinuationToken: string | undefined;
+
+			for (let hopIndex = 0; hopIndex < MAX_CONTINUATION_HOPS; hopIndex++) {
+				promptBlockReason = undefined;
+				promptBlockMessage = undefined;
+				let hopFinishReason: FinishReason | undefined;
+				let hopContinuationToken: string | undefined;
+				let hopUsage: Usage | undefined;
+
+				for await (const chunk of googleStream) {
+					await options?.onProviderStreamEvent?.(chunk, model);
+					// @google/genai documents GenerateContentResponse.responseId as an output-only field
+					// used to identify each response. Keep the first non-empty one from the stream.
+					output.responseId ||= chunk.responseId;
+					const blockReason = chunk.promptFeedback?.blockReason;
+					if (blockReason && blockReason !== BlockedReason.BLOCKED_REASON_UNSPECIFIED) {
+						promptBlockReason = blockReason;
+						promptBlockMessage = chunk.promptFeedback?.blockReasonMessage;
+					}
+					const candidate = chunk.candidates?.[0];
+					if (candidate?.continuationToken) {
+						hopContinuationToken = candidate.continuationToken;
+					}
+					if (candidate?.content?.parts) {
+						for (const part of candidate.content.parts) {
+							const currentSignature =
+								currentBlock?.type === "thinking"
+									? currentBlock.thinkingSignature
+									: currentBlock?.type === "text"
+										? currentBlock.textSignature
+										: undefined;
+							if (part.text !== undefined) {
+								const isThinking = isThinkingPart(part);
+								const hasDistinctSignature =
+									Boolean(currentSignature) &&
+									Boolean(part.thoughtSignature) &&
+									part.thoughtSignature !== currentSignature;
+								if (
+									!currentBlock ||
+									(isThinking && currentBlock.type !== "thinking") ||
+									(!isThinking && currentBlock.type !== "text") ||
+									hasDistinctSignature
+								) {
+									endCurrentBlock();
+									if (isThinking) {
+										currentBlock = { type: "thinking", thinking: "", thinkingSignature: undefined };
+										output.content.push(currentBlock);
+										stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
+									} else {
+										currentBlock = { type: "text", text: "" };
+										output.content.push(currentBlock);
+										stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
+									}
+								}
+								if (currentBlock.type === "thinking") {
+									currentBlock.thinking += part.text;
+									currentBlock.thinkingSignature = retainThoughtSignature(
+										currentBlock.thinkingSignature,
+										part.thoughtSignature,
+									);
+									stream.push({
+										type: "thinking_delta",
+										contentIndex: blockIndex(),
+										delta: part.text,
+										partial: output,
+									});
 								} else {
-									currentBlock = { type: "text", text: "" };
-									output.content.push(currentBlock);
-									stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
+									currentBlock.text += part.text;
+									currentBlock.textSignature = retainThoughtSignature(
+										currentBlock.textSignature,
+										part.thoughtSignature,
+									);
+									stream.push({
+										type: "text_delta",
+										contentIndex: blockIndex(),
+										delta: part.text,
+										partial: output,
+									});
+								}
+							} else if (!part.functionCall && part.thoughtSignature) {
+								const isThinking = isThinkingPart(part);
+								const hasDistinctSignature =
+									Boolean(currentSignature) && part.thoughtSignature !== currentSignature;
+								if (
+									!currentBlock ||
+									(isThinking && currentBlock.type !== "thinking") ||
+									(!isThinking && currentBlock.type !== "text") ||
+									hasDistinctSignature
+								) {
+									endCurrentBlock();
+									if (isThinking) {
+										currentBlock = {
+											type: "thinking",
+											thinking: "",
+											thinkingSignature: part.thoughtSignature,
+										};
+										output.content.push(currentBlock);
+										stream.push({ type: "thinking_start", contentIndex: blockIndex(), partial: output });
+									} else {
+										currentBlock = { type: "text", text: "", textSignature: part.thoughtSignature };
+										output.content.push(currentBlock);
+										stream.push({ type: "text_start", contentIndex: blockIndex(), partial: output });
+									}
+								} else if (currentBlock.type === "thinking") {
+									currentBlock.thinkingSignature = retainThoughtSignature(
+										currentBlock.thinkingSignature,
+										part.thoughtSignature,
+									);
+								} else {
+									currentBlock.textSignature = retainThoughtSignature(
+										currentBlock.textSignature,
+										part.thoughtSignature,
+									);
 								}
 							}
-							if (currentBlock.type === "thinking") {
-								currentBlock.thinking += part.text;
-								currentBlock.thinkingSignature = retainThoughtSignature(
-									currentBlock.thinkingSignature,
-									part.thoughtSignature,
-								);
+
+							if (part.functionCall) {
+								endCurrentBlock();
+
+								// Generate unique ID if not provided or if it's a duplicate
+								const providedId = part.functionCall.id;
+								const needsNewId =
+									!providedId || output.content.some((b) => b.type === "toolCall" && b.id === providedId);
+								const toolCallId = needsNewId
+									? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`
+									: providedId;
+
+								const toolCall: ToolCall = {
+									type: "toolCall",
+									id: toolCallId,
+									name: part.functionCall.name || "",
+									arguments: (part.functionCall.args as ToolCall["arguments"]) ?? {},
+									...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
+								};
+
+								output.content.push(toolCall);
+								stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
 								stream.push({
-									type: "thinking_delta",
+									type: "toolcall_delta",
 									contentIndex: blockIndex(),
-									delta: part.text,
+									delta: JSON.stringify(toolCall.arguments),
 									partial: output,
 								});
-							} else {
-								currentBlock.text += part.text;
-								currentBlock.textSignature = retainThoughtSignature(
-									currentBlock.textSignature,
-									part.thoughtSignature,
-								);
-								stream.push({
-									type: "text_delta",
-									contentIndex: blockIndex(),
-									delta: part.text,
-									partial: output,
-								});
+								stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
 							}
 						}
+					}
 
-						if (part.functionCall) {
-							endCurrentBlock();
+					if (candidate?.finishReason) {
+						hopFinishReason = candidate.finishReason;
+						output.rawStopReason = candidate.finishReason;
+						output.stopReason = mapStopReason(candidate.finishReason);
+						if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
+							output.stopReason = "toolUse";
+						}
+					}
 
-							// Generate unique ID if not provided or if it's a duplicate
-							const providedId = part.functionCall.id;
-							const needsNewId =
-								!providedId || output.content.some((b) => b.type === "toolCall" && b.id === providedId);
-							const toolCallId = needsNewId
-								? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`
-								: providedId;
-
-							const toolCall: ToolCall = {
-								type: "toolCall",
-								id: toolCallId,
-								name: part.functionCall.name || "",
-								arguments: (part.functionCall.args as ToolCall["arguments"]) ?? {},
-								...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
+					if (chunk.usageMetadata) {
+						const builtUsage = buildHopUsage(api, model, chunk.usageMetadata);
+						hopUsage = builtUsage.usage;
+						if (hopIndex === 0 || !initialPromptUsage) {
+							initialPromptUsage = {
+								input: hopUsage.input,
+								cacheRead: hopUsage.cacheRead,
+								promptTokens: builtUsage.promptTokens,
 							};
-
-							output.content.push(toolCall);
-							stream.push({ type: "toolcall_start", contentIndex: blockIndex(), partial: output });
-							stream.push({
-								type: "toolcall_delta",
-								contentIndex: blockIndex(),
-								delta: JSON.stringify(toolCall.arguments),
-								partial: output,
-							});
-							stream.push({ type: "toolcall_end", contentIndex: blockIndex(), toolCall, partial: output });
+						}
+						if (hopIndex === 0) {
+							output.usage = hopUsage;
+						} else {
+							const totalOutput = priorOutputTokens + hopUsage.output;
+							const totalReasoning = priorReasoningTokens + (hopUsage.reasoning ?? 0);
+							output.usage = {
+								input: initialPromptUsage.input,
+								output: totalOutput,
+								cacheRead: initialPromptUsage.cacheRead,
+								cacheWrite: 0,
+								reasoning: totalReasoning,
+								totalTokens: initialPromptUsage.promptTokens + totalOutput,
+								cost: {
+									input: priorCost.input + hopUsage.cost.input,
+									output: priorCost.output + hopUsage.cost.output,
+									cacheRead: priorCost.cacheRead + hopUsage.cost.cacheRead,
+									cacheWrite: priorCost.cacheWrite + hopUsage.cost.cacheWrite,
+									total: priorCost.total + hopUsage.cost.total,
+									totalFromProvider: false,
+								},
+							};
 						}
 					}
 				}
 
-				if (candidate?.finishReason) {
-					output.rawStopReason = candidate.finishReason;
-					output.stopReason = mapStopReason(candidate.finishReason);
-					if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
-						output.stopReason = "toolUse";
-					}
+				if (options?.signal?.aborted) {
+					throw new Error("Request was aborted");
 				}
 
-				if (chunk.usageMetadata) {
-					output.usage = {
-						input:
-							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
-						output:
-							(chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
-						cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
-						cacheWrite: 0,
-						reasoning: chunk.usageMetadata.thoughtsTokenCount || 0,
-						totalTokens: chunk.usageMetadata.totalTokenCount || 0,
-						cost: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							total: 0,
-						},
-					};
-					calculateCost(model, output.usage);
-					if (api === "google-generative-ai") {
-						// @google/genai 3.6.1 retains this wire field on GenerateContentResponseUsageMetadata but omits it from its type.
-						const serviceTier =
-							"serviceTier" in chunk.usageMetadata ? chunk.usageMetadata.serviceTier : undefined;
-						applyGoogleServiceTierPricing(model, output.usage, serviceTier);
-					}
+				const shouldContinue =
+					options?.disableContinuation !== true &&
+					!promptBlockReason &&
+					hopFinishReason !== undefined &&
+					hopFinishReason === FinishReason.CONTINUATION &&
+					Boolean(hopContinuationToken) &&
+					hopContinuationToken !== previousContinuationToken &&
+					hopIndex + 1 < MAX_CONTINUATION_HOPS;
+				if (!shouldContinue) {
+					break;
 				}
+
+				if (hopUsage) {
+					priorOutputTokens += hopUsage.output;
+					priorReasoningTokens += hopUsage.reasoning ?? 0;
+					priorCost.input += hopUsage.cost.input;
+					priorCost.output += hopUsage.cost.output;
+					priorCost.cacheRead += hopUsage.cost.cacheRead;
+					priorCost.cacheWrite += hopUsage.cost.cacheWrite;
+					priorCost.total += hopUsage.cost.total;
+				}
+				output.stopReason = "pending";
+				output.rawStopReason = undefined;
+				previousContinuationToken = hopContinuationToken;
+				const nextHopParams: GenerateContentParameters = {
+					...baseParams,
+					config: {
+						...baseParams.config,
+						automaticContinuation: false,
+						continuationToken: hopContinuationToken,
+					},
+				};
+				googleStream = await retryGoogleRequest(
+					() => {
+						lastFailedHeaders = undefined;
+						return client.models.generateContentStream(nextHopParams);
+					},
+					options,
+					() => lastFailedHeaders,
+				);
 			}
 
 			endCurrentBlock();
@@ -396,19 +595,65 @@ function applyGoogleServiceTierPricing(model: Model<GoogleApiType>, usage: Usage
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 }
 
+function buildHopUsage(
+	api: GoogleApiType,
+	model: Model<GoogleApiType>,
+	usageMetadata: NonNullable<GenerateContentResponse["usageMetadata"]>,
+): { usage: Usage; promptTokens: number } {
+	const promptTokens = usageMetadata.promptTokenCount || 0;
+	const cacheRead = usageMetadata.cachedContentTokenCount || 0;
+	const thoughts = usageMetadata.thoughtsTokenCount || 0;
+	const usage: Usage = {
+		input: promptTokens - cacheRead,
+		output: (usageMetadata.candidatesTokenCount || 0) + thoughts,
+		cacheRead,
+		cacheWrite: 0,
+		reasoning: thoughts,
+		totalTokens: usageMetadata.totalTokenCount || 0,
+		cost: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			total: 0,
+		},
+	};
+	calculateCost(model, usage);
+	if (api === "google-generative-ai") {
+		// @google/genai 3.6.1 retains this wire field on GenerateContentResponseUsageMetadata but omits it from its type.
+		const serviceTier = "serviceTier" in usageMetadata ? usageMetadata.serviceTier : undefined;
+		applyGoogleServiceTierPricing(model, usage, serviceTier);
+	}
+	return { usage, promptTokens };
+}
+
 function buildParams(
 	model: Model<GoogleApiType>,
 	context: TranscriptContext,
 	options: GoogleOptions = {},
-): GenerateContentParameters {
+	strictOptions: { disablePreferredStrictTools?: boolean } = {},
+): { params: GenerateContentParameters; hasPreferredStrictTools: boolean } {
 	const contents = convertMessages(model, context);
 	const initialSystemMessage = getInitialSystemMessage(context.messages);
 	const currentTools = getCurrentTools(context.messages);
 
 	const supportsStrictMode = supportsGoogleStrictToolSampling(model);
+	const disablePreferredStrictTools = strictOptions.disablePreferredStrictTools === true;
+	const hasPreferredStrictTools =
+		currentTools.length > 0 &&
+		currentTools.some(
+			(tool) =>
+				prefersJsonSchemaStrictSampling(tool) &&
+				resolveGoogleToolStrictSchema(tool, supportsStrictMode, disablePreferredStrictTools) !== undefined,
+		);
 	const functionCallingMode =
 		currentTools.length > 0
-			? resolveGoogleFunctionCallingMode(currentTools, options.toolChoice, supportsStrictMode)
+			? resolveGoogleFunctionCallingMode(
+					currentTools,
+					options.toolChoice,
+					supportsStrictMode,
+					disablePreferredStrictTools,
+				)
 			: undefined;
 	const systemInstruction = initialSystemMessage ? getSystemMessageText(initialSystemMessage) : "";
 	const config: GenerateContentConfig = {
@@ -424,7 +669,7 @@ function buildParams(
 		...(options.maxTokens !== undefined && { maxOutputTokens: options.maxTokens }),
 		...(systemInstruction && { systemInstruction: sanitizeSurrogates(systemInstruction) }),
 		...(currentTools.length > 0 && {
-			tools: convertTools(currentTools, false, supportsStrictMode),
+			tools: convertTools(currentTools, false, supportsStrictMode, disablePreferredStrictTools),
 		}),
 		...(functionCallingMode !== undefined && {
 			toolConfig: { functionCallingConfig: { mode: functionCallingMode } },
@@ -450,7 +695,7 @@ function buildParams(
 		config.abortSignal = options.signal;
 	}
 
-	return { model: model.id, contents, config };
+	return { params: { model: model.id, contents, config }, hasPreferredStrictTools };
 }
 
 /**
@@ -725,12 +970,13 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			}
 		} else if (msg.role === "assistant") {
 			const parts: Part[] = [];
-			// Check if message is from same provider and model - only then keep thinking blocks
-			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
+			// Keep thinking blocks and signatures for the same model, or across Gemini 4 text/coding
+			// models on the same provider/API (documented cross-model thought-signature replay).
+			const canReplaySignature = canReplayGoogleThoughtSignature(msg, model);
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
-					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.textSignature);
+					const thoughtSignature = resolveThoughtSignature(canReplaySignature, block.textSignature);
 					// Skip empty text blocks — unless they carry a thought signature. Gemini can attach
 					// the signature to a part whose visible text is empty and requires it echoed back;
 					// dropping it breaks the reasoning chain and the model intermittently ends mid-task
@@ -741,9 +987,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						...(thoughtSignature && { thoughtSignature }),
 					});
 				} else if (block.type === "thinking") {
-					// Only keep as thinking block if same provider AND same model
+					// Only keep as thinking block when signatures/reasoning are replayable on target model.
 					// Otherwise convert to plain text (no tags to avoid model mimicking them)
-					if (isSameProviderAndModel) {
+					if (canReplaySignature) {
 						const thoughtSignature = isValidThoughtSignature(block.thinkingSignature)
 							? block.thinkingSignature
 							: undefined;
@@ -763,7 +1009,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 						});
 					}
 				} else if (block.type === "toolCall") {
-					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
+					const thoughtSignature = resolveThoughtSignature(canReplaySignature, block.thoughtSignature);
 					const part: Part = {
 						functionCall: {
 							name: block.name,
@@ -926,6 +1172,17 @@ function rewriteConstAsEnum(schema: unknown, isNameMap = false): unknown {
 	return result;
 }
 
+function resolveGoogleToolStrictSchema(
+	tool: Tool,
+	supportsStrictMode: boolean,
+	disablePreferredStrictTools: boolean,
+): Tool["parameters"] | undefined {
+	if (disablePreferredStrictTools && prefersJsonSchemaStrictSampling(tool)) {
+		return undefined;
+	}
+	return resolveStrictJsonSchema(tool, supportsStrictMode);
+}
+
 /**
  * Convert tools to Gemini function declarations format.
  *
@@ -939,12 +1196,14 @@ export function convertTools(
 	tools: Tool[],
 	useParameters = false,
 	supportsStrictMode = true,
+	disablePreferredStrictTools = false,
 ): { functionDeclarations: Record<string, unknown>[] }[] | undefined {
 	if (tools.length === 0) return undefined;
 	return [
 		{
 			functionDeclarations: tools.map((tool) => {
-				const parameters = resolveStrictJsonSchema(tool, supportsStrictMode) ?? tool.parameters;
+				const parameters =
+					resolveGoogleToolStrictSchema(tool, supportsStrictMode, disablePreferredStrictTools) ?? tool.parameters;
 				return {
 					name: tool.name,
 					description: tool.description,
@@ -984,8 +1243,11 @@ export function resolveGoogleFunctionCallingMode(
 	tools: Tool[],
 	toolChoice: string | undefined,
 	supportsStrictMode: boolean,
+	disablePreferredStrictTools = false,
 ): FunctionCallingConfigMode | undefined {
-	const useStrictMode = tools.some((tool) => resolveJsonSchemaStrictSampling(tool, supportsStrictMode) === true);
+	const useStrictMode = tools.some(
+		(tool) => resolveGoogleToolStrictSchema(tool, supportsStrictMode, disablePreferredStrictTools) !== undefined,
+	);
 	if (toolChoice === "none" || toolChoice === "any") {
 		return mapToolChoice(toolChoice);
 	}
@@ -1003,7 +1265,7 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case FinishReason.STOP:
 			return "stop";
 		case FinishReason.MAX_TOKENS:
-		// Per-request token limit reached before generation completed; pi does not resume with the continuation token.
+		// Per-hop token limit reached when continuation is disabled, capped, or lacks a new token.
 		case FinishReason.CONTINUATION:
 			return "length";
 		case FinishReason.BLOCKLIST:

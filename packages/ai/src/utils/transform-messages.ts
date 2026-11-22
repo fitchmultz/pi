@@ -83,6 +83,36 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
 	});
 }
 
+const GEMINI_MODEL_VERSION_PATTERN = /gemini(?:-live)?-(\d+)(?:\.(\d+))?/;
+
+function isGemini4TextModelId(modelId: string): boolean {
+	const id = modelId.toLowerCase();
+	if (id.startsWith("deep-research-") || /(?:^|-)image(?:$|-)/.test(id)) {
+		return false;
+	}
+	const match = id.match(GEMINI_MODEL_VERSION_PATTERN);
+	return match !== null && Number.parseInt(match[1], 10) === 4;
+}
+
+/**
+ * Whether thought signatures and thinking blocks from `source` can be replayed to `target`.
+ * Gemini 4 text/coding models share a compatible thought-signature format across models on
+ * the same provider/API, allowing multi-model sessions without stripping signatures.
+ */
+export function canReplayGoogleThoughtSignature(
+	source: Pick<AssistantMessage, "api" | "provider" | "model">,
+	target: Pick<Model<Api>, "api" | "provider" | "id">,
+): boolean {
+	if (source.provider !== target.provider) return false;
+	if (source.model === target.id) return true;
+	return (
+		source.api === target.api &&
+		(target.api === "google-generative-ai" || target.api === "google-vertex") &&
+		isGemini4TextModelId(source.model) &&
+		isGemini4TextModelId(target.id)
+	);
+}
+
 /**
  * Normalize tool call ID for cross-provider compatibility.
  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
@@ -123,22 +153,23 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.provider === model.provider &&
 				assistantMsg.api === model.api &&
 				assistantMsg.model === model.id;
+			const keepReasoning =
+				isSameModel || (assistantMsg.api === model.api && canReplayGoogleThoughtSignature(assistantMsg, model));
 
 			const transformedContent = assistantMsg.content.flatMap((block) => {
 				if (block.type === "thinking") {
-					// Thinking from another model is dropped. Signatures and encrypted reasoning are
-					// only valid for the model that produced them, and sending readable thinking as
-					// plain text makes the new model treat it as part of the visible reply.
-					if (!isSameModel) return [];
+					// Thinking from another model is dropped unless both models share replayable
+					// reasoning (e.g. Gemini 4 text/coding models on the same provider/API).
+					if (!keepReasoning) return [];
 					// Keep redacted and signed blocks even if the thinking text is empty
-					// (OpenAI encrypted reasoning); they are needed for replay.
+					// (OpenAI encrypted reasoning, Gemini signed thought bursts); they are needed for replay.
 					if (block.redacted || block.thinkingSignature) return block;
 					if (!block.thinking || block.thinking.trim() === "") return [];
 					return block;
 				}
 
 				if (block.type === "text") {
-					if (isSameModel) return block;
+					if (keepReasoning) return block;
 					return {
 						type: "text" as const,
 						text: block.text,
@@ -149,7 +180,7 @@ export function transformMessages<TApi extends Api>(
 					const toolCall = block as ToolCall;
 					let normalizedToolCall: ToolCall = toolCall;
 
-					if (!isSameModel && toolCall.thoughtSignature) {
+					if (!keepReasoning && toolCall.thoughtSignature) {
 						normalizedToolCall = { ...toolCall };
 						delete (normalizedToolCall as { thoughtSignature?: string }).thoughtSignature;
 					}

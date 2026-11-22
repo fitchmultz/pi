@@ -171,12 +171,13 @@ describe("fetch stream option", () => {
 	});
 
 	it.each([
-		{ api: "google-generative-ai" as const, cancel: false },
-		{ api: "google-generative-ai" as const, cancel: true },
-		{ api: "google-vertex" as const, cancel: false },
-		{ api: "google-vertex" as const, cancel: true },
-	])("does not silently resume $api generation (cancel=$cancel)", async ({ api, cancel }) => {
-		// Provider refresh for #10909 must retain Pi's request/retry boundary.
+		{ api: "google-generative-ai" as const, mode: "continue" as const },
+		{ api: "google-generative-ai" as const, mode: "cancel" as const },
+		{ api: "google-generative-ai" as const, mode: "disable" as const },
+		{ api: "google-vertex" as const, mode: "continue" as const },
+		{ api: "google-vertex" as const, mode: "cancel" as const },
+		{ api: "google-vertex" as const, mode: "disable" as const },
+	])("controls $api continuation inside Pi (mode=$mode)", async ({ api, mode }) => {
 		const ambient = vi
 			.fn<FetchFunction>()
 			.mockResolvedValueOnce(
@@ -204,12 +205,18 @@ describe("fetch stream option", () => {
 		vi.stubGlobal("fetch", ambient);
 
 		const controller = new AbortController();
+		let sdkAutoContinuation: boolean | undefined;
 		const options = {
 			apiKey: "test-key",
 			maxRetries: 0,
 			signal: controller.signal,
+			...(mode === "disable" && { disableContinuation: true }),
+			onPayload: (payload: unknown) => {
+				sdkAutoContinuation = (payload as { config?: { automaticContinuation?: boolean } }).config
+					?.automaticContinuation;
+			},
 			onProviderStreamEvent: () => {
-				if (cancel) controller.abort();
+				if (mode === "cancel") controller.abort();
 			},
 		};
 		const result =
@@ -217,10 +224,23 @@ describe("fetch stream option", () => {
 				? await streamGoogleGenerativeAI(createModel(api), context, options).result()
 				: await streamGoogleVertex(createModel(api), context, options).result();
 
-		expect(ambient).toHaveBeenCalledOnce();
-		expect(result.stopReason).toBe(cancel ? "aborted" : "length");
-		expect(result.rawStopReason).toBe("CONTINUATION");
-		expect(result.content).toEqual([{ type: "text", text: "partial" }]);
+		expect(sdkAutoContinuation).toBe(false);
+		if (mode === "continue") {
+			expect(ambient).toHaveBeenCalledTimes(2);
+			expect(result.stopReason).toBe("stop");
+			expect(result.rawStopReason).toBe("STOP");
+			expect(result.content).toEqual([{ type: "text", text: "partialresumed" }]);
+			const hop1Body = JSON.parse(String(ambient.mock.calls[0]?.[1]?.body));
+			const hop2Body = JSON.parse(String(ambient.mock.calls[1]?.[1]?.body));
+			expect(hop1Body.continuationToken).toBeUndefined();
+			expect(hop2Body.continuationToken).toBe("checkpoint");
+			expect(hop2Body.contents).toEqual(hop1Body.contents);
+		} else {
+			expect(ambient).toHaveBeenCalledOnce();
+			expect(result.stopReason).toBe(mode === "cancel" ? "aborted" : "length");
+			expect(result.rawStopReason).toBe("CONTINUATION");
+			expect(result.content).toEqual([{ type: "text", text: "partial" }]);
+		}
 	});
 
 	it("uses fetch for image generation", async () => {

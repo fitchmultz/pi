@@ -1,4 +1,5 @@
 export {
+	canReplayGoogleThoughtSignature,
 	type SplitErrorToolResult,
 	splitErrorToolResultImages,
 	transformMessages,
