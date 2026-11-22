@@ -30,7 +30,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
-import { getDeclaredTools, normalizeContext, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getDeclaredTools, normalizeContext, resolveTranscriptTools } from "../utils/transcript.ts";
 import { uuidv7 } from "../utils/uuid.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -38,9 +38,11 @@ import {
 	applyServiceTierPricing,
 	convertResponsesMessages,
 	convertResponsesTools,
+	getOpenAIProviderSummaryBlock,
 	getResponsesToolSupport,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
+	resolveOpenAIResponsesContext,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
@@ -262,7 +264,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 	options?: OpenAICodexResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+	const normalizedContext = resolveOpenAIResponsesContext(
+		model,
+		context,
+		model.compat?.supportsMidConvoSystemMessages,
+	);
 
 	(async () => {
 		const configurationUpdateEffort = getConfigurationUpdateEffort(model, options);
@@ -359,7 +365,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				recordWebSocketSseFallback(cacheSessionId);
 			}
 
-			if (transport !== "sse" && !websocketDisabledForSession) {
+			if (transport !== "sse" && !websocketDisabledForSession && options?.providerSummary === undefined) {
 				let websocketStarted = false;
 				let retriedWebSocketConnectionLimit = false;
 				let retriedMissingWebSocketContinuation = false;
@@ -640,6 +646,8 @@ function buildRequestBody(
 		supportsToolSearch,
 		toolOptions: { strict: null, supportsStrictMode, supportsOpenAIGrammarTools },
 		configurationUpdateEffort,
+		summaryBlock: getOpenAIProviderSummaryBlock(model, context.messages),
+		compactionTrigger: options?.providerSummary !== undefined,
 	});
 
 	const body: RequestBody = {
@@ -654,7 +662,12 @@ function buildRequestBody(
 		parallel_tool_calls: true,
 	};
 
-	if (options?.maxTokens && (model.compat?.supportsMaxOutputTokens ?? true)) {
+	// OpenAI rejects `compaction_trigger` when `max_output_tokens` is specified below 20,000.
+	if (
+		options?.maxTokens &&
+		(model.compat?.supportsMaxOutputTokens ?? true) &&
+		options?.providerSummary === undefined
+	) {
 		body.max_output_tokens = Math.max(options.maxTokens, MIN_OUTPUT_TOKENS);
 	}
 
@@ -1614,7 +1627,10 @@ async function processWebSocketStream(
 		options?.env,
 	);
 	let keepConnection = true;
-	const useCachedContext = options?.transport === "websocket-cached" || options?.transport === "auto";
+	const useCachedContext =
+		options?.disableContinuation !== true &&
+		options?.providerSummary === undefined &&
+		(options?.transport === "websocket-cached" || options?.transport === "auto");
 	// ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
 	// WebSocket continuation still works via connection-scoped previous_response_id state.
 	const requestBody = useCachedContext && entry ? buildCachedWebSocketRequestBody(entry, fullBody) : fullBody;

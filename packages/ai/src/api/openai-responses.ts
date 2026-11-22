@@ -17,7 +17,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { hasCredentialHeader, headersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import {
@@ -31,11 +31,13 @@ import {
 	applyServiceTierPricing,
 	convertResponsesMessages,
 	convertResponsesTools,
+	getOpenAIProviderSummaryBlock,
 	getResponsesToolSupport,
 	OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
 	resolveOpenAIConfigurationUpdateEffort,
+	resolveOpenAIResponsesContext,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
@@ -114,11 +116,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 	options?: OpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, getCompat(model).supportsMidConvoSystemMessages);
+	const compat = getCompat(model);
+	const normalizedContext = resolveOpenAIResponsesContext(model, context, compat.supportsMidConvoSystemMessages);
 
 	// Start async processing
 	(async () => {
-		const compat = getCompat(model);
 		const configurationUpdateEffort = getConfigurationUpdateEffort(model, options, compat);
 		const output: AssistantMessage = {
 			role: "assistant",
@@ -142,6 +144,9 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 		try {
 			// Create OpenAI client
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
+			if (options?.providerSummary !== undefined && isChatGPTSignIn(model, options.apiKey)) {
+				throw new Error("Sign in with ChatGPT does not support OpenAI compaction_trigger");
+			}
 			const cacheRetention = resolveOpenAICacheRetention(options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const grammarToolInputProperties = createGrammarToolInputProperties(
@@ -307,6 +312,8 @@ function buildParams(
 			supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,
 		},
 		configurationUpdateEffort,
+		summaryBlock: getOpenAIProviderSummaryBlock(model, context.messages),
+		compactionTrigger: options?.providerSummary !== undefined,
 	});
 
 	const cacheRetention = resolveOpenAICacheRetention(options?.cacheRetention, options?.env);
@@ -323,7 +330,13 @@ function buildParams(
 		store: false,
 	};
 
-	if (options?.maxTokens && compat.supportsMaxOutputTokens && !omitUnsupportedFields) {
+	// OpenAI rejects `compaction_trigger` when `max_output_tokens` is specified below 20,000.
+	if (
+		options?.maxTokens &&
+		compat.supportsMaxOutputTokens &&
+		!omitUnsupportedFields &&
+		options?.providerSummary === undefined
+	) {
 		params.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
 	}
 

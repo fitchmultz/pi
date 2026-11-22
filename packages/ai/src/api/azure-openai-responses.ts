@@ -7,7 +7,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
 import { type AzureEndpointOptions, resolveAzureConfig, resolveDeploymentName } from "./azure-openai-config.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import {
@@ -20,11 +20,13 @@ import {
 import {
 	convertResponsesMessages,
 	convertResponsesTools,
+	getOpenAIProviderSummaryBlock,
 	getResponsesToolSupport,
 	OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
 	resolveOpenAIConfigurationUpdateEffort,
+	resolveOpenAIResponsesContext,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
@@ -51,7 +53,11 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 	options?: AzureOpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, model.compat?.supportsMidConvoSystemMessages);
+	const normalizedContext = resolveOpenAIResponsesContext(
+		model,
+		context,
+		model.compat?.supportsMidConvoSystemMessages,
+	);
 
 	// Start async processing
 	(async () => {
@@ -231,6 +237,8 @@ function buildParams(
 			supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
 		},
 		configurationUpdateEffort,
+		summaryBlock: getOpenAIProviderSummaryBlock(model, context.messages),
+		compactionTrigger: options?.providerSummary !== undefined,
 	});
 
 	const cacheRetention = resolveOpenAICacheRetention(options?.cacheRetention, options?.env);
@@ -249,7 +257,8 @@ function buildParams(
 		store: false,
 	};
 
-	if (options?.maxTokens) {
+	// OpenAI rejects `compaction_trigger` when `max_output_tokens` is specified below 20,000.
+	if (options?.maxTokens && options?.providerSummary === undefined) {
 		params.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
 	}
 
