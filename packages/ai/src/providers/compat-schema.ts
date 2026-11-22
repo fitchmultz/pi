@@ -617,8 +617,7 @@ const ProviderCompatPropertyOverrides = {
 	}),
 	supportsMidConvoSystemMessages: optionalCompatBoolean({
 		description:
-			"Whether the exact model accepts system or developer messages after the conversation has started. When false, later system messages are folded into the leading system message.",
-		default: false,
+			"Whether mid-conversation system updates are kept inline instead of folded into the leading system prompt (for example native mid-conversation system/developer messages, or inline contents updates on Google Gemini 4+). Defaults are API-specific.",
 	}),
 	sessionAffinityFormat: optionalSessionAffinityFormat({
 		description: "Session-affinity header format. Defaults are API-specific or auto-detected.",
