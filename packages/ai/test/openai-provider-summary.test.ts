@@ -251,6 +251,39 @@ describe("OpenAI Responses provider summary blocks", () => {
 		expect(result.providerSummary).toBeUndefined();
 	});
 
+	it("allows providerSummary when OpenAI credentials are supplied via headers without apiKey", async () => {
+		const model = getModel("openai", "gpt-6.2-sol");
+		const payloads: Array<{ input: Array<Record<string, unknown>> }> = [];
+		const result = await streamOpenAIResponsesSimple(
+			model,
+			normalizeContext({
+				systemPrompt: "sys",
+				messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			}),
+			{
+				headers: { authorization: "Bearer sk-header-key" },
+				reasoning: "medium",
+				providerSummary: {},
+				fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
+					payloads.push(JSON.parse(String(init?.body)));
+					return sse([
+						{ type: "response.created", response: { id: "resp_hdr_cmp" } },
+						{ type: "response.output_item.done", output_index: 0, item: compactionBlock },
+						{
+							type: "response.completed",
+							response: { id: "resp_hdr_cmp", status: "completed", output: [compactionBlock] },
+						},
+					]);
+				}) as typeof globalThis.fetch,
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.providerSummary?.block).toEqual(compactionBlock);
+		expect(payloads).toHaveLength(1);
+		expect(payloads[0]?.input.at(-1)).toEqual({ type: "compaction_trigger" });
+	});
+
 	it("sends compaction_trigger over SSE on openai-codex-responses even when transport is auto", async () => {
 		const model = getModel("openai-codex", "gpt-6.2-sol");
 		const payloads: Array<{ input: Array<Record<string, unknown>> }> = [];

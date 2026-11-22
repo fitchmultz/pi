@@ -144,7 +144,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 		try {
 			// Create OpenAI client
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
-			if (options?.providerSummary !== undefined && isChatGPTSignIn(model, apiKey)) {
+			if (options?.providerSummary !== undefined && isChatGPTSignIn(model, options.apiKey)) {
 				throw new Error("Sign in with ChatGPT does not support OpenAI compaction_trigger");
 			}
 			const cacheRetention = resolveOpenAICacheRetention(options?.cacheRetention, options?.env);
