@@ -21,6 +21,7 @@ import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import {
+	applyOpenAISessionAffinityHeaders,
 	clampOpenAIPromptCacheKey,
 	getOpenAIPromptCacheOptions,
 	getOpenAIPromptCacheRetention,
@@ -31,8 +32,10 @@ import {
 	convertResponsesMessages,
 	convertResponsesTools,
 	getResponsesToolSupport,
+	OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
+	resolveOpenAIConfigurationUpdateEffort,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
@@ -41,8 +44,6 @@ const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage";
 const CHATGPT_WORKSPACE_LIMIT_HINT =
 	"You've reached your ChatGPT workspace's usage limit. Ask your workspace admin to increase it at admin.openai.com → Workspace → Usage limits.";
-// Fixed reasoning.effort while configuration_update items carry the thinking level.
-const CONFIGURATION_UPDATE_REQUEST_EFFORT = "medium";
 
 /**
  * OpenAI API keys start with `sk-`; a different credential sent directly to OpenAI
@@ -91,15 +92,9 @@ function getConfigurationUpdateEffort(
 	options: OpenAIResponsesOptions | undefined,
 	compat: Required<OpenAIResponsesCompat>,
 ): string | undefined {
-	if (
-		!compat.supportsMidConvoEffort ||
-		!options?.reasoningEffort ||
-		// Sign in with ChatGPT rejects configuration_update items.
-		isChatGPTSignIn(model, options.apiKey)
-	) {
-		return undefined;
-	}
-	return model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
+	// Sign in with ChatGPT rejects configuration_update items.
+	const enabled = compat.supportsMidConvoEffort && !isChatGPTSignIn(model, options?.apiKey);
+	return resolveOpenAIConfigurationUpdateEffort(model, options?.reasoningEffort, enabled);
 }
 
 // OpenAI Responses-specific options
@@ -277,16 +272,7 @@ function createClient(
 		Object.assign(headers, copilotHeaders);
 	}
 
-	if (sessionId) {
-		if (compat.sessionAffinityFormat === "openrouter") {
-			headers["x-session-id"] = sessionId;
-		} else {
-			if (compat.sessionAffinityFormat === "openai") {
-				headers["session-id"] = sessionId;
-			}
-			headers["x-client-request-id"] = sessionId;
-		}
-	}
+	applyOpenAISessionAffinityHeaders(headers, sessionId, compat.sessionAffinityFormat);
 
 	// Merge options headers last so they can override defaults
 	if (optionsHeaders) {
@@ -366,7 +352,8 @@ function buildParams(
 			const requestedEffort = options?.reasoningEffort
 				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
 				: reasoningEffort;
-			const effort = configurationUpdateEffort === undefined ? requestedEffort : CONFIGURATION_UPDATE_REQUEST_EFFORT;
+			const effort =
+				configurationUpdateEffort === undefined ? requestedEffort : OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT;
 			const summary = options?.reasoningSummary === undefined ? "auto" : options.reasoningSummary;
 			params.reasoning = {
 				effort: effort as NonNullable<typeof params.reasoning>["effort"],

@@ -11,6 +11,7 @@ import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../
 import { type AzureEndpointOptions, resolveAzureConfig, resolveDeploymentName } from "./azure-openai-config.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import {
+	applyOpenAISessionAffinityHeaders,
 	clampOpenAIPromptCacheKey,
 	getOpenAIPromptCacheOptions,
 	getOpenAIPromptCacheRetention,
@@ -20,25 +21,15 @@ import {
 	convertResponsesMessages,
 	convertResponsesTools,
 	getResponsesToolSupport,
+	OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
+	resolveOpenAIConfigurationUpdateEffort,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
 // OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
-// Fixed reasoning.effort while configuration_update items carry the thinking level.
-const CONFIGURATION_UPDATE_REQUEST_EFFORT = "medium";
-
-function getConfigurationUpdateEffort(
-	model: Model<"azure-openai-responses">,
-	options: AzureOpenAIResponsesOptions | undefined,
-): string | undefined {
-	if (!model.compat?.supportsMidConvoEffort || !options?.reasoningEffort) {
-		return undefined;
-	}
-	return model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort;
-}
 
 function formatAzureOpenAIError(error: unknown): string {
 	return formatProviderError(normalizeProviderError(error), "Azure OpenAI API error");
@@ -65,7 +56,11 @@ export const stream: StreamFunction<"azure-openai-responses", AzureOpenAIRespons
 	// Start async processing
 	(async () => {
 		const deploymentName = resolveDeploymentName(model, options);
-		const configurationUpdateEffort = getConfigurationUpdateEffort(model, options);
+		const configurationUpdateEffort = resolveOpenAIConfigurationUpdateEffort(
+			model,
+			options?.reasoningEffort,
+			model.compat?.supportsMidConvoEffort === true,
+		);
 
 		const output: AssistantMessage = {
 			role: "assistant",
@@ -187,17 +182,7 @@ function createClient(
 	sessionId?: string,
 ) {
 	const headers = { ...getIdentityHeaders(model, options?.identity), ...model.headers };
-	const sessionAffinityFormat = model.compat?.sessionAffinityFormat ?? "openai";
-	if (sessionId) {
-		if (sessionAffinityFormat === "openrouter") {
-			headers["x-session-id"] = sessionId;
-		} else {
-			if (sessionAffinityFormat === "openai") {
-				headers["session-id"] = sessionId;
-			}
-			headers["x-client-request-id"] = sessionId;
-		}
-	}
+	applyOpenAISessionAffinityHeaders(headers, sessionId, model.compat?.sessionAffinityFormat ?? "openai");
 
 	if (options?.headers) {
 		Object.assign(headers, options.headers);
@@ -288,7 +273,8 @@ function buildParams(
 			const requestedEffort = options?.reasoningEffort
 				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
 				: reasoningEffort;
-			const effort = configurationUpdateEffort === undefined ? requestedEffort : CONFIGURATION_UPDATE_REQUEST_EFFORT;
+			const effort =
+				configurationUpdateEffort === undefined ? requestedEffort : OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT;
 			const summary = options?.reasoningSummary === undefined ? "auto" : options.reasoningSummary;
 			params.reasoning = {
 				effort: effort as NonNullable<typeof params.reasoning>["effort"],

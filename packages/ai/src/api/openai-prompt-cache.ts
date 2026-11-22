@@ -1,5 +1,5 @@
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
-import type { CacheRetention, OpenAIResponsesCompat, ProviderEnv } from "../types.ts";
+import type { CacheRetention, OpenAIResponsesCompat, ProviderEnv, ProviderHeaders } from "../types.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 
 export const OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64;
@@ -42,4 +42,20 @@ export function getOpenAIPromptCacheOptions(
 	if (cacheRetention === "none") return { mode: "explicit" };
 	if (cacheRetention === "long" && compat.supportsLongCacheRetention) return { ttl: "30m" };
 	return undefined;
+}
+
+export function applyOpenAISessionAffinityHeaders(
+	headers: ProviderHeaders,
+	sessionId: string | undefined,
+	sessionAffinityFormat: NonNullable<OpenAIResponsesCompat["sessionAffinityFormat"]>,
+): void {
+	if (!sessionId) return;
+	if (sessionAffinityFormat === "openrouter") {
+		headers["x-session-id"] = sessionId;
+		return;
+	}
+	if (sessionAffinityFormat === "openai") {
+		headers["session-id"] = sessionId;
+	}
+	headers["x-client-request-id"] = sessionId;
 }

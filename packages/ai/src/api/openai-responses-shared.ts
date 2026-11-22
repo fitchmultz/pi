@@ -64,6 +64,19 @@ export const OPENAI_RESPONSES_TOOL_CALL_PROVIDERS: ReadonlySet<string> = new Set
 	"azure",
 ]);
 
+/** Fixed `reasoning.effort` while `configuration_update` items carry the effective thinking level. */
+export const OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT = "medium";
+
+/** Effort to send in `configuration_update` items, or `undefined` to send it in `reasoning.effort`. */
+export function resolveOpenAIConfigurationUpdateEffort(
+	model: Pick<Model<Api>, "thinkingLevelMap">,
+	reasoningEffort: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined,
+	enabled: boolean,
+): string | undefined {
+	if (!enabled || !reasoningEffort) return undefined;
+	return model.thinkingLevelMap?.[reasoningEffort] ?? reasoningEffort;
+}
+
 function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): string {
 	const payload: TextSignatureV1 = { v: 1, id };
 	if (phase) payload.phase = phase;
