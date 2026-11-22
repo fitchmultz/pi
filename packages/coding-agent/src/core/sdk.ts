@@ -547,6 +547,11 @@ export async function createAgentSessionWithDiagnostics(
 		const headerRunner = extensionRunnerRef.current;
 		return {
 			...options,
+			...(options.reasoningSummary !== undefined
+				? {}
+				: settingsManager.getHideThinkingBlock()
+					? { reasoningSummary: null }
+					: {}),
 			timeoutMs: options.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs,
 			websocketConnectTimeoutMs: options.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
 			maxRetries: options.maxRetries ?? providerRetrySettings.maxRetries,

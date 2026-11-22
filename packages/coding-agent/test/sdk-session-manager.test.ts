@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getModel } from "@earendil-works/pi-ai/compat";
+import { getModel, normalizeContext } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("createAgentSession session manager defaults", () => {
 	let tempDir: string;
@@ -126,6 +127,43 @@ describe("createAgentSession session manager defaults", () => {
 			session.thinkingLevel,
 		]);
 
+		session.dispose();
+	});
+
+	it("passes reasoningSummary: null when hideThinkingBlock is enabled", async () => {
+		const model = getModel("openai", "gpt-6.2-sol");
+		expect(model).toBeTruthy();
+
+		const settingsManager = SettingsManager.inMemory({ hideThinkingBlock: true });
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model: model!,
+			thinkingLevel: "medium",
+			sessionManager: SessionManager.inMemory(cwd),
+			settingsManager,
+		});
+
+		let capturedPayload: { reasoning?: { effort?: string; summary?: string } } | undefined;
+		await (
+			await session.agent.streamFunction(
+				model!,
+				normalizeContext({
+					systemPrompt: "sys",
+					messages: [{ role: "user", content: "hi", timestamp: 1 }],
+				}),
+				{
+					apiKey: "sk-test-key",
+					reasoning: "medium",
+					onPayload: (payload) => {
+						capturedPayload = payload as { reasoning?: { effort?: string; summary?: string } };
+						throw new Error("captured");
+					},
+				},
+			)
+		).result();
+
+		expect(capturedPayload?.reasoning).toEqual({ effort: "medium" });
 		session.dispose();
 	});
 });

@@ -1108,6 +1108,10 @@
           "description": "Whether the provider accepts max_output_tokens. Some Codex-protocol gateways reject it.",
           "default": true
         },
+        "supportsTemperature": {
+          "type": "boolean",
+          "description": "Whether the model accepts the temperature request field. Defaults are API-specific."
+        },
         "supportsEagerToolInputStreaming": {
           "type": "boolean",
           "description": "Whether the provider accepts per-tool eager_input_streaming. When false, the Anthropic provider omits tools[].eager_input_streaming and sends the legacy fine-grained-tool-streaming-2025-05-14 beta header for tool-enabled requests.",
@@ -1117,10 +1121,6 @@
           "type": "boolean",
           "description": "Whether the provider supports Anthropic-style cache_control markers on tool definitions. When false, cache_control is omitted from tool parameters. Some Anthropic-compatible providers, such as Fireworks, do not support this field on tools and may reject or ignore it.",
           "default": true
-        },
-        "supportsTemperature": {
-          "type": "boolean",
-          "description": "Whether the model accepts the temperature request field. Defaults are API-specific."
         },
         "forceAdaptiveThinking": {
           "type": "boolean",

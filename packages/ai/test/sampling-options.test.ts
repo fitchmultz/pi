@@ -12,6 +12,7 @@ interface SamplingPayload {
 	top_p?: number;
 	top_k?: number;
 	min_p?: number;
+	text?: { verbosity?: string };
 	reasoning?: { effort?: string };
 }
 
@@ -49,9 +50,16 @@ function makeModel(
 	};
 }
 
-function capturingOptions(onCapture: (payload: SamplingPayload) => void) {
+function makeCodexJwt(): string {
+	const payload = Buffer.from(
+		JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct_test" } }),
+	).toString("base64url");
+	return `h.${payload}.s`;
+}
+
+function capturingOptions(model: Model<Api>, onCapture: (payload: SamplingPayload) => void) {
 	return {
-		apiKey: "fake-key",
+		apiKey: model.api === "openai-codex-responses" ? makeCodexJwt() : "fake-key",
 		onPayload: (payload: unknown) => {
 			onCapture(payload as SamplingPayload);
 			throw new PayloadCaptured();
@@ -64,7 +72,7 @@ async function capturePayload(model: Model<Api>, options?: DirectSamplingOptions
 
 	await stream(model, makeContext(), {
 		...options,
-		...capturingOptions((payload) => {
+		...capturingOptions(model, (payload) => {
 			capturedPayload = payload;
 		}),
 	}).result();
@@ -81,7 +89,7 @@ async function captureSimplePayload(model: Model<Api>, options?: SimpleStreamOpt
 
 	await streamSimple(model, makeContext(), {
 		...options,
-		...capturingOptions((payload) => {
+		...capturingOptions(model, (payload) => {
 			capturedPayload = payload;
 		}),
 	}).result();
@@ -112,7 +120,7 @@ describe("sampling params", () => {
 	});
 
 	// Model defaults must apply to direct stream()/complete() calls, not only streamSimple() (#9506)
-	it.each(["openai-completions", "openai-responses", "azure-openai-responses"] as const)(
+	it.each(["openai-completions", "openai-responses", "openai-codex-responses", "azure-openai-responses"] as const)(
 		"applies model-level sampling params with request keys taking precedence for %s",
 		async (api) => {
 			const payload = await capturePayload(makeModel(api, { top_p: 0.95, min_p: 0.05 }), {
@@ -123,6 +131,15 @@ describe("sampling params", () => {
 			expect(payload.min_p).toBe(0.05);
 		},
 	);
+
+	it("overrides default Codex text verbosity from model samplingParams", async () => {
+		const payload = await captureSimplePayload(
+			makeModel("openai-codex-responses", { text: { verbosity: "medium" } }, { reasoning: true }),
+			{ reasoning: "medium" },
+		);
+
+		expect(payload.text).toEqual({ verbosity: "medium" });
+	});
 
 	it("passes request sampling params through streamSimple", async () => {
 		const payload = await captureSimplePayload(makeModel("openai-completions"), {
@@ -174,7 +191,7 @@ describe("sampling params", () => {
 		expect(payload.top_p).toBe(0.5);
 	});
 
-	it.each(["openai-completions", "openai-responses", "azure-openai-responses"] as const)(
+	it.each(["openai-completions", "openai-responses", "openai-codex-responses", "azure-openai-responses"] as const)(
 		"applies thinking-level params between model and request params for %s",
 		async (api) => {
 			const payload = await capturePayload(

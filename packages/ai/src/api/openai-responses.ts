@@ -29,11 +29,11 @@ import {
 	convertResponsesMessages,
 	convertResponsesTools,
 	getResponsesToolSupport,
+	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
-const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 // OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage";
@@ -93,6 +93,7 @@ function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCo
 		supportsExplicitPromptCacheMode: model.compat?.supportsExplicitPromptCacheMode ?? false,
 		supportsMaxOutputTokens: model.compat?.supportsMaxOutputTokens ?? true,
 		supportsMidConvoEffort: model.compat?.supportsMidConvoEffort ?? false,
+		supportsTemperature: model.compat?.supportsTemperature ?? true,
 	};
 }
 
@@ -283,6 +284,7 @@ export const streamSimple: StreamFunction<"openai-responses", SimpleStreamOption
 	return stream(model, context, {
 		...base,
 		reasoningEffort,
+		...(options?.reasoningSummary !== undefined ? { reasoningSummary: options.reasoningSummary } : {}),
 	} satisfies OpenAIResponsesOptions);
 };
 
@@ -340,7 +342,7 @@ function buildParams(
 	configurationUpdateEffort: string | undefined,
 ) {
 	const transcriptTools = resolveTranscriptTools(context.messages, getResponsesToolSupport(compat));
-	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
+	const messages = convertResponsesMessages(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: compat.supportsMidConvoSystemMessages,
 		supportsAdditionalTools: compat.supportsAdditionalTools,
@@ -370,7 +372,7 @@ function buildParams(
 		params.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
 	}
 
-	if (options?.temperature !== undefined && !omitUnsupportedFields) {
+	if (options?.temperature !== undefined && compat.supportsTemperature && !omitUnsupportedFields) {
 		params.temperature = options?.temperature;
 	}
 
@@ -396,9 +398,10 @@ function buildParams(
 				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
 				: reasoningEffort;
 			const effort = configurationUpdateEffort === undefined ? requestedEffort : CONFIGURATION_UPDATE_REQUEST_EFFORT;
+			const summary = options?.reasoningSummary === undefined ? "auto" : options.reasoningSummary;
 			params.reasoning = {
 				effort: effort as NonNullable<typeof params.reasoning>["effort"],
-				summary: options?.reasoningSummary || "auto",
+				...(summary !== null ? { summary } : {}),
 			};
 			params.include = ["reasoning.encrypted_content"];
 		} else if (model.provider !== "github-copilot" && model.thinkingLevelMap?.off !== null) {

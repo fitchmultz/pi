@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `compat.supportsTemperature` to OpenAI Responses APIs (`openai-responses`, `openai-codex-responses`, `azure-openai-responses`), defaulting to `false` for GPT-6 models that reject `temperature` (`gpt-6-astra`, `gpt-6.1-sol`, `gpt-6.2-astra`, `gpt-6.2-sol`), and added `SimpleStreamOptions.reasoningSummary` so callers can pass `null` to omit `reasoning.summary`.
 - Added `compat.supportsMidConvoSystemMessages` to the `google-generative-ai` and `google-vertex` APIs (defaulting to `true` for Gemini 4+ model IDs and `false` otherwise): when enabled, mid-conversation system updates render inline inside `contents` rather than rewriting `systemInstruction`, preserving Gemini's implicit prompt prefix cache across mid-session updates.
 - Added `compat.supportsTemperature` to the `google-generative-ai` and `google-vertex` APIs (defaulting to `false` for Gemini 4 and Gemini 3.6+ model IDs, where Google deprecates `temperature`/`top_p`/`top_k`, and `true` otherwise).
 - Added `compat.supportsStrictMode` to the `google-generative-ai` and `google-vertex` APIs, so Gemini 3+ models served under IDs without the version can use strict tools (`VALIDATED` function calling); unset keeps the model ID detection ([#12321](https://github.com/earendil-works/pi/issues/12321))
@@ -26,6 +27,7 @@
 
 ### Fixed
 
+- Fixed OpenAI Responses (`openai-responses`, `openai-codex-responses`, `azure-openai-responses`) forcing `reasoning.summary: "auto"` when `reasoningSummary: null` was passed, wired `resolveSamplingParams` into `openai-codex-responses` so model and request `samplingParams` apply on Codex turns, included `cloudflare-ai-gateway` in the shared Responses tool-call provider set, and matched concrete Cloudflare AI Gateway `/openai` and `/anthropic` base URLs in `normalizeCloudflareModel()`.
 - Fixed OpenAI Responses and Codex replayed `function_call` and `custom_tool_call` items omitting `status: "completed"`, which caused Codex WebSocket-cached fallbacks to full input replay to drop reasoning items with `prefix_mismatch` and wipe the prompt cache.
 - Fixed context and compaction token estimates (`estimateMessageTokens` and `compaction.estimateTokens`) omitting `TextContent.textSignature`, where Gemini attaches thought signatures on non-tool-call turns.
 - Fixed Google Generative AI and Google Vertex long-decode `CONTINUATION` responses truncating after the first hop: Pi now resumes `FinishReason.CONTINUATION` inside its own hop loop (keeping `automaticContinuation: false`, honoring `signal`, `disableContinuation`, and cycle/repeat token protection, applying per-hop retries/timeouts, keeping Hop 1 prompt tokens for context sizing/overflow checks while pricing each hop individually and summing output/reasoning tokens and billed cost across hops, and excluding `CONTINUATION` from `isRecoverableLength()`).

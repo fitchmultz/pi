@@ -15,6 +15,7 @@ function positional(model: { compat?: unknown }) {
 		toolSearch: compat?.supportsToolSearch === true,
 		explicitPromptCacheMode: compat?.supportsExplicitPromptCacheMode === true,
 		effort: compat?.supportsMidConvoEffort === true,
+		temperature: compat?.supportsTemperature ?? true,
 	};
 }
 
@@ -27,7 +28,10 @@ describe("Cloudflare OpenAI positional defaults", () => {
 	// /openai passthrough re-sent the whole prompt after every system update or tool load.
 	it("match direct OpenAI for every Cloudflare /openai Responses model", () => {
 		const direct = new Map(getBuiltinModels("openai").map((model) => [model.id, positional(model)]));
-		const actual = routed.map((model) => ({ id: model.id, ...positional(normalizeCloudflareModel(model)) }));
+		const actual = routed.map((model) => ({
+			id: model.id,
+			...positional(normalizeCloudflareModel({ ...model, compat: undefined })),
+		}));
 		expect(actual).toEqual(routed.map((model) => ({ id: model.id, ...(direct.get(model.id) ?? positional({})) })));
 		expect(actual.some((model) => model.additionalTools)).toBe(true);
 		expect(actual.some((model) => model.effort)).toBe(true);
@@ -43,6 +47,20 @@ describe("Cloudflare OpenAI positional defaults", () => {
 			supportsToolSearch: true,
 			supportsExplicitPromptCacheMode: true,
 			supportsMidConvoEffort: true,
+			supportsTemperature: false,
+		});
+		const concrete = normalizeCloudflareModel({
+			...astra,
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/acc123/workos/openai",
+			compat: undefined,
+		});
+		expect(concrete.compat).toEqual({
+			supportsMidConvoSystemMessages: true,
+			supportsAdditionalTools: true,
+			supportsToolSearch: true,
+			supportsExplicitPromptCacheMode: true,
+			supportsMidConvoEffort: true,
+			supportsTemperature: false,
 		});
 		const custom = { ...astra, baseUrl: "https://proxy.invalid/openai", compat: { supportsStrictMode: true } };
 		expect(normalizeCloudflareModel(custom)).toBe(custom);

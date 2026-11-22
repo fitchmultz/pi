@@ -239,7 +239,7 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 * fields, so keys here override them. Lets custom OpenAI-compatible servers (llama.cpp, vLLM,
 	 * SGLang, ...) receive parameters pi does not model, e.g. `top_p`, `top_k`, `min_p`,
 	 * `repetition_penalty`. Merged over `Model.samplingParams` per key. Only applied by
-	 * OpenAI-compatible adapters (completions, responses, Azure responses); other APIs ignore it.
+	 * OpenAI-compatible adapters (completions, responses, Codex responses, Azure responses); other APIs ignore it.
 	 */
 	samplingParams?: SamplingParams;
 	maxTokens?: number;
@@ -398,6 +398,8 @@ export interface SimpleStreamOptions extends StreamOptions {
 	/** Provider-neutral tool selection for simple requests. When omitted, adapters use provider-specific behavior. */
 	toolChoice?: ToolChoice;
 	reasoning?: ThinkingLevel;
+	/** Reasoning summary preference for OpenAI Responses APIs. Pass `null` to omit `reasoning.summary`. */
+	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	/** Ask a capable provider to return a durable handle and continue the request asynchronously. */
 	deferred?: boolean | { window?: "15m" | "1h" | "24h" };
 	/** Custom token budgets for thinking levels (token-based providers only) */

@@ -1,5 +1,6 @@
 import type { AnyModel } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
+import { GPT_6_NO_NONE_EFFORT_MODEL_IDS } from "./openai-catalog.ts";
 
 /** Workers AI direct endpoint. */
 export const CLOUDFLARE_WORKERS_AI_BASE_URL =
@@ -58,6 +59,11 @@ const OPENAI_MID_CONVO_MODEL_IDS = new Set([
 	...OPENAI_ADDITIONAL_TOOLS_MODEL_IDS,
 ]);
 
+const CLOUDFLARE_AI_GATEWAY_OPENAI_URL_PATTERN =
+	/^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+\/openai\/?$/;
+const CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN =
+	/^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+\/anthropic\/?$/;
+
 /**
  * Claude passthrough parity with `catalog/families/anthropic.ts`. Kept in runtime code for the same
  * reason as the OpenAI lists above: published `pi.dev` catalog overlays can replace generated entries.
@@ -101,7 +107,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 	if (!isModelType(model, "chat") || model.provider !== "cloudflare-ai-gateway") return model;
 	if (
 		model.api === "openai-responses" &&
-		model.baseUrl === CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL &&
+		CLOUDFLARE_AI_GATEWAY_OPENAI_URL_PATTERN.test(model.baseUrl) &&
 		OPENAI_MID_CONVO_MODEL_IDS.has(model.id)
 	) {
 		const supportsToolFeatures = OPENAI_ADDITIONAL_TOOLS_MODEL_IDS.has(model.id);
@@ -117,6 +123,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 						}
 					: {}),
 				...(OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id) ? { supportsMidConvoEffort: true } : {}),
+				...(GPT_6_NO_NONE_EFFORT_MODEL_IDS.has(model.id) ? { supportsTemperature: false } : {}),
 				...model.compat,
 			},
 		};
@@ -124,7 +131,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 	if (
 		model.api !== "anthropic-messages" ||
 		!supportsCloudflareClaudeMidConvoSystemMessages(model.id) ||
-		model.baseUrl !== CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL
+		!CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN.test(model.baseUrl)
 	) {
 		return model;
 	}

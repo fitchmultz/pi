@@ -39,9 +39,10 @@ import {
 	convertResponsesMessages,
 	convertResponsesTools,
 	getResponsesToolSupport,
+	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
-import { buildBaseOptions } from "./simple-options.ts";
+import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
 // ============================================================================
 // Configuration
@@ -56,7 +57,6 @@ const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 // The Codex backend accepts zstd-compressed request bodies on the SSE responses
 // endpoint (the same endpoint the official Codex client compresses against).
 const REQUEST_COMPRESSION_ZSTD_LEVEL = 3;
-const CODEX_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const WEBSOCKET_MESSAGE_TOO_BIG_CLOSE_CODE = 1009;
 const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached";
 const PREVIOUS_RESPONSE_NOT_FOUND_CODE = "previous_response_not_found";
@@ -582,6 +582,7 @@ export const streamSimple: StreamFunction<"openai-codex-responses", SimpleStream
 	return stream(model, context, {
 		...base,
 		reasoningEffort,
+		...(options?.reasoningSummary !== undefined ? { reasoningSummary: options.reasoningSummary } : {}),
 	} satisfies OpenAICodexResponsesOptions);
 };
 
@@ -632,7 +633,7 @@ function buildRequestBody(
 	// The system prompt goes into a leading developer item, not top-level `instructions`, as in Codex.
 	// From GPT-6.2 on, the backend appends `instructions` after `input`, so every new turn changed the
 	// prompt before the system prompt and it was never served from the prompt cache (#12273).
-	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
+	const messages = convertResponsesMessages(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
 		supportsAdditionalTools,
@@ -657,7 +658,7 @@ function buildRequestBody(
 		body.max_output_tokens = Math.max(options.maxTokens, MIN_OUTPUT_TOKENS);
 	}
 
-	if (options?.temperature !== undefined) {
+	if (options?.temperature !== undefined && (model.compat?.supportsTemperature ?? true)) {
 		body.temperature = options.temperature;
 	}
 
@@ -679,13 +680,22 @@ function buildRequestBody(
 				? resolveReasoningEffort(model, options.reasoningEffort)
 				: CONFIGURATION_UPDATE_REQUEST_EFFORT;
 		if (effort !== null) {
+			const summary = options.reasoningSummary === undefined ? "auto" : options.reasoningSummary;
 			body.reasoning = {
 				effort: configurationUpdateEffort === undefined ? effort : CONFIGURATION_UPDATE_REQUEST_EFFORT,
-				summary: options.reasoningSummary ?? "auto",
+				...(summary !== null ? { summary } : {}),
 			};
 		}
 	} else if (model.reasoning && model.thinkingLevelMap?.off !== null) {
 		body.reasoning = { effort: model.thinkingLevelMap?.off ?? "none" };
+	}
+
+	// Last so model and request sampling parameters override named request fields.
+	const samplingThinkingLevel =
+		options?.reasoningEffort === undefined || options.reasoningEffort === "none" ? "off" : options.reasoningEffort;
+	const samplingParams = resolveSamplingParams(model, samplingThinkingLevel, options?.samplingParams);
+	if (samplingParams) {
+		Object.assign(body, samplingParams);
 	}
 
 	return body;
@@ -1659,7 +1669,7 @@ async function processWebSocketStream(
 			const responseItems = convertResponsesMessages(
 				model,
 				normalizeContext({ messages: [output] }),
-				CODEX_TOOL_CALL_PROVIDERS,
+				OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 				{ grammarToolInputProperties },
 			).filter((item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output");
 			entry.continuation = {

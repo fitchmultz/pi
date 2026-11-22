@@ -15,11 +15,11 @@ import {
 	convertResponsesMessages,
 	convertResponsesTools,
 	getResponsesToolSupport,
+	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
 } from "./openai-responses-shared.ts";
 import { buildBaseOptions, resolveSamplingParams } from "./simple-options.ts";
 
-const AZURE_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "azure"]);
 // OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 
@@ -148,6 +148,7 @@ export const streamSimple: StreamFunction<"azure-openai-responses", SimpleStream
 	return stream(model, context, {
 		...base,
 		reasoningEffort,
+		...(options?.reasoningSummary !== undefined ? { reasoningSummary: options.reasoningSummary } : {}),
 	} satisfies AzureOpenAIResponsesOptions);
 };
 
@@ -190,7 +191,7 @@ function buildParams(
 			supportsToolSearch,
 		}),
 	);
-	const messages = convertResponsesMessages(model, context, AZURE_TOOL_CALL_PROVIDERS, {
+	const messages = convertResponsesMessages(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
 		supportsAdditionalTools,
@@ -214,7 +215,7 @@ function buildParams(
 		params.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
 	}
 
-	if (options?.temperature !== undefined) {
+	if (options?.temperature !== undefined && (model.compat?.supportsTemperature ?? true)) {
 		params.temperature = options?.temperature;
 	}
 
@@ -234,9 +235,10 @@ function buildParams(
 			const effort = options?.reasoningEffort
 				? (model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort)
 				: reasoningEffort;
+			const summary = options?.reasoningSummary === undefined ? "auto" : options.reasoningSummary;
 			params.reasoning = {
 				effort: effort as NonNullable<typeof params.reasoning>["effort"],
-				summary: options?.reasoningSummary || "auto",
+				...(summary !== null ? { summary } : {}),
 			};
 			params.include = ["reasoning.encrypted_content"];
 		} else if (model.thinkingLevelMap?.off !== null) {
