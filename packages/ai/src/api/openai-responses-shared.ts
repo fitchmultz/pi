@@ -4,6 +4,7 @@ import type {
 	Response,
 	ResponseConfigurationUpdateItemParam,
 	ResponseCreateParamsStreaming,
+	ResponseCustomToolCall,
 	ResponseFailedEvent,
 	ResponseInput,
 	ResponseInputContent,
@@ -373,7 +374,9 @@ export function convertResponsesMessages<TApi extends Api>(
 					}
 
 					if (customInputProperty !== undefined) {
-						output.push({
+						// OpenAI persists status: "completed" on custom_tool_call items (matching openai/codex),
+						// though ResponseCustomToolCall in the OpenAI SDK .d.ts omits the field.
+						const customCall: ResponseCustomToolCall & { status: "completed" } = {
 							type: "custom_tool_call",
 							id: itemId,
 							call_id: callId,
@@ -381,8 +384,10 @@ export function convertResponsesMessages<TApi extends Api>(
 							input: sanitizeSurrogates(
 								getGrammarToolInput(toolCall.name, toolCall.arguments, customInputProperty),
 							),
+							status: "completed",
 							...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
-						} satisfies ResponseOutputItem);
+						};
+						output.push(customCall);
 					} else {
 						output.push({
 							type: "function_call",
@@ -390,6 +395,7 @@ export function convertResponsesMessages<TApi extends Api>(
 							call_id: callId,
 							name: toolCall.name,
 							arguments: JSON.stringify(toolCall.arguments),
+							status: "completed",
 							...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
 						});
 					}

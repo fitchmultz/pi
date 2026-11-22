@@ -1,5 +1,9 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import {
+	getOpenAICodexWebSocketDebugStats,
+	resetOpenAICodexWebSocketDebugStats,
+} from "../src/api/openai-codex-responses.ts";
 import { getModel, completeSimple as runSimple } from "../src/compat.ts";
 import type {
 	Api,
@@ -43,6 +47,18 @@ const lookup = {
 	name: "lookup",
 	description: "Look up a numeric value by key.",
 	parameters: Type.Object({ key: Type.String() }),
+};
+
+const customLookup = {
+	name: "custom_lookup",
+	description: "Look up a tag using a lowercase ASCII word.",
+	parameters: Type.Object({ tag: Type.String() }),
+	constrainedSampling: {
+		type: "grammar" as const,
+		variants: {
+			openai_lark: "start: /[a-z]+/",
+		},
+	},
 };
 
 function reasoningIds(message: AssistantMessage): string[] {
@@ -137,6 +153,88 @@ describe.each(targets)("$name reasoning replay conformance", (target) => {
 			expect(removals(afterEdit)).toEqual(
 				followingReasoning.map((id) => ({ type: "reasoning", id, action: "removed", reason: "prefix_mismatch" })),
 			);
+		},
+	);
+});
+
+describe("Codex WebSocket to full-replay tool call status conformance", () => {
+	it.skipIf(!codexToken)(
+		"preserves reasoning when switching from WebSocket continuation to full replay after function and custom tool calls",
+		{ timeout: 300000 },
+		async () => {
+			const model = getModel("openai-codex", "gpt-6.2-sol");
+			const sessionId = `pi-e2e-ws-full-replay-${Date.now()}`;
+			resetOpenAICodexWebSocketDebugStats(sessionId);
+			const context: Context = {
+				systemPrompt: "You are a terse assistant.",
+				tools: [lookup, customLookup],
+				messages: [
+					{
+						role: "user",
+						content:
+							"Call both lookup with key 'alpha' and custom_lookup with tag 'beta' in this turn, then after results reply with only their sum.",
+						timestamp: 1,
+					},
+				],
+			};
+
+			const seenTools = new Set<string>();
+			let wsAnswer: AssistantMessage | undefined;
+			for (let turn = 0; turn < 4; turn++) {
+				const reply = await runSimple(model, context, {
+					apiKey: codexToken,
+					transport: "websocket-cached",
+					sessionId,
+					reasoning: "medium",
+					maxTokens: 4000,
+				});
+				expect(reply.stopReason, reply.errorMessage).not.toBe("error");
+				if (turn > 0) expect(removals(reply)).toEqual([]);
+				context.messages.push(reply);
+				const calls = reply.content.filter((block) => block.type === "toolCall");
+				if (calls.length === 0) {
+					wsAnswer = reply;
+					break;
+				}
+				for (const [index, call] of calls.entries()) {
+					seenTools.add(call.name);
+					context.messages.push({
+						role: "toolResult",
+						toolCallId: call.id,
+						toolName: call.name,
+						content: [{ type: "text", text: call.name === "lookup" ? "17" : "25" }],
+						isError: false,
+						timestamp: 2 + turn * 10 + index,
+					});
+				}
+			}
+			expect(seenTools.has("lookup")).toBe(true);
+			expect(seenTools.has("custom_lookup")).toBe(true);
+			expect(wsAnswer).toBeDefined();
+			const wsStats = getOpenAICodexWebSocketDebugStats(sessionId);
+			expect(wsStats?.deltaRequests ?? 0).toBeGreaterThanOrEqual(1);
+			expect(wsStats?.lastPreviousResponseId).toBeTruthy();
+
+			// Next turn switches to SSE with the same sessionId, forcing full input replay without previous_response_id.
+			context.messages.push({
+				role: "user",
+				content: "Multiply that sum by 3. Only the integer.",
+				timestamp: 100,
+			});
+			let fullReplayPreviousResponseId: string | undefined = "sentinel";
+			const fullReplay = await runSimple(model, context, {
+				apiKey: codexToken,
+				transport: "sse",
+				sessionId,
+				reasoning: "medium",
+				maxTokens: 4000,
+				onPayload: (payload) => {
+					fullReplayPreviousResponseId = (payload as { previous_response_id?: string }).previous_response_id;
+				},
+			});
+			expect(fullReplayPreviousResponseId).toBeUndefined();
+			expect(fullReplay.stopReason, fullReplay.errorMessage).not.toBe("error");
+			expect(removals(fullReplay)).toEqual([]);
 		},
 	);
 });
