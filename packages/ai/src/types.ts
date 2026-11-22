@@ -260,10 +260,12 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 */
 	sessionId?: string;
 	/**
-	 * Do not use or record server-side continuation state for this request (for example
-	 * Anthropic message threads). Set this for replays such as cache warming, which must not
-	 * replace the state of the real conversation. Providers that do not keep continuation
-	 * state ignore it.
+	 * Disable continuation for this request: skips server-side continuation state (such as
+	 * Anthropic message threads) and suppresses multi-hop Google (`google-generative-ai` and
+	 * `google-vertex`) long-decode `CONTINUATION` resumption (stopping after one hop with
+	 * `stopReason: "length"` and `rawStopReason: "CONTINUATION"`). Set this for replays such as
+	 * cache warming or provider summaries that must not replace conversation state or run
+	 * multi-hop generation. Providers without continuation support ignore it.
 	 */
 	disableContinuation?: boolean;
 	/**

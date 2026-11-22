@@ -145,37 +145,57 @@ function countUnionParameters(schema: unknown): number {
 	return count;
 }
 
+export interface StrictToolLimitSessionTracker {
+	markExceeded: (sessionId: string | undefined) => void;
+	hasExceeded: (sessionId: string | undefined) => boolean;
+}
+
+const MAX_SESSIONS_OVER_STRICT_TOOL_LIMITS = 10_000;
+
+/**
+ * Creates a bounded, session-cleaned tracker of sessions whose strict tools were rejected by a
+ * provider. Each provider family keeps its own tracker so a rejection on one provider never
+ * disables strict tools on another.
+ *
+ * Entries are normally freed by `cleanupSessionResources(sessionId)` when a session ends. The cap
+ * bounds memory for library users that never call it; a dropped session just pays one more rejection.
+ */
+export function createStrictToolLimitSessionTracker(): StrictToolLimitSessionTracker {
+	const sessions = new Set<string>();
+	registerSessionResourceCleanup((sessionId) => {
+		if (sessionId) sessions.delete(sessionId);
+		else sessions.clear();
+	});
+	return {
+		markExceeded: (sessionId) => {
+			if (sessionId === undefined) return;
+			sessions.add(sessionId);
+			if (sessions.size > MAX_SESSIONS_OVER_STRICT_TOOL_LIMITS) {
+				const oldest = sessions.values().next().value;
+				if (oldest !== undefined) sessions.delete(oldest);
+			}
+		},
+		hasExceeded: (sessionId) => sessionId !== undefined && sessions.has(sessionId),
+	};
+}
+
 /**
  * Sessions whose strict tools Claude rejected for exceeding its limits. Their later requests send `strict: "prefer"`
  * tools non-strict right away: the tool set rarely changes between turns, so trying strict again would only repeat
  * the rejection, and switching back to strict later would rewrite the tool definitions and miss the prompt cache.
  * Shared by the Anthropic and Bedrock providers, which run the same Claude limits.
  */
-const sessionsOverStrictToolLimits = new Set<string>();
-const MAX_SESSIONS_OVER_STRICT_TOOL_LIMITS = 10_000;
+const claudeStrictToolLimitSessions = createStrictToolLimitSessionTracker();
 
 /**
  * Records that a session's strict tools exceeded Claude's limits; does nothing without a session. Keeps at most
  * `MAX_SESSIONS_OVER_STRICT_TOOL_LIMITS` sessions.
- *
- * Entries are normally freed by `cleanupSessionResources(sessionId)` when a session ends. The cap bounds memory for
- * library users that never call it; a dropped session just pays one more rejection.
  */
 export function markStrictToolLimitsExceeded(sessionId: string | undefined): void {
-	if (sessionId === undefined) return;
-	sessionsOverStrictToolLimits.add(sessionId);
-	if (sessionsOverStrictToolLimits.size > MAX_SESSIONS_OVER_STRICT_TOOL_LIMITS) {
-		const oldest = sessionsOverStrictToolLimits.values().next().value;
-		if (oldest !== undefined) sessionsOverStrictToolLimits.delete(oldest);
-	}
+	claudeStrictToolLimitSessions.markExceeded(sessionId);
 }
 
 /** Returns true when an earlier request of this session had its strict tools rejected for exceeding Claude's limits. */
 export function hasExceededStrictToolLimits(sessionId: string | undefined): boolean {
-	return sessionId !== undefined && sessionsOverStrictToolLimits.has(sessionId);
+	return claudeStrictToolLimitSessions.hasExceeded(sessionId);
 }
-
-registerSessionResourceCleanup((sessionId) => {
-	if (sessionId) sessionsOverStrictToolLimits.delete(sessionId);
-	else sessionsOverStrictToolLimits.clear();
-});

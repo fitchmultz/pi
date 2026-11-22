@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { hasExceededStrictToolLimits, markStrictToolLimitsExceeded } from "../src/api/strict-tool-limits.ts";
+import {
+	createStrictToolLimitSessionTracker,
+	hasExceededStrictToolLimits,
+	markStrictToolLimitsExceeded,
+} from "../src/api/strict-tool-limits.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 
 describe("strict tool limit sessions", () => {
@@ -26,5 +30,15 @@ describe("strict tool limit sessions", () => {
 		expect(hasExceededStrictToolLimits("session-0")).toBe(false);
 		expect(hasExceededStrictToolLimits("session-1")).toBe(true);
 		expect(hasExceededStrictToolLimits("session-10000")).toBe(true);
+	});
+
+	it("keeps provider-scoped session trackers isolated while sharing session cleanup", () => {
+		const googleTracker = createStrictToolLimitSessionTracker();
+		googleTracker.markExceeded("shared-session");
+		expect(googleTracker.hasExceeded("shared-session")).toBe(true);
+		expect(hasExceededStrictToolLimits("shared-session")).toBe(false);
+
+		cleanupSessionResources("shared-session");
+		expect(googleTracker.hasExceeded("shared-session")).toBe(false);
 	});
 });

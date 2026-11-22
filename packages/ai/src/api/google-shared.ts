@@ -16,7 +16,6 @@ import {
 	type ThinkingConfig,
 } from "@google/genai";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
-import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	AssistantMessage,
 	FetchFunction,
@@ -45,7 +44,8 @@ import {
 	getInitialSystemMessage,
 	withoutInitialSystemMessage,
 } from "../utils/transcript.ts";
-import { prefersJsonSchemaStrictSampling, resolveStrictJsonSchema } from "./constrained-sampling.ts";
+import { resolveStrictJsonSchema } from "./constrained-sampling.ts";
+import { createStrictToolLimitSessionTracker, planStrictTools, type StrictToolPlan } from "./strict-tool-limits.ts";
 import { canReplayGoogleThoughtSignature, transformMessages } from "./transform-messages.ts";
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
@@ -80,26 +80,7 @@ const GOOGLE_STRICT_TOOL_NON_SCHEMA_EXCLUSIONS = [
 	/api key/i,
 ];
 
-const sessionsOverGoogleStrictToolLimits = new Set<string>();
-const MAX_SESSIONS_OVER_GOOGLE_STRICT_TOOL_LIMITS = 10_000;
-
-function markGoogleStrictToolLimitsExceeded(sessionId: string | undefined): void {
-	if (sessionId === undefined) return;
-	sessionsOverGoogleStrictToolLimits.add(sessionId);
-	if (sessionsOverGoogleStrictToolLimits.size > MAX_SESSIONS_OVER_GOOGLE_STRICT_TOOL_LIMITS) {
-		const oldest = sessionsOverGoogleStrictToolLimits.values().next().value;
-		if (oldest !== undefined) sessionsOverGoogleStrictToolLimits.delete(oldest);
-	}
-}
-
-function hasExceededGoogleStrictToolLimits(sessionId: string | undefined): boolean {
-	return sessionId !== undefined && sessionsOverGoogleStrictToolLimits.has(sessionId);
-}
-
-registerSessionResourceCleanup((sessionId) => {
-	if (sessionId) sessionsOverGoogleStrictToolLimits.delete(sessionId);
-	else sessionsOverGoogleStrictToolLimits.clear();
-});
+const googleStrictToolLimitSessions = createStrictToolLimitSessionTracker();
 
 function isGoogleStrictToolRejectionError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
@@ -197,7 +178,7 @@ export function streamGoogle(
 				lastFailedHeaders = headers;
 			});
 			const client = createClient(googleFetch);
-			let disablePreferredStrictTools = hasExceededGoogleStrictToolLimits(options?.sessionId);
+			let disablePreferredStrictTools = googleStrictToolLimitSessions.hasExceeded(options?.sessionId);
 			let baseParams: GenerateContentParameters;
 			let googleStream: AsyncGenerator<GenerateContentResponse>;
 			for (;;) {
@@ -228,7 +209,7 @@ export function streamGoogle(
 						throw error;
 					}
 					disablePreferredStrictTools = true;
-					markGoogleStrictToolLimitsExceeded(options?.sessionId);
+					googleStrictToolLimitSessions.markExceeded(options?.sessionId);
 					appendAssistantMessageDiagnostic(output, {
 						type: "google_strict_tools_fallback",
 						timestamp: Date.now(),
@@ -639,22 +620,21 @@ function buildParams(
 
 	const supportsStrictMode = supportsGoogleStrictToolSampling(model);
 	const disablePreferredStrictTools = strictOptions.disablePreferredStrictTools === true;
-	const hasPreferredStrictTools =
-		currentTools.length > 0 &&
-		currentTools.some(
-			(tool) =>
-				prefersJsonSchemaStrictSampling(tool) &&
-				resolveGoogleToolStrictSchema(tool, supportsStrictMode, disablePreferredStrictTools) !== undefined,
-		);
+	const strictPlan =
+		currentTools.length > 0
+			? planStrictTools(currentTools, {
+					supportsStrictMode,
+					disablePreferred: disablePreferredStrictTools,
+					applyClaudeLimits: false,
+				})
+			: undefined;
+	const convertedTools =
+		currentTools.length > 0 ? convertTools(currentTools, false, supportsStrictMode, strictPlan) : undefined;
 	const functionCallingMode =
 		currentTools.length > 0
-			? resolveGoogleFunctionCallingMode(
-					currentTools,
-					options.toolChoice,
-					supportsStrictMode,
-					disablePreferredStrictTools,
-				)
+			? resolveGoogleFunctionCallingMode(currentTools, options.toolChoice, supportsStrictMode, strictPlan)
 			: undefined;
+	const hasPreferredStrictTools = strictPlan?.hasPreferredStrictTools ?? false;
 	const systemInstruction = initialSystemMessage ? getSystemMessageText(initialSystemMessage) : "";
 	const config: GenerateContentConfig = {
 		// Pi owns retry/continuation; do not silently resume inside the SDK.
@@ -668,9 +648,7 @@ function buildParams(
 			supportsGoogleTemperature(model) && { temperature: options.temperature }),
 		...(options.maxTokens !== undefined && { maxOutputTokens: options.maxTokens }),
 		...(systemInstruction && { systemInstruction: sanitizeSurrogates(systemInstruction) }),
-		...(currentTools.length > 0 && {
-			tools: convertTools(currentTools, false, supportsStrictMode, disablePreferredStrictTools),
-		}),
+		...(convertedTools !== undefined && { tools: convertedTools }),
 		...(functionCallingMode !== undefined && {
 			toolConfig: { functionCallingConfig: { mode: functionCallingMode } },
 		}),
@@ -1172,17 +1150,6 @@ function rewriteConstAsEnum(schema: unknown, isNameMap = false): unknown {
 	return result;
 }
 
-function resolveGoogleToolStrictSchema(
-	tool: Tool,
-	supportsStrictMode: boolean,
-	disablePreferredStrictTools: boolean,
-): Tool["parameters"] | undefined {
-	if (disablePreferredStrictTools && prefersJsonSchemaStrictSampling(tool)) {
-		return undefined;
-	}
-	return resolveStrictJsonSchema(tool, supportsStrictMode);
-}
-
 /**
  * Convert tools to Gemini function declarations format.
  *
@@ -1196,14 +1163,15 @@ export function convertTools(
 	tools: Tool[],
 	useParameters = false,
 	supportsStrictMode = true,
-	disablePreferredStrictTools = false,
+	strictPlan?: StrictToolPlan,
 ): { functionDeclarations: Record<string, unknown>[] }[] | undefined {
 	if (tools.length === 0) return undefined;
 	return [
 		{
 			functionDeclarations: tools.map((tool) => {
 				const parameters =
-					resolveGoogleToolStrictSchema(tool, supportsStrictMode, disablePreferredStrictTools) ?? tool.parameters;
+					(strictPlan ? strictPlan.admit(tool) : resolveStrictJsonSchema(tool, supportsStrictMode)) ??
+					tool.parameters;
 				return {
 					name: tool.name,
 					description: tool.description,
@@ -1243,10 +1211,10 @@ export function resolveGoogleFunctionCallingMode(
 	tools: Tool[],
 	toolChoice: string | undefined,
 	supportsStrictMode: boolean,
-	disablePreferredStrictTools = false,
+	strictPlan?: StrictToolPlan,
 ): FunctionCallingConfigMode | undefined {
 	const useStrictMode = tools.some(
-		(tool) => resolveGoogleToolStrictSchema(tool, supportsStrictMode, disablePreferredStrictTools) !== undefined,
+		(tool) => (strictPlan ? strictPlan.admit(tool) : resolveStrictJsonSchema(tool, supportsStrictMode)) !== undefined,
 	);
 	if (toolChoice === "none" || toolChoice === "any") {
 		return mapToolChoice(toolChoice);
