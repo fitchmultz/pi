@@ -18,18 +18,6 @@ import { buildBaseOptions } from "./simple-options.ts";
 // This adapter takes the shared options unchanged; the type stays exported from this path.
 export type { GoogleOptions };
 
-function getHeaderValue(headers: Record<string, string> | undefined, name: string): string | undefined {
-	if (!headers) return undefined;
-	const expected = name.toLowerCase();
-	for (const [key, value] of Object.entries(headers)) {
-		if (key.toLowerCase() === expected) {
-			const trimmed = value.trim();
-			return trimmed.length > 0 ? trimmed : undefined;
-		}
-	}
-	return undefined;
-}
-
 /**
  * Resolve the SDK `apiKey` for `@google/genai`:
  * - Explicit `options.apiKey` or `x-goog-api-key` header takes precedence.
@@ -44,13 +32,14 @@ function resolveGoogleApiKey(
 ): string | undefined {
 	if (apiKey) return apiKey;
 	const merged = providerHeadersToRecord(model.headers, optionsHeaders);
-	const explicitHeaderKey = getHeaderValue(merged, "x-goog-api-key");
+	if (!merged) return undefined;
+	const headers = new Headers(merged);
+	const explicitHeaderKey = headers.get("x-goog-api-key")?.trim();
 	if (explicitHeaderKey) return explicitHeaderKey;
 	if (!isCloudflareGoogleAiStudioUrl(model.baseUrl)) return undefined;
-	const gatewayAuth = getHeaderValue(merged, "cf-aig-authorization");
+	const gatewayAuth = headers.get("cf-aig-authorization")?.trim();
 	if (!gatewayAuth) return undefined;
-	const token = gatewayAuth.replace(/^Bearer\s+/i, "").trim();
-	return token.length > 0 ? token : undefined;
+	return gatewayAuth.replace(/^Bearer\s+/i, "").trim() || undefined;
 }
 
 export const stream: StreamFunction<"google-generative-ai", GoogleOptions> = (
