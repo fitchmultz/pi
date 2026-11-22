@@ -1,5 +1,9 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
+import {
+	getOpenAICodexWebSocketDebugStats,
+	resetOpenAICodexWebSocketDebugStats,
+} from "../src/api/openai-codex-responses.ts";
 import { getModel, completeSimple as runSimple } from "../src/compat.ts";
 import type {
 	Api,
@@ -160,6 +164,7 @@ describe("Codex WebSocket to full-replay tool call status conformance", () => {
 		async () => {
 			const model = getModel("openai-codex", "gpt-6.2-sol");
 			const sessionId = `pi-e2e-ws-full-replay-${Date.now()}`;
+			resetOpenAICodexWebSocketDebugStats(sessionId);
 			const context: Context = {
 				systemPrompt: "You are a terse assistant.",
 				tools: [lookup, customLookup],
@@ -178,7 +183,7 @@ describe("Codex WebSocket to full-replay tool call status conformance", () => {
 			for (let turn = 0; turn < 4; turn++) {
 				const reply = await runSimple(model, context, {
 					apiKey: codexToken,
-					transport: "websocket",
+					transport: "websocket-cached",
 					sessionId,
 					reasoning: "medium",
 					maxTokens: 4000,
@@ -206,6 +211,9 @@ describe("Codex WebSocket to full-replay tool call status conformance", () => {
 			expect(seenTools.has("lookup")).toBe(true);
 			expect(seenTools.has("custom_lookup")).toBe(true);
 			expect(wsAnswer).toBeDefined();
+			const wsStats = getOpenAICodexWebSocketDebugStats(sessionId);
+			expect(wsStats?.deltaRequests ?? 0).toBeGreaterThanOrEqual(1);
+			expect(wsStats?.lastPreviousResponseId).toBeTruthy();
 
 			// Next turn switches to SSE with the same sessionId, forcing full input replay without previous_response_id.
 			context.messages.push({
@@ -213,13 +221,18 @@ describe("Codex WebSocket to full-replay tool call status conformance", () => {
 				content: "Multiply that sum by 3. Only the integer.",
 				timestamp: 100,
 			});
+			let fullReplayPreviousResponseId: string | undefined = "sentinel";
 			const fullReplay = await runSimple(model, context, {
 				apiKey: codexToken,
 				transport: "sse",
 				sessionId,
 				reasoning: "medium",
 				maxTokens: 4000,
+				onPayload: (payload) => {
+					fullReplayPreviousResponseId = (payload as { previous_response_id?: string }).previous_response_id;
+				},
 			});
+			expect(fullReplayPreviousResponseId).toBeUndefined();
 			expect(fullReplay.stopReason, fullReplay.errorMessage).not.toBe("error");
 			expect(removals(fullReplay)).toEqual([]);
 		},

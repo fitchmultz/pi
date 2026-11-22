@@ -26,6 +26,7 @@
 
 ### Fixed
 
+- Fixed OpenAI Responses and Codex replayed `function_call` and `custom_tool_call` items omitting `status: "completed"`, which caused Codex WebSocket-cached fallbacks to full input replay to drop reasoning items with `prefix_mismatch` and wipe the prompt cache.
 - Fixed context and compaction token estimates (`estimateMessageTokens` and `compaction.estimateTokens`) omitting `TextContent.textSignature`, where Gemini attaches thought signatures on non-tool-call turns.
 - Fixed Google Generative AI and Google Vertex long-decode `CONTINUATION` responses truncating after the first hop: Pi now resumes `FinishReason.CONTINUATION` inside its own hop loop (keeping `automaticContinuation: false`, honoring `signal`, `disableContinuation`, and cycle/repeat token protection, applying per-hop retries/timeouts, keeping Hop 1 prompt tokens for context sizing/overflow checks while pricing each hop individually and summing output/reasoning tokens and billed cost across hops, and excluding `CONTINUATION` from `isRecoverableLength()`).
 - Fixed Gemini thought-signature streaming and cross-model replay: consecutive same-type parts carrying distinct `thoughtSignature` values now open separate blocks instead of overwriting earlier signatures, signature-only parts (`part.text === undefined && part.thoughtSignature`) are preserved for replay, and switching between Gemini 4 text/coding models on the same provider/API preserves thinking blocks and thought signatures.
