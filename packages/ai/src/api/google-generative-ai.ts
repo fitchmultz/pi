@@ -23,12 +23,12 @@ export const stream: StreamFunction<"google-generative-ai", GoogleOptions> = (
 	context: TranscriptContext,
 	options?: GoogleOptions,
 ): AssistantMessageEventStream =>
-	streamGoogle("google-generative-ai", model, context, options, () => {
+	streamGoogle("google-generative-ai", model, context, options, (fetch) => {
 		const apiKey = options?.apiKey;
 		if (!apiKey) {
 			throw new Error(`No API key for provider: ${model.provider}`);
 		}
-		return createClient(model, apiKey, options?.headers, options?.identity, options?.fetch);
+		return createClient(model, apiKey, options?.headers, options?.identity, fetch);
 	});
 
 export const streamSimple: StreamFunction<"google-generative-ai", SimpleStreamOptions> = (

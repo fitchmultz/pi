@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { stream as streamGoogle } from "../src/api/google-generative-ai.ts";
 import { stream as streamVertex } from "../src/api/google-vertex.ts";
 import type { AssistantMessageEvent, FetchFunction, Model } from "../src/types.ts";
+import { isRetryableAssistantError } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 function model<T extends "google-generative-ai" | "google-vertex">(api: T): Model<T> {
@@ -177,6 +178,8 @@ describe("Google SDK streaming protocol", () => {
 	});
 
 	it.each([
+		{ id: "gemini-4-neon", tier: "flex", input: 40, output: 15, cacheRead: 30, total: 85 },
+		{ id: "gemini-4-neon", tier: "priority", input: 144, output: 54, cacheRead: 108, total: 306 },
 		{ id: "gemini-4-carbon", tier: "flex", input: 40, output: 15, cacheRead: 30, total: 85 },
 		{ id: "gemini-4-carbon", tier: "priority", input: 144, output: 54, cacheRead: 108, total: 306 },
 		{ id: "gemini-4-argon", tier: "priority", input: 144, output: 54, cacheRead: 108, total: 306 },
@@ -365,6 +368,7 @@ describe("Google SDK streaming protocol", () => {
 
 	it.each([
 		{ api: "google-generative-ai" as const, id: "gemini-4-neon", expected: ["\nuser\n"] },
+		{ api: "google-generative-ai" as const, id: "vendor-gemini-4-neon", expected: ["\nuser\n"] },
 		{ api: "google-vertex" as const, id: "gemini-4-neon", expected: ["\nuser\n"] },
 		{ api: "google-generative-ai" as const, id: "gemini-4-carbon", expected: undefined },
 		{ api: "google-generative-ai" as const, id: "gemini-4-hydrogen", expected: undefined },
@@ -408,5 +412,184 @@ describe("Google SDK streaming protocol", () => {
 		});
 		expect(onPayload).not.toHaveBeenCalled();
 		expect(fetch).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		{
+			name: "google provider via gateway",
+			target: { ...model("google-generative-ai"), provider: "google", baseUrl: "https://gateway.invalid/v1beta" },
+			expectedStore: false,
+		},
+		{
+			name: "direct Gemini API host",
+			target: {
+				...model("google-generative-ai"),
+				provider: "custom",
+				baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			},
+			expectedStore: false,
+		},
+		{
+			name: "custom non-Gemini endpoint",
+			target: { ...model("google-generative-ai"), provider: "custom", baseUrl: "https://proxy.invalid/v1" },
+			expectedStore: undefined,
+		},
+		{
+			name: "google-vertex",
+			target: { ...model("google-vertex"), provider: "google-vertex" },
+			expectedStore: undefined,
+		},
+	])("sets store=$expectedStore for $name", async ({ target, expectedStore }) => {
+		const fetch = respond([{ candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }] }]);
+		const result =
+			target.api === "google-generative-ai"
+				? await streamGoogle(target, context, { apiKey: "test-key" }).result()
+				: await streamVertex(target, context, { apiKey: "test-key" }).result();
+
+		expect(result.stopReason).toBe("stop");
+		const body = JSON.parse(String(fetch.mock.calls[0][1]?.body)) as { store?: boolean };
+		expect(body.store).toBe(expectedStore);
+	});
+
+	it.each([
+		{ id: "gemini-4-neon", compat: undefined, expected: undefined },
+		{ id: "gemini-4-carbon", compat: undefined, expected: undefined },
+		{ id: "vendor-gemini-4-argon", compat: undefined, expected: undefined },
+		{ id: "gemini-3.6-flash", compat: undefined, expected: undefined },
+		{ id: "gemini-3.8-flash", compat: undefined, expected: undefined },
+		{ id: "gemini-3.5-flash", compat: undefined, expected: 0.4 },
+		{ id: "gemini-3-flash-preview", compat: undefined, expected: 0.4 },
+		{ id: "gemini-4-neon", compat: { supportsTemperature: true }, expected: 0.4 },
+		{ id: "gemini-3.5-flash", compat: { supportsTemperature: false }, expected: undefined },
+	])("sends temperature=$expected for $id (compat=$compat)", async ({ id, compat, expected }) => {
+		const fetch = respond([{ candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }] }]);
+		const result = await streamGoogle({ ...model("google-generative-ai"), id, compat }, context, {
+			apiKey: "test-key",
+			temperature: 0.4,
+		}).result();
+
+		expect(result.stopReason).toBe("stop");
+		const body = JSON.parse(String(fetch.mock.calls[0][1]?.body)) as {
+			generationConfig?: { temperature?: number };
+		};
+		expect(body.generationConfig?.temperature).toBe(expected);
+	});
+
+	it("surfaces promptFeedback blockReason and keeps only PROHIBITED_CONTENT retryable", async () => {
+		respond([
+			{
+				promptFeedback: {
+					blockReason: "SAFETY",
+					blockReasonMessage: "Blocked by safety filter",
+				},
+			},
+		]);
+		const safetyResult = await streamGoogle(model("google-generative-ai"), context, { apiKey: "test-key" }).result();
+		expect(safetyResult.stopReason).toBe("error");
+		expect(safetyResult.rawStopReason).toBe("SAFETY");
+		expect(safetyResult.errorMessage).toBe("Prompt blocked (SAFETY): Blocked by safety filter");
+		expect(isRetryableAssistantError(safetyResult)).toBe(false);
+
+		respond([{ promptFeedback: { blockReason: "PROHIBITED_CONTENT" } }]);
+		const prohibitedResult = await streamGoogle(model("google-generative-ai"), context, {
+			apiKey: "test-key",
+		}).result();
+		expect(prohibitedResult.stopReason).toBe("error");
+		expect(prohibitedResult.rawStopReason).toBe("PROHIBITED_CONTENT");
+		expect(prohibitedResult.errorMessage).toBe("Prompt blocked: PROHIBITED_CONTENT");
+		expect(isRetryableAssistantError(prohibitedResult)).toBe(true);
+	});
+
+	it("invokes onResponse and honors Retry-After / x-should-retry headers on HTTP errors", async () => {
+		const observed: Array<{ status: number; headers: Record<string, string> }> = [];
+		const fetch = vi
+			.fn<FetchFunction>()
+			.mockResolvedValueOnce(
+				new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+					status: 429,
+					headers: { "content-type": "application/json", "retry-after-ms": "1", "x-request-id": "req-1" },
+				}),
+			)
+			.mockResolvedValueOnce(
+				new Response(
+					`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] })}\n\n`,
+					{
+						status: 200,
+						headers: { "content-type": "text/event-stream", "x-request-id": "req-2" },
+					},
+				),
+			);
+		const result = await streamGoogle(model("google-generative-ai"), context, {
+			apiKey: "test-key",
+			fetch,
+			maxRetries: 1,
+			onResponse: (response) => {
+				observed.push(response);
+			},
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(observed).toEqual([
+			expect.objectContaining({ status: 429, headers: expect.objectContaining({ "x-request-id": "req-1" }) }),
+			expect.objectContaining({ status: 200, headers: expect.objectContaining({ "x-request-id": "req-2" }) }),
+		]);
+
+		const stopFetch = vi.fn<FetchFunction>(
+			async () =>
+				new Response(JSON.stringify({ error: { message: "stop retrying" } }), {
+					status: 429,
+					headers: { "content-type": "application/json", "x-should-retry": "false" },
+				}),
+		);
+		const stopResult = await streamGoogle(model("google-generative-ai"), context, {
+			apiKey: "test-key",
+			fetch: stopFetch,
+			maxRetries: 2,
+		}).result();
+		expect(stopResult.stopReason).toBe("error");
+		expect(stopFetch).toHaveBeenCalledTimes(1);
+	});
+
+	it("bounds only response-header wait with timeoutMs and leaves active streams running", async () => {
+		const slowHeadersFetch = vi.fn<FetchFunction>(
+			(_input, init) =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+				}),
+		);
+		const timedOut = await streamGoogle(model("google-generative-ai"), context, {
+			apiKey: "test-key",
+			fetch: slowHeadersFetch,
+			timeoutMs: 25,
+		}).result();
+		expect(timedOut.stopReason).toBe("error");
+		expect(timedOut.errorMessage).toBe("Google response headers timed out after 25ms");
+		expect(isRetryableAssistantError(timedOut)).toBe(true);
+
+		const slowBodyFetch = vi.fn<FetchFunction>(
+			async () =>
+				new Response(
+					new ReadableStream({
+						start(controller) {
+							setTimeout(() => {
+								controller.enqueue(
+									new TextEncoder().encode(
+										`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "slow stream ok" }] }, finishReason: "STOP" }] })}\n\n`,
+									),
+								);
+								controller.close();
+							}, 40);
+						},
+					}),
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+		);
+		const streamed = await streamGoogle(model("google-generative-ai"), context, {
+			apiKey: "test-key",
+			fetch: slowBodyFetch,
+			timeoutMs: 20,
+		}).result();
+		expect(streamed.stopReason).toBe("stop");
+		expect(streamed.content).toEqual([{ type: "text", text: "slow stream ok" }]);
 	});
 });

@@ -3,6 +3,7 @@
  */
 
 import {
+	BlockedReason,
 	type Content,
 	FinishReason,
 	FunctionCallingConfigMode,
@@ -16,6 +17,7 @@ import {
 import { calculateCost, clampThinkingLevel } from "../models.ts";
 import type {
 	AssistantMessage,
+	FetchFunction,
 	ImageContent,
 	Model,
 	StopReason,
@@ -30,6 +32,7 @@ import type {
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { headersToRecord } from "../utils/headers.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText } from "../utils/text.ts";
@@ -57,12 +60,64 @@ export interface GoogleOptions extends StreamOptions {
 // Counter for generating unique tool call IDs
 let toolCallCounter = 0;
 
+const MAX_HEADER_TIMEOUT_MS = 0x7fffffff;
+
+function createGoogleFetch(
+	api: GoogleApiType,
+	model: Model<GoogleApiType>,
+	options: GoogleOptions | undefined,
+	onFailedHeaders: (headers: Headers | undefined) => void,
+): FetchFunction {
+	const baseFetch = options?.fetch ?? globalThis.fetch;
+	const timeoutMs = options?.timeoutMs;
+	if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs < 0)) {
+		throw new RangeError(`Invalid timeoutMs: ${String(timeoutMs)}`);
+	}
+	const providerLabel = api === "google-vertex" ? "Google Vertex" : "Google";
+	// The header timeout bounds only the wait for response headers; active streams stay governed
+	// by the HTTP client's idle bodyTimeout so long reasoning responses are never cut off mid-stream.
+	const effectiveHeaderTimeoutMs =
+		timeoutMs !== undefined && timeoutMs < MAX_HEADER_TIMEOUT_MS ? Math.floor(timeoutMs) : undefined;
+
+	return async (input, init) => {
+		onFailedHeaders(undefined);
+		let response: Response;
+		if (effectiveHeaderTimeoutMs !== undefined) {
+			const headerTimeoutController = new AbortController();
+			const existingSignal = init?.signal ?? undefined;
+			const signal = existingSignal
+				? AbortSignal.any([existingSignal, headerTimeoutController.signal])
+				: headerTimeoutController.signal;
+			const timer = setTimeout(() => headerTimeoutController.abort(), effectiveHeaderTimeoutMs);
+			timer.unref?.();
+			try {
+				response = await baseFetch(input, { ...init, signal });
+			} catch (error) {
+				if (headerTimeoutController.signal.aborted && !existingSignal?.aborted) {
+					throw new Error(`${providerLabel} response headers timed out after ${effectiveHeaderTimeoutMs}ms`);
+				}
+				throw error;
+			} finally {
+				clearTimeout(timer);
+			}
+		} else {
+			response = await baseFetch(input, init);
+		}
+
+		if (!response.ok) {
+			onFailedHeaders(new Headers(response.headers));
+		}
+		await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+		return response;
+	};
+}
+
 export function streamGoogle(
 	api: GoogleApiType,
 	model: Model<GoogleApiType>,
 	context: TranscriptContext,
 	options: GoogleOptions | undefined,
-	createClient: () => GoogleGenAI,
+	createClient: (fetch: FetchFunction) => GoogleGenAI,
 ): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
 	const normalizedContext = collapseSystemMessages(context);
@@ -87,16 +142,29 @@ export function streamGoogle(
 		};
 
 		try {
-			const client = createClient();
+			let lastFailedHeaders: Headers | undefined;
+			const googleFetch = createGoogleFetch(api, model, options, (headers) => {
+				lastFailedHeaders = headers;
+			});
+			const client = createClient(googleFetch);
 			let params = buildParams(model, normalizedContext, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
-			const googleStream = await retryGoogleRequest(() => client.models.generateContentStream(params), options);
+			const googleStream = await retryGoogleRequest(
+				() => {
+					lastFailedHeaders = undefined;
+					return client.models.generateContentStream(params);
+				},
+				options,
+				() => lastFailedHeaders,
+			);
 
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
+			let promptBlockReason: BlockedReason | undefined;
+			let promptBlockMessage: string | undefined;
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
 			const endCurrentBlock = () => {
@@ -123,6 +191,11 @@ export function streamGoogle(
 				// @google/genai documents GenerateContentResponse.responseId as an output-only field
 				// used to identify each response. Keep the first non-empty one from the stream.
 				output.responseId ||= chunk.responseId;
+				const blockReason = chunk.promptFeedback?.blockReason;
+				if (blockReason && blockReason !== BlockedReason.BLOCKED_REASON_UNSPECIFIED) {
+					promptBlockReason = blockReason;
+					promptBlockMessage = chunk.promptFeedback?.blockReasonMessage;
+				}
 				const candidate = chunk.candidates?.[0];
 				if (candidate?.content?.parts) {
 					for (const part of candidate.content.parts) {
@@ -246,6 +319,15 @@ export function streamGoogle(
 			}
 
 			if (output.stopReason === "pending") {
+				if (promptBlockReason) {
+					output.rawStopReason = promptBlockReason;
+					output.stopReason = "error";
+					throw new Error(
+						promptBlockMessage
+							? `Prompt blocked (${promptBlockReason}): ${promptBlockMessage}`
+							: `Prompt blocked: ${promptBlockReason}`,
+					);
+				}
 				throw new Error(
 					`${api === "google-vertex" ? "Google Vertex" : "Google"} stream ended without a finish reason`,
 				);
@@ -270,9 +352,10 @@ export function streamGoogle(
 	return stream;
 }
 
-// Published Flex/Priority cache-read multipliers, checked 2026-11-13:
+// Published Flex/Priority cache-read multipliers, checked 2026-11-22:
 // https://aistudio.google.com/docs/pricing
 const GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS = new Map<string, { flex: number; priority: number }>([
+	["gemini-4-neon", { flex: 0.5, priority: 1.8 }],
 	["gemini-4-carbon", { flex: 0.5, priority: 1.8 }],
 	["gemini-4-argon", { flex: 0.5, priority: 1.8 }],
 	["gemini-4-hydrogen", { flex: 0.5, priority: 1.8 }],
@@ -287,13 +370,22 @@ const GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS = new Map<string, { flex: number; pr
 	["gemini-2.5-flash-lite", { flex: 1, priority: 1.8 }],
 ]);
 
+/**
+ * Whether requests for `model` target the Gemini Developer API (rather than Vertex AI or an
+ * unrelated third-party endpoint). Without a base URL the SDK sends to generativelanguage.googleapis.com.
+ */
+function sendsToGeminiApi(model: Model<GoogleApiType>): boolean {
+	return (
+		model.api === "google-generative-ai" &&
+		(model.provider === "google" ||
+			!model.baseUrl ||
+			(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com"))
+	);
+}
+
 function applyGoogleServiceTierPricing(model: Model<GoogleApiType>, usage: Usage, serviceTier: unknown): void {
-	const sendsToGeminiApi =
-		model.provider === "google" ||
-		!model.baseUrl ||
-		(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com");
 	const cacheMultipliers = GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS.get(model.id);
-	if (!sendsToGeminiApi || !cacheMultipliers) return;
+	if (!sendsToGeminiApi(model) || !cacheMultipliers) return;
 
 	const multiplier = serviceTier === "flex" ? 0.5 : serviceTier === "priority" ? 1.8 : 1;
 	if (multiplier === 1) return;
@@ -322,10 +414,13 @@ function buildParams(
 	const config: GenerateContentConfig = {
 		// Pi owns retry/continuation; do not silently resume inside the SDK.
 		automaticContinuation: false,
+		// Opt out of Gemini Developer API request logging; @google/genai rejects `store` on Vertex.
+		...(sendsToGeminiApi(model) && { store: false }),
 		// gemini-4-neon intermittently omits its end-of-turn stop token and emits a raw "\nuser\n"
 		// turn header followed by a fabricated user turn and tool calls.
-		...(model.id.toLowerCase() === "gemini-4-neon" && { stopSequences: ["\nuser\n"] }),
-		...(options.temperature !== undefined && { temperature: options.temperature }),
+		...(/(?:^|[-/])gemini-4-neon(?:$|-)/.test(model.id.toLowerCase()) && { stopSequences: ["\nuser\n"] }),
+		...(options.temperature !== undefined &&
+			supportsGoogleTemperature(model) && { temperature: options.temperature }),
 		...(options.maxTokens !== undefined && { maxOutputTokens: options.maxTokens }),
 		...(systemInstruction && { systemInstruction: sanitizeSurrogates(systemInstruction) }),
 		...(currentTools.length > 0 && {
@@ -544,11 +639,31 @@ export function requiresToolCallId(modelId: string): boolean {
 	);
 }
 
-function getGeminiMajorVersion(modelId: string): number | undefined {
+function getGeminiVersion(modelId: string): { major: number; minor: number } | undefined {
 	// Unanchored like usesGoogleThinkingLevel: some hosts prefix the ID, e.g. randomprefix-gemini-4-argon (#12321).
-	const match = modelId.toLowerCase().match(/gemini(?:-live)?-(\d+)/);
+	const match = modelId.toLowerCase().match(/gemini(?:-live)?-(\d+)(?:\.(\d+))?/);
 	if (!match) return undefined;
-	return Number.parseInt(match[1], 10);
+	return {
+		major: Number.parseInt(match[1], 10),
+		minor: match[2] ? Number.parseInt(match[2], 10) : 0,
+	};
+}
+
+function getGeminiMajorVersion(modelId: string): number | undefined {
+	return getGeminiVersion(modelId)?.major;
+}
+
+/**
+ * Gemini 4 and Gemini 3.6+ deprecate custom sampling parameters (`temperature`, `top_p`, `top_k`).
+ * `compat.supportsTemperature` overrides the model ID detection.
+ */
+export function supportsGoogleTemperature<T extends GoogleApiType>(model: Model<T>): boolean {
+	if (model.compat?.supportsTemperature !== undefined) {
+		return model.compat.supportsTemperature;
+	}
+	const version = getGeminiVersion(model.id);
+	if (!version) return true;
+	return !(version.major >= 4 || (version.major === 3 && version.minor >= 6));
 }
 
 function supportsMultimodalFunctionResponse(modelId: string): boolean {
@@ -576,13 +691,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 	// Only the Gemini API gets the skip value (provider `google` or its host), not Gemini before 3 or Deep Research.
 	// Real calls proved this through a gateway route of `google`; no call went to the host itself.
 	// Without a base URL the client sends to the SDK default, which is that host.
-	const sendsToGeminiApiHost =
-		!model.baseUrl ||
-		(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com");
 	const geminiMajorVersion = getGeminiMajorVersion(model.id);
 	const sendsSkipValue =
-		model.api === "google-generative-ai" &&
-		(model.provider === "google" || sendsToGeminiApiHost) &&
+		sendsToGeminiApi(model) &&
 		(geminiMajorVersion === undefined || geminiMajorVersion >= 3) &&
 		!model.id.startsWith("deep-research-");
 
@@ -936,6 +1047,7 @@ export function mapStopReason(reason: FinishReason): StopReason {
 export function retryGoogleRequest<T>(
 	request: () => Promise<T>,
 	options?: Pick<StreamOptions, "maxRetries" | "maxRetryDelayMs" | "signal">,
+	getFailureHeaders?: () => Headers | undefined,
 ): Promise<T> {
 	return retryProviderRequest(
 		async () => {
@@ -943,7 +1055,7 @@ export function retryGoogleRequest<T>(
 				return await request();
 			} catch (error) {
 				if (error instanceof Error && "status" in error && !("headers" in error)) {
-					(error as { headers?: Headers }).headers = undefined;
+					(error as { headers?: Headers }).headers = getFailureHeaders?.();
 				}
 				throw error;
 			}

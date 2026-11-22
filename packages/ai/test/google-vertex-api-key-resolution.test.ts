@@ -31,6 +31,16 @@ vi.mock("@google/genai", () => {
 	}
 
 	return {
+		BlockedReason: {
+			BLOCKED_REASON_UNSPECIFIED: "BLOCKED_REASON_UNSPECIFIED",
+			SAFETY: "SAFETY",
+			OTHER: "OTHER",
+			BLOCKLIST: "BLOCKLIST",
+			PROHIBITED_CONTENT: "PROHIBITED_CONTENT",
+			IMAGE_SAFETY: "IMAGE_SAFETY",
+			MODEL_ARMOR: "MODEL_ARMOR",
+			JAILBREAK: "JAILBREAK",
+		},
 		GoogleGenAI,
 		ResourceScope: {
 			COLLECTION: "COLLECTION",
@@ -157,7 +167,7 @@ describe("google-vertex api key resolution", () => {
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
 		expect(googleGenAiMock.constructorCalls[0]?.httpOptions).toEqual({
-			fetch: globalThis.fetch,
+			fetch: expect.any(Function),
 			headers: { "User-Agent": PI_USER_AGENT },
 		});
 	});
@@ -173,7 +183,7 @@ describe("google-vertex api key resolution", () => {
 
 		expect(googleGenAiMock.constructorCalls).toHaveLength(1);
 		expect(googleGenAiMock.constructorCalls[0]?.httpOptions).toEqual({
-			fetch: globalThis.fetch,
+			fetch: expect.any(Function),
 			headers: { "User-Agent": "custom-agent" },
 		});
 	});

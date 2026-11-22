@@ -37,11 +37,11 @@ export const stream: StreamFunction<"google-vertex", GoogleVertexOptions> = (
 	context: TranscriptContext,
 	options?: GoogleVertexOptions,
 ): AssistantMessageEventStream =>
-	streamGoogle("google-vertex", model, context, options, () => {
+	streamGoogle("google-vertex", model, context, options, (fetch) => {
 		const apiKey = resolveApiKey(options);
 		// Create the client using either a Vertex API key, if provided, or ADC with project and location
 		return apiKey
-			? createClientWithApiKey(model, apiKey, options?.headers, options?.identity, options?.fetch)
+			? createClientWithApiKey(model, apiKey, options?.headers, options?.identity, fetch)
 			: createClient(
 					model,
 					resolveProject(options),
@@ -49,7 +49,7 @@ export const stream: StreamFunction<"google-vertex", GoogleVertexOptions> = (
 					options?.headers,
 					options?.env,
 					options?.identity,
-					options?.fetch,
+					fetch,
 				);
 	});
 

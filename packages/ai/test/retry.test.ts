@@ -181,11 +181,22 @@ describe("provider retry classification", () => {
 	});
 
 	it("keeps provider limit errors non-retryable", () => {
-		expect(
-			isRetryableAssistantError(
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 quota exceeded" }),
-			),
-		).toBe(false);
+		for (const errorMessage of [
+			"429 quota exceeded",
+			"402 Your prepayment credits are depleted. Add credits to continue.",
+			"429 Insufficient balance for this request",
+			"429 Insufficient AI Gateway credits",
+		]) {
+			expect(
+				isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage })),
+				errorMessage,
+			).toBe(false);
+		}
+	});
+
+	it("matches Cloudflare AI Gateway Worker 1102 resource limit errors", () => {
+		const errorMessage = "503 <!DOCTYPE html><title>Worker exceeded resource limits</title><p>Error 1102</p>";
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
 	});
 
 	it("keeps the ChatGPT subscription usage limit non-retryable", () => {

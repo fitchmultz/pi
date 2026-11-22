@@ -37,4 +37,29 @@ describe("google request retries", () => {
 		await expect(retryGoogleRequest(request, { maxRetries: 2 })).rejects.toBe(error);
 		expect(request).toHaveBeenCalledTimes(1);
 	});
+
+	it("attaches captured HTTP failure headers so Retry-After and x-should-retry are honored", async () => {
+		vi.useFakeTimers();
+		const retryAfterRequest = vi
+			.fn<() => Promise<string>>()
+			.mockRejectedValueOnce(googleApiError(429))
+			.mockResolvedValue("ok");
+		const retryAfterResult = retryGoogleRequest(
+			retryAfterRequest,
+			{ maxRetries: 1 },
+			() => new Headers({ "retry-after": "2" }),
+		);
+		await vi.advanceTimersByTimeAsync(1999);
+		expect(retryAfterRequest).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(1);
+		await expect(retryAfterResult).resolves.toBe("ok");
+		expect(retryAfterRequest).toHaveBeenCalledTimes(2);
+
+		const noRetryError = googleApiError(429);
+		const noRetryRequest = vi.fn<() => Promise<string>>().mockRejectedValue(noRetryError);
+		await expect(
+			retryGoogleRequest(noRetryRequest, { maxRetries: 2 }, () => new Headers({ "x-should-retry": "false" })),
+		).rejects.toBe(noRetryError);
+		expect(noRetryRequest).toHaveBeenCalledTimes(1);
+	});
 });
