@@ -28,7 +28,10 @@ describe("Cloudflare OpenAI positional defaults", () => {
 	// /openai passthrough re-sent the whole prompt after every system update or tool load.
 	it("match direct OpenAI for every Cloudflare /openai Responses model", () => {
 		const direct = new Map(getBuiltinModels("openai").map((model) => [model.id, positional(model)]));
-		const actual = routed.map((model) => ({ id: model.id, ...positional(normalizeCloudflareModel(model)) }));
+		const actual = routed.map((model) => ({
+			id: model.id,
+			...positional(normalizeCloudflareModel({ ...model, compat: undefined })),
+		}));
 		expect(actual).toEqual(routed.map((model) => ({ id: model.id, ...(direct.get(model.id) ?? positional({})) })));
 		expect(actual.some((model) => model.additionalTools)).toBe(true);
 		expect(actual.some((model) => model.effort)).toBe(true);

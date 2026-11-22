@@ -1,5 +1,6 @@
 import type { AnyModel } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
+import { GPT_6_NO_NONE_EFFORT_MODEL_IDS } from "./openai-responses-shared.ts";
 
 /** Workers AI direct endpoint. */
 export const CLOUDFLARE_WORKERS_AI_BASE_URL =
@@ -58,12 +59,6 @@ const OPENAI_MID_CONVO_MODEL_IDS = new Set([
 	...OPENAI_ADDITIONAL_TOOLS_MODEL_IDS,
 ]);
 
-const OPENAI_TEMPERATURE_UNSUPPORTED_MODEL_IDS = new Set([
-	"gpt-6-astra",
-	"gpt-6.1-sol",
-	"gpt-6.2-astra",
-	"gpt-6.2-sol",
-]);
 const CLOUDFLARE_AI_GATEWAY_OPENAI_URL_PATTERN =
 	/^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+\/openai\/?$/;
 const CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN =
@@ -128,7 +123,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 						}
 					: {}),
 				...(OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id) ? { supportsMidConvoEffort: true } : {}),
-				...(OPENAI_TEMPERATURE_UNSUPPORTED_MODEL_IDS.has(model.id) ? { supportsTemperature: false } : {}),
+				...(GPT_6_NO_NONE_EFFORT_MODEL_IDS.has(model.id) ? { supportsTemperature: false } : {}),
 				...model.compat,
 			},
 		};

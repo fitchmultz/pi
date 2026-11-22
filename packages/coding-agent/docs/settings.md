@@ -16,7 +16,7 @@ Add `"$schema": "https://pi.dev/schemas/settings.schema.json"` to `settings.json
 | `modelThinkingLevels` | object | None | Per-model startup thinking levels keyed by exact `provider/modelId`. |
 | `thinkingBudgets` | object | Built-in budgets | Token budgets for `minimal`, `low`, `medium`, and `high` thinking levels. |
 | `enabledModels` | `string[]` | All available models | Model patterns used for startup selection and model cycling. Uses the same format as `--models`. |
-| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. |
+| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. On OpenAI Responses models, also omits `reasoning.summary` from requests while keeping encrypted reasoning for multi-turn replay; saved sessions and exports omit summary text for turns recorded while enabled. |
 | `showCacheMissNotices` | boolean | `false` | Show significant cache overlap estimates, successful cache warming, compaction usage, and provider recovery. |
 | `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"idle"` | Keep eligible provider prompt caches warm during active runs and, with `"idle"`, for up to 30 minutes between runs. `"streaming"` warms only during active runs. Global setting only. |
 
@@ -190,7 +190,7 @@ In an open group, a tool card, custom message, custom entry, compaction summary 
 
 Pi skips blank rows, so a card that is not expanded has no blank row above it. Pi shortens each row to the terminal width and shows `[image]` in place of an inline image. A shell command card shows the command and its status with the last output line.
 
-Enabling on collapses existing groups and cards; enabling hybrid opens groups but keeps cards compact. Disabling it restores normal presentation without expanding everything. Visible thinking separates groups; thinking hidden by `hideThinkingBlock` takes no rows and does not. A thinking block collapsed with a click keeps its label, and a click on the label expands the block again. Input dialogs, the working indicator, warnings, and errors stay outside groups. Presentation changes do not alter model context or saved results; `/compact` remains the context-compaction command.
+Enabling on collapses existing groups and cards; enabling hybrid opens groups but keeps cards compact. Disabling it restores normal presentation without expanding everything. Visible thinking separates groups; thinking hidden by `hideThinkingBlock` takes no rows and does not. A thinking block collapsed with a click keeps its label, and a click on the label expands the block again. Input dialogs, the working indicator, warnings, and errors stay outside groups. Compact-view changes do not alter model context or saved results; `hideThinkingBlock` additionally omits `reasoning.summary` on OpenAI Responses requests (while keeping encrypted reasoning intact). `/compact` remains the context-compaction command.
 
 ## Network and retries
 

@@ -6,7 +6,6 @@ import {
 	stream as streamOpenAIResponses,
 	streamSimple as streamOpenAIResponsesSimple,
 } from "../src/api/openai-responses.ts";
-import { convertResponsesMessages, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS } from "../src/api/openai-responses-shared.ts";
 import { getModel, normalizeContext } from "../src/compat.ts";
 import type { AssistantMessage, Model } from "../src/types.ts";
 
@@ -743,7 +742,7 @@ describe("openai-responses max_output_tokens compat", () => {
 		expect(azurePayload?.reasoning).toEqual({ effort: "medium" });
 	});
 
-	it("preserves Responses tool call IDs when replaying into cloudflare-ai-gateway", () => {
+	it("preserves Responses tool call IDs when replaying foreign OpenAI turns into cloudflare-ai-gateway", async () => {
 		const model = getModel("cloudflare-ai-gateway", "gpt-6.2-sol");
 		const assistant: AssistantMessage = {
 			role: "assistant",
@@ -756,7 +755,7 @@ describe("openai-responses max_output_tokens compat", () => {
 				},
 			],
 			api: "openai-responses",
-			provider: "cloudflare-ai-gateway",
+			provider: "openai",
 			model: "gpt-6.2-sol",
 			usage: {
 				input: 0,
@@ -769,7 +768,9 @@ describe("openai-responses max_output_tokens compat", () => {
 			stopReason: "toolUse",
 			timestamp: 2,
 		};
-		const input = convertResponsesMessages(
+		let capturedInput: Array<{ type?: string; id?: string; call_id?: string; status?: string }> | undefined;
+
+		await streamOpenAIResponses(
 			model,
 			normalizeContext({
 				systemPrompt: "sys",
@@ -786,12 +787,27 @@ describe("openai-responses max_output_tokens compat", () => {
 					},
 				],
 			}),
-			OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
-		);
-		expect(input.find((item) => item.type === "function_call")).toMatchObject({
-			id: "fc_item_abc",
+			{
+				apiKey: "cf-test-key",
+				onPayload: (payload) => {
+					capturedInput = (
+						payload as { input?: Array<{ type?: string; id?: string; call_id?: string; status?: string }> }
+					).input;
+					throw new Error("captured");
+				},
+			},
+		).result();
+
+		const functionCall = capturedInput?.find((item) => item.type === "function_call");
+		const functionOutput = capturedInput?.find((item) => item.type === "function_call_output");
+		expect(functionCall).toMatchObject({
 			call_id: "call_123",
 			status: "completed",
+		});
+		expect(functionCall?.id).toMatch(/^fc_[a-zA-Z0-9_-]+$/);
+		expect(functionCall?.id).not.toBe("fc_item_abc");
+		expect(functionOutput).toMatchObject({
+			call_id: "call_123",
 		});
 	});
 });

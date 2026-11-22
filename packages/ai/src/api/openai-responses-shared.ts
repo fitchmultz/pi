@@ -64,6 +64,17 @@ export const OPENAI_RESPONSES_TOOL_CALL_PROVIDERS: ReadonlySet<string> = new Set
 	"azure",
 ]);
 
+/**
+ * GPT-6 models that reject `reasoning.effort: "none"`, so `off` thinking is unavailable and
+ * `temperature` is unsupported on OpenAI Responses endpoints.
+ */
+export const GPT_6_NO_NONE_EFFORT_MODEL_IDS: ReadonlySet<string> = new Set([
+	"gpt-6-astra",
+	"gpt-6.1-sol",
+	"gpt-6.2-astra",
+	"gpt-6.2-sol",
+]);
+
 function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): string {
 	const payload: TextSignatureV1 = { v: 1, id };
 	if (phase) payload.phase = phase;

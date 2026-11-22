@@ -172,6 +172,7 @@ Also applies to `azure-openai-responses` and `openai-codex-responses`.
 | `supportsExplicitPromptCacheMode` | boolean | `false` | Whether the model accepts prompt_cache_options. Older OpenAI models reject the parameter. |
 | `supportsMidConvoEffort` | boolean | `false` | Whether thinking level changes are sent as configuration_update input items instead of changing reasoning.effort, so a change keeps the prompt cache. Used by the openai-responses and openai-codex-responses APIs, and ignored with Sign in with ChatGPT on the openai provider. |
 | `supportsMaxOutputTokens` | boolean | `true` | Whether the provider accepts max_output_tokens. Some Codex-protocol gateways reject it. |
+| `supportsTemperature` | boolean | `true` | Whether the model accepts the temperature parameter. Reasoning models such as GPT-6.2 reject it. |
 
 ### `anthropic-messages`
 

@@ -1,5 +1,6 @@
 // OpenAI GPT models: facts that hold on every host that serves them.
 
+import { GPT_6_NO_NONE_EFFORT_MODEL_IDS } from "../../src/api/openai-responses-shared.ts";
 import type { Api, Model, ModelCost } from "../../src/types.ts";
 import { type ChatModel, mergeCompat, mergeThinking } from "../define.ts";
 import { roundCost } from "../sources/models-dev.ts";
@@ -107,9 +108,6 @@ const GPT_6_MODEL_IDS = new Set([
 	"gpt-6.2-astra",
 	"gpt-6.2-sol",
 ]);
-// GPT-6 models that reject reasoning.effort "none", so `off` is unavailable. For GPT-6.2 see
-// https://developers.openai.com/api/docs/models/gpt-6.2-sol
-const GPT_6_NO_NONE_EFFORT_MODEL_IDS = new Set(["gpt-6-astra", "gpt-6.1-sol", "gpt-6.2-astra", "gpt-6.2-sol"]);
 
 /** Thinking levels of GPT models on any host. */
 export function applyOpenAiFamilyRules(model: ChatModel): void {
