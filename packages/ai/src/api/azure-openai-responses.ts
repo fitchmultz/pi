@@ -236,7 +236,7 @@ function buildParams(
 	const cacheRetention = resolveOpenAICacheRetention(options?.cacheRetention, options?.env);
 	const sendPromptCacheKey = cacheRetention !== "none" && model.compat?.promptCacheKeyMode !== "disabled";
 	const cacheCompat = {
-		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
+		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? false,
 		supportsExplicitPromptCacheMode: model.compat?.supportsExplicitPromptCacheMode ?? false,
 	};
 	const params: ResponseCreateParamsStreaming = {

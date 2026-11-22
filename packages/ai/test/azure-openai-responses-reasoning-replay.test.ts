@@ -217,17 +217,24 @@ describe("Azure OpenAI Responses parity with OpenAI Responses", () => {
 
 	it("honors cacheRetention and session affinity headers", async () => {
 		const baseModel = getModel("azure", "gpt-6.2-sol");
-		const model: Model<"azure-openai-responses"> = {
+		const optInModel: Model<"azure-openai-responses"> = {
 			...baseModel,
-			compat: { ...baseModel.compat, supportsExplicitPromptCacheMode: true },
+			compat: {
+				...baseModel.compat,
+				supportsLongCacheRetention: true,
+				supportsExplicitPromptCacheMode: true,
+			},
 		};
 		const env = { AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1" };
-		const capture = async (cacheRetention: "none" | "short" | "long") => {
+		const capture = async (
+			targetModel: Model<"azure-openai-responses">,
+			cacheRetention: "none" | "short" | "long",
+		) => {
 			let payload: Record<string, unknown> | undefined;
 			let sessionIdHeader: string | null = null;
 			let clientRequestIdHeader: string | null = null;
 			await streamAzureOpenAIResponses(
-				model,
+				targetModel,
 				normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }] }),
 				{
 					apiKey: "azure-test-key",
@@ -248,14 +255,23 @@ describe("Azure OpenAI Responses parity with OpenAI Responses", () => {
 			return { payload, sessionIdHeader, clientRequestIdHeader };
 		};
 
-		const none = await capture("none");
+		// Unmodified Azure catalog models keep long retention opt-in so GPT-5.6+/GPT-6 do not emit legacy 24h by default.
+		const defaultLong = await capture(baseModel, "long");
+		expect(defaultLong.payload?.prompt_cache_key).toBe("sess-azure-1");
+		expect(defaultLong.payload?.prompt_cache_retention).toBeUndefined();
+		expect(defaultLong.payload?.prompt_cache_options).toBeUndefined();
+		expect(defaultLong.sessionIdHeader).toBe("sess-azure-1");
+		expect(defaultLong.clientRequestIdHeader).toBe("sess-azure-1");
+
+		const none = await capture(optInModel, "none");
 		expect(none.payload?.prompt_cache_key).toBeUndefined();
 		expect(none.payload?.prompt_cache_options).toEqual({ mode: "explicit" });
 		expect(none.sessionIdHeader).toBeNull();
 		expect(none.clientRequestIdHeader).toBeNull();
 
-		const long = await capture("long");
+		const long = await capture(optInModel, "long");
 		expect(long.payload?.prompt_cache_key).toBe("sess-azure-1");
+		expect(long.payload?.prompt_cache_retention).toBeUndefined();
 		expect(long.payload?.prompt_cache_options).toEqual({ ttl: "30m" });
 		expect(long.sessionIdHeader).toBe("sess-azure-1");
 		expect(long.clientRequestIdHeader).toBe("sess-azure-1");
