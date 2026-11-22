@@ -12,7 +12,7 @@
 
 ### Added
 
-- Added a `20 min` (`1200000` ms) HTTP idle timeout choice to `HTTP_IDLE_TIMEOUT_CHOICES` and `/settings` for long Gemini 4 reasoning turns, and exposed `compat.supportsTemperature` for `google-generative-ai` and `google-vertex` models in `models.json`.
+- Added a `20 min` (`1200000` ms) HTTP idle timeout choice to `HTTP_IDLE_TIMEOUT_CHOICES` and `/settings` for long Gemini 4 reasoning turns, and exposed `compat.supportsTemperature` and `compat.supportsMidConvoSystemMessages` for `google-generative-ai` and `google-vertex` models in `models.json`.
 - Added `compat.supportsStrictMode` for `google-generative-ai` and `google-vertex` models in `models.json`, so Gemini 3+ models served under IDs without the version can use strict tools ([#12321](https://github.com/earendil-works/pi/issues/12321))
 - Codemode results now link to an omitted-only output file as well as the full output, so recovering truncated text does not repeat the visible head and tail. Native guidance also directs agents to emit selected results as plain text and reuse instructions still in context.
 - Added `show()` to `codemode` scripts: `await show(tools.read({ path }), tools.grep({ pattern }))` prints each result under a label of its call and prints a failed call's error in its place, so one missing path no longer ends a script of look-ups before the others run. See [Show several results](docs/codemode.md#show-several-results).

@@ -68,7 +68,7 @@ export function estimateMessageTokens(message: Message): number {
 
 	for (const block of message.content) {
 		if (block.type === "text") {
-			chars += block.text.length;
+			chars += block.text.length + (block.textSignature?.length ?? 0);
 		} else if (block.type === "thinking") {
 			chars += block.thinking.length + (block.thinkingSignature?.length ?? 0);
 		} else {

@@ -14,6 +14,7 @@ import {
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { streamSimple as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
+import { streamSimple as googleStream } from "@earendil-works/pi-ai/api/google-generative-ai";
 import { streamSimple as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { streamSimple as completionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as responsesStream } from "@earendil-works/pi-ai/api/openai-responses";
@@ -883,3 +884,73 @@ it.each([
 		}
 	},
 );
+
+it("keeps Gemini 4 systemInstruction and contents prefix stable across mid-session system updates", async () => {
+	const model = getBuiltinModel("google", "gemini-4-neon");
+	interface GoogleCapture {
+		contents?: unknown[];
+		config?: { systemInstruction?: string; tools?: unknown[] };
+	}
+	const captures: GoogleCapture[] = [];
+	const capture = async (context: TranscriptContext) => {
+		const result = await googleStream(model, context, {
+			apiKey: "offline-key",
+			onPayload(value: unknown) {
+				captures.push(JSON.parse(JSON.stringify(value)) as GoogleCapture);
+				throw new Error("offline payload captured");
+			},
+		}).result();
+		expect(result.errorMessage).toContain("offline payload captured");
+	};
+	let currentCwd = "/tmp/initial-cwd";
+	const h = await createHarness({
+		initialActiveToolNames: ["tool_search"],
+		extensionFactories: [
+			createToolSearchExtension(),
+			(pi) => {
+				pi.on("before_agent_start", (event) => {
+					event.systemPromptOptions.cwd = currentCwd;
+				});
+			},
+		],
+	});
+	try {
+		await h.session.bindExtensions({});
+		h.setResponses([
+			async (context) => {
+				await capture(context);
+				return fauxAssistantMessage("turn 1 done");
+			},
+			async (context) => {
+				await capture(context);
+				return fauxAssistantMessage("turn 2 done");
+			},
+			async (context) => {
+				await capture(context);
+				return fauxAssistantMessage("turn 3 done");
+			},
+		]);
+		await h.session.prompt("First turn");
+		// Changing cwd mid-session emits a system prompt section diff (e.g. change_dir).
+		currentCwd = "/tmp/updated-cwd";
+		await h.session.prompt("Second turn after system update");
+		await h.session.prompt("Third turn steady state");
+
+		expect(captures).toHaveLength(3);
+		const [first, second, third] = captures;
+		expect(second.config?.systemInstruction).toBe(first.config?.systemInstruction);
+		expect(third.config?.systemInstruction).toBe(first.config?.systemInstruction);
+		expect(JSON.stringify(second.config?.tools)).toBe(JSON.stringify(first.config?.tools));
+		expect(JSON.stringify(third.config?.tools)).toBe(JSON.stringify(first.config?.tools));
+		expect(JSON.stringify(second.contents?.slice(0, first.contents?.length ?? 0))).toBe(
+			JSON.stringify(first.contents),
+		);
+		expect(JSON.stringify(third.contents?.slice(0, second.contents?.length ?? 0))).toBe(
+			JSON.stringify(second.contents),
+		);
+		expect(JSON.stringify(second.contents?.at(-1))).toContain("<system_update>");
+		expect(JSON.stringify(second.contents?.at(-1))).toContain("/tmp/updated-cwd");
+	} finally {
+		h.cleanup();
+	}
+});

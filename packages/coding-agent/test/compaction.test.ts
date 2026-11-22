@@ -10,6 +10,7 @@ import {
 	compact,
 	DEFAULT_COMPACTION_SETTINGS,
 	estimateContextTokens,
+	estimateTokens,
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
@@ -593,6 +594,16 @@ describe("Large session fixture", () => {
 
 		expect(loaded.messages.length).toBeGreaterThan(100);
 		expect(loaded.model).not.toBeNull();
+	});
+
+	it("includes assistant textSignature characters in compaction token estimates", () => {
+		const unsigned = createAssistantMessage("ok");
+		const signed: AssistantMessage = {
+			...unsigned,
+			content: [{ type: "text", text: "ok", textSignature: "x".repeat(4_000) }],
+		};
+		expect(estimateTokens(unsigned)).toBe(1);
+		expect(estimateTokens(signed)).toBe(1_001);
 	});
 });
 

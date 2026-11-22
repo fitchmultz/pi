@@ -70,7 +70,7 @@ describe.each([
 	{ name: "without a target", target: undefined },
 	{ name: "with the same target", target: model },
 ])("context token estimation $name", ({ target }) => {
-	it("counts encrypted thinking and tool replay signatures without reported usage", () => {
+	it("counts encrypted thinking, text, and tool replay signatures without reported usage", () => {
 		const assistant = createAssistant(1, 0);
 		assistant.content = [
 			{ type: "thinking", thinking: "", thinkingSignature: "x".repeat(40_000) },
@@ -92,6 +92,10 @@ describe.each([
 				target,
 			).tokens,
 		).toBe(12_574);
+
+		const signedText = createAssistant(3, 0);
+		signedText.content = [{ type: "text", text: "ok", textSignature: "x".repeat(3_500) }];
+		expect(estimateContextTokens([signedText], target).tokens).toBe(1_001);
 	});
 
 	// Regression for #10497: large new inputs need more room than chars/4 allows.
