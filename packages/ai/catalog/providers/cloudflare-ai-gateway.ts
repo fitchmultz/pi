@@ -6,7 +6,7 @@ import {
 	normalizeCloudflareModel,
 } from "../../src/api/cloudflare.ts";
 import type { Model } from "../../src/types.ts";
-import { type ChatModel, defineProvider, mergeCompat, modelsDevModels } from "../define.ts";
+import { type ChatModel, defineProvider, mergeCompat, modelsDevModels, withInputLimits } from "../define.ts";
 import { enableOpenAiGrammarTools, OPENAI_STANDARD_COSTS, withOpenAiLongContextPricing } from "../families/openai.ts";
 import { OPENAI_DECISIONS_MODELS } from "./openai.ts";
 
@@ -106,6 +106,7 @@ export default defineProvider({
 	finalize: (model) => {
 		if (model.api === "openai-responses") {
 			mergeCompat(model as Model<"openai-responses">, { supportsStrictMode: true });
+			withInputLimits(model, { maxRequestBytes: 512 * 1024 * 1024, images: { maxPerRequest: 1500 } });
 		}
 		enableOpenAiGrammarTools(model);
 		Object.assign(model, normalizeCloudflareModel(model));

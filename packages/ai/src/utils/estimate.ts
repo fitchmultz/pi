@@ -57,10 +57,15 @@ export function estimateMessageTokens(message: Message): number {
 	let chars = 0;
 
 	if (message.role === "system") {
+		const summaryTokens =
+			message.providerSummary?.outputTokens && message.providerSummary.outputTokens > 0
+				? message.providerSummary.outputTokens
+				: 0;
 		return (
 			estimateTextTokens(getSystemMessageText(message)) +
 			estimateToolsTokens(message.toolsAdded) +
-			estimateToolsTokens(message.toolsRemoved)
+			estimateToolsTokens(message.toolsRemoved) +
+			summaryTokens
 		);
 	}
 	if (message.role === "user") return estimateTextAndImageContentTokens(message.content);

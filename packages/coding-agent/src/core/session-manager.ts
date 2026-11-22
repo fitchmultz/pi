@@ -115,6 +115,8 @@ export interface CompactionProviderSummary {
 	model: string;
 	/** The signed block exactly as the provider returned it. Absent when none was made. */
 	block?: JsonObject;
+	/** Optional opaque account/credential identity set by a routing provider. */
+	cacheIdentity?: string;
 	/** Why there is no block. Absent when `block` is present. */
 	reason?: string;
 	/**
@@ -816,9 +818,23 @@ function projectSummaryBlockEntries(
 	edits: Map<string, ContextEditEntry>,
 ): ProjectedSessionEntry[] {
 	const { systemMessage, providerSummary } = compaction;
-	const { provider, api, model, block, toolsAdded, toolsRemoved } = providerSummary;
+	const { provider, api, model, block, cacheIdentity, usage, toolsAdded, toolsRemoved } = providerSummary;
 	const timestamp = new Date(compaction.timestamp).getTime();
-	const lead: AgentMessage[] = [{ ...systemMessage, providerSummary: { provider, api, model, block, timestamp } }];
+	const outputTokens = usage?.output && usage.output > 0 ? usage.output : undefined;
+	const lead: AgentMessage[] = [
+		{
+			...systemMessage,
+			providerSummary: {
+				provider,
+				api,
+				model,
+				block,
+				timestamp,
+				...(cacheIdentity !== undefined ? { cacheIdentity } : {}),
+				...(outputTokens !== undefined ? { outputTokens } : {}),
+			},
+		},
+	];
 	if (toolsAdded || toolsRemoved) {
 		lead.push({
 			role: "system",

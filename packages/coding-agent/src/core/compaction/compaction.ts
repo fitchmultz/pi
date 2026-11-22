@@ -248,7 +248,12 @@ export function estimateProjectedContextTokens(
 	}
 
 	const currentSystem = getCurrentSystemMessage(projection.messages);
-	let tokens = currentSystem ? estimateTokens(currentSystem) : 0;
+	const lead = projection.messages[0];
+	const summaryTokens =
+		lead?.role === "system" && lead.providerSummary?.outputTokens && lead.providerSummary.outputTokens > 0
+			? lead.providerSummary.outputTokens
+			: 0;
+	let tokens = (currentSystem ? estimateTokens(currentSystem) : 0) + summaryTokens;
 	for (const message of projection.messages) {
 		if (message.role !== "system") tokens += estimateTokens(message);
 	}
@@ -302,7 +307,11 @@ export function estimateTokens(message: AgentMessage): number {
 				}
 			}
 			if (system.toolsAdded) chars += JSON.stringify(system.toolsAdded).length;
-			return Math.ceil(chars / 4);
+			const summaryTokens =
+				system.providerSummary?.outputTokens && system.providerSummary.outputTokens > 0
+					? system.providerSummary.outputTokens
+					: 0;
+			return Math.ceil(chars / 4) + summaryTokens;
 		}
 		case "user": {
 			chars = estimateTextAndImageContentChars(

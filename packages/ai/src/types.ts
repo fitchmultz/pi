@@ -591,6 +591,16 @@ export interface ProviderSummary {
 	/** The block exactly as the provider returned it. Opaque: never edit it. */
 	block: JsonObject;
 	/**
+	 * Optional opaque account/credential identity set by a routing provider (such as an account
+	 * rotator) so replay only sends the block to the account that wrote it.
+	 */
+	cacheIdentity?: string;
+	/**
+	 * Output tokens reported when the provider wrote the block, used by token estimators before
+	 * the first post-compaction assistant reply reports real usage.
+	 */
+	outputTokens?: number;
+	/**
 	 * On a leading system message: when the block replaced the conversation before the kept
 	 * messages, as a Unix timestamp in milliseconds. Usage that a kept reply reported before
 	 * that time describes the replaced conversation, not this one.

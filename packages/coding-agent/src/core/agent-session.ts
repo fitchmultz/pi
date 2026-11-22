@@ -449,11 +449,18 @@ type BackgroundToolRunState =
 	  };
 
 /**
- * Time limit of a provider summary block request. The slowest measured request took 12.9 s (a
- * 326k-token conversation whose cache had expired); past the limit the compaction is stored
- * without a block.
+ * Time limit of an Anthropic 1-line provider summary block request. The slowest measured request
+ * took 12.9 s (a 326k-token conversation whose cache had expired); past the limit the compaction
+ * is stored without a block.
  */
 const PROVIDER_SUMMARY_TIMEOUT_MS = 30_000;
+
+/**
+ * Time limit of an OpenAI Responses `compaction_trigger` request. OpenAI ignores custom
+ * instructions and runs full-context server-side compaction (requiring >=20k output headroom),
+ * which can take significantly longer than Anthropic's 1-line summary at high context.
+ */
+const OPENAI_PROVIDER_SUMMARY_TIMEOUT_MS = 180_000;
 
 /** The usage to store on a compaction entry: the summary's plus the block request's. */
 function withProviderSummaryUsage(
@@ -4057,7 +4064,13 @@ export class AgentSession {
 		}
 
 		const abortController = new AbortController();
-		const timeout = AbortSignal.timeout(PROVIDER_SUMMARY_TIMEOUT_MS);
+		const timeoutMs =
+			model.api === "openai-responses" ||
+			model.api === "openai-codex-responses" ||
+			model.api === "azure-openai-responses"
+				? OPENAI_PROVIDER_SUMMARY_TIMEOUT_MS
+				: PROVIDER_SUMMARY_TIMEOUT_MS;
+		const timeout = AbortSignal.timeout(timeoutMs);
 		const signal = AbortSignal.any([abortController.signal, timeout]);
 		this._providerSummaryAbortController = abortController;
 		const started = Date.now();
@@ -4076,6 +4089,7 @@ export class AgentSession {
 				onResponse: agent.onResponse,
 				transport: agent.transport,
 				thinkingBudgets: agent.thinkingBudgets,
+				maxRetries: 0,
 				maxRetryDelayMs: agent.maxRetryDelayMs,
 				signal,
 				disableContinuation: true,

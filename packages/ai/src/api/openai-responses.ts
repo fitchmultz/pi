@@ -192,7 +192,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 
 			await processResponsesStream(openaiStream, output, stream, model, {
 				onProviderStreamEvent: options?.onProviderStreamEvent,
-				serviceTier: options?.serviceTier,
+				serviceTier: params.service_tier,
 				// Ultrafast pricing requires terminal confirmation, not just a requested tier.
 				resolveServiceTier: (returned, requested) =>
 					returned ?? (requested === "ultrafast" ? undefined : requested),
