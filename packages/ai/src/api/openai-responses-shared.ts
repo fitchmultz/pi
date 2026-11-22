@@ -56,6 +56,14 @@ import { transformMessages } from "./transform-messages.ts";
 // Utilities
 // =============================================================================
 
+export const OPENAI_RESPONSES_TOOL_CALL_PROVIDERS: ReadonlySet<string> = new Set([
+	"openai",
+	"openai-codex",
+	"opencode",
+	"cloudflare-ai-gateway",
+	"azure",
+]);
+
 function encodeTextSignatureV1(id: string, phase?: TextSignatureV1["phase"]): string {
 	const payload: TextSignatureV1 = { v: 1, id };
 	if (phase) payload.phase = phase;

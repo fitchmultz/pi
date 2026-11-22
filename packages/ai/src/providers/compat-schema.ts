@@ -445,6 +445,10 @@ const OpenAIResponsesCompatProperties = {
 			default: true,
 		}),
 	),
+	supportsTemperature: optionalCompatBoolean({
+		description: "Whether the model accepts the temperature parameter. Reasoning models such as GPT-6.2 reject it.",
+		default: true,
+	}),
 };
 
 export const OpenAIResponsesCompatSchema = openObject(OpenAIResponsesCompatProperties, {

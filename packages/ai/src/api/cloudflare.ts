@@ -58,6 +58,17 @@ const OPENAI_MID_CONVO_MODEL_IDS = new Set([
 	...OPENAI_ADDITIONAL_TOOLS_MODEL_IDS,
 ]);
 
+const OPENAI_TEMPERATURE_UNSUPPORTED_MODEL_IDS = new Set([
+	"gpt-6-astra",
+	"gpt-6.1-sol",
+	"gpt-6.2-astra",
+	"gpt-6.2-sol",
+]);
+const CLOUDFLARE_AI_GATEWAY_OPENAI_URL_PATTERN =
+	/^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+\/openai\/?$/;
+const CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN =
+	/^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+\/anthropic\/?$/;
+
 /**
  * Claude passthrough parity with `catalog/families/anthropic.ts`. Kept in runtime code for the same
  * reason as the OpenAI lists above: published `pi.dev` catalog overlays can replace generated entries.
@@ -101,7 +112,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 	if (!isModelType(model, "chat") || model.provider !== "cloudflare-ai-gateway") return model;
 	if (
 		model.api === "openai-responses" &&
-		model.baseUrl === CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL &&
+		CLOUDFLARE_AI_GATEWAY_OPENAI_URL_PATTERN.test(model.baseUrl) &&
 		OPENAI_MID_CONVO_MODEL_IDS.has(model.id)
 	) {
 		const supportsToolFeatures = OPENAI_ADDITIONAL_TOOLS_MODEL_IDS.has(model.id);
@@ -117,6 +128,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 						}
 					: {}),
 				...(OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id) ? { supportsMidConvoEffort: true } : {}),
+				...(OPENAI_TEMPERATURE_UNSUPPORTED_MODEL_IDS.has(model.id) ? { supportsTemperature: false } : {}),
 				...model.compat,
 			},
 		};
@@ -124,7 +136,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 	if (
 		model.api !== "anthropic-messages" ||
 		!supportsCloudflareClaudeMidConvoSystemMessages(model.id) ||
-		model.baseUrl !== CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL
+		!CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN.test(model.baseUrl)
 	) {
 		return model;
 	}

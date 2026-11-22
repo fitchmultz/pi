@@ -15,6 +15,7 @@ function positional(model: { compat?: unknown }) {
 		toolSearch: compat?.supportsToolSearch === true,
 		explicitPromptCacheMode: compat?.supportsExplicitPromptCacheMode === true,
 		effort: compat?.supportsMidConvoEffort === true,
+		temperature: compat?.supportsTemperature ?? true,
 	};
 }
 
@@ -43,6 +44,20 @@ describe("Cloudflare OpenAI positional defaults", () => {
 			supportsToolSearch: true,
 			supportsExplicitPromptCacheMode: true,
 			supportsMidConvoEffort: true,
+			supportsTemperature: false,
+		});
+		const concrete = normalizeCloudflareModel({
+			...astra,
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/acc123/workos/openai",
+			compat: undefined,
+		});
+		expect(concrete.compat).toEqual({
+			supportsMidConvoSystemMessages: true,
+			supportsAdditionalTools: true,
+			supportsToolSearch: true,
+			supportsExplicitPromptCacheMode: true,
+			supportsMidConvoEffort: true,
+			supportsTemperature: false,
 		});
 		const custom = { ...astra, baseUrl: "https://proxy.invalid/openai", compat: { supportsStrictMode: true } };
 		expect(normalizeCloudflareModel(custom)).toBe(custom);

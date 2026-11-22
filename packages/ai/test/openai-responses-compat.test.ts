@@ -1,8 +1,14 @@
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { stream as streamOpenAIResponses } from "../src/api/openai-responses.ts";
+import { streamSimple as streamAzureOpenAIResponsesSimple } from "../src/api/azure-openai-responses.ts";
+import { streamSimple as streamOpenAICodexResponsesSimple } from "../src/api/openai-codex-responses.ts";
+import {
+	stream as streamOpenAIResponses,
+	streamSimple as streamOpenAIResponsesSimple,
+} from "../src/api/openai-responses.ts";
+import { convertResponsesMessages, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS } from "../src/api/openai-responses-shared.ts";
 import { getModel, normalizeContext } from "../src/compat.ts";
-import type { Model } from "../src/types.ts";
+import type { AssistantMessage, Model } from "../src/types.ts";
 
 type CapturedHeaders = Headers | string[][] | Record<string, string | readonly string[]> | undefined;
 
@@ -641,5 +647,151 @@ describe("openai-responses max_output_tokens compat", () => {
 		}
 
 		expect(capturedPayload?.max_output_tokens).toBeUndefined();
+	});
+
+	it("omits temperature when supportsTemperature is false across Responses APIs", async () => {
+		const codexToken = `h.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct_test" } })).toString("base64url")}.s`;
+		let openaiPayload: { temperature?: number } | undefined;
+		let codexPayload: { temperature?: number } | undefined;
+		let azurePayload: { temperature?: number } | undefined;
+
+		const ctx = normalizeContext({
+			systemPrompt: "sys",
+			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+		});
+
+		await streamOpenAIResponsesSimple(getModel("openai", "gpt-6.2-sol"), ctx, {
+			apiKey: "sk-test-key",
+			reasoning: "medium",
+			temperature: 0.4,
+			onPayload: (payload) => {
+				openaiPayload = payload as { temperature?: number };
+				throw new Error("captured");
+			},
+		}).result();
+
+		await streamOpenAICodexResponsesSimple(getModel("openai-codex", "gpt-6.2-sol"), ctx, {
+			apiKey: codexToken,
+			reasoning: "medium",
+			temperature: 0.4,
+			onPayload: (payload) => {
+				codexPayload = payload as { temperature?: number };
+				throw new Error("captured");
+			},
+		}).result();
+
+		await streamAzureOpenAIResponsesSimple(getModel("azure", "gpt-6.2-sol"), ctx, {
+			apiKey: "azure-test-key",
+			reasoning: "medium",
+			temperature: 0.4,
+			env: { AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1" },
+			onPayload: (payload) => {
+				azurePayload = payload as { temperature?: number };
+				throw new Error("captured");
+			},
+		}).result();
+
+		expect(openaiPayload?.temperature).toBeUndefined();
+		expect(codexPayload?.temperature).toBeUndefined();
+		expect(azurePayload?.temperature).toBeUndefined();
+	});
+
+	it("omits reasoning.summary when reasoningSummary is null across Responses APIs", async () => {
+		const codexToken = `h.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct_test" } })).toString("base64url")}.s`;
+		let openaiPayload: { reasoning?: { effort?: string; summary?: string } } | undefined;
+		let codexPayload: { reasoning?: { effort?: string; summary?: string } } | undefined;
+		let azurePayload: { reasoning?: { effort?: string; summary?: string } } | undefined;
+
+		const ctx = normalizeContext({
+			systemPrompt: "sys",
+			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+		});
+
+		await streamOpenAIResponsesSimple(getModel("openai", "gpt-6.2-sol"), ctx, {
+			apiKey: "sk-test-key",
+			reasoning: "medium",
+			reasoningSummary: null,
+			onPayload: (payload) => {
+				openaiPayload = payload as { reasoning?: { effort?: string; summary?: string } };
+				throw new Error("captured");
+			},
+		}).result();
+
+		await streamOpenAICodexResponsesSimple(getModel("openai-codex", "gpt-6.2-sol"), ctx, {
+			apiKey: codexToken,
+			reasoning: "medium",
+			reasoningSummary: null,
+			onPayload: (payload) => {
+				codexPayload = payload as { reasoning?: { effort?: string; summary?: string } };
+				throw new Error("captured");
+			},
+		}).result();
+
+		await streamAzureOpenAIResponsesSimple(getModel("azure", "gpt-6.2-sol"), ctx, {
+			apiKey: "azure-test-key",
+			reasoning: "medium",
+			reasoningSummary: null,
+			env: { AZURE_OPENAI_BASE_URL: "https://example.openai.azure.com/openai/v1" },
+			onPayload: (payload) => {
+				azurePayload = payload as { reasoning?: { effort?: string; summary?: string } };
+				throw new Error("captured");
+			},
+		}).result();
+
+		expect(openaiPayload?.reasoning).toEqual({ effort: "medium" });
+		expect(codexPayload?.reasoning).toEqual({ effort: "medium" });
+		expect(azurePayload?.reasoning).toEqual({ effort: "medium" });
+	});
+
+	it("preserves Responses tool call IDs when replaying into cloudflare-ai-gateway", () => {
+		const model = getModel("cloudflare-ai-gateway", "gpt-6.2-sol");
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "call_123|fc_item_abc",
+					name: "lookup",
+					arguments: { key: "alpha" },
+				},
+			],
+			api: "openai-responses",
+			provider: "cloudflare-ai-gateway",
+			model: "gpt-6.2-sol",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 2,
+		};
+		const input = convertResponsesMessages(
+			model,
+			normalizeContext({
+				systemPrompt: "sys",
+				messages: [
+					{ role: "user", content: "hi", timestamp: 1 },
+					assistant,
+					{
+						role: "toolResult",
+						toolCallId: "call_123|fc_item_abc",
+						toolName: "lookup",
+						content: [{ type: "text", text: "ok" }],
+						isError: false,
+						timestamp: 3,
+					},
+				],
+			}),
+			OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
+		);
+		expect(input.find((item) => item.type === "function_call")).toMatchObject({
+			id: "fc_item_abc",
+			call_id: "call_123",
+			status: "completed",
+		});
 	});
 });

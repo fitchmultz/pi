@@ -127,6 +127,9 @@ export function applyOpenAiFamilyRules(model: ChatModel): void {
 			xhigh: "xhigh",
 			max: "max",
 		});
+		if (GPT_6_NO_NONE_EFFORT_MODEL_IDS.has(model.id)) {
+			mergeCompat(model as Model<"openai-responses">, { supportsTemperature: false });
+		}
 	}
 	if (supportsOpenAiXhigh(model.id)) {
 		mergeThinking(model, { xhigh: "xhigh" });
