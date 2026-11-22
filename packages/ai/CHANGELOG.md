@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `compat.supportsStrictMode` to the `google-generative-ai` and `google-vertex` APIs, so Gemini 3+ models served under IDs without the version can use strict tools (`VALIDATED` function calling); unset keeps the model ID detection ([#12321](https://github.com/earendil-works/pi/issues/12321))
 - Added the `google-decisions` classifier API for Google's Gemini Decisions API (`POST /v1beta/decisions`), with `gemini-decision-1` as a multimodal classifier model of the `google` provider.
 - Added GPT-6 Luna as an `openai-decisions` classifier on Cloudflare AI Gateway's `/openai` passthrough (`cloudflare-ai-gateway/gpt-6-luna`), with OpenAI's limits and pricing. It authenticates with the gateway token, so it is available while the `openai` provider uses Sign in with ChatGPT. OpenAI Decisions and System One requests accept an `authorization` or `cf-aig-authorization` header in place of an API key, as the chat APIs do.
 - Added GPT-6.2 Astra and GPT-6.2 Sol on Cloudflare AI Gateway's `/openai` passthrough, with OpenAI's limits and pricing and the mid-conversation system message and additional-tools defaults of the other GPT-6 models.
@@ -23,10 +24,15 @@
 
 ### Fixed
 
+- Fixed Gemini 3+ models whose IDs carry a prefix, such as `vendor-gemini-4-argon`, being treated as older Gemini models in the `google-generative-ai` and `google-vertex` APIs: they now get strict tools, tool-call IDs, and images inside function responses ([#12321](https://github.com/earendil-works/pi/issues/12321))
 - Fixed `retryAssistantCall()` retaining an abort listener after each completed backoff, causing listener buildup across repeated retries ([#10506](https://github.com/earendil-works/pi/issues/10506))
 - Fixed Cloudflare's HTTP 525 (SSL handshake failed) not being retried like its 520 and 524 errors
 - Fixed request-level retries (`retryProviderRequest`) retrying errors that report an exhausted quota, budget, billing or plan limit. SDK chat requests, OpenRouter image generation and classifiers now fail on the first such response, as assistant-turn retries do; a Google Decisions classification whose billing account had reached its spending cap took 241 s to fail. The shared pattern is exported as `isProviderLimitError()` from `@earendil-works/pi-ai/utils/retry`.
 - Fixed gateway errors such as "The provider is temporarily unavailable. Retry shortly.", "The provider ended the response before it was complete.", "The connection to the provider was reset.", and "The provider reported a failure while generating the response." not being retried ([#12227](https://github.com/earendil-works/pi/issues/12227))
+- Fixed temporary provider failures not being retried automatically: Anthropic `api_error` events during streaming, OpenRouter's "Provider returned an empty response" and "stopped before completing the response", streams that end with `finish_reason: "error"`, and "Repeat the request later" and "admission ceiling" responses
+- Fixed Amazon Bedrock requests hanging behind `HTTPS_PROXY` with AWS SSO profiles: SSO credential and token requests now go through the proxy like the Bedrock request ([#12353](https://github.com/earendil-works/pi/issues/12353))
+- Fixed OpenAI Decisions (`gpt-6-luna` classifier) usage dropping `cached_tokens` and `cache_write_tokens`: they are now reported as `cacheRead` and `cacheWrite` and no longer counted in `input`, and the catalog prices them at the input rate so the cost estimate is unchanged ([#12264](https://github.com/earendil-works/pi/issues/12264))
+- Fixed `createProvider` providers with `fetchModels` re-merging the whole model catalog on every `getModels()`/`getAllModels()` call, which made `getModel()` quadratic in catalog size and blocked the event loop for about a second with ~10k models. The merge now runs once per published refresh ([#12311](https://github.com/earendil-works/pi/issues/12311))
 - Fixed `gemini-4-neon` intermittently omitting its end-of-turn stop token and emitting a raw `\nuser\n` turn header with hallucinated follow-up turns and tool calls by sending `stopSequences: ["\nuser\n"]` on `gemini-4-neon` requests.
 - Fixed transient Google Gemini `PROHIBITED_CONTENT` finish reasons aborting turns immediately instead of retrying through Pi's retry policy.
 - Fixed exact `gpt-6.1-sol` Ultrafast estimates in OpenAI and Codex Responses staying at the standard rate: terminal-confirmed `ultrafast` costs 6x every standard or long-context component; request-only Ultrafast does not imply delivery.

@@ -462,9 +462,9 @@ describe("submissions", () => {
 			requestId: "oversized-admitting",
 			entry: { kind: "test.oversized-write", head: "self" },
 		};
-		// Both `submit(draft, context)` and `submit(tx, draft)` must reject directly, not settle `unanswered`.
+		// Both `submit(draft, context)` and `admit(tx, draft)` must reject directly, not settle `unanswered`.
 		await expect(root.submit(oversizedDraft, context)).rejects.toBeInstanceOf(StorageCapacityError);
-		await expect(root.commit((tx) => root.submit(tx, oversizedDraft), context)).rejects.toBeInstanceOf(
+		await expect(root.commit((tx) => root.admit(tx, oversizedDraft), context)).rejects.toBeInstanceOf(
 			StorageCapacityError,
 		);
 		expect(
@@ -524,10 +524,10 @@ describe("submissions", () => {
 			expect(await root.commit((tx) => tx.submissionByRequest(root.id, draft.requestId!), context)).toBeUndefined();
 		}
 
-		// Transaction form `submit(tx, draft)` still checks entry admission when the caller omits `{ admission: true }`.
+		// Transaction form `admit(tx, draft)` still checks entry admission when the caller omits `{ admission: true }`.
 		storage.checks = [];
 		await expect(
-			root.commit((tx) => root.submit(tx, { type: "input", content: "big in tx" }), context),
+			root.commit((tx) => root.admit(tx, { type: "input", content: "big in tx" }), context),
 		).rejects.toBeInstanceOf(StorageCapacityError);
 		expect(storage.checks).toHaveLength(1);
 

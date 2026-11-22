@@ -21,7 +21,7 @@ import { createTheme } from "../../src/tui/theme/theme.ts";
 import { holdIn, poll, startFixture, TUI_NODE, testHost } from "./helpers.ts";
 
 test("savePrefs patches: privileged bindings, the editor command and launcher-only keys are refused", () => {
-	const refused = (patch: unknown) => "error" in validatePrefsPatch(patch);
+	const refused = (patch: unknown) => validatePrefsPatch(patch).kind === "invalid";
 	assert(refused({ keybindings: { "app.clipboard.pasteImage": "ctrl+y" } }));
 	assert(refused({ keybindings: { "app.editor.external": null } }));
 	assert(refused({ keybindings: { "p2.attach": "f5" } }));
@@ -38,7 +38,7 @@ test("savePrefs patches: privileged bindings, the editor command and launcher-on
 		theme: "light",
 		settings: { hideThinkingBlock: true, terminal: { showImages: false, imageWidthCells: null } },
 	});
-	assert(!("error" in ok));
+	assert(ok.kind === "valid");
 	const before = {
 		keybindings: { "app.tools.expand": "ctrl+e" },
 		settings: { terminal: { imageWidthCells: 80 } },

@@ -22,7 +22,7 @@ for (const revisions of populations) {
 			const receive = (_index: number, seq: Seq) => {
 				stored = seq;
 			};
-			assert.deepEqual(await storage.commit([[write]], receive, context), { stored: 1 });
+			assert.deepEqual(await storage.commit([[write]], receive, context), { kind: "stored", stored: 1 });
 			assert(stored !== undefined);
 			return stored;
 		};

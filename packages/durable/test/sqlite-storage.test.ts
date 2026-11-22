@@ -841,7 +841,7 @@ describe("SqliteStorage batches", () => {
 				context,
 			);
 			expect(refused.stored).toBe(1);
-			expect(String(refused.refused)).toContain("already belongs to conversation");
+			expect(refused.kind === "refused" && String(refused.refused)).toContain("already belongs to conversation");
 			expect(receipts).toEqual([0]);
 			expect(await storage.entry(first, context)).toBeDefined();
 		});

@@ -169,7 +169,7 @@ it("waits at each close for the commit underway, refusing calls from the close o
 	// Made while the commit is underway.
 	await expect(storage.conversation(ROOT_CONVERSATION_ID, context)).rejects.toThrow("IndexedDbStorage is closed");
 	expect(await Promise.all(closes)).toEqual([[0], [0]]);
-	await expect(commit).resolves.toEqual({ stored: 1 });
+	await expect(commit).resolves.toEqual({ kind: "stored", stored: 1 });
 });
 
 it("rolls back table writes when a later document copy fails", async () => {
@@ -346,7 +346,9 @@ describe("commit", () => {
 				context,
 			);
 			expect(result.stored).toBe(1);
-			expect(String(result.refused)).toBe(`Error: ID ${first} already belongs to entry`);
+			expect(result.kind === "refused" && String(result.refused)).toBe(
+				`Error: ID ${first} already belongs to entry`,
+			);
 			expect(receipts.map(([index]) => index)).toEqual([0]);
 			expect((await storage.entry(first, context))?.commitSeq).toBe(receipts[0]![1]);
 			expect(await storage.entry(after, context)).toBeUndefined();
@@ -388,7 +390,7 @@ describe("commit", () => {
 				() => {},
 				context,
 			);
-			expect(result).toEqual({ stored: 3 });
+			expect(result).toEqual({ kind: "stored", stored: 3 });
 			expect((await storage.document(copyId, "current", context))?.value).toEqual({ count: 2 });
 		}));
 
@@ -426,7 +428,7 @@ describe("commit", () => {
 				context,
 			);
 			expect(result.stored).toBe(1);
-			expect(String(result.refused)).toContain(`Document copy ${copyId} was rejected`);
+			expect(result.kind === "refused" && String(result.refused)).toContain(`Document copy ${copyId} was rejected`);
 			expect(await storage.entry(first, context)).toBeDefined();
 			expect(await storage.task(taskId, context)).toBeUndefined();
 			expect(await storage.document(copyId, "current", context)).toBeUndefined();

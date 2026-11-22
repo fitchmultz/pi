@@ -121,21 +121,26 @@ function tokenCount(value: unknown): number {
 /**
  * Usage from `{ input_tokens, output_tokens }` or `{ total_input_tokens, total_output_tokens }`,
  * priced from the model catalog like chat usage. A missing or malformed usage object leaves the
- * result without usage instead of failing it.
+ * result without usage instead of failing it. `input_tokens_details.cached_tokens` and
+ * `cache_write_tokens` are included in `input_tokens`, as in the Responses API, so they are split
+ * out of `input`.
  */
 export function parseClassifierUsage(value: unknown, model: ClassifierModel<ClassifierApi>): Usage | undefined {
 	if (!isRecord(value)) return undefined;
 	const rawInput = value.input_tokens ?? value.total_input_tokens;
 	const rawOutput = value.output_tokens ?? value.total_output_tokens;
 	if (rawInput === undefined && rawOutput === undefined) return undefined;
-	const input = tokenCount(rawInput);
+	const totalInput = tokenCount(rawInput);
 	const output = tokenCount(rawOutput);
+	const details = isRecord(value.input_tokens_details) ? value.input_tokens_details : undefined;
+	const cacheRead = Math.min(tokenCount(details?.cached_tokens), totalInput);
+	const cacheWrite = Math.min(tokenCount(details?.cache_write_tokens), totalInput - cacheRead);
 	const usage: Usage = {
-		input,
+		input: totalInput - cacheRead - cacheWrite,
 		output,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: input + output,
+		cacheRead,
+		cacheWrite,
+		totalTokens: totalInput + output,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage);

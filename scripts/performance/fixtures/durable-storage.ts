@@ -115,7 +115,7 @@ try {
 		assert.equal(noops.walGrowthBytes, 0);
 		// A refused batch is returned, not thrown: every write here must be stored.
 		const commit = async (write: StorageWrite) =>
-			assert.deepEqual(await storage.commit([[write]], () => {}, context), { stored: 1 });
+			assert.deepEqual(await storage.commit([[write]], () => {}, context), { kind: "stored", stored: 1 });
 		await commit({ type: "conversation", value: { id: ROOT_CONVERSATION_ID } });
 		const id = await storage.mintId<TaskId<null>>();
 		const task: TaskRecord<{ blob: string }, { phase: string; count: number }, null> = {
