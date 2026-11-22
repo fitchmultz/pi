@@ -37,11 +37,11 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
-import { getSystemMessageText } from "../utils/text.ts";
+import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import {
-	collapseSystemMessages,
 	getCurrentTools,
 	getInitialSystemMessage,
+	resolveTranscript,
 	withoutInitialSystemMessage,
 } from "../utils/transcript.ts";
 import { resolveStrictJsonSchema } from "./constrained-sampling.ts";
@@ -151,7 +151,7 @@ export function streamGoogle(
 	createClient: (fetch: FetchFunction) => GoogleGenAI,
 ): AssistantMessageEventStream {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = collapseSystemMessages(context);
+	const normalizedContext = resolveTranscript(context, supportsGoogleMidConvoSystemMessages(model));
 
 	(async () => {
 		const output: AssistantMessage = {
@@ -889,6 +889,21 @@ export function supportsGoogleTemperature<T extends GoogleApiType>(model: Model<
 	return !(version.major >= 4 || (version.major === 3 && version.minor >= 6));
 }
 
+/**
+ * Whether mid-conversation system updates are rendered inline inside `contents` instead of
+ * folding them into `systemInstruction`. Gemini 4 relies on implicit prefix caching across
+ * `systemInstruction`, `tools`, and `contents`, so mutating `systemInstruction` mid-session
+ * invalidates the entire cached prefix.
+ * `compat.supportsMidConvoSystemMessages` overrides the model ID detection.
+ */
+export function supportsGoogleMidConvoSystemMessages<T extends GoogleApiType>(model: Model<T>): boolean {
+	if (model.compat?.supportsMidConvoSystemMessages !== undefined) {
+		return model.compat.supportsMidConvoSystemMessages;
+	}
+	const majorVersion = getGeminiMajorVersion(model.id);
+	return majorVersion !== undefined && majorVersion >= 4;
+}
+
 function supportsMultimodalFunctionResponse(modelId: string): boolean {
 	const geminiMajorVersion = getGeminiMajorVersion(modelId);
 	if (geminiMajorVersion !== undefined) {
@@ -901,8 +916,10 @@ function supportsMultimodalFunctionResponse(modelId: string): boolean {
  * Convert internal messages to Gemini Content[] format.
  */
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: TranscriptContext): Content[] {
-	// Gemini has no mid-conversation system messages; the leading prompt is sent as systemInstruction.
-	const conversation = withoutInitialSystemMessage(collapseSystemMessages(context).messages);
+	// Leading prompt goes in systemInstruction; when mid-convo system updates are enabled,
+	// later system messages stay in place and render inline as <system_update> user parts.
+	const resolved = resolveTranscript(context, supportsGoogleMidConvoSystemMessages(model));
+	const conversation = withoutInitialSystemMessage(resolved.messages);
 	const contents: Content[] = [];
 	const normalizeToolCallId = (id: string): string => {
 		if (!requiresToolCallId(model.id)) return id;
@@ -920,32 +937,51 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 		(geminiMajorVersion === undefined || geminiMajorVersion >= 3) &&
 		!model.id.startsWith("deep-research-");
 
+	let lastContentWasSystemUpdate = false;
+
 	for (const msg of transformedMessages) {
-		if (msg.role === "user") {
-			if (typeof msg.content === "string") {
+		if (msg.role === "system") {
+			const updateText = renderSystemMessageUpdate(msg);
+			if (!updateText) continue;
+			const updatePart: Part = {
+				text: `<system_update>\n${sanitizeSurrogates(updateText)}\n</system_update>`,
+			};
+			const lastContent = contents[contents.length - 1];
+			if (lastContent?.role === "user" && lastContent.parts) {
+				lastContent.parts.push(updatePart);
+			} else {
 				contents.push({
 					role: "user",
-					parts: [{ text: sanitizeSurrogates(msg.content) }],
+					parts: [updatePart],
 				});
+			}
+			lastContentWasSystemUpdate = true;
+		} else if (msg.role === "user") {
+			const parts: Part[] =
+				typeof msg.content === "string"
+					? [{ text: sanitizeSurrogates(msg.content) }]
+					: msg.content.map((item) => {
+							if (item.type === "text") {
+								return { text: sanitizeSurrogates(item.text) };
+							}
+							return {
+								inlineData: {
+									mimeType: item.mimeType,
+									data: item.data,
+								},
+							};
+						});
+			if (parts.length === 0) continue;
+			const lastContent = contents[contents.length - 1];
+			if (lastContentWasSystemUpdate && lastContent?.role === "user" && lastContent.parts) {
+				lastContent.parts.push(...parts);
 			} else {
-				const parts: Part[] = msg.content.map((item) => {
-					if (item.type === "text") {
-						return { text: sanitizeSurrogates(item.text) };
-					} else {
-						return {
-							inlineData: {
-								mimeType: item.mimeType,
-								data: item.data,
-							},
-						};
-					}
-				});
-				if (parts.length === 0) continue;
 				contents.push({
 					role: "user",
 					parts,
 				});
 			}
+			lastContentWasSystemUpdate = false;
 		} else if (msg.role === "assistant") {
 			const parts: Part[] = [];
 			// Keep thinking blocks and signatures for the same model, or across Gemini 4 text/coding
@@ -1006,7 +1042,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				role: "model",
 				parts,
 			});
+			lastContentWasSystemUpdate = false;
 		} else if (msg.role === "toolResult") {
+			lastContentWasSystemUpdate = false;
 			// Extract text and image content
 			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
 			const textResult = textContent.map((c) => c.text).join("\n");

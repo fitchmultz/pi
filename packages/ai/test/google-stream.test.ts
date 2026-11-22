@@ -844,4 +844,124 @@ describe("Google SDK streaming protocol", () => {
 		expect(unrelatedResult.stopReason).toBe("error");
 		expect(unrelatedFetch).toHaveBeenCalledTimes(1);
 	});
+
+	it("keeps systemInstruction cache-stable on Gemini 4 by emitting mid-convo system updates inline in contents", async () => {
+		const neon = { ...model("google-generative-ai"), id: "gemini-4-neon", provider: "google" };
+		const turn1 = normalizeContext({
+			systemPrompt: "base prompt",
+			messages: [{ role: "user", content: "step 1", timestamp: 1 }],
+		});
+		const assistantTurn1 = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "done 1" }],
+			api: "google-generative-ai" as const,
+			provider: "google",
+			model: "gemini-4-neon",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop" as const,
+			timestamp: 2,
+		};
+		const turn2 = normalizeContext({
+			systemPrompt: "base prompt",
+			messages: [
+				{ role: "user", content: "step 1", timestamp: 1 },
+				assistantTurn1,
+				{ role: "system", content: "", sections: { cwd: "/new/dir" }, timestamp: 3 },
+				{ role: "user", content: "step 2", timestamp: 4 },
+			],
+		});
+		const capturePayload = async (
+			targetModel: Model<"google-generative-ai">,
+			transcript: ReturnType<typeof normalizeContext>,
+		) => {
+			let captured: { contents?: unknown[]; config?: GenerateContentParameters["config"] } | undefined;
+			await streamGoogle(targetModel, transcript, {
+				apiKey: "test-key",
+				onPayload: (payload) => {
+					const params = payload as GenerateContentParameters;
+					captured = {
+						contents: Array.isArray(params.contents) ? params.contents : undefined,
+						config: params.config,
+					};
+					throw new Error("captured");
+				},
+			}).result();
+			return captured;
+		};
+
+		const payload1 = await capturePayload(neon, turn1);
+		const payload2 = await capturePayload(neon, turn2);
+		expect(payload1?.config?.systemInstruction).toBe("base prompt");
+		expect(payload2?.config?.systemInstruction).toBe("base prompt");
+		expect(payload2?.contents).toEqual([
+			{ role: "user", parts: [{ text: "step 1" }] },
+			{ role: "model", parts: [{ text: "done 1" }] },
+			{
+				role: "user",
+				parts: [
+					{ text: '<system_update>\nUpdated system prompt section "cwd":\n\n/new/dir\n</system_update>' },
+					{ text: "step 2" },
+				],
+			},
+		]);
+
+		// Tool result immediately followed by a system update stays in one user turn.
+		const afterTool = normalizeContext({
+			systemPrompt: "base prompt",
+			messages: [
+				{ role: "user", content: "cd", timestamp: 1 },
+				{
+					...assistantTurn1,
+					content: [{ type: "toolCall", id: "c1", name: "change_dir", arguments: { path: "/new/dir" } }],
+					stopReason: "toolUse",
+				},
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "change_dir",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+					timestamp: 3,
+				},
+				{ role: "system", content: "", sections: { cwd: "/new/dir" }, timestamp: 4 },
+			],
+		});
+		const payloadAfterTool = await capturePayload(neon, afterTool);
+		expect(payloadAfterTool?.config?.systemInstruction).toBe("base prompt");
+		expect(payloadAfterTool?.contents).toHaveLength(3);
+		expect(payloadAfterTool?.contents?.[2]).toMatchObject({
+			role: "user",
+			parts: [
+				{ functionResponse: { id: "c1", name: "change_dir", response: { output: "ok" } } },
+				{ text: '<system_update>\nUpdated system prompt section "cwd":\n\n/new/dir\n</system_update>' },
+			],
+		});
+
+		// compat.supportsMidConvoSystemMessages overrides model ID detection both ways.
+		const neonDisabled = await capturePayload({ ...neon, compat: { supportsMidConvoSystemMessages: false } }, turn2);
+		expect(neonDisabled?.config?.systemInstruction).toBe("base prompt\n\n/new/dir");
+		expect(neonDisabled?.contents).toEqual([
+			{ role: "user", parts: [{ text: "step 1" }] },
+			{ role: "model", parts: [{ text: "done 1" }] },
+			{ role: "user", parts: [{ text: "step 2" }] },
+		]);
+
+		const gemini3Enabled = await capturePayload(
+			{
+				...model("google-generative-ai"),
+				id: "gemini-3-flash-preview",
+				compat: { supportsMidConvoSystemMessages: true },
+			},
+			turn2,
+		);
+		expect(gemini3Enabled?.config?.systemInstruction).toBe("base prompt");
+		expect(gemini3Enabled?.contents?.[2]).toEqual(payload2?.contents?.[2]);
+	});
 });

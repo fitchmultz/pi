@@ -582,6 +582,10 @@ const GoogleCompatProperties = {
 		description:
 			"Whether the model accepts the temperature request field. Gemini 4 and Gemini 3.6+ deprecate custom sampling parameters. Default: false for Gemini 4 and Gemini 3.6+ model IDs, true otherwise.",
 	}),
+	supportsMidConvoSystemMessages: optionalCompatBoolean({
+		description:
+			"Whether mid-conversation system updates are rendered inline inside contents to keep systemInstruction cache-stable instead of folding them into systemInstruction. Default: true for Gemini 4 and later model IDs, false otherwise.",
+	}),
 };
 
 export const GoogleCompatSchema = openObject(GoogleCompatProperties, {

@@ -213,6 +213,7 @@ Also applies to `google-vertex`.
 |---|---|---|---|
 | `supportsStrictMode` | boolean |  | Whether the model enforces strict tools through Gemini's VALIDATED function-calling mode. Default: true for model IDs containing gemini-3 or a later version, such as gemini-3-pro or vendor-gemini-4-argon, false otherwise. Set true for Gemini 3+ models served under IDs without the version. |
 | `supportsTemperature` | boolean |  | Whether the model accepts the temperature request field. Gemini 4 and Gemini 3.6+ deprecate custom sampling parameters. Default: false for Gemini 4 and Gemini 3.6+ model IDs, true otherwise. |
+| `supportsMidConvoSystemMessages` | boolean |  | Whether mid-conversation system updates are rendered inline inside contents to keep systemInstruction cache-stable instead of folding them into systemInstruction. Default: true for Gemini 4 and later model IDs, false otherwise. |
 
 ### `typesafe-system-one`
 

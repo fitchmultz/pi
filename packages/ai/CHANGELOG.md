@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `compat.supportsMidConvoSystemMessages` to the `google-generative-ai` and `google-vertex` APIs (defaulting to `true` for Gemini 4+ model IDs and `false` otherwise): when enabled, mid-conversation system updates render inline inside `contents` rather than rewriting `systemInstruction`, preserving Gemini's implicit prompt prefix cache across mid-session updates.
 - Added `compat.supportsTemperature` to the `google-generative-ai` and `google-vertex` APIs (defaulting to `false` for Gemini 4 and Gemini 3.6+ model IDs, where Google deprecates `temperature`/`top_p`/`top_k`, and `true` otherwise).
 - Added `compat.supportsStrictMode` to the `google-generative-ai` and `google-vertex` APIs, so Gemini 3+ models served under IDs without the version can use strict tools (`VALIDATED` function calling); unset keeps the model ID detection ([#12321](https://github.com/earendil-works/pi/issues/12321))
 - Added the `google-decisions` classifier API for Google's Gemini Decisions API (`POST /v1beta/decisions`), with `gemini-decision-1` as a multimodal classifier model of the `google` provider.
@@ -25,6 +26,7 @@
 
 ### Fixed
 
+- Fixed context and compaction token estimates (`estimateMessageTokens` and `compaction.estimateTokens`) omitting `TextContent.textSignature`, where Gemini attaches thought signatures on non-tool-call turns.
 - Fixed Google Generative AI and Google Vertex long-decode `CONTINUATION` responses truncating after the first hop: Pi now resumes `FinishReason.CONTINUATION` inside its own hop loop (keeping `automaticContinuation: false`, honoring `signal`, `disableContinuation`, and cycle/repeat token protection, applying per-hop retries/timeouts, keeping Hop 1 prompt tokens for context sizing/overflow checks while pricing each hop individually and summing output/reasoning tokens and billed cost across hops, and excluding `CONTINUATION` from `isRecoverableLength()`).
 - Fixed Gemini thought-signature streaming and cross-model replay: consecutive same-type parts carrying distinct `thoughtSignature` values now open separate blocks instead of overwriting earlier signatures, signature-only parts (`part.text === undefined && part.thoughtSignature`) are preserved for replay, and switching between Gemini 4 text/coding models on the same provider/API preserves thinking blocks and thought signatures.
 - Fixed Google `VALIDATED` strict tool schema rejections (`400 INVALID_ARGUMENT` grammar/state-limit errors) failing turns when tools only declare `strict: "prefer"`: Pi now retries once without strict enforcement on preferred tools (preserving `strict: "require"`), memoizes the fallback per session with `registerSessionResourceCleanup`, and records a `google_strict_tools_fallback` diagnostic.
