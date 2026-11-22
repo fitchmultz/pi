@@ -262,7 +262,7 @@ export class SqliteStorage implements Storage {
 					const state = await CommitState.read(transaction, this.schema.tables, [writes]);
 					const pending = new PendingWrites();
 					const checked = await this.checkBatch(transaction, state, pending, writes);
-					if ("refused" in checked) throw checked.refused;
+					if (checked.kind === "refused") throw checked.refused;
 					const seq = seqFromNumber(metadata.next_seq);
 					state.apply(writes, checked.actions, seq);
 					pending.add(writes, checked.actions, seq, state);
