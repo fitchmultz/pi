@@ -64,8 +64,6 @@ export interface GoogleOptions extends StreamOptions {
 let toolCallCounter = 0;
 
 const MAX_HEADER_TIMEOUT_MS = 0x7fffffff;
-// 16 x 64K tokens spans Gemini 4's full 1M unified context window while bounding malformed loops.
-const MAX_CONTINUATION_HOPS = 16;
 
 const GOOGLE_STRICT_TOOL_ERROR_PATTERNS = [
 	/too many states/i,
@@ -266,16 +264,19 @@ export function streamGoogle(
 				currentBlock = null;
 			};
 
-			// Across continuation hops, prompt tokens stay anchored to Hop 1 so downstream context
-			// sizing and overflow detection see the true context window, while output/reasoning
-			// tokens and billed costs sum every hop.
+			// Pi owns the continuation hop loop rather than delegating to @google/genai's
+			// automaticContinuation so every hop runs through retryGoogleRequest (honoring
+			// Retry-After, x-should-retry, maxRetryDelayMs, and non-retryable billing/limit
+			// errors) and prices each hop individually (accurate per-hop cost.tiers and
+			// serviceTier while keeping Hop 1's uncached/cached prompt split for context sizing
+			// and isContextOverflow).
 			let initialPromptUsage: { input: number; cacheRead: number; promptTokens: number } | undefined;
 			let priorOutputTokens = 0;
 			let priorReasoningTokens = 0;
 			const priorCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
-			let previousContinuationToken: string | undefined;
+			const seenContinuationTokens = new Set<string>();
 
-			for (let hopIndex = 0; hopIndex < MAX_CONTINUATION_HOPS; hopIndex++) {
+			for (let hopIndex = 0; ; hopIndex++) {
 				promptBlockReason = undefined;
 				promptBlockMessage = undefined;
 				let hopFinishReason: FinishReason | undefined;
@@ -469,15 +470,14 @@ export function streamGoogle(
 					throw new Error("Request was aborted");
 				}
 
-				const shouldContinue =
-					options?.disableContinuation !== true &&
-					!promptBlockReason &&
-					hopFinishReason !== undefined &&
-					hopFinishReason === FinishReason.CONTINUATION &&
-					Boolean(hopContinuationToken) &&
-					hopContinuationToken !== previousContinuationToken &&
-					hopIndex + 1 < MAX_CONTINUATION_HOPS;
-				if (!shouldContinue) {
+				if (
+					options?.disableContinuation === true ||
+					promptBlockReason !== undefined ||
+					hopFinishReason === undefined ||
+					hopFinishReason !== FinishReason.CONTINUATION ||
+					hopContinuationToken === undefined ||
+					seenContinuationTokens.has(hopContinuationToken)
+				) {
 					break;
 				}
 
@@ -492,7 +492,7 @@ export function streamGoogle(
 				}
 				output.stopReason = "pending";
 				output.rawStopReason = undefined;
-				previousContinuationToken = hopContinuationToken;
+				seenContinuationTokens.add(hopContinuationToken);
 				const nextHopParams: GenerateContentParameters = {
 					...baseParams,
 					config: {
@@ -1265,7 +1265,7 @@ export function mapStopReason(reason: FinishReason): StopReason {
 		case FinishReason.STOP:
 			return "stop";
 		case FinishReason.MAX_TOKENS:
-		// Per-hop token limit reached when continuation is disabled, capped, or lacks a new token.
+		// Per-hop token limit reached when continuation is disabled or lacks a new token.
 		case FinishReason.CONTINUATION:
 			return "length";
 		case FinishReason.BLOCKLIST:

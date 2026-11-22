@@ -192,5 +192,50 @@ describe("Google CONTINUATION finish reason", () => {
 		expect(repeatedFetch).toHaveBeenCalledTimes(2);
 		expect(repeated.stopReason).toBe("length");
 		expect(repeated.rawStopReason).toBe("CONTINUATION");
+
+		// Cycling tokens (token-a -> token-b -> token-a) also terminate cleanly.
+		const cycleFetch = vi
+			.fn<FetchFunction>()
+			.mockResolvedValueOnce(
+				sse({
+					candidates: [
+						{
+							content: { role: "model", parts: [{ text: "a" }] },
+							finishReason: "CONTINUATION",
+							continuationToken: "token-a",
+						},
+					],
+				}),
+			)
+			.mockResolvedValueOnce(
+				sse({
+					candidates: [
+						{
+							content: { role: "model", parts: [{ text: "b" }] },
+							finishReason: "CONTINUATION",
+							continuationToken: "token-b",
+						},
+					],
+				}),
+			)
+			.mockResolvedValueOnce(
+				sse({
+					candidates: [
+						{
+							content: { role: "model", parts: [{ text: "c" }] },
+							finishReason: "CONTINUATION",
+							continuationToken: "token-a",
+						},
+					],
+				}),
+			);
+		const cycled = await streamGoogleGenerativeAI(createModel("google-generative-ai"), context, {
+			apiKey: "test-key",
+			fetch: cycleFetch,
+		}).result();
+		expect(cycleFetch).toHaveBeenCalledTimes(3);
+		expect(cycled.stopReason).toBe("length");
+		expect(cycled.rawStopReason).toBe("CONTINUATION");
+		expect(cycled.content).toEqual([{ type: "text", text: "abc" }]);
 	});
 });
