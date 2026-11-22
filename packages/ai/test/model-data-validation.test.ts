@@ -465,6 +465,47 @@ describe("generated model data validation", () => {
 		});
 	});
 
+	it("normalizes canonical google maxRequestBytes to 100 MiB and Gemini 4 Carbon/Argon maxTokens to 65536 during hydration", () => {
+		const { dataDir, packageRoot, values } = createFixture("google");
+		const catalogPath = join(packageRoot, "models.all.json");
+		const baseGoogle = {
+			...(values["chat:model-a"] as Record<string, unknown>),
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			inputLimits: { maxRequestBytes: 20 * 1024 * 1024 },
+		};
+		writeFileSync(
+			catalogPath,
+			JSON.stringify({
+				google: [
+					{ ...baseGoogle, id: "gemini-4-carbon", maxTokens: 32768 },
+					{ ...baseGoogle, id: "gemini-4-argon", maxTokens: 32768 },
+					{ ...baseGoogle, id: "gemini-4-neon", maxTokens: 65536 },
+				],
+			}),
+		);
+
+		hydrateModelCatalog(packageRoot, catalogPath);
+
+		const hydrated = JSON.parse(readFileSync(join(dataDir, "google.json"), "utf8")) as Record<
+			string,
+			Record<string, unknown>
+		>;
+		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-carbon"]).toMatchObject({
+			maxTokens: 65536,
+			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+		});
+		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-argon"]).toMatchObject({
+			maxTokens: 65536,
+			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+		});
+		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-neon"]).toMatchObject({
+			maxTokens: 65536,
+			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+		});
+	});
+
 	it("adds OpenAI's Decisions classifiers to cloudflare-ai-gateway when hydrating upstream catalogs without them", () => {
 		const { dataDir, packageRoot, values } = createFixture("cloudflare-ai-gateway");
 		const catalogPath = join(packageRoot, "models.all.json");

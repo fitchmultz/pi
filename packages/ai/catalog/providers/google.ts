@@ -1,3 +1,4 @@
+import { GOOGLE_MAX_REQUEST_BYTES, GOOGLE_STREAMING_MAX_OUTPUT_OVERRIDES } from "../../src/api/google-catalog.ts";
 import { GEMINI_DECISION_1_MODEL } from "../../src/api/google-decisions-catalog.ts";
 import { defineProvider, modelsDevModels, withInputLimits } from "../define.ts";
 import { googleThinkingLevels } from "../families/google.ts";
@@ -28,11 +29,12 @@ export default defineProvider({
 					input: source.imageInput ? ["text", "image"] : ["text"],
 					cost: modelsDevCost(source.cost),
 					contextWindow: source.contextWindow || 4096,
-					maxTokens: source.maxTokens || 4096,
+					maxTokens: GOOGLE_STREAMING_MAX_OUTPUT_OVERRIDES[model.id] ?? (source.maxTokens || 4096),
 				};
 			},
 		});
 	},
 	classifiers: () => [{ ...GEMINI_DECISION_1_MODEL }],
-	finalize: (model) => withInputLimits(model, { maxRequestBytes: 20 * 1024 * 1024, images: { maxPerRequest: 3600 } }),
+	finalize: (model) =>
+		withInputLimits(model, { maxRequestBytes: GOOGLE_MAX_REQUEST_BYTES, images: { maxPerRequest: 3600 } }),
 });

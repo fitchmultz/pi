@@ -578,6 +578,10 @@ const GoogleCompatProperties = {
 		description:
 			"Whether the model enforces strict tools through Gemini's VALIDATED function-calling mode. Default: true for model IDs containing gemini-3 or a later version, such as gemini-3-pro or vendor-gemini-4-argon, false otherwise. Set true for Gemini 3+ models served under IDs without the version.",
 	}),
+	supportsTemperature: optionalCompatBoolean({
+		description:
+			"Whether the model accepts the temperature request field. Gemini 4 and Gemini 3.6+ deprecate custom sampling parameters. Default: false for Gemini 4 and Gemini 3.6+ model IDs, true otherwise.",
+	}),
 };
 
 export const GoogleCompatSchema = openObject(GoogleCompatProperties, {
@@ -635,6 +639,9 @@ const ProviderCompatPropertyOverrides = {
 	}),
 	supportsStrictMode: optionalCompatBoolean({
 		description: "Whether the provider supports strict tool schemas. Defaults are API-specific.",
+	}),
+	supportsTemperature: optionalCompatBoolean({
+		description: "Whether the model accepts the temperature request field. Defaults are API-specific.",
 	}),
 	supportsOpenAIGrammarTools: optionalCompatBoolean({
 		description:

@@ -130,9 +130,11 @@ describe("builtin providers", () => {
 			images: { maxPerRequest: 1500 },
 		});
 		expect(getBuiltinModel("google", "gemini-2.5-flash").inputLimits).toMatchObject({
-			maxRequestBytes: 20 * 1024 * 1024,
+			maxRequestBytes: 100 * 1024 * 1024,
 			images: { maxPerRequest: 3600 },
 		});
+		expect(getBuiltinModel("google", "gemini-4-carbon").maxTokens).toBe(65536);
+		expect(getBuiltinModel("google", "gemini-4-argon").maxTokens).toBe(65536);
 	});
 
 	it("does not infer image limits from gateway API compatibility", () => {

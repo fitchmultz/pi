@@ -131,6 +131,59 @@ describe("remote catalog provider", () => {
 		},
 	);
 
+	it("normalizes canonical google catalog limits on fetched and restored overlays", async () => {
+		const baseline: Model<"google-generative-ai"> = {
+			...model("gemini-4-carbon"),
+			api: "google-generative-ai",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			maxTokens: 65536,
+			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+		};
+		const remote = [
+			{
+				...baseline,
+				name: "Published Gemini 4 Carbon",
+				maxTokens: 32768,
+				inputLimits: { maxRequestBytes: 20 * 1024 * 1024 },
+			},
+		];
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify(remote), { headers: { "last-modified": "Thu, 15 Oct 2026 00:00:00 GMT" } }),
+		);
+		const makeProvider = () =>
+			withRemoteCatalog(
+				createProvider({
+					id: "google",
+					auth: { apiKey: { name: "Offline", resolve: async () => ({ auth: {} }) } },
+					models: [baseline],
+					api: {
+						stream: () => {
+							throw new Error("unused");
+						},
+						streamSimple: () => {
+							throw new Error("unused");
+						},
+					},
+				}),
+				"https://pi.dev",
+				0,
+			);
+		const store = new InMemoryModelsStore();
+		const provider = makeProvider();
+		await refreshProvider(provider, store);
+		expect(provider.getModels()[0]).toMatchObject({
+			maxTokens: 65536,
+			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+		});
+		const restored = makeProvider();
+		await refreshProvider(restored, store, { allowNetwork: false });
+		expect(restored.getModels()[0]).toMatchObject({
+			maxTokens: 65536,
+			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+		});
+	});
+
 	it("parses keyed catalogs, sends version headers, observes the refresh TTL, and supports forced refreshes", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			async () =>

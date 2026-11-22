@@ -1121,8 +1121,7 @@
         },
         "supportsTemperature": {
           "type": "boolean",
-          "description": "Whether the model accepts the Anthropic temperature request field. Claude Opus 4.7+ rejects non-default values.",
-          "default": true
+          "description": "Whether the model accepts the temperature request field. Defaults are API-specific."
         },
         "forceAdaptiveThinking": {
           "type": "boolean",

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `compat.supportsTemperature` to the `google-generative-ai` and `google-vertex` APIs (defaulting to `false` for Gemini 4 and Gemini 3.6+ model IDs, where Google deprecates `temperature`/`top_p`/`top_k`, and `true` otherwise).
 - Added `compat.supportsStrictMode` to the `google-generative-ai` and `google-vertex` APIs, so Gemini 3+ models served under IDs without the version can use strict tools (`VALIDATED` function calling); unset keeps the model ID detection ([#12321](https://github.com/earendil-works/pi/issues/12321))
 - Added the `google-decisions` classifier API for Google's Gemini Decisions API (`POST /v1beta/decisions`), with `gemini-decision-1` as a multimodal classifier model of the `google` provider.
 - Added GPT-6 Luna as an `openai-decisions` classifier on Cloudflare AI Gateway's `/openai` passthrough (`cloudflare-ai-gateway/gpt-6-luna`), with OpenAI's limits and pricing. It authenticates with the gateway token, so it is available while the `openai` provider uses Sign in with ChatGPT. OpenAI Decisions and System One requests accept an `authorization` or `cf-aig-authorization` header in place of an API key, as the chat APIs do.
@@ -24,6 +25,9 @@
 
 ### Fixed
 
+- Fixed Google Generative AI and Google Vertex streams dropping HTTP response headers on `@google/genai` `ApiError`s, never invoking `options.onResponse`, and ignoring `options.timeoutMs`: requests now capture response headers so retries honor `Retry-After`/`retry-after-ms`/`x-should-retry`, invoke `options.onResponse`, and enforce `options.timeoutMs` on response-header wait without aborting active streams.
+- Fixed Gemini `promptFeedback.blockReason` responses ending with `"stream ended without a finish reason"` and blindly retrying; blocked prompts now surface `rawStopReason` and `blockReasonMessage`, retrying only `PROHIBITED_CONTENT`.
+- Fixed Gemini Developer API requests omitting `store: false` (Vertex AI and custom third-party endpoints remain unchanged), generalized `gemini-4-neon`'s `\nuser\n` stop-sequence guard to prefixed IDs, added `gemini-4-neon` Flex/Priority pricing multipliers, raised `google` catalog `maxRequestBytes` to 100 MiB and `gemini-4-carbon`/`gemini-4-argon` streaming `maxTokens` to 65,536 (including hydration and `pi.dev` overlays), and classified Cloudflare AI Gateway 1102 (`worker exceeded resource limits`) as retryable and prepayment/credit-depletion errors as non-retryable.
 - Fixed Gemini 3+ models whose IDs carry a prefix, such as `vendor-gemini-4-argon`, being treated as older Gemini models in the `google-generative-ai` and `google-vertex` APIs: they now get strict tools, tool-call IDs, and images inside function responses ([#12321](https://github.com/earendil-works/pi/issues/12321))
 - Fixed `retryAssistantCall()` retaining an abort listener after each completed backoff, causing listener buildup across repeated retries ([#10506](https://github.com/earendil-works/pi/issues/10506))
 - Fixed Cloudflare's HTTP 525 (SSL handshake failed) not being retried like its 520 and 524 errors

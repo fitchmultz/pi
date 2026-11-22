@@ -60,8 +60,16 @@ describe("provider request retries", () => {
 			),
 			{ status: 429, headers: undefined },
 		);
+		const gatewayCredits = Object.assign(
+			new Error('429 {"error":{"message":"Prepayment credits are depleted for this workspace"}}'),
+			{ status: 429, headers: new Headers({ "retry-after-ms": "0" }) },
+		);
+		const insufficientBalance = Object.assign(new Error("429 Insufficient AI Gateway credits"), {
+			status: 429,
+			headers: new Headers({ "retry-after-ms": "0" }),
+		});
 
-		for (const error of [openai, google]) {
+		for (const error of [openai, google, gatewayCredits, insufficientBalance]) {
 			const request = vi.fn<() => Promise<string>>().mockRejectedValue(error);
 			await expect(retryProviderRequest(request, { maxRetries: 2 })).rejects.toBe(error);
 			expect(request).toHaveBeenCalledTimes(1);

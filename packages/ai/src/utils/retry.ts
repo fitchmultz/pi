@@ -20,6 +20,9 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 	// Generic quota/budget/billing exhaustion. `insufficient_quota` is OpenAI's
 	// quota/billing error code; the other strings cover common gateway wording.
 	"insufficient_quota",
+	"insufficient balance",
+	"insufficient ai gateway credits",
+	"prepayment credits are depleted",
 	"out of budget",
 	"quota exceeded",
 	"billing",
@@ -86,6 +89,8 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	// Other gateway upstream failures relayed as `response.failed` error codes (#10920).
 	"upstream.?request.?failed",
 	"upstream_stream_read_error",
+	// Cloudflare AI Gateway HTML Error 1102 when the gateway worker hits a transient resource cap.
+	"worker exceeded resource limits",
 	"stream was interrupted",
 	"http/?2 stream failed",
 
