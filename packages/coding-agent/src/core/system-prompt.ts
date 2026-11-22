@@ -53,6 +53,8 @@ export interface BuildSystemPromptOptions {
 	cwd: string;
 	/** Static host environment metadata for the `<host>` section. Defaults to current process info. */
 	host?: HostEnvironmentInfo;
+	/** Active model ID used for model-family prompt guidance (for example `"gpt-6.2-sol"`). */
+	modelId?: string;
 	/** Pre-loaded context files. */
 	contextFiles?: Array<{ path: string; content: string }>;
 	/** Pre-loaded skills. */
@@ -79,6 +81,33 @@ export type NormalizedBuildSystemPromptOptions = BuildSystemPromptOptions & {
 export type SystemPromptSections = Record<string, string>;
 
 const SYSTEM_PROMPT_SECTION_NAME = /^[a-z][a-z0-9_-]*$/;
+const GPT_6_2_MODEL_PATTERN = /(?:^|\/)gpt-6\.2(?:[-.]|$)/i;
+
+/** Whether `modelId` identifies a GPT-6.2 model (including provider-prefixed IDs). */
+export function isGpt62Model(modelId?: string): boolean {
+	return modelId !== undefined && GPT_6_2_MODEL_PATTERN.test(modelId.trim());
+}
+
+/**
+ * Cache-stable behavioral guidance for GPT-6.2 models, adapted from OpenAI's GPT-6.2 prompting
+ * and Codex guidance to counter cryptic shorthand, contrived gates, false product assumptions,
+ * and premature stopping without interfering with other model families.
+ */
+export const GPT_6_2_MODEL_GUIDANCE = [
+	"Write clearly and directly in plain English, like a capable colleague:",
+	"- Treat every reply as the user's first look: keep it self-contained and drop working shorthand, internal labels, invented compound jargon, cryptic tag chains, and process narration.",
+	'- State outcomes and facts directly. Avoid contrastive filler ("X, not Y"), preemptive disclaimers, unsolicited warnings, or repeating points the user can already see.',
+	"- Include exact identifiers, paths, or commands only when they help the user understand or act.",
+	"",
+	"Stay grounded in the user's actual request and codebase:",
+	"- Do not invent requirements, policies, edge-case checklists, or approval/verification gates that the user, repository, or genuine technical dependencies do not require.",
+	"- Do not assume or override product design decisions on the user's behalf. Ask once plainly when a choice materially changes user-facing behavior or product direction and is not already settled; resolve routine, reversible implementation choices yourself and state any material assumption.",
+	"- Reuse existing code, types, and abstractions in the repository. Keep changes simple, readable, and strictly scoped: no unrequested files, config churn, formatting sweeps, extra options, unnecessary indirection, or low-value tests.",
+	"",
+	"Follow through to completion:",
+	"- Bias toward action within authorized scope. When asked to build, fix, or finish work, execute and verify the requested outcome instead of stopping at a plan, partial result, or routine confirmation.",
+	"- When corrected or told something is missing, fix the issue directly rather than just acknowledging or explaining it.",
+].join("\n");
 
 const HOST_PLATFORM_LABELS: Record<string, string> = {
 	darwin: "macOS",
@@ -135,6 +164,7 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 		sections: { ...(input.sections ?? {}) },
 		cwd: input.cwd,
 		host: input.host ? { ...input.host } : undefined,
+		...(input.modelId !== undefined ? { modelId: input.modelId } : {}),
 		contextFiles: (input.contextFiles ?? []).map((file) => ({ ...file })),
 		skills: (input.skills ?? []).map((skill) => ({ ...skill })),
 	};
@@ -153,6 +183,7 @@ function buildRules(
 	selectedTools: string[],
 	toolGuidelines: Record<string, string[]>,
 	promptGuidelines: string[],
+	omitConciseRule = false,
 ): string {
 	const rules: string[] = [];
 	const seen = new Set<string>();
@@ -183,7 +214,7 @@ function buildRules(
 		for (const rule of toolGuidelines[name] ?? []) addRule(rule);
 	}
 	for (const rule of promptGuidelines) addRule(rule);
-	addRule("Be concise in your responses");
+	if (!omitConciseRule) addRule("Be concise in your responses");
 	addRule("Show file paths clearly when working with files");
 	return rules.map((rule) => `- ${rule}`).join("\n");
 }
@@ -202,6 +233,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		sections: customSections,
 		cwd,
 		host,
+		modelId,
 		contextFiles,
 		skills,
 	} = options;
@@ -213,6 +245,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	}
 
 	const declaredTools = selectedTools.filter((name) => !hiddenTools.includes(name));
+	const gpt62 = isGpt62Model(modelId);
 	const promptSections: Record<string, string> = {};
 	if (customPrompt) {
 		promptSections.preamble = customPrompt;
@@ -223,7 +256,8 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		const tools =
 			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
 		promptSections.tools = `${tools}\n\nAdditional tools may be available.`;
-		promptSections.rules = buildRules(declaredTools, toolGuidelines, promptGuidelines);
+		promptSections.rules = buildRules(declaredTools, toolGuidelines, promptGuidelines, gpt62);
+		if (gpt62) promptSections.model_guidance = GPT_6_2_MODEL_GUIDANCE;
 		// The package folder differs per installed release. It is named once, and only here, so a
 		// session that continues under another release gets one changed section and no changed tool.
 		promptSections.docs = `Pi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):

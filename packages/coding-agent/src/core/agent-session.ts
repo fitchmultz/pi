@@ -1577,6 +1577,7 @@ export class AgentSession {
 			const runOptions = this._runSystemPromptOptions ?? this._baseSystemPromptOptions;
 			const options = normalizeBuildSystemPromptOptions({
 				...runOptions,
+				modelId: this.model?.id,
 				selectedTools: this.getActiveToolNames(),
 				toolSnippets: { ...this._baseSystemPromptOptions.toolSnippets, ...runOptions.toolSnippets },
 				toolGuidelines: { ...this._baseSystemPromptOptions.toolGuidelines, ...runOptions.toolGuidelines },
@@ -2233,9 +2234,14 @@ export class AgentSession {
 		return this._isEmittingAgentSettled || this._deferredSettledActions.length > 0 || this._settledActionCount > 0;
 	}
 
+	/** Base prompt options paired with the session's active model ID. */
+	private _currentBaseSystemPromptOptions(): NormalizedBuildSystemPromptOptions {
+		return this.model ? { ...this._baseSystemPromptOptions, modelId: this.model.id } : this._baseSystemPromptOptions;
+	}
+
 	/** Current effective system prompt, including changes not yet sent to the model. */
 	get systemPrompt(): string {
-		return buildSystemPrompt(this._runSystemPromptOptions ?? this._baseSystemPromptOptions);
+		return buildSystemPrompt(this._runSystemPromptOptions ?? this._currentBaseSystemPromptOptions());
 	}
 
 	/** Current retry attempt (0 if not retrying) */
@@ -2828,8 +2834,10 @@ export class AgentSession {
 			await this._checkCompaction(lastAssistant, false);
 		}
 
-		const selectedToolsBefore = this._baseSystemPromptOptions.selectedTools;
-		const result = await this._extensionRunner.emitBeforeAgentStart(trigger, this._baseSystemPromptOptions);
+		const baseOptions = this._currentBaseSystemPromptOptions();
+		const selectedToolsBefore = baseOptions.selectedTools;
+		const modelIdBefore = baseOptions.modelId;
+		const result = await this._extensionRunner.emitBeforeAgentStart(trigger, baseOptions);
 		// Handlers may edit event.systemPromptOptions.selectedTools or call setActiveTools(),
 		// which updates the live loadout instead. An explicit edit wins; otherwise the live
 		// loadout is authoritative, so a setActiveTools() call is not undone here.
@@ -2837,6 +2845,9 @@ export class AgentSession {
 			result.systemPromptOptions.selectedTools.length !== selectedToolsBefore.length ||
 			result.systemPromptOptions.selectedTools.some((name, index) => name !== selectedToolsBefore[index]);
 		if (!handlerEditedTools) result.systemPromptOptions.selectedTools = this.getActiveToolNames();
+		if (result.systemPromptOptions.modelId === modelIdBefore) {
+			result.systemPromptOptions.modelId = this.model?.id;
+		}
 
 		const messages: AgentMessage[] = [];
 		if (trigger.messageType === "custom") {
@@ -4695,7 +4706,7 @@ export class AgentSession {
 					})();
 				},
 				getSystemPrompt: () => this.systemPrompt,
-				getSystemPromptOptions: () => this._baseSystemPromptOptions,
+				getSystemPromptOptions: () => this._currentBaseSystemPromptOptions(),
 				executeTool: (callerId, name, args, options) => this._executeNestedToolCall(callerId, name, args, options),
 				getCallableTools: () => this._getCallableTools(),
 				runInBackground: (callerId, customType, work) => this._startBackgroundToolRun(callerId, customType, work),

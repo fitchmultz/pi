@@ -20,6 +20,8 @@ import {
 	buildSystemPromptSections,
 	buildSystemPromptState,
 	diffSystemPromptSections,
+	GPT_6_2_MODEL_GUIDANCE,
+	isGpt62Model,
 } from "../src/core/system-prompt.ts";
 import type { ExtensionFactory } from "../src/index.ts";
 import { createHarness } from "./suite/harness.ts";
@@ -313,6 +315,97 @@ describe("system prompt updates", () => {
 			harness.session.agent.state.messages = JSON.parse(JSON.stringify(harness.session.messages));
 			await harness.session.prompt("two");
 			expect(harness.session.messages.filter((message) => message.role === "system")).toHaveLength(1);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	test("applies model_guidance and omits generic conciseness only for GPT-6.2 models", () => {
+		expect(isGpt62Model("gpt-6.2-astra")).toBe(true);
+		expect(isGpt62Model("gpt-6.2-sol")).toBe(true);
+		expect(isGpt62Model("openai/gpt-6.2-sol")).toBe(true);
+		expect(isGpt62Model("gpt-6.1-sol")).toBe(false);
+		expect(isGpt62Model("gemini-4-neon")).toBe(false);
+		expect(isGpt62Model("claude-opus-5-5")).toBe(false);
+		expect(isGpt62Model(undefined)).toBe(false);
+
+		const baseline = buildSystemPromptSections({ cwd: "/tmp" });
+		const gemini = buildSystemPromptSections({ cwd: "/tmp", modelId: "gemini-4-neon" });
+		const claude = buildSystemPromptSections({ cwd: "/tmp", modelId: "claude-opus-5-5" });
+		expect(gemini).toEqual(baseline);
+		expect(claude).toEqual(baseline);
+		expect(baseline.model_guidance).toBeUndefined();
+		expect(baseline.rules).toContain("Be concise in your responses");
+
+		const astra = buildSystemPromptSections({ cwd: "/tmp", modelId: "gpt-6.2-astra" });
+		const sol = buildSystemPromptSections({ cwd: "/tmp", modelId: "gpt-6.2-sol" });
+		expect(astra).toEqual(sol);
+		expect(astra.model_guidance).toBe(`<model_guidance>\n${GPT_6_2_MODEL_GUIDANCE}\n</model_guidance>`);
+		expect(astra.rules).not.toContain("Be concise in your responses");
+		expect(diffSystemPromptSections(astra, sol)).toBeUndefined();
+
+		const enterGpt62 = diffSystemPromptSections(gemini, sol);
+		expect(enterGpt62?.model_guidance).toBe(sol.model_guidance);
+		expect(enterGpt62?.rules).toBe(sol.rules);
+
+		const leaveGpt62 = diffSystemPromptSections(sol, gemini);
+		expect(leaveGpt62?.model_guidance).toBeNull();
+		expect(leaveGpt62?.rules).toBe(gemini.rules);
+
+		const customPromptSections = buildSystemPromptSections({
+			cwd: "/tmp",
+			customPrompt: "Custom instructions.",
+			modelId: "gpt-6.2-sol",
+		});
+		expect(customPromptSections.model_guidance).toBeUndefined();
+
+		const overridden = buildSystemPromptSections({
+			cwd: "/tmp",
+			modelId: "gpt-6.2-sol",
+			sections: { model_guidance: "Custom guidance." },
+		});
+		expect(overridden.model_guidance).toBe("<model_guidance>\nCustom guidance.\n</model_guidance>");
+	});
+
+	test("diffs GPT-6.2 model_guidance cleanly across mid-session model switches", async () => {
+		const harness = await createHarness();
+		try {
+			const originalModel = harness.session.model;
+			if (!originalModel) throw new Error("expected initial faux model");
+			const gpt62Model = { ...originalModel, id: "gpt-6.2-sol" };
+			const gpt62Astra = { ...originalModel, id: "gpt-6.2-astra" };
+			harness.setResponses([
+				fauxAssistantMessage("turn 1"),
+				fauxAssistantMessage("turn 2"),
+				fauxAssistantMessage("turn 3"),
+				fauxAssistantMessage("turn 4"),
+			]);
+
+			await harness.session.prompt("start on baseline");
+			expect(harness.session.messages.filter((message) => message.role === "system")).toHaveLength(1);
+			expect(harness.session.systemPrompt).not.toContain("<model_guidance>");
+
+			// Switching into GPT-6.2 appends a mid-conversation system update without mutating the leading message.
+			harness.session.agent.state.model = gpt62Model;
+			expect(harness.session.systemPrompt).toContain("<model_guidance>");
+			await harness.session.prompt("switch to gpt-6.2-sol");
+			const afterEnter = harness.session.messages.filter((message) => message.role === "system");
+			expect(afterEnter).toHaveLength(2);
+			expect(afterEnter[0]?.sections?.model_guidance).toBeUndefined();
+			expect(afterEnter[1]?.sections?.model_guidance).toContain(GPT_6_2_MODEL_GUIDANCE);
+
+			// Switching between GPT-6.2 models emits no additional system update.
+			harness.session.agent.state.model = gpt62Astra;
+			await harness.session.prompt("switch to gpt-6.2-astra");
+			expect(harness.session.messages.filter((message) => message.role === "system")).toHaveLength(2);
+
+			// Switching back out of GPT-6.2 removes model_guidance and restores baseline rules.
+			harness.session.agent.state.model = originalModel;
+			await harness.session.prompt("switch back");
+			const afterLeave = harness.session.messages.filter((message) => message.role === "system");
+			expect(afterLeave).toHaveLength(3);
+			expect(afterLeave[2]?.sections?.model_guidance).toBeNull();
+			expect(afterLeave[2]?.sections?.rules).toContain("Be concise in your responses");
 		} finally {
 			harness.cleanup();
 		}

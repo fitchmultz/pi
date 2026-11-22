@@ -12,6 +12,7 @@
 
 ### Added
 
+- Added cache-stable model-aware `<model_guidance>` system prompt steering for GPT-6.2 models (`gpt-6.2-astra`, `gpt-6.2-sol`) and omitted the generic `"Be concise in your responses"` rule for GPT-6.2, diffed cleanly across mid-session model switches while keeping non-GPT-6.2 prompts unchanged.
 - Added automatic `reasoningSummary: null` forwarding in session requests when `hideThinkingBlock` is enabled (unless explicitly overridden), avoiding unused OpenAI Responses reasoning-summary latency while keeping encrypted reasoning intact.
 - Added a `20 min` (`1200000` ms) HTTP idle timeout choice to `HTTP_IDLE_TIMEOUT_CHOICES` and `/settings` for long Gemini 4 reasoning turns, and exposed `compat.supportsTemperature` and `compat.supportsMidConvoSystemMessages` for `google-generative-ai` and `google-vertex` models in `models.json`.
 - Added `compat.supportsStrictMode` for `google-generative-ai` and `google-vertex` models in `models.json`, so Gemini 3+ models served under IDs without the version can use strict tools ([#12321](https://github.com/earendil-works/pi/issues/12321))
