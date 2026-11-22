@@ -18,10 +18,12 @@ import type {
 	ResponseToolSearchOutputItemParam,
 } from "openai/resources/responses/responses.js";
 import { calculateCost } from "../models.ts";
+import { wroteProviderSummary } from "../provider-summary.ts";
 import type {
 	Api,
 	AssistantMessage,
 	ImageContent,
+	JsonObject,
 	Model,
 	StopReason,
 	StreamOptions,
@@ -40,7 +42,12 @@ import { shortHash } from "../utils/hash.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate, renderToolRemovalNotice } from "../utils/text.ts";
-import { resolveTranscript, resolveTranscriptTools, type TranscriptToolSupport } from "../utils/transcript.ts";
+import {
+	getInitialSystemMessage,
+	resolveTranscript,
+	resolveTranscriptTools,
+	type TranscriptToolSupport,
+} from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
 	closeGrammarToolInputJson,
@@ -150,6 +157,32 @@ export interface OpenAIResponsesStreamOptions {
 	failedResponseError?: (event: ResponseFailedEvent) => Error;
 }
 
+/** The opaque compaction item on the leading system message, if this model wrote it. */
+export function getOpenAIProviderSummaryBlock(
+	model: Model<Api>,
+	messages: TranscriptContext["messages"],
+): JsonObject | undefined {
+	const summary = getInitialSystemMessage(messages)?.providerSummary;
+	return summary && wroteProviderSummary(model, summary) ? summary.block : undefined;
+}
+
+/**
+ * Resolve transcript system messages for OpenAI Responses. When a leading system message carries
+ * a `providerSummary` block written by this model and mid-conversation system messages are enabled,
+ * leave leading tool updates unfolded so the leading tool list stays unchanged before the block and
+ * summarized tool changes follow the block.
+ */
+export function resolveOpenAIResponsesContext(
+	model: Model<Api>,
+	context: TranscriptContext,
+	supportsMidConvoSystemMessages: boolean | undefined,
+): TranscriptContext {
+	if (supportsMidConvoSystemMessages && getOpenAIProviderSummaryBlock(model, context.messages) !== undefined) {
+		return context;
+	}
+	return resolveTranscript(context, supportsMidConvoSystemMessages);
+}
+
 export interface ConvertResponsesMessagesOptions {
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
 	/** Whether later system messages are sent in place; otherwise they are folded into the leading prompt. */
@@ -167,6 +200,10 @@ export interface ConvertResponsesMessagesOptions {
 	 * and to apply to the next reply.
 	 */
 	configurationUpdateEffort?: string;
+	/** Opaque OpenAI `compaction` item returned by an earlier `compaction_trigger` request, emitted after the leading system message. */
+	summaryBlock?: JsonObject;
+	/** Append `{ type: "compaction_trigger" }` as the final input item to request a provider summary block. */
+	compactionTrigger?: boolean;
 }
 
 export interface ConvertResponsesToolsOptions {
@@ -217,7 +254,10 @@ export function convertResponsesMessages<TApi extends Api>(
 	allowedToolCallProviders: ReadonlySet<string>,
 	options?: ConvertResponsesMessagesOptions,
 ): ResponseInput {
-	const normalizedContext = resolveTranscript(context, options?.supportsMidConvoSystemMessages);
+	const normalizedContext =
+		options?.summaryBlock !== undefined && options?.supportsMidConvoSystemMessages
+			? context
+			: resolveTranscript(context, options?.supportsMidConvoSystemMessages);
 	const messages: ResponseInput = [];
 
 	const normalizeIdPart = (part: string): string => {
@@ -315,6 +355,9 @@ export function convertResponsesMessages<TApi extends Api>(
 			const text = parts.filter((part) => part.length > 0).join("\n\n");
 			if (text.length > 0) {
 				messages.push({ role: instructionRole, content: sanitizeSurrogates(text) });
+			}
+			if (isLeadingSystemMessage && options?.summaryBlock) {
+				messages.push(options.summaryBlock as unknown as ResponseInputItem);
 			}
 		} else if (msg.role === "user") {
 			if (typeof msg.content === "string") {
@@ -452,6 +495,9 @@ export function convertResponsesMessages<TApi extends Api>(
 		if (!isLeadingSystemMessage) msgIndex++;
 	}
 	if (options?.configurationUpdateEffort !== undefined) pushConfigurationUpdate(options.configurationUpdateEffort);
+	if (options?.compactionTrigger) {
+		messages.push({ type: "compaction_trigger" } satisfies ResponseInputItem);
+	}
 
 	return messages;
 }
@@ -645,6 +691,16 @@ export async function processResponsesStream<TApi extends Api>(
 			});
 		}
 	};
+	const recordCompactionBlock = (item: ResponseOutputItem): void => {
+		if (item.type !== "compaction") return;
+		if (typeof item.encrypted_content !== "string" || item.encrypted_content.length === 0) return;
+		output.providerSummary = {
+			provider: model.provider,
+			api: model.api,
+			model: model.id,
+			block: item as unknown as JsonObject,
+		};
+	};
 	const finalizeResponse = (
 		response:
 			| Extract<
@@ -655,6 +711,11 @@ export async function processResponsesStream<TApi extends Api>(
 	): void => {
 		sawTerminalResponseEvent = true;
 		backfillReasoningSignatures(response?.output ?? []);
+		if (!output.providerSummary) {
+			for (const item of response?.output ?? []) {
+				recordCompactionBlock(item);
+			}
+		}
 		appendReasoningRemovals(output, response?.input_transformations);
 		if (response?.id) {
 			output.responseId = response.id;
@@ -824,6 +885,8 @@ export async function processResponsesStream<TApi extends Api>(
 					partial: output,
 				});
 				outputSlots.delete(event.output_index);
+			} else if (item.type === "compaction") {
+				recordCompactionBlock(item);
 			}
 		} else if (event.type === "response.completed" || event.type === "response.incomplete") {
 			finalizeResponse(event.response);

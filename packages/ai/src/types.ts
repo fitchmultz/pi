@@ -271,8 +271,11 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	/**
 	 * Ask the provider to answer with a summary block of `context.messages` instead of a reply.
 	 * The block arrives as `AssistantMessage.providerSummary`. Only send this to an API that
-	 * implements it (`supportsProviderSummary(model)` tells; currently `anthropic-messages`); other APIs
-	 * ignore the option and answer normally.
+	 * implements it (`supportsProviderSummary(model)` tells: `anthropic-messages`,
+	 * `openai-responses`, `openai-codex-responses`, and `azure-openai-responses`); other APIs
+	 * ignore the option and answer normally. OpenAI Responses uses `{ type: "compaction_trigger" }`,
+	 * ignores `instructions`, returns an encrypted `compaction` item, and is not supported with
+	 * Sign in with ChatGPT on the `openai` provider.
 	 */
 	providerSummary?: ProviderSummaryRequest;
 	/**

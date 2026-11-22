@@ -4,7 +4,7 @@ import {
 	getOpenAICodexWebSocketDebugStats,
 	resetOpenAICodexWebSocketDebugStats,
 } from "../src/api/openai-codex-responses.ts";
-import { getModel, completeSimple as runSimple } from "../src/compat.ts";
+import { getModel, normalizeContext, completeSimple as runSimple } from "../src/compat.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -12,6 +12,7 @@ import type {
 	Message,
 	Model,
 	SimpleStreamOptions,
+	SystemMessage,
 	ThinkingLevel,
 } from "../src/types.ts";
 import { resolveApiKey } from "./oauth.ts";
@@ -235,6 +236,90 @@ describe("Codex WebSocket to full-replay tool call status conformance", () => {
 			expect(fullReplayPreviousResponseId).toBeUndefined();
 			expect(fullReplay.stopReason, fullReplay.errorMessage).not.toBe("error");
 			expect(removals(fullReplay)).toEqual([]);
+		},
+	);
+});
+
+describe("Codex providerSummary compaction conformance", () => {
+	it.skipIf(!codexToken)(
+		"preserves kept GPT-6.2 reasoning across compaction_trigger with zero prefix_mismatch",
+		{ timeout: 180000 },
+		async () => {
+			const model = getModel("openai-codex", "gpt-6.2-sol");
+			const base = normalizeContext({
+				systemPrompt: "You are a careful math assistant.",
+				tools: [lookup],
+				messages: [
+					{
+						role: "user",
+						content:
+							"First think about which prime factors 982451653 has, then call lookup with key 'alpha'. After getting the result, multiply it by 961748941 and reply with only the integer.",
+						timestamp: 1,
+					},
+				],
+			});
+			const turn1 = await runSimple(model, base, {
+				apiKey: codexToken,
+				transport: "sse",
+				reasoning: "high",
+				maxTokens: 4000,
+			});
+			expect(turn1.stopReason, turn1.errorMessage).toBe("toolUse");
+			const call = turn1.content.find((block) => block.type === "toolCall");
+			if (call?.type !== "toolCall") throw new Error("Expected lookup tool call");
+			const tr1: Message = {
+				role: "toolResult",
+				toolCallId: call.id,
+				toolName: "lookup",
+				content: [{ type: "text", text: "7919" }],
+				isError: false,
+				timestamp: 2,
+			};
+
+			const beforeTurn2 = { ...base, messages: [...base.messages, turn1, tr1] };
+			const turn2 = await runSimple(model, beforeTurn2, {
+				apiKey: codexToken,
+				transport: "sse",
+				reasoning: "high",
+				maxTokens: 4000,
+			});
+			expect(turn2.stopReason, turn2.errorMessage).not.toBe("error");
+			expect(reasoningIds(turn2).length).toBeGreaterThan(0);
+
+			const summaryReply = await runSimple(model, beforeTurn2, {
+				apiKey: codexToken,
+				transport: "auto",
+				reasoning: "high",
+				disableContinuation: true,
+				providerSummary: {},
+				maxTokens: 4000,
+			});
+			expect(summaryReply.stopReason, summaryReply.errorMessage).toBe("stop");
+			expect(summaryReply.providerSummary?.block).toMatchObject({ type: "compaction" });
+
+			const leadWithBlock: SystemMessage = {
+				...(base.messages[0] as SystemMessage),
+				providerSummary: { ...summaryReply.providerSummary!, timestamp: 10 },
+			};
+			const compactedReply = await runSimple(
+				model,
+				{
+					...base,
+					messages: [
+						leadWithBlock,
+						turn2,
+						{ role: "user", content: "Divide that previous answer by 7919. Only the integer.", timestamp: 11 },
+					],
+				},
+				{
+					apiKey: codexToken,
+					transport: "sse",
+					reasoning: "low",
+					maxTokens: 4000,
+				},
+			);
+			expect(compactedReply.stopReason, compactedReply.errorMessage).not.toBe("error");
+			expect(removals(compactedReply)).toEqual([]);
 		},
 	);
 });

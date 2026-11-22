@@ -65,6 +65,45 @@ describe("provider summary", () => {
 		).toBe(false);
 	});
 
+	it("is supported by OpenAI Responses models with mid-convo effort, system messages, and additional_tools", () => {
+		const openaiWriter: Model<"openai-responses"> = {
+			...writer,
+			id: "gpt-6.2-sol",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			compat: {
+				supportsMidConvoEffort: true,
+				supportsMidConvoSystemMessages: true,
+				supportsAdditionalTools: true,
+			},
+		};
+		expect(supportsProviderSummary(openaiWriter)).toBe(true);
+		expect(
+			supportsProviderSummary({ ...openaiWriter, api: "openai-codex-responses", provider: "openai-codex" }),
+		).toBe(true);
+		expect(supportsProviderSummary({ ...openaiWriter, api: "azure-openai-responses", provider: "azure" })).toBe(true);
+		expect(supportsProviderSummary({ ...openaiWriter, compat: {} })).toBe(false);
+		expect(
+			supportsProviderSummary({
+				...openaiWriter,
+				compat: { ...openaiWriter.compat, supportsMidConvoEffort: false },
+			}),
+		).toBe(false);
+		expect(
+			supportsProviderSummary({
+				...openaiWriter,
+				compat: { ...openaiWriter.compat, supportsMidConvoSystemMessages: false },
+			}),
+		).toBe(false);
+		expect(
+			supportsProviderSummary({
+				...openaiWriter,
+				compat: { ...openaiWriter.compat, supportsAdditionalTools: false },
+			}),
+		).toBe(false);
+	});
+
 	it("leaves the transcript as it is for the model that wrote the block", () => {
 		const context = contextWith({ type: "compaction", content: "the summary", signature: "sig" });
 		expect(resolveProviderSummary(writer, context)).toBe(context);

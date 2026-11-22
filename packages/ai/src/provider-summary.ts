@@ -4,19 +4,34 @@ import { getInitialSystemMessage, type TranscriptMessages } from "./utils/transc
 
 /**
  * Whether a `providerSummary` request to this model returns a summary block that later requests
- * can send (see `StreamOptions.providerSummary`). True for the Anthropic Messages models whose
+ * can send (see `StreamOptions.providerSummary`). True for Anthropic Messages models whose
  * thinking blocks are bound to the conversation before them (the models pi sends per-message
- * effort to), on routes that take system messages and tool changes inside the conversation. A
- * block is readable only below an unchanged leading system message and tool list; without those
- * two capabilities pi folds every later change into them.
+ * effort to) on routes that take system messages and tool changes inside the conversation, and for
+ * OpenAI Responses models (`openai-responses`, `openai-codex-responses`, `azure-openai-responses`)
+ * with mid-conversation effort, system messages, and `additional_tools`. A block is readable only
+ * below an unchanged leading system message and tool list; without those capabilities pi folds
+ * every later change into them.
  */
 export function supportsProviderSummary(model: Model<Api>): boolean {
-	if (!hasApi(model, "anthropic-messages")) return false;
-	return (
-		model.compat?.supportsMidConvoEffort === true &&
-		model.compat.supportsMidConvoSystemMessages === true &&
-		model.compat.supportsMidConvoToolChanges === true
-	);
+	if (hasApi(model, "anthropic-messages")) {
+		return (
+			model.compat?.supportsMidConvoEffort === true &&
+			model.compat.supportsMidConvoSystemMessages === true &&
+			model.compat.supportsMidConvoToolChanges === true
+		);
+	}
+	if (
+		hasApi(model, "openai-responses") ||
+		hasApi(model, "openai-codex-responses") ||
+		hasApi(model, "azure-openai-responses")
+	) {
+		return (
+			model.compat?.supportsMidConvoEffort === true &&
+			model.compat.supportsMidConvoSystemMessages === true &&
+			model.compat.supportsAdditionalTools === true
+		);
+	}
+	return false;
 }
 
 /** Whether `model` wrote the summary block. Only the provider, API and model that wrote a block can read it. */
