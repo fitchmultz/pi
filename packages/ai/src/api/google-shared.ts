@@ -231,7 +231,7 @@ export function streamGoogle(
 					};
 					calculateCost(model, output.usage);
 					if (api === "google-generative-ai") {
-						// @google/genai 3.6.0 retains this wire field on GenerateContentResponseUsageMetadata but omits it from its type.
+						// @google/genai 3.6.1 retains this wire field on GenerateContentResponseUsageMetadata but omits it from its type.
 						const serviceTier =
 							"serviceTier" in chunk.usageMetadata ? chunk.usageMetadata.serviceTier : undefined;
 						applyGoogleServiceTierPricing(model, output.usage, serviceTier);
