@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, JsonObject, SystemMessage, Tool, UserMessage } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { estimateProjectedContextTokens, estimateTokens } from "../../src/core/compaction/compaction.ts";
 import { type CompactionProviderSummary, SessionManager } from "../../src/core/session-manager.ts";
 
 const block: JsonObject = { type: "compaction", content: "Read the task note.", signature: "EuYBCkQY" };
@@ -186,5 +187,56 @@ describe("SessionManager provider summary block", () => {
 			"summary: plain summary",
 			"user: four",
 		]);
+	});
+
+	it("preserves cacheIdentity and projects outputTokens into context estimates across disk resume", () => {
+		const manager = SessionManager.create(dir, dir);
+		manager.appendMessage(system("prompt", [tool("lookup")]));
+		manager.appendMessage(user("one"));
+		const keptId = manager.appendMessage(assistant("kept"));
+		const encryptedBlock: JsonObject = { type: "compaction", id: "cmp_1", encrypted_content: "enc" };
+		manager.appendCompaction("handoff", keptId, 50_000, undefined, true, undefined, {
+			provider: "chatgpt-rotate",
+			api: "openai-responses",
+			model: "gpt-6.2-sol",
+			block: encryptedBlock,
+			cacheIdentity: "work-account-hash",
+			seconds: 4.2,
+			usage: {
+				input: 1000,
+				output: 2_500,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 3_500,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		});
+
+		const file = manager.getSessionFile();
+		if (!file) throw new Error("expected a session file");
+		const reopenedManager = SessionManager.open(file);
+		const reopened = reopenedManager.buildSessionProjection();
+		const lead = reopened.messages[0] as SystemMessage;
+		expect(lead.providerSummary).toMatchObject({
+			provider: "chatgpt-rotate",
+			api: "openai-responses",
+			model: "gpt-6.2-sol",
+			block: encryptedBlock,
+			cacheIdentity: "work-account-hash",
+			outputTokens: 2_500,
+		});
+
+		const withoutOutputLead: SystemMessage = {
+			...lead,
+			providerSummary: { ...lead.providerSummary!, outputTokens: undefined },
+		};
+		const withoutOutput = {
+			...reopened,
+			messages: [withoutOutputLead, ...reopened.messages.slice(1)],
+		};
+		expect(estimateTokens(lead)).toBe(estimateTokens(withoutOutputLead) + 2_500);
+		expect(estimateProjectedContextTokens(reopened, reopenedManager.getBranch()).tokens).toBe(
+			estimateProjectedContextTokens(withoutOutput, reopenedManager.getBranch()).tokens + 2_500,
+		);
 	});
 });

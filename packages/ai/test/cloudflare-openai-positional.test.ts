@@ -35,6 +35,14 @@ describe("Cloudflare OpenAI positional defaults", () => {
 		expect(actual).toEqual(routed.map((model) => ({ id: model.id, ...(direct.get(model.id) ?? positional({})) })));
 		expect(actual.some((model) => model.additionalTools)).toBe(true);
 		expect(actual.some((model) => model.effort)).toBe(true);
+		const imageModels = routed.filter((model) => model.input.includes("image"));
+		expect(imageModels.length).toBeGreaterThan(0);
+		for (const model of imageModels) {
+			expect(model.inputLimits).toMatchObject({
+				maxRequestBytes: 512 * 1024 * 1024,
+				images: { maxPerRequest: 1500 },
+			});
+		}
 	});
 
 	it("keeps explicit values and leaves custom endpoints alone", () => {

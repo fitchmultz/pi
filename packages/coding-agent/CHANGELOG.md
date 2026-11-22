@@ -12,6 +12,7 @@
 
 ### Added
 
+- Preserved `CompactionProviderSummary.cacheIdentity` and projected block `outputTokens` onto leading system messages in `SessionManager` (counted in `compaction.ts` token estimates), and increased the `_requestProviderSummary` wall-clock timeout for OpenAI Responses `compaction_trigger` requests to 120 seconds with `maxRetries: 0`.
 - Added cache-stable model-aware `<model_guidance>` system prompt steering for GPT-6.2 models (`gpt-6.2-astra`, `gpt-6.2-sol`) and omitted the generic `"Be concise in your responses"` rule for GPT-6.2, diffed cleanly across mid-session model switches while keeping non-GPT-6.2 prompts unchanged.
 - Added automatic `reasoningSummary: null` forwarding in session requests when `hideThinkingBlock` is enabled (unless explicitly overridden), avoiding unused OpenAI Responses reasoning-summary latency while keeping encrypted reasoning intact.
 - Added a `20 min` (`1200000` ms) HTTP idle timeout choice to `HTTP_IDLE_TIMEOUT_CHOICES` and `/settings` for long Gemini 4 reasoning turns, and exposed `compat.supportsTemperature` and `compat.supportsMidConvoSystemMessages` for `google-generative-ai` and `google-vertex` models in `models.json`.

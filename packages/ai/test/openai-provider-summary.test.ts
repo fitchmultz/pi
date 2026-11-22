@@ -368,4 +368,49 @@ describe("OpenAI Responses provider summary blocks", () => {
 		expect(summaryResult.providerSummary?.block).toEqual(compactionBlock);
 		expect(payloads[0]?.input.at(-1)).toEqual({ type: "compaction_trigger" });
 	});
+
+	it("prices onPayload-injected service_tier on openai-responses when the response omits service_tier", async () => {
+		const model = getModel("openai", "gpt-6.2-sol");
+		const baseContext = normalizeContext({
+			systemPrompt: "sys",
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+		});
+		const makeResponse = () =>
+			sse([
+				{ type: "response.created", response: { id: "resp_tier" } },
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: {
+						type: "message",
+						id: "msg_tier",
+						role: "assistant",
+						status: "completed",
+						content: [{ type: "output_text", text: "ok" }],
+					},
+				},
+				{
+					type: "response.completed",
+					response: {
+						id: "resp_tier",
+						status: "completed",
+						output: [],
+						usage: { input_tokens: 1_000, output_tokens: 500, total_tokens: 1_500 },
+					},
+				},
+			]);
+
+		const standard = await streamOpenAIResponsesSimple(model, baseContext, {
+			apiKey: "sk-test-key",
+			fetch: (async () => makeResponse()) as typeof globalThis.fetch,
+		}).result();
+		const priorityViaHook = await streamOpenAIResponsesSimple(model, baseContext, {
+			apiKey: "sk-test-key",
+			onPayload: (payload) => ({ ...(payload as Record<string, unknown>), service_tier: "priority" }),
+			fetch: (async () => makeResponse()) as typeof globalThis.fetch,
+		}).result();
+
+		expect(priorityViaHook.stopReason).toBe("stop");
+		expect(priorityViaHook.usage.cost.total).toBeCloseTo(standard.usage.cost.total * 2, 10);
+	});
 });

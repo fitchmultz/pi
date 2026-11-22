@@ -355,7 +355,7 @@ return {
 
 Without `providerSummary`, nothing changes. With it, Pi does this before it stores the compaction entry:
 
-1. Pi sends one request to the session's current model, with the session's credentials and route. The request holds exactly the messages before `firstKeptEntryId`, built the way Pi built the request that the first kept message answered, plus `instructions`. The model answers with the block instead of a reply. The compaction waits for this request, at most 30 seconds. Unless the kept entries reach back across an earlier compaction, the request repeats one that Pi already sent, so the API reads it from the prompt cache while that cache entry lives.
+1. Pi sends one request to the session's current model, with the session's credentials and route. The request holds exactly the messages before `firstKeptEntryId`, built the way Pi built the request that the first kept message answered, plus `instructions`. The model answers with the block instead of a reply. The compaction waits for this request with `maxRetries: 0` (at most 30 seconds for Anthropic's one-line summary, or 120 seconds for OpenAI Responses full-context `compaction_trigger`). Unless the kept entries reach back across an earlier compaction, the request repeats one that Pi already sent, so the API reads it from the prompt cache while that cache entry lives.
 2. Pi stores the entry. `summary`, `firstKeptEntryId`, `tokensBefore` and `details` are stored as returned. `providerSummary` on the entry holds the block and the record of the request. The request's usage is added to the entry's `usage`, so session totals include it.
 3. From then on, a request to that same provider, API and model starts with the block. The kept entries follow unchanged, including system messages among them. `summary` follows the kept entries. Entries after the compaction follow `summary`.
 
@@ -380,7 +380,7 @@ In messages, the context of such an entry is:
 [system message + providerSummary] [system message: summarized tool changes] [kept entries] [compactionSummary] [toolUpdate (pruned removals, if any)] [later entries]
 ```
 
-`providerSummary` on the leading system message is `{ provider, api, model, block, timestamp }`. `timestamp` is the time of the compaction, in milliseconds. The kept replies reported their usage before that time, for the conversation the block replaced. Token estimates therefore do not take the usage of a kept reply as the size of this context: until the first reply after the compaction they count the messages by size.
+`providerSummary` on the leading system message is `{ provider, api, model, block, timestamp }` (plus optional `cacheIdentity` for routing providers and `outputTokens` from the block request's output usage). `timestamp` is the time of the compaction, in milliseconds. The kept replies reported their usage before that time, for the conversation the block replaced. Token estimates therefore do not take the usage of a kept reply as the size of this context: until the first reply after the compaction they count the messages by size plus `outputTokens`.
 
 Only the model that made a block can read it, and only below the leading system message it was made under. In these requests the block's summary text takes its place, as a user message before the first kept message (`Summary of the earlier conversation:` and the text), and the kept reasoning is not kept valid:
 
@@ -399,7 +399,7 @@ Pi never cancels the compaction and never runs its own summarizer because of `pr
 | `prompt` | A `before_agent_start` handler replaced the system prompt of this run. The block could not be sent later. No request is sent. |
 | `cut` | The kept entries do not start with a completed assistant message (see above). No request is sent. |
 | `aborted` | The user cancelled (Esc) while the request ran. Esc at that point stops only the request; the compaction is stored. |
-| `timeout` | The request took longer than 30 seconds. |
+| `timeout` | The request exceeded the provider summary time limit (30 seconds on Anthropic; 120 seconds on OpenAI Responses). |
 | `error: <message>` | The request failed, for example `prompt is too long` when the messages do not fit the model. |
 | `stop: <stop reason>` | The API answered without a block, for example `stop: refusal` when it rejects the `instructions`, or `stop: max_tokens`. `stop: compaction` means that the API failed to write the summary and returned a block without content. |
 
@@ -409,6 +409,7 @@ interface CompactionProviderSummary {
   api: string;
   model: string;
   block?: JsonObject;  // the signed block as returned; absent when none was made
+  cacheIdentity?: string; // optional opaque account/credential identity set by a routing provider
   reason?: string;     // why there is no block; absent when block is present
   toolsAdded?: Tool[];            // with a block: tools the summarized messages added
   toolsRemoved?: ToolReference[]; // with a block: tools the summarized messages removed

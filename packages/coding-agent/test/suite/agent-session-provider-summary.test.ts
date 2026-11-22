@@ -816,4 +816,37 @@ describe("AgentSession provider summary block", () => {
 		expect(summaryIdx).toBeGreaterThan(0);
 		expect(removalIdx).toBeGreaterThan(summaryIdx);
 	});
+
+	it("requests provider summary with maxRetries: 0 and preserves cacheIdentity and outputTokens", async () => {
+		const harness = await createHarness({
+			tools: [lookup],
+			settings: { compaction: { enabled: false } },
+			extensionFactories: [compactAtTurns([1], { providerSummary: { instructions: "One line." } })],
+		});
+		harnesses.push(harness);
+		const requests = useSummaryModel(harness);
+
+		harness.setResponses([
+			fauxAssistantMessage("kept reply"),
+			{
+				...fauxAssistantMessage("compact summary payload text"),
+				rawStopReason: "compaction",
+				providerSummary: { ...writer(harness), block, cacheIdentity: "acct-hash-1" },
+			},
+		]);
+
+		await harness.session.prompt("turn one");
+
+		const summaryReq = requests.find((req) => req.options?.providerSummary !== undefined);
+		expect(summaryReq?.options?.maxRetries).toBe(0);
+		expect(summaryReq?.options?.disableContinuation).toBe(true);
+		const [stored] = getCompactions(harness);
+		expect(stored.providerSummary?.cacheIdentity).toBe("acct-hash-1");
+		expect(stored.providerSummary?.usage?.output).toBeGreaterThan(0);
+		const lead = harness.sessionManager.buildSessionProjection().messages[0];
+		expect(lead?.role === "system" ? lead.providerSummary : undefined).toMatchObject({
+			cacheIdentity: "acct-hash-1",
+			outputTokens: stored.providerSummary?.usage?.output,
+		});
+	});
 });

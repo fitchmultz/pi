@@ -96,6 +96,21 @@ describe.each([
 		const signedText = createAssistant(3, 0);
 		signedText.content = [{ type: "text", text: "ok", textSignature: "x".repeat(3_500) }];
 		expect(estimateContextTokens([signedText], target).tokens).toBe(1_001);
+
+		const withSummaryBlock = normalizeContext({ systemPrompt: "sys", messages: [] });
+		const baseTokens = estimateContextTokens(withSummaryBlock, target).tokens;
+		const leadWithSummary = {
+			...withSummaryBlock.messages[0],
+			providerSummary: {
+				provider: "openai",
+				api: "openai-responses" as const,
+				model: "gpt-6.2-sol",
+				block: { type: "compaction", id: "cmp_1", encrypted_content: "enc" },
+				outputTokens: 3_200,
+				timestamp: 10,
+			},
+		};
+		expect(estimateContextTokens([leadWithSummary], target).tokens).toBe(baseTokens + 3_200);
 	});
 
 	// Regression for #10497: large new inputs need more room than chars/4 allows.
