@@ -355,7 +355,7 @@ return {
 
 Without `providerSummary`, nothing changes. With it, Pi does this before it stores the compaction entry:
 
-1. Pi sends one request to the session's current model, with the session's credentials and route. The request holds exactly the messages before `firstKeptEntryId`, built the way Pi built the request that the first kept message answered, plus `instructions`. The model answers with the block instead of a reply. The compaction waits for this request with `maxRetries: 0` (at most 30 seconds for Anthropic's one-line summary, or 180 seconds for OpenAI Responses full-context `compaction_trigger`). Unless the kept entries reach back across an earlier compaction, the request repeats one that Pi already sent, so the API reads it from the prompt cache while that cache entry lives.
+1. Pi sends one request to the session's current model, with the session's credentials and route. The request holds exactly the messages before `firstKeptEntryId`, built the way Pi built the request that the first kept message answered, plus `instructions`. The model answers with the block instead of a reply. The compaction waits for this request with `maxRetries: 0` (at most 30 seconds for Anthropic's one-line summary, or 120 seconds for OpenAI Responses full-context `compaction_trigger`). Unless the kept entries reach back across an earlier compaction, the request repeats one that Pi already sent, so the API reads it from the prompt cache while that cache entry lives.
 2. Pi stores the entry. `summary`, `firstKeptEntryId`, `tokensBefore` and `details` are stored as returned. `providerSummary` on the entry holds the block and the record of the request. The request's usage is added to the entry's `usage`, so session totals include it.
 3. From then on, a request to that same provider, API and model starts with the block. The kept entries follow unchanged, including system messages among them. `summary` follows the kept entries. Entries after the compaction follow `summary`.
 
@@ -399,7 +399,7 @@ Pi never cancels the compaction and never runs its own summarizer because of `pr
 | `prompt` | A `before_agent_start` handler replaced the system prompt of this run. The block could not be sent later. No request is sent. |
 | `cut` | The kept entries do not start with a completed assistant message (see above). No request is sent. |
 | `aborted` | The user cancelled (Esc) while the request ran. Esc at that point stops only the request; the compaction is stored. |
-| `timeout` | The request exceeded the provider summary time limit (30 seconds on Anthropic; 180 seconds on OpenAI Responses). |
+| `timeout` | The request exceeded the provider summary time limit (30 seconds on Anthropic; 120 seconds on OpenAI Responses). |
 | `error: <message>` | The request failed, for example `prompt is too long` when the messages do not fit the model. |
 | `stop: <stop reason>` | The API answered without a block, for example `stop: refusal` when it rejects the `instructions`, or `stop: max_tokens`. `stop: compaction` means that the API failed to write the summary and returned a block without content. |
 

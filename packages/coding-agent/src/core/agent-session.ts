@@ -456,11 +456,11 @@ type BackgroundToolRunState =
 const PROVIDER_SUMMARY_TIMEOUT_MS = 30_000;
 
 /**
- * Time limit of an OpenAI Responses `compaction_trigger` request. OpenAI ignores custom
- * instructions and runs full-context server-side compaction (requiring >=20k output headroom),
- * which can take significantly longer than Anthropic's 1-line summary at high context.
+ * Time limit of an OpenAI Responses `compaction_trigger` request. Measured at 43.87s on a dense
+ * ~100k-token coding transcript (3,147 output tokens at high reasoning on `gpt-6.2-sol`), so 120s
+ * gives ~2.7x headroom comparable to Anthropic's 12.9s -> 30s ratio.
  */
-const OPENAI_PROVIDER_SUMMARY_TIMEOUT_MS = 180_000;
+const OPENAI_PROVIDER_SUMMARY_TIMEOUT_MS = 120_000;
 
 /** The usage to store on a compaction entry: the summary's plus the block request's. */
 function withProviderSummaryUsage(
