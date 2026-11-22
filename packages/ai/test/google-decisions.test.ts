@@ -252,4 +252,37 @@ describe("Google Decisions", () => {
 		expect(noKey.errorMessage).toContain("No API key for provider: google");
 		expect(tooManyImages.errorMessage).toContain("at most 3600 images, got 3601");
 	});
+
+	it("authenticates with cf-aig-authorization from options or model headers without sending x-goog-api-key", async () => {
+		const fetch = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) =>
+			Response.json({ answers: wireAnswers, usage: wireUsage }),
+		);
+		const gatewayModel = {
+			...model,
+			provider: "google-cf",
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/acc123/workos/google-ai-studio/v1beta",
+		};
+
+		const viaOptions = await classify(gatewayModel, context, {
+			headers: { "cf-aig-authorization": "Bearer cf-token" },
+			fetch,
+		});
+		const viaModel = await classify(
+			{ ...gatewayModel, headers: { "cf-aig-authorization": "Bearer cf-model-token" } },
+			context,
+			{ fetch },
+		);
+
+		expect(viaOptions.stopReason).toBe("stop");
+		expect(viaModel.stopReason).toBe("stop");
+		expect(fetch).toHaveBeenCalledTimes(2);
+		const firstHeaders = new Headers(fetch.mock.calls[0]?.[1]?.headers);
+		expect(firstHeaders.get("cf-aig-authorization")).toBe("Bearer cf-token");
+		expect(firstHeaders.get("x-goog-api-key")).toBeNull();
+		expect(firstHeaders.get("authorization")).toBeNull();
+		const secondHeaders = new Headers(fetch.mock.calls[1]?.[1]?.headers);
+		expect(secondHeaders.get("cf-aig-authorization")).toBe("Bearer cf-model-token");
+		expect(secondHeaders.get("x-goog-api-key")).toBeNull();
+		expect(secondHeaders.get("authorization")).toBeNull();
+	});
 });

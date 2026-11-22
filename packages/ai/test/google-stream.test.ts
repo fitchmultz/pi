@@ -1,7 +1,7 @@
 import type { GenerateContentParameters } from "@google/genai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { stream as streamGoogle } from "../src/api/google-generative-ai.ts";
+import { stream as streamGoogle, streamSimple as streamGoogleSimple } from "../src/api/google-generative-ai.ts";
 import { stream as streamVertex } from "../src/api/google-vertex.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type { AssistantMessageEvent, FetchFunction, Model, Tool } from "../src/types.ts";
@@ -963,5 +963,94 @@ describe("Google SDK streaming protocol", () => {
 		);
 		expect(gemini3Enabled?.config?.systemInstruction).toBe("base prompt");
 		expect(gemini3Enabled?.contents?.[2]).toEqual(payload2?.contents?.[2]);
+	});
+
+	it("treats Cloudflare AI Gateway /google-ai-studio custom providers as Gemini API and supports cf-aig-authorization without apiKey", async () => {
+		const fetch = respond([
+			{
+				candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+				usageMetadata: {
+					promptTokenCount: 100,
+					cachedContentTokenCount: 20,
+					candidatesTokenCount: 10,
+					totalTokenCount: 110,
+					serviceTier: "priority",
+				},
+			},
+		]);
+		const cfGoogleModel: Model<"google-generative-ai"> = {
+			...model("google-generative-ai"),
+			id: "gemini-4-neon",
+			provider: "google-cf",
+			baseUrl: "https://gateway.ai.cloudflare.com/v1/acc123/workos/google-ai-studio/v1beta",
+			headers: { "cf-aig-authorization": "Bearer cf-gateway-token" },
+		};
+		const unsignedHistory = normalizeContext({
+			messages: [
+				{ role: "user", content: "find it", timestamp: 1 },
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call_1", name: "lookup", arguments: { q: "x" } }],
+					api: "openai-responses",
+					provider: "openai",
+					model: "gpt-6.2-sol",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_1",
+					toolName: "lookup",
+					content: [{ type: "text", text: "done" }],
+					isError: false,
+					timestamp: 3,
+				},
+			],
+		});
+
+		let capturedPayload: GenerateContentParameters | undefined;
+		const stream = streamGoogleSimple(cfGoogleModel, unsignedHistory, {
+			reasoning: "medium",
+			onPayload: (payload) => {
+				capturedPayload = payload as GenerateContentParameters;
+				return {
+					...(payload as Record<string, unknown>),
+					config: {
+						...((payload as { config?: Record<string, unknown> }).config ?? {}),
+						serviceTier: "priority",
+					},
+				};
+			},
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(fetch).toHaveBeenCalledOnce();
+		const [reqInput, reqInit] = fetch.mock.calls[0]!;
+		const sentHeaders = new Headers(reqInit?.headers ?? (reqInput instanceof Request ? reqInput.headers : undefined));
+		expect(sentHeaders.get("cf-aig-authorization")).toBe("Bearer cf-gateway-token");
+		expect(sentHeaders.get("x-goog-api-key")).toBe("cf-gateway-token");
+		// sendsToGeminiApi() enables store: false, skip_thought_signature_validator, and service-tier pricing.
+		expect((capturedPayload?.config as Record<string, unknown> | undefined)?.store).toBe(false);
+		expect(capturedPayload?.contents).toMatchObject([
+			{ role: "user" },
+			{
+				role: "model",
+				parts: [{ thoughtSignature: "skip_thought_signature_validator" }],
+			},
+			{ role: "user" },
+		]);
+		// Priority tier scales input/output/cacheRead by 1.8x (gemini-4-neon).
+		expect(result.usage.cost.input).toBeCloseTo(80 * 1.8, 6);
+		expect(result.usage.cost.output).toBeCloseTo(20 * 1.8, 6);
+		expect(result.usage.cost.cacheRead).toBeCloseTo(60 * 1.8, 6);
 	});
 });

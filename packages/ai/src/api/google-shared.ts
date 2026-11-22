@@ -550,6 +550,14 @@ const GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS = new Map<string, { flex: number; pr
 	["gemini-2.5-flash-lite", { flex: 1, priority: 1.8 }],
 ]);
 
+const CLOUDFLARE_AI_GATEWAY_GOOGLE_AI_STUDIO_URL_PATTERN =
+	/^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+\/google-ai-studio(?:\/|$)/;
+
+/** Whether `baseUrl` targets a Cloudflare AI Gateway `/google-ai-studio` passthrough endpoint. */
+export function isCloudflareGoogleAiStudioUrl(baseUrl: string | undefined): boolean {
+	return baseUrl !== undefined && CLOUDFLARE_AI_GATEWAY_GOOGLE_AI_STUDIO_URL_PATTERN.test(baseUrl);
+}
+
 /**
  * Whether requests for `model` target the Gemini Developer API (rather than Vertex AI or an
  * unrelated third-party endpoint). Without a base URL the SDK sends to generativelanguage.googleapis.com.
@@ -559,7 +567,8 @@ function sendsToGeminiApi(model: Model<GoogleApiType>): boolean {
 		model.api === "google-generative-ai" &&
 		(model.provider === "google" ||
 			!model.baseUrl ||
-			(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com"))
+			(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com") ||
+			isCloudflareGoogleAiStudioUrl(model.baseUrl))
 	);
 }
 
