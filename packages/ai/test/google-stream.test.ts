@@ -3,7 +3,8 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stream as streamGoogle } from "../src/api/google-generative-ai.ts";
 import { stream as streamVertex } from "../src/api/google-vertex.ts";
-import type { AssistantMessageEvent, FetchFunction, Model } from "../src/types.ts";
+import { cleanupSessionResources } from "../src/session-resources.ts";
+import type { AssistantMessageEvent, FetchFunction, Model, Tool } from "../src/types.ts";
 import { isRetryableAssistantError } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
@@ -45,7 +46,10 @@ function eventValue(event: AssistantMessageEvent) {
 	return [event.type, event.contentIndex];
 }
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+	vi.unstubAllGlobals();
+	cleanupSessionResources();
+});
 
 describe("Google SDK streaming protocol", () => {
 	it("preserves block transitions, replay signatures, tool IDs and cached/thinking usage", async () => {
@@ -591,5 +595,253 @@ describe("Google SDK streaming protocol", () => {
 		}).result();
 		expect(streamed.stopReason).toBe("stop");
 		expect(streamed.content).toEqual([{ type: "text", text: "slow stream ok" }]);
+	});
+
+	it("splits consecutive same-type parts with distinct thought signatures and preserves signature-only parts", async () => {
+		const sig1 = "QUFBQQ==";
+		const sig2 = "QkJCQg==";
+		const sig3 = "Q0NDQw==";
+		const sig4 = "RERERA==";
+		const sig5 = "RUVFRQ==";
+		respond([
+			{
+				candidates: [
+					{
+						content: {
+							parts: [
+								{ text: "thought A", thought: true, thoughtSignature: sig1 },
+								{ text: "thought B", thought: true, thoughtSignature: sig2 },
+								{ thought: true, thoughtSignature: sig3 },
+								{ text: "part 1", thoughtSignature: sig4 },
+								{ text: "part 2", thoughtSignature: sig5 },
+								{ thoughtSignature: sig1 },
+							],
+						},
+						finishReason: "STOP",
+					},
+				],
+			},
+		]);
+		const target = { ...model("google-generative-ai"), id: "gemini-4-neon", provider: "google" };
+		const result = await streamGoogle(target, context, { apiKey: "test-key" }).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([
+			{ type: "thinking", thinking: "thought A", thinkingSignature: sig1 },
+			{ type: "thinking", thinking: "thought B", thinkingSignature: sig2 },
+			{ type: "thinking", thinking: "", thinkingSignature: sig3 },
+			{ type: "text", text: "part 1", textSignature: sig4 },
+			{ type: "text", text: "part 2", textSignature: sig5 },
+			{ type: "text", text: "", textSignature: sig1 },
+		]);
+
+		let replay: GenerateContentParameters | undefined;
+		await streamGoogle(target, { messages: [...context.messages, result] } as typeof context, {
+			apiKey: "test-key",
+			onPayload: (payload) => {
+				replay = payload as GenerateContentParameters;
+				throw new Error("captured replay");
+			},
+		}).result();
+		expect(replay?.contents).toMatchObject([
+			{ role: "user" },
+			{
+				role: "model",
+				parts: [
+					{ thought: true, text: "thought A", thoughtSignature: sig1 },
+					{ thought: true, text: "thought B", thoughtSignature: sig2 },
+					{ thought: true, text: "", thoughtSignature: sig3 },
+					{ text: "part 1", thoughtSignature: sig4 },
+					{ text: "part 2", thoughtSignature: sig5 },
+					{ text: "", thoughtSignature: sig1 },
+				],
+			},
+		]);
+	});
+
+	it("attaches a trailing signature-only part onto the current unsigned block without splitting", async () => {
+		const sig = "QUFBQQ==";
+		respond([
+			{
+				candidates: [
+					{
+						content: {
+							parts: [{ text: "hello" }, { thoughtSignature: sig }],
+						},
+						finishReason: "STOP",
+					},
+				],
+			},
+		]);
+		const result = await streamGoogle(model("google-generative-ai"), context, { apiKey: "test-key" }).result();
+		expect(result.content).toEqual([{ type: "text", text: "hello", textSignature: sig }]);
+	});
+
+	it("falls back once from VALIDATED on 400 schema rejection for prefer tools and memoizes per session", async () => {
+		const preferredTool: Tool = {
+			name: "lookup",
+			description: "Look up a value",
+			parameters: Type.Object({ value: Type.String(), optional: Type.Optional(Type.Number()) }),
+			constrainedSampling: { type: "json_schema", strict: "prefer" },
+		};
+		const transcript = normalizeContext({
+			tools: [preferredTool],
+			messages: [{ role: "user", content: "hello", timestamp: 0 }],
+		});
+		const bodies: Array<Record<string, unknown>> = [];
+		const fetch = vi.fn<FetchFunction>(async (_input, init) => {
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			bodies.push(body);
+			if (bodies.length === 1) {
+				return new Response(
+					JSON.stringify({
+						error: {
+							code: 400,
+							status: "INVALID_ARGUMENT",
+							message: "The specified schema produces a constraint that has too many states for serving.",
+						},
+					}),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				);
+			}
+			return new Response(
+				`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] })}\n\n`,
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		});
+
+		const target = { ...model("google-generative-ai"), id: "gemini-4-neon" };
+		const first = await streamGoogle(target, transcript, {
+			apiKey: "test-key",
+			fetch,
+			sessionId: "sess-strict-fallback",
+		}).result();
+		expect(first.stopReason).toBe("stop");
+		expect(bodies).toHaveLength(2);
+		expect(bodies[0]).toMatchObject({ toolConfig: { functionCallingConfig: { mode: "VALIDATED" } } });
+		expect(bodies[1].toolConfig).toBeUndefined();
+		expect(first.diagnostics?.[0]).toMatchObject({
+			type: "google_strict_tools_fallback",
+			details: { reason: "strict_tool_schema_rejected" },
+		});
+
+		// Subsequent turn in the same session skips VALIDATED immediately.
+		const second = await streamGoogle(target, transcript, {
+			apiKey: "test-key",
+			fetch,
+			sessionId: "sess-strict-fallback",
+		}).result();
+		expect(second.stopReason).toBe("stop");
+		expect(bodies).toHaveLength(3);
+		expect(bodies[2].toolConfig).toBeUndefined();
+
+		// Cleanup resets session memory.
+		cleanupSessionResources("sess-strict-fallback");
+		await streamGoogle(target, transcript, {
+			apiKey: "test-key",
+			fetch,
+			sessionId: "sess-strict-fallback",
+		}).result();
+		expect(bodies).toHaveLength(4);
+		expect(bodies[3]).toMatchObject({ toolConfig: { functionCallingConfig: { mode: "VALIDATED" } } });
+	});
+
+	it("does not relax strict:require tools or downgrade unrelated 400 errors", async () => {
+		const requireTool: Tool = {
+			name: "must_be_strict",
+			description: "Required strict tool",
+			parameters: Type.Object({ value: Type.String() }),
+			constrainedSampling: { type: "json_schema", strict: "require" },
+		};
+		const preferTool: Tool = {
+			name: "prefer_strict",
+			description: "Preferred strict tool",
+			parameters: Type.Object({ value: Type.String(), optional: Type.Optional(Type.Number()) }),
+			constrainedSampling: { type: "json_schema", strict: "prefer" },
+		};
+
+		// require-only: never retries.
+		const requireFetch = vi.fn<FetchFunction>(
+			async () =>
+				new Response(
+					JSON.stringify({
+						error: {
+							code: 400,
+							status: "INVALID_ARGUMENT",
+							message: "The specified schema produces a constraint that has too many states for serving.",
+						},
+					}),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				),
+		);
+		const requireResult = await streamGoogle(
+			{ ...model("google-generative-ai"), id: "gemini-4-neon" },
+			normalizeContext({ tools: [requireTool], messages: [{ role: "user", content: "hi", timestamp: 0 }] }),
+			{ apiKey: "test-key", fetch: requireFetch },
+		).result();
+		expect(requireResult.stopReason).toBe("error");
+		expect(requireFetch).toHaveBeenCalledTimes(1);
+
+		// Mixed prefer + require: relaxes prefer schema while keeping VALIDATED for require.
+		const mixedBodies: Array<Record<string, unknown>> = [];
+		const mixedFetch = vi.fn<FetchFunction>(async (_input, init) => {
+			mixedBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			if (mixedBodies.length === 1) {
+				return new Response(
+					JSON.stringify({
+						error: {
+							code: 400,
+							status: "INVALID_ARGUMENT",
+							message: "The specified schema produces a constraint that has too many states for serving.",
+						},
+					}),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				);
+			}
+			return new Response(
+				`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] })}\n\n`,
+				{ headers: { "content-type": "text/event-stream" } },
+			);
+		});
+		const mixedResult = await streamGoogle(
+			{ ...model("google-generative-ai"), id: "gemini-4-neon" },
+			normalizeContext({
+				tools: [preferTool, requireTool],
+				messages: [{ role: "user", content: "hi", timestamp: 0 }],
+			}),
+			{ apiKey: "test-key", fetch: mixedFetch },
+		).result();
+		expect(mixedResult.stopReason).toBe("stop");
+		expect(mixedBodies).toHaveLength(2);
+		expect(mixedBodies[1]).toMatchObject({ toolConfig: { functionCallingConfig: { mode: "VALIDATED" } } });
+		const secondDecls = (
+			mixedBodies[1].tools as Array<{
+				functionDeclarations: Array<{ parametersJsonSchema: { required?: string[] } }>;
+			}>
+		)[0].functionDeclarations;
+		expect(secondDecls[0].parametersJsonSchema.required).toEqual(["value"]);
+		expect(secondDecls[1].parametersJsonSchema.required).toEqual(["value"]);
+
+		// Unrelated 400 (e.g. missing thought_signature): never downgrades.
+		const unrelatedFetch = vi.fn<FetchFunction>(
+			async () =>
+				new Response(
+					JSON.stringify({
+						error: {
+							code: 400,
+							status: "INVALID_ARGUMENT",
+							message: "Function call 'bash' in the 1. content block is missing a thought_signature.",
+						},
+					}),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				),
+		);
+		const unrelatedResult = await streamGoogle(
+			{ ...model("google-generative-ai"), id: "gemini-4-neon" },
+			normalizeContext({ tools: [preferTool], messages: [{ role: "user", content: "hi", timestamp: 0 }] }),
+			{ apiKey: "test-key", fetch: unrelatedFetch },
+		).result();
+		expect(unrelatedResult.stopReason).toBe("error");
+		expect(unrelatedFetch).toHaveBeenCalledTimes(1);
 	});
 });

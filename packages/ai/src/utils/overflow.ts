@@ -184,7 +184,12 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
  * limit before any context-based clamping.
  */
 export function isRecoverableLength(message: AssistantMessage, desiredMaxOutput: number): boolean {
-	return message.stopReason === "length" && desiredMaxOutput > 0 && message.usage.output < desiredMaxOutput;
+	return (
+		message.stopReason === "length" &&
+		message.rawStopReason !== "CONTINUATION" &&
+		desiredMaxOutput > 0 &&
+		message.usage.output < desiredMaxOutput
+	);
 }
 
 /**

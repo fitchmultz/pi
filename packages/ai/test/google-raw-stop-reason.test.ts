@@ -63,6 +63,7 @@ vi.mock("@google/genai", () => {
 		FinishReason: {
 			STOP: "STOP",
 			MAX_TOKENS: "MAX_TOKENS",
+			CONTINUATION: "CONTINUATION",
 			BLOCKLIST: "BLOCKLIST",
 			PROHIBITED_CONTENT: "PROHIBITED_CONTENT",
 			SPII: "SPII",

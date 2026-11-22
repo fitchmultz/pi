@@ -232,4 +232,19 @@ describe("isContextOverflow", () => {
 		const message = createLengthStopMessage({ input: 100, cacheRead: 0, output: 0 });
 		expect(isContextOverflow(message, 200000)).toBe(false);
 	});
+
+	it("does not treat Google CONTINUATION length stops as recoverable context-pressure truncation", () => {
+		const message: AssistantMessage = {
+			...createLengthStopMessage({
+				input: 1000,
+				cacheRead: 0,
+				output: 65536,
+				api: "google-generative-ai",
+				provider: "google",
+				model: "gemini-4-neon",
+			}),
+			rawStopReason: "CONTINUATION",
+		};
+		expect(isRecoverableLength(message, 262144)).toBe(false);
+	});
 });
