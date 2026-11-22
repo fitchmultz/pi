@@ -1,6 +1,6 @@
 import type { AnyModel } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
-import { GPT_6_NO_NONE_EFFORT_MODEL_IDS } from "./openai-responses-shared.ts";
+import { GPT_6_NO_NONE_EFFORT_MODEL_IDS } from "./openai-catalog.ts";
 
 /** Workers AI direct endpoint. */
 export const CLOUDFLARE_WORKERS_AI_BASE_URL =
