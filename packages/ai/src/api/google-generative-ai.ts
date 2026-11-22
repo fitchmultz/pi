@@ -12,11 +12,35 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { providerHeadersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import type { GoogleOptions, ResolvedGoogleThinkingLevel } from "./google-shared.ts";
-import { resolveGoogleSimpleThinking, streamGoogle } from "./google-shared.ts";
+import { isCloudflareGoogleAiStudioUrl, resolveGoogleSimpleThinking, streamGoogle } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 // This adapter takes the shared options unchanged; the type stays exported from this path.
 export type { GoogleOptions };
+
+/**
+ * Resolve the SDK `apiKey` for `@google/genai`:
+ * - Explicit `options.apiKey` or `x-goog-api-key` header takes precedence.
+ * - For Cloudflare AI Gateway `/google-ai-studio` passthroughs (BYOK / Unified Billing) without a
+ *   Google key, pass the `cf-aig-authorization` token directly as `apiKey` per Cloudflare's
+ *   `@google/genai` guide.
+ */
+function resolveGoogleApiKey(
+	model: Model<"google-generative-ai">,
+	apiKey: string | undefined,
+	optionsHeaders: ProviderHeaders | undefined,
+): string | undefined {
+	if (apiKey) return apiKey;
+	const merged = providerHeadersToRecord(model.headers, optionsHeaders);
+	if (!merged) return undefined;
+	const headers = new Headers(merged);
+	const explicitHeaderKey = headers.get("x-goog-api-key")?.trim();
+	if (explicitHeaderKey) return explicitHeaderKey;
+	if (!isCloudflareGoogleAiStudioUrl(model.baseUrl)) return undefined;
+	const gatewayAuth = headers.get("cf-aig-authorization")?.trim();
+	if (!gatewayAuth) return undefined;
+	return gatewayAuth.replace(/^Bearer\s+/i, "").trim() || undefined;
+}
 
 export const stream: StreamFunction<"google-generative-ai", GoogleOptions> = (
 	model: Model<"google-generative-ai">,
@@ -24,7 +48,7 @@ export const stream: StreamFunction<"google-generative-ai", GoogleOptions> = (
 	options?: GoogleOptions,
 ): AssistantMessageEventStream =>
 	streamGoogle("google-generative-ai", model, context, options, (fetch) => {
-		const apiKey = options?.apiKey;
+		const apiKey = resolveGoogleApiKey(model, options?.apiKey, options?.headers);
 		if (!apiKey) {
 			throw new Error(`No API key for provider: ${model.provider}`);
 		}
@@ -36,7 +60,7 @@ export const streamSimple: StreamFunction<"google-generative-ai", SimpleStreamOp
 	context: TranscriptContext,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
-	const apiKey = options?.apiKey;
+	const apiKey = resolveGoogleApiKey(model, options?.apiKey, options?.headers);
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}

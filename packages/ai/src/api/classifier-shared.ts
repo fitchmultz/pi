@@ -74,7 +74,8 @@ export async function postClassifierRequest(
 ): Promise<unknown> {
 	// Gateways such as Cloudflare AI Gateway send the credential in a header instead of an API key,
 	// which the OpenAI chat APIs accept through the same check.
-	if (!options || (!options.apiKey && !hasCredentialHeader(options.headers))) {
+	const mergedHeaders = providerHeadersToRecord(model.headers, options?.headers);
+	if (!options || (!options.apiKey && !hasCredentialHeader(mergedHeaders))) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
 	const apiKey = options.apiKey;

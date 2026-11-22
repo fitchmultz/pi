@@ -181,7 +181,6 @@ export const classify: ClassifierFunction<ClassifierOptions> = async (model, con
 
 	try {
 		if (model.api !== "google-decisions") throw new Error(`Unsupported classifier API: ${model.api}`);
-		if (!options?.apiKey) throw new Error(`No API key for provider: ${model.provider}`);
 		const { payload: questions, keyMap } = wireQuestions(context.questions);
 		const body = await postClassifierRequest(
 			LABEL,
@@ -194,7 +193,7 @@ export const classify: ClassifierFunction<ClassifierOptions> = async (model, con
 			},
 			options,
 			undefined,
-			{ "x-goog-api-key": options.apiKey },
+			options?.apiKey ? { "x-goog-api-key": options.apiKey } : {},
 		);
 		if (!isRecord(body)) throw new Error(`${LABEL} returned an unexpected response`);
 		// Set before parsing answers: a request with malformed or refused answers was still billed.
