@@ -5,6 +5,9 @@
 ### Breaking Changes
 
 - Require patched Node.js 22.23.5+, 24.22.3+, or 26.13.1+ on those release lines. The terminal launcher requires Node 26.13.1 or later for the November 2026 security fixes.
+- `RolloutHost` is a tagged union: `{ kind: "reloaded", host, report }`, `{ kind: "stopped", host }` or `{ kind: "failed", host, error }` (was `{ host, report }`, `{ host, stopped: true }`, `{ host, error }`). Migration: a rollout step's `reload` returns entries with `kind`; readers switch on `kind` instead of `"report" in entry`. A worker's reply to a reload is `reloaded` (with its report) or `reload_failed` (with its error).
+- `PluginSource` (`installPlugin`, the app kit's `plugins.install`) is tagged: `{ kind: "git", git, ref }` or `{ kind: "npm", npm, version }`. Migration: add the `kind`.
+- `SeriesResult` (`ChordStore.commitSeries`) is tagged: `{ kind: "stored", stored }` or `{ kind: "refused", stored, refused }` (was `{ stored, refused? }`). Migration: read `refused` after checking `result.kind === "refused"`.
 
 ### Fixed
 
@@ -13,7 +16,6 @@
 - Chord v2's plugins component no longer watches linked plugin directories after `close()`: a build whose discovery finished after the close added persistent watches that kept the process alive.
 - Chord v2's persisted jobs no longer drop a blocked run from their count twice: a run blocked at its load (another job version) whose activation then failed (a native's open throwing, say) was blocked again by a reload that dropped its job, so `host.activity.jobs` fell below zero and, once a reload declared the job again, its `concurrency` limit let one run too many start. Such a run now stays blocked as it was.
 - Chord v2's jobs map a run's result from the version of the code that returned it. A run that newer code ran after a reload (a persisted run resumed with `rerun`, or a start that committed after its attempt's seal) had its result mapped through `accepts` as if the run's own version had returned it: `finish` got it mapped a second time, and older code after a rollback finished the run with a result it could not read. The recorded outcome now keeps the version and fingerprint of the code that returned the result, and a persisted run's record stores them with the result when they are not the run's own. `finish` maps the result from that version; code older than it, or at that version with another fingerprint, blocks the run (`blocked { version }`) until a reload brings code that takes it. Persisted run records are now record version 2 (`chord.job-run.2`). Version 1 records still load, and their results read as the run's own version's, including a result that newer code returned before this fix: nothing stored tells it apart. Earlier Chord builds read version 2 records as version 1 ones: they ignore a result's version and drop it when they write the record again.
-
 ## [1.6.0] - 2026-11-20
 
 ### Breaking Changes

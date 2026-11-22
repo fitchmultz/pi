@@ -12,6 +12,7 @@
 
 ### Added
 
+- Added `compat.supportsStrictMode` for `google-generative-ai` and `google-vertex` models in `models.json`, so Gemini 3+ models served under IDs without the version can use strict tools ([#12321](https://github.com/earendil-works/pi/issues/12321))
 - Codemode results now link to an omitted-only output file as well as the full output, so recovering truncated text does not repeat the visible head and tail. Native guidance also directs agents to emit selected results as plain text and reuse instructions still in context.
 - Added `show()` to `codemode` scripts: `await show(tools.read({ path }), tools.grep({ pattern }))` prints each result under a label of its call and prints a failed call's error in its place, so one missing path no longer ends a script of look-ups before the others run. See [Show several results](docs/codemode.md#show-several-results).
 - Added the `toolExposure` setting, which replaces the exposure a tool registered with by tool name or `*` pattern. A rarely needed `direct` tool set to `deferred` is no longer declared in every request and stays reachable: `tool_search` loads it and codemode scripts call it. Pi warns when the setting leaves tools reachable only through `codemode` or `tool_search` and neither is active. See [Tool exposure](docs/settings.md#tool-exposure).
@@ -79,7 +80,11 @@
 
 ### Fixed
 
+- Fixed sessions with very many entries after the last compaction (about 120k or more) failing to load with `RangeError: Maximum call stack size exceeded` when building the context ([#12154](https://github.com/earendil-works/pi/issues/12154))
 - Fixed `ctx.ui.pasteToEditor()` and `ctx.ui.setEditorText()` not repainting the editor when called outside terminal input handling, such as after an `await` in a command handler ([#12295](https://github.com/earendil-works/pi/issues/12295))
+- Fixed the bash tool returning `(no output)` when the output ended with a line over 50KB followed by an empty line; it now shows the end of that line ([#12350](https://github.com/earendil-works/pi/issues/12350))
+- Fixed `/tree` navigation adding the branch's prompts to Up-arrow history again on every navigation; prompts already in history now move to the most recent position instead of repeating ([#12279](https://github.com/earendil-works/pi/issues/12279))
+- Fixed closing the console window or terminal tab on Windows skipping `session_shutdown` and leaving commands started by the bash tool running, for example `sleep 300` from `bash -c "sleep 300"`. pi now handles SIGHUP on Windows like on POSIX and waits for `taskkill` to finish before it exits. Quitting with Ctrl+D or `/quit` while a `!` command runs, or ending RPC mode while a `bash` command runs, no longer leaves that command running on Windows either
 - Fixed managed restarts (`pi restart`, `/restart`, and `restartWhenStale`) restoring stale pre-restart `settings.json` snapshots over updated disk settings files; managed restarts now refresh global and trusted project settings from disk while preserving transient `applyOverrides` (falling back per scope on parse errors), and `/reload` now also refreshes setting-managed `httpProxy` environment variables. Explicit `--working-session` and SDK restores keep exact captured settings.
 - Fixed `background_command` calls failing validation on strict-schema providers that forced every optional action field to be populated: `background_command` no longer requests strict JSON-schema sampling, matching Pi's other multiplexed tools.
 - Fixed `background_command` status and failure output tails leaking torn leading ANSI escape fragments (such as `;5;196m` or private-parameter CSI parameters) when `output.log` exceeds `maxBytes`, and dropped torn leading lines when at least as much complete output follows in the tail window (keeping oversized first lines intact so the tail preserves its capacity).

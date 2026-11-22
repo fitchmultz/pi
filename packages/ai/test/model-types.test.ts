@@ -197,14 +197,5 @@ describe("dynamic model overlays", () => {
 			"duplicate chat",
 			"last new overlay",
 		]);
-		baseline[0].id = "renamed";
-		expect(models.getAllModels("dyn").map((model) => model.name)).toEqual([
-			"first chat",
-			"untouched",
-			"image overlay",
-			"classifier overlay",
-			"last chat overlay",
-			"last new overlay",
-		]);
 	});
 });

@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Fixed `Editor.addToHistory()` storing a prompt again when it was already in history; it now moves the existing entry to the most recent position ([#12279](https://github.com/earendil-works/pi/issues/12279))
 - Fixed fullscreen source-aware Markdown selection falling back to raw terminal cells when a `Markdown` `transform` (such as display-only styling, icons, or status pills) modifies the rendered text.
 - Fixed `Text` and `Markdown` returning private selection annotations from `render()` to callers outside a fullscreen frame, such as tests, HTML export and `TuiMainScreen`. They now add annotations only while `TuiAltScreen` renders a frame, so other callers get plain lines without calling `stripSelectionMetadata()`.
 - Fixed inline math stripping dollar signs, braces and shell operators from quoted shell arguments.
@@ -29,7 +30,6 @@
 - Fixed `wrapTextWithAnsi()` adding a blank row after a line that fills the width when a space follows it and then a word longer than the width, or nothing else on that line. This affected text with an active style or hyperlink and, in a fullscreen frame, all `Text` and `Markdown` text.
 - Fixed fullscreen rendering and `Loader` animation slowing or stopping when the terminal loses focus.
 - Fixed Markdown OSC 8 linkification swallowing trailing CJK punctuation, inline codespans calling `theme.code()` multiple times (duplicating theme delimiters), fullscreen selection copies miscomputing block offsets after HTML comments containing matching text, and `sliceWithWidth()`'s ASCII fast path dropping or leaking selection source markers across sliced overlay rows.
-
 ## [1.6.0] - 2026-11-20
 
 ### Breaking Changes

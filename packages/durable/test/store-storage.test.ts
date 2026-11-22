@@ -167,7 +167,7 @@ describe("claims and close", () => {
 		await expect(refused).rejects.toThrow("StoreStorage is closed");
 		await expect(second).rejects.toMatchObject({ code: "invalid", reason: "args" });
 		expect(await Promise.all(closes)).toEqual([[0], [0]]);
-		await expect(commit).resolves.toEqual({ stored: 1 });
+		await expect(commit).resolves.toEqual({ kind: "stored", stored: 1 });
 		await StoreStorage.open(store, "harness", context);
 		await store.close(context);
 	});
