@@ -1,4 +1,4 @@
-import type { AnyModel } from "../types.ts";
+import type { AnyModel, Api, Model } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
 import { GPT_6_NO_NONE_EFFORT_MODEL_IDS } from "./openai-catalog.ts";
 
@@ -21,6 +21,13 @@ export const CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL =
 /** AI Gateway → Anthropic passthrough. */
 export const CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL =
 	"https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/anthropic";
+
+/**
+ * Request payload ceiling for Cloudflare AI Gateway vision routes.
+ * Cloudflare Workers isolates have a 128 MiB memory ceiling; live testing against the gateway
+ * showed 27–37 MiB requests succeeding while 46–60 MiB streaming requests evicted isolates mid-stream.
+ */
+export const CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 
 /**
  * Direct OpenAI models that accept prefix-preserving Responses features (`OPENAI_TOOL_SEARCH_MODEL_IDS`,
@@ -59,6 +66,7 @@ const OPENAI_MID_CONVO_MODEL_IDS = new Set([
 	...OPENAI_ADDITIONAL_TOOLS_MODEL_IDS,
 ]);
 
+const CLOUDFLARE_AI_GATEWAY_URL_PATTERN = /^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+\//;
 const CLOUDFLARE_AI_GATEWAY_OPENAI_URL_PATTERN =
 	/^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+\/openai\/?$/;
 const CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN =
@@ -103,8 +111,24 @@ function supportsCloudflareClaudeMidConvoEffort(modelId: string): boolean {
 	);
 }
 
+function normalizeCloudflareInputLimits(model: Model<Api>): Model<Api>["inputLimits"] {
+	if (!model.input.includes("image") || !CLOUDFLARE_AI_GATEWAY_URL_PATTERN.test(model.baseUrl)) {
+		return model.inputLimits;
+	}
+	const current = model.inputLimits?.maxRequestBytes;
+	if (current !== undefined && current <= CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES) {
+		return model.inputLimits;
+	}
+	return {
+		...model.inputLimits,
+		maxRequestBytes: CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES,
+	};
+}
+
 export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel): TModel {
 	if (!isModelType(model, "chat") || model.provider !== "cloudflare-ai-gateway") return model;
+	const inputLimits = normalizeCloudflareInputLimits(model);
+	const inputLimitsChanged = inputLimits !== model.inputLimits;
 	if (
 		model.api === "openai-responses" &&
 		CLOUDFLARE_AI_GATEWAY_OPENAI_URL_PATTERN.test(model.baseUrl) &&
@@ -113,6 +137,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 		const supportsToolFeatures = OPENAI_ADDITIONAL_TOOLS_MODEL_IDS.has(model.id);
 		return {
 			...model,
+			...(inputLimitsChanged ? { inputLimits } : {}),
 			compat: {
 				supportsMidConvoSystemMessages: true,
 				...(supportsToolFeatures
@@ -133,7 +158,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 		!supportsCloudflareClaudeMidConvoSystemMessages(model.id) ||
 		!CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN.test(model.baseUrl)
 	) {
-		return model;
+		return inputLimitsChanged ? { ...model, inputLimits } : model;
 	}
 	const midConvoEffort = supportsCloudflareClaudeMidConvoEffort(model.id);
 	const lowerId = model.id.toLowerCase();
@@ -151,6 +176,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 	};
 	return {
 		...model,
+		...(inputLimitsChanged ? { inputLimits } : {}),
 		promptCache: model.promptCache ?? { short: 300, long: 3600 },
 		compat,
 		...(compat.supportsMidConvoEffort && disablesOff

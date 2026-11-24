@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
+	CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES,
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	normalizeCloudflareModel,
 } from "../src/api/cloudflare.ts";
@@ -39,7 +40,7 @@ describe("Cloudflare OpenAI positional defaults", () => {
 		expect(imageModels.length).toBeGreaterThan(0);
 		for (const model of imageModels) {
 			expect(model.inputLimits).toMatchObject({
-				maxRequestBytes: 512 * 1024 * 1024,
+				maxRequestBytes: CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES,
 				images: { maxPerRequest: 1500 },
 			});
 		}
@@ -98,6 +99,9 @@ describe("Cloudflare Anthropic passthrough positional defaults", () => {
 		expect(actual).toEqual(
 			routedAnthropic.map((model) => ({ id: model.id, ...(direct.get(model.id) ?? claudePositional({})) })),
 		);
+		for (const model of routedAnthropic.filter((entry) => entry.input.includes("image"))) {
+			expect(model.inputLimits?.maxRequestBytes).toBe(CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES);
+		}
 		expect(actual.find((entry) => entry.id === "claude-sonnet-5-5")).toEqual({
 			id: "claude-sonnet-5-5",
 			systemMessages: true,
