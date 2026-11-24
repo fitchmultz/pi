@@ -58,13 +58,13 @@ export async function convertImageBytesToPngInProcess(bytes: Uint8Array): Promis
 	return encodePngSync(photon, bytes);
 }
 
-// 4.5MB of base64 payload. Provides headroom below Anthropic's 5MB limit.
-const DEFAULT_MAX_BYTES = 4.5 * 1024 * 1024;
+// 4.5 MiB of base64 payload. Provides headroom below Anthropic's 5 MiB per-image limit.
+export const DEFAULT_IMAGE_RESIZE_MAX_BYTES = 4.5 * 1024 * 1024;
 
 const DEFAULT_OPTIONS: Required<ImageResizeOptions> = {
 	maxWidth: 2000,
 	maxHeight: 2000,
-	maxBytes: DEFAULT_MAX_BYTES,
+	maxBytes: DEFAULT_IMAGE_RESIZE_MAX_BYTES,
 	jpegQuality: 80,
 };
 

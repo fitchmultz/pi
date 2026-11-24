@@ -8,7 +8,11 @@ import {
 	resizeImageInProcess,
 } from "./image-resize-core.ts";
 
-export type { ImageResizeOptions, ResizedImage } from "./image-resize-core.ts";
+export {
+	DEFAULT_IMAGE_RESIZE_MAX_BYTES,
+	type ImageResizeOptions,
+	type ResizedImage,
+} from "./image-resize-core.ts";
 
 type WorkerReply<TResult> = { type: string; result: TResult } | { type: string; error: string };
 

@@ -116,6 +116,7 @@ const ProviderConfigSchema = Type.Object({
 	),
 	oauth: Type.Optional(Type.Literal("radius", { description: "OAuth login flow. Requires baseUrl." })),
 	headers: Type.Optional(HeadersSchema),
+	inputLimits: Type.Optional(ModelInputLimitsSchema),
 	compat: Type.Optional(ProviderCompatSchema),
 	authHeader: Type.Optional(
 		Type.Boolean({ default: false, description: "Whether to send the resolved API key as Authorization: Bearer." }),

@@ -602,6 +602,73 @@ describe("generated model data validation", () => {
 		).toBeUndefined();
 	});
 
+	it("caps cloudflare-ai-gateway vision models at 32 MiB maxRequestBytes during hydration while preserving smaller limits and custom endpoints", () => {
+		const { dataDir, packageRoot, values } = createFixture("cloudflare-ai-gateway");
+		const catalogPath = join(packageRoot, "models.all.json");
+		const baseGateway = {
+			...(values["chat:model-a"] as Record<string, unknown>),
+			provider: "cloudflare-ai-gateway",
+			input: ["text", "image"],
+		};
+		writeFileSync(
+			catalogPath,
+			JSON.stringify({
+				"cloudflare-ai-gateway": [
+					{
+						...baseGateway,
+						id: "gpt-6-astra",
+						api: "openai-responses",
+						baseUrl:
+							"https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/openai",
+						inputLimits: { maxRequestBytes: 512 * 1024 * 1024, images: { maxPerRequest: 1500 } },
+					},
+					{
+						...baseGateway,
+						id: "claude-sonnet-5-5",
+						api: "anthropic-messages",
+						baseUrl:
+							"https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/anthropic",
+						inputLimits: { images: { resize: { maxWidth: 2000 } } },
+					},
+					{
+						...baseGateway,
+						id: "workers-ai/small-limit",
+						api: "openai-completions",
+						baseUrl:
+							"https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/{CLOUDFLARE_GATEWAY_ID}/compat",
+						inputLimits: { maxRequestBytes: 16 * 1024 * 1024 },
+					},
+					{
+						...baseGateway,
+						id: "custom-proxy-model",
+						api: "openai-responses",
+						baseUrl: "https://proxy.invalid/openai",
+						inputLimits: { maxRequestBytes: 512 * 1024 * 1024 },
+					},
+				],
+			}),
+		);
+
+		hydrateModelCatalog(packageRoot, catalogPath);
+
+		const hydrated = JSON.parse(readFileSync(join(dataDir, "cloudflare-ai-gateway.json"), "utf8")) as Record<
+			string,
+			Record<string, unknown>
+		>;
+		expect(hydrated["openai-responses"]?.["chat:gpt-6-astra"]).toMatchObject({
+			inputLimits: { maxRequestBytes: 32 * 1024 * 1024, images: { maxPerRequest: 1500 } },
+		});
+		expect(hydrated["anthropic-messages"]?.["chat:claude-sonnet-5-5"]).toMatchObject({
+			inputLimits: { maxRequestBytes: 32 * 1024 * 1024, images: { resize: { maxWidth: 2000 } } },
+		});
+		expect(hydrated["openai-completions"]?.["chat:workers-ai/small-limit"]).toMatchObject({
+			inputLimits: { maxRequestBytes: 16 * 1024 * 1024 },
+		});
+		expect(hydrated["openai-responses"]?.["chat:custom-proxy-model"]).toMatchObject({
+			inputLimits: { maxRequestBytes: 512 * 1024 * 1024 },
+		});
+	});
+
 	it("adds OpenAI's Decisions classifiers to cloudflare-ai-gateway when hydrating upstream catalogs without them", () => {
 		const { dataDir, packageRoot, values } = createFixture("cloudflare-ai-gateway");
 		const catalogPath = join(packageRoot, "models.all.json");
