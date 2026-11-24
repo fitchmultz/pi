@@ -486,7 +486,7 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
-	it("invokes the right-click paste handler only on Windows outside VS Code", () => {
+	it("invokes the right-click paste handler only on Windows outside terminals that paste on right-click", () => {
 		const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
 		const termProgram = process.env.TERM_PROGRAM;
 		assert.ok(platformDescriptor);
@@ -506,6 +506,10 @@ describe("TuiAltScreen", () => {
 			assert.strictEqual(pasteCount, 1);
 
 			process.env.TERM_PROGRAM = "vscode";
+			terminal.sendInput("\x1b[<2;1;1M");
+			assert.strictEqual(pasteCount, 1);
+
+			process.env.TERM_PROGRAM = "Tabby";
 			terminal.sendInput("\x1b[<2;1;1M");
 			assert.strictEqual(pasteCount, 1);
 

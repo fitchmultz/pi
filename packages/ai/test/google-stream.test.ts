@@ -263,7 +263,7 @@ describe("Google SDK streaming protocol", () => {
 			provider: "test-provider",
 			content: [],
 			stopReason: "error",
-			errorMessage: `${prefix} stream ended without a finish reason`,
+			errorMessage: `${prefix} stream ended without a finish reason after receiving 0 chunks`,
 			usage: { input: 0, output: 0, totalTokens: 0 },
 		});
 	});
@@ -491,7 +491,7 @@ describe("Google SDK streaming protocol", () => {
 		const safetyResult = await streamGoogle(model("google-generative-ai"), context, { apiKey: "test-key" }).result();
 		expect(safetyResult.stopReason).toBe("error");
 		expect(safetyResult.rawStopReason).toBe("SAFETY");
-		expect(safetyResult.errorMessage).toBe("Prompt blocked (SAFETY): Blocked by safety filter");
+		expect(safetyResult.errorMessage).toBe("Google prompt blocked: SAFETY. Blocked by safety filter");
 		expect(isRetryableAssistantError(safetyResult)).toBe(false);
 
 		respond([{ promptFeedback: { blockReason: "PROHIBITED_CONTENT" } }]);
@@ -500,7 +500,7 @@ describe("Google SDK streaming protocol", () => {
 		}).result();
 		expect(prohibitedResult.stopReason).toBe("error");
 		expect(prohibitedResult.rawStopReason).toBe("PROHIBITED_CONTENT");
-		expect(prohibitedResult.errorMessage).toBe("Prompt blocked: PROHIBITED_CONTENT");
+		expect(prohibitedResult.errorMessage).toBe("Google prompt blocked: PROHIBITED_CONTENT");
 		expect(isRetryableAssistantError(prohibitedResult)).toBe(true);
 	});
 

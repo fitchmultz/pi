@@ -148,6 +148,20 @@ Canonical `google` Gemini 4 models (`gemini-4-neon`, `gemini-4-carbon`, `gemini-
 
 A provider-level `baseUrl` override in `models.json` or an extension is applied after catalog normalization and retains the model's metadata, including these lifetimes. To replace the lifetimes, redefine the model under `models` with its complete metadata, including `input`, `reasoning`, `thinkingLevelMap`, `cost`, limits and `compat`; `promptCache: {}` leaves both tiers unknown and disables warming for that model. An empty `promptCache` in `modelOverrides` does not remove inherited tiers.
 
+### Map thinking levels
+
+Use `thinkingLevelMap` to choose which thinking levels `/thinking` offers and which provider value Pi sends for each:
+
+```json
+{
+  "id": "reasoning-model",
+  "reasoning": true,
+  "thinkingLevelMap": { "minimal": null, "xhigh": "xhigh", "max": "max" }
+}
+```
+
+A string is sent to the provider as the effort value, and `null` hides the level. Levels left out use the provider's default value for `off` through `high`. `xhigh` and `max` are opt-in: Pi offers them only when the map gives them a string, which must be a value the provider accepts. Set the map in `models.json`, on a custom model or in a `modelOverrides` entry for a built-in model, not in `settings.json`.
+
 ### Configure sampling by thinking level
 
 OpenAI-compatible APIs support free-form `samplingParams` model defaults and `samplingParamsByThinkingLevel` overrides. The latter uses Pi thinking-level keys (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`), not provider values from `thinkingLevelMap`:
@@ -178,7 +192,7 @@ Compatibility settings should describe verified differences in the endpoint's re
 
 ## Use classifier models
 
-Classifier models do not chat. They answer typed questions about JSON state: pick one of several choices, answer yes or no, or give a score, each with probabilities. Pi includes TypeSafe's Jev model from these providers, Cloudflare's Clef, Clef Flash, and Clef Omni models from Workers AI and OpenRouter, OpenAI's GPT-6 Luna through the [Decisions API](https://developers.openai.com/api/docs/guides/decisions) from OpenAI and Cloudflare AI Gateway, Google's Gemini Decision 1 through the [Gemini Decisions API](https://ai.google.dev/gemini-api/docs/decisions), and Microsoft-Decision-1 through GitHub Copilot:
+Classifier models do not chat. They answer typed questions about JSON state: pick one of several choices, answer yes or no, or give a score, each with probabilities. Pi includes TypeSafe's Jev model from these providers, Cloudflare's Clef, Clef Flash, and Clef Omni models from Workers AI and OpenRouter, OpenAI's GPT-6 Luna through the [Decisions API](https://developers.openai.com/api/docs/guides/decisions) from OpenAI and Cloudflare AI Gateway, Google's Gemini Decision 1 through the [Gemini Decisions API](https://ai.google.dev/gemini-api/docs/decisions), and GPT-6 Luna Decisions and Microsoft-Decision-1 through GitHub Copilot:
 
 | Provider | Model IDs | Authentication |
 |---|---|---|
@@ -190,13 +204,15 @@ Classifier models do not chat. They answer typed questions about JSON state: pic
 | `openai` | `gpt-6-luna` | `OPENAI_API_KEY` |
 | `cloudflare-ai-gateway` | `gpt-6-luna` | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, and `CLOUDFLARE_GATEWAY_ID` |
 | `google` | `gemini-decision-1` | `GEMINI_API_KEY` |
-| `github-copilot` | `microsoft-decision-1` | `COPILOT_GITHUB_TOKEN` or `/login` |
+| `github-copilot` | `gpt-6-luna-decisions`, `microsoft-decision-1` | `COPILOT_GITHUB_TOKEN` or `/login` |
 
 Chat models on a [llama.cpp router](llama-cpp.md#classification) are also listed as classifier models.
 
 OpenAI's Decisions API needs an API key. Sign in with ChatGPT credentials do not work with it, so `gpt-6-luna` is not listed as available while `openai` is logged in through `/login`, even when `OPENAI_API_KEY` is set; log out of `openai` to use the key. The API rejects inputs above 922K tokens, but requests that run longer than about five seconds, currently above roughly 600K input tokens, fail with a gateway timeout.
 
 The `cloudflare-ai-gateway` provider serves the same `gpt-6-luna` through the gateway's OpenAI passthrough. It authenticates with the gateway token, so it stays available while `openai` uses Sign in with ChatGPT. The gateway itself needs access to OpenAI, as described in [Cloudflare AI Gateway](providers.md#cloudflare-ai-gateway).
+
+Which GitHub Copilot classifiers an account can use depends on its plan: Microsoft-Decision-1 is limited to Business and Enterprise, and organizations can turn models off. With `/login`, pi lists only the classifiers in the account's Copilot model catalog. With `COPILOT_GITHUB_TOKEN` it lists both.
 
 Classifier models do not appear in `/model`. The model reaches them through the [`codemode`](cli.md#enable-codemode) tool, which is off unless an MCP server turned it on. Enable it with `"defaultTools": ["+codemode"]` in [settings](settings.md#tools). Scripts then list classifier models with `models.getAvailableOfType("classifier")` and call `models.classify(model, { state, questions })`:
 

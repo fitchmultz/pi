@@ -3,6 +3,7 @@
  */
 
 import { Container, Loader, Spacer, Text, type TUI, type TuiMouseEvent, truncateToWidth } from "@earendil-works/pi-tui";
+import { bashTruncationNote } from "../../../core/messages.ts";
 import { formatExpandKeyHint } from "../../../core/tools/render-utils.ts";
 import {
 	DEFAULT_MAX_BYTES,
@@ -28,6 +29,7 @@ export class BashExecutionComponent extends Container {
 	private loader: Loader;
 	private truncationResult?: TruncationResult;
 	private fullOutputPath?: string;
+	private fullOutputError?: string;
 	private expanded = false;
 	private compactView: boolean;
 	// The collapsed compact card. `lines` follow the lines its Texts return, so they change with them: between a
@@ -160,6 +162,7 @@ export class BashExecutionComponent extends Container {
 		cancelled: boolean,
 		truncationResult?: TruncationResult,
 		fullOutputPath?: string,
+		fullOutputError?: string,
 	): void {
 		this.exitCode = exitCode;
 		this.status = cancelled
@@ -169,6 +172,7 @@ export class BashExecutionComponent extends Container {
 				: "complete";
 		this.truncationResult = truncationResult;
 		this.fullOutputPath = fullOutputPath;
+		this.fullOutputError = fullOutputError;
 
 		// Stop loader
 		this.loader.stop();
@@ -243,8 +247,13 @@ export class BashExecutionComponent extends Container {
 
 			// Add truncation warning (context truncation, not preview truncation)
 			const wasTruncated = this.truncationResult?.truncated || contextTruncation.truncated;
-			if (wasTruncated && this.fullOutputPath) {
-				statusParts.push(theme.fg("warning", `Output truncated. Full output: ${this.fullOutputPath}`));
+			if (wasTruncated) {
+				statusParts.push(
+					theme.fg(
+						"warning",
+						bashTruncationNote({ fullOutputPath: this.fullOutputPath, fullOutputError: this.fullOutputError }),
+					),
+				);
 			}
 
 			if (statusParts.length > 0) {

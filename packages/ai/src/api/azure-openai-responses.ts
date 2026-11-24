@@ -7,7 +7,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getDeclaredTools } from "../utils/transcript.ts";
 import { type AzureEndpointOptions, resolveAzureConfig, resolveDeploymentName } from "./azure-openai-config.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import {
@@ -18,11 +18,10 @@ import {
 	resolveOpenAICacheRetention,
 } from "./openai-prompt-cache.ts";
 import {
-	convertResponsesMessages,
-	convertResponsesTools,
 	getOpenAIProviderSummaryBlock,
 	OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
+	prepareResponsesPrompt,
 	processResponsesStream,
 	resolveOpenAIConfigurationUpdateEffort,
 	resolveOpenAIResponsesContext,
@@ -217,8 +216,7 @@ function buildParams(
 	configurationUpdateEffort?: string,
 ) {
 	const toolSupport = getMidConvoToolSupport(model);
-	const transcriptTools = resolveTranscriptTools(context.messages, toolSupport);
-	const messages = convertResponsesMessages(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
+	const { input, requestTools } = prepareResponsesPrompt(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
 		toolSupport,
@@ -239,7 +237,7 @@ function buildParams(
 	};
 	const params: ResponseCreateParamsStreaming = {
 		model: deploymentName,
-		input: messages,
+		input,
 		stream: true,
 		prompt_cache_key: sendPromptCacheKey ? clampOpenAIPromptCacheKey(options?.sessionId) : undefined,
 		prompt_cache_retention: getOpenAIPromptCacheRetention(cacheCompat, cacheRetention),
@@ -256,12 +254,7 @@ function buildParams(
 		params.temperature = options?.temperature;
 	}
 
-	if (transcriptTools.requestTools.length > 0) {
-		params.tools = convertResponsesTools(transcriptTools.requestTools, {
-			supportsStrictMode: model.compat?.supportsStrictMode ?? true,
-			supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
-		});
-	}
+	if (requestTools.length > 0) params.tools = requestTools;
 	if (options?.toolChoice !== undefined) {
 		params.tool_choice = options.toolChoice;
 	}

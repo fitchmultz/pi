@@ -36,7 +36,7 @@ export const defaultModelPerProvider: Partial<Record<KnownProvider, string>> = {
 	cerebras: "gpt-oss-120b",
 	zai: "glm-5.4",
 	"zai-coding-cn": "glm-5.4",
-	mistral: "mistral-large-4",
+	mistral: "mistral-medium-latest",
 	minimax: "MiniMax-M3",
 	"minimax-cn": "MiniMax-M3",
 	moonshotai: "kimi-k2.7-code",

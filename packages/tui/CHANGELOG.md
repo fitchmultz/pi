@@ -30,6 +30,11 @@
 - Fixed `wrapTextWithAnsi()` adding a blank row after a line that fills the width when a space follows it and then a word longer than the width, or nothing else on that line. This affected text with an active style or hyperlink and, in a fullscreen frame, all `Text` and `Markdown` text.
 - Fixed fullscreen rendering and `Loader` animation slowing or stopping when the terminal loses focus.
 - Fixed Markdown OSC 8 linkification swallowing trailing CJK punctuation, inline codespans calling `theme.code()` multiple times (duplicating theme delimiters), fullscreen selection copies miscomputing block offsets after HTML comments containing matching text, and `sliceWithWidth()`'s ASCII fast path dropping or leaking selection source markers across sliced overlay rows.
+- Fixed a failed crash-log write replacing the rendered-line-width error and leaving the terminal in raw mode ([#10585](https://github.com/earendil-works/pi/issues/10585))
+- Fixed Markdown after an unclosed `$` before a number, such as `+$50`, rendering as raw text for the rest of the paragraph ([#12389](https://github.com/earendil-works/pi/issues/12389) by [@wuhaoyujerry](https://github.com/wuhaoyujerry))
+- Fixed right-click paste inserting the clipboard twice in Tabby on Windows, which pastes on right-click itself ([#12406](https://github.com/earendil-works/pi/issues/12406))
+- Fixed rendering a bare URL that runs into a multi-megabyte line exhausting the heap in terminals with OSC 8 hyperlinks: `hyperlink()` no longer links URLs longer than 8192 characters ([#12416](https://github.com/earendil-works/pi/issues/12416))
+
 ## [1.6.0] - 2026-11-20
 
 ### Breaking Changes

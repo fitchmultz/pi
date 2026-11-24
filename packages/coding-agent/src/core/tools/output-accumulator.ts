@@ -1,6 +1,5 @@
-import type { WriteStream } from "node:fs";
 import { open } from "node:fs/promises";
-import { createOutputFileStream, writeOutputFileChunk } from "../../utils/output-files.ts";
+import { createOutputFileStream, type OutputFileResult, type OutputFileStream } from "../../utils/output-files.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "./truncate.ts";
 
 export interface OutputAccumulatorOptions {
@@ -12,7 +11,8 @@ export interface OutputAccumulatorOptions {
 export interface OutputSnapshot {
 	content: string;
 	truncation: TruncationResult;
-	fullOutputPath?: string;
+	/** Set once the full output goes to a file. While output streams in, `saved` means the file is being written. */
+	fullOutputFile?: OutputFileResult;
 }
 
 export interface FullOutput {
@@ -20,12 +20,6 @@ export interface FullOutput {
 	/** Whether `content` omits part of the output. */
 	truncated: boolean;
 }
-
-/** Raw bytes move from memory to a private file; closing the file keeps its path. */
-type RawOutput =
-	| { readonly kind: "memory"; readonly chunks: Buffer[] }
-	| { readonly kind: "file"; readonly path: string; readonly stream: WriteStream; readonly done: Promise<void> }
-	| { readonly kind: "closed"; readonly path: string };
 
 function byteLength(text: string): number {
 	return Buffer.byteLength(text, "utf-8");
@@ -45,7 +39,7 @@ export class OutputAccumulator {
 	private readonly tempFilePrefix: string;
 	private readonly decoder = new TextDecoder();
 
-	private raw: RawOutput = { kind: "memory", chunks: [] };
+	private rawChunks: Buffer[] = [];
 	private tailText = "";
 	private tailBytes = 0;
 	private tailStartsAtLineBoundary = true;
@@ -57,6 +51,7 @@ export class OutputAccumulator {
 	private hasOpenLine = false;
 	private finished = false;
 
+	private tempFile: OutputFileStream | undefined;
 	constructor(options: OutputAccumulatorOptions = {}) {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -65,8 +60,9 @@ export class OutputAccumulator {
 	}
 
 	/**
-	 * Returns nothing while the output is kept in memory. Once it goes to the temp file, returns a
-	 * promise that settles when this chunk has been written and rejects if the write fails.
+	 * Returns nothing while the output is kept in memory or after the temp file fails. Once it goes
+	 * to the temp file, returns a promise that resolves when this chunk has been written or the file
+	 * fails. Never rejects.
 	 */
 	append(data: Buffer): Promise<void> | undefined {
 		if (this.finished) {
@@ -76,15 +72,13 @@ export class OutputAccumulator {
 		this.totalRawBytes += data.length;
 		this.appendDecodedText(this.decoder.decode(data, { stream: true }));
 
-		if (this.raw.kind === "memory" && !this.shouldUseTempFile()) {
-			if (data.length > 0) this.raw.chunks.push(data);
-			return undefined;
+		if (this.tempFile || this.shouldUseTempFile()) {
+			return this.ensureTempFile().write(data);
 		}
-		const raw = this.ensureTempFile();
-		if (raw.kind === "closed") {
-			throw new Error("Cannot append to an output accumulator after closeTempFile()");
+		if (data.length > 0) {
+			this.rawChunks.push(data);
 		}
-		return writeOutputFileChunk(raw.stream, data);
+		return undefined;
 	}
 
 	finish(): void {
@@ -99,11 +93,7 @@ export class OutputAccumulator {
 	}
 
 	snapshot(options: { persistIfTruncated?: boolean } = {}): OutputSnapshot {
-		// Clipping drops the partial first line of the retained tail. When the tail is only the end of
-		// one over-long line (plus blank lines), nothing is left, so show the end of that line instead.
-		const clippedText = this.getSnapshotText();
-		const snapshotText = clippedText.trim().length === 0 ? this.tailText : clippedText;
-		const tailTruncation = truncateTail(snapshotText, {
+		const tailTruncation = truncateTail(this.getRetainedText(), {
 			maxLines: this.maxLines,
 			maxBytes: this.maxBytes,
 		});
@@ -125,35 +115,30 @@ export class OutputAccumulator {
 			this.ensureTempFile();
 		}
 
-		return {
-			content: truncation.content,
-			truncation,
-			fullOutputPath: this.raw.kind === "memory" ? undefined : this.raw.path,
-		};
+		return { content: truncation.content, truncation, fullOutputFile: this.tempFile?.result };
 	}
 
+	/** Flush and close the temp file. Never rejects: a failed file shows up as `failed` in later snapshots. */
 	async closeTempFile(): Promise<void> {
-		if (this.raw.kind !== "file") {
-			return;
-		}
-
-		const { path, stream, done } = this.raw;
-		this.raw = { kind: "closed", path };
-
-		stream.end();
-		await done;
+		await this.tempFile?.close();
 	}
 
 	/**
 	 * The complete output, for callers that can take more than the display snapshot. Call after
 	 * `finish()` and `closeTempFile()`. Output longer than `maxBytes` raw bytes keeps its first and
-	 * last `maxBytes / 2` bytes around an omission marker.
+	 * last `maxBytes / 2` bytes around an omission marker. When the temp file could not be saved, only
+	 * the retained tail is left: up to its last `maxBytes` bytes, behind the same marker when output is
+	 * missing.
 	 */
 	async readFullOutput(maxBytes: number): Promise<FullOutput> {
-		if (this.raw.kind === "memory") {
-			return { content: new TextDecoder().decode(Buffer.concat(this.raw.chunks)), truncated: false };
+		const fullOutputFile = this.tempFile?.result;
+		if (!fullOutputFile) {
+			return { content: new TextDecoder().decode(Buffer.concat(this.rawChunks)), truncated: false };
 		}
-		const file = await open(this.raw.path, "r");
+		if (fullOutputFile.kind === "failed") {
+			return this.readRetainedOutput(maxBytes);
+		}
+		const file = await open(fullOutputFile.path, "r");
 		try {
 			const size = (await file.stat()).size;
 			if (size <= maxBytes) {
@@ -230,6 +215,32 @@ export class OutputAccumulator {
 		this.tailBytes = byteLength(this.tailText);
 	}
 
+	/**
+	 * The retained tail, for display and as the fallback of `readFullOutput()`. Clipping drops the partial
+	 * first line of the tail. When the tail is only the end of one over-long line (plus blank lines),
+	 * nothing is left, so it keeps the end of that line instead.
+	 */
+	private getRetainedText(): string {
+		const clippedText = this.getSnapshotText();
+		return clippedText.trim().length === 0 ? this.tailText : clippedText;
+	}
+
+	/** The retained tail within `maxBytes`, marked as truncated only when output is missing. */
+	private readRetainedOutput(maxBytes: number): FullOutput {
+		let bytes = Buffer.from(this.getRetainedText(), "utf-8");
+		if (bytes.length > maxBytes) {
+			let start = bytes.length - maxBytes;
+			while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+			bytes = bytes.subarray(start);
+		}
+		const tail = bytes.toString("utf-8");
+		const omitted = this.totalDecodedBytes - bytes.length;
+		if (omitted === 0) {
+			return { content: tail, truncated: false };
+		}
+		return { content: `[... ${omitted} bytes omitted ...]\n\n${tail}`, truncated: true };
+	}
+
 	private getSnapshotText(): string {
 		if (this.tailStartsAtLineBoundary) {
 			return this.tailText;
@@ -245,15 +256,16 @@ export class OutputAccumulator {
 		);
 	}
 
-	private ensureTempFile(): Exclude<RawOutput, { kind: "memory" }> {
-		if (this.raw.kind !== "memory") {
-			return this.raw;
+	private ensureTempFile(): OutputFileStream {
+		if (this.tempFile) {
+			return this.tempFile;
 		}
-		const { path, stream, done } = createOutputFileStream(this.tempFilePrefix, ".log");
-		for (const chunk of this.raw.chunks) {
-			stream.write(chunk);
+		const tempFile = createOutputFileStream(this.tempFilePrefix, ".log");
+		this.tempFile = tempFile;
+		for (const chunk of this.rawChunks) {
+			tempFile.write(chunk);
 		}
-		this.raw = { kind: "file", path, stream, done };
-		return this.raw;
+		this.rawChunks = [];
+		return tempFile;
 	}
 }

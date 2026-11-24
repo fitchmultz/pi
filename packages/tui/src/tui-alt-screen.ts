@@ -257,6 +257,15 @@ function isPrimaryButtonEvent(event: SgrMouseEvent): boolean {
 	return button === 0 || (event.release && button === 3);
 }
 
+// Terminals that forward the right-click to mouse-tracking apps and also paste
+// the clipboard themselves. pi's synthetic paste would duplicate their paste.
+const RIGHT_CLICK_PASTING_TERMINALS = new Set(["vscode", "tabby"]);
+
+function terminalPastesOnRightClick(): boolean {
+	const termProgram = process.env.TERM_PROGRAM?.toLowerCase();
+	return termProgram !== undefined && RIGHT_CLICK_PASTING_TERMINALS.has(termProgram);
+}
+
 /** Alternate-screen TUI with a scrollable, application-owned viewport. */
 export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	readonly mode = "fullscreen" as const;
@@ -1151,7 +1160,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (
 			!this.onRightClickPaste ||
 			process.platform !== "win32" ||
-			process.env.TERM_PROGRAM?.toLowerCase() === "vscode" ||
+			terminalPastesOnRightClick() ||
 			event.release ||
 			event.button !== 2
 		) {

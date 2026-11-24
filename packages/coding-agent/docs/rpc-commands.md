@@ -476,7 +476,7 @@ Response:
 }
 ```
 
-If output was truncated, includes `fullOutputPath`:
+If output was truncated, includes `fullOutputPath`, or `fullOutputError` with the reason when the full output could not be saved (for example a full temp directory):
 ```json
 {
   "type": "response",

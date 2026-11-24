@@ -15,6 +15,8 @@
 ### Fixed
 
 - Fixed `McpClient.connect()` reporting success after the connection closed during initialization. It now rejects with `McpConnectionClosedError`, keeps the client closed, and notifies close listeners only once.
+- Fixed requests to servers that echo request IDs as strings (`"1"` for `1`) timing out instead of matching the response ([#12205](https://github.com/earendil-works/pi/issues/12205))
+
 ## [1.6.0] - 2026-11-20
 
 ### Added

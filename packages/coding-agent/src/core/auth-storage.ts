@@ -13,7 +13,12 @@ import { raceWithAbortSignal } from "../utils/abort.ts";
 import { atomicWriteFileSync, resolveFileTarget } from "../utils/atomic-file.ts";
 import { getFileRevision, normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
-import { isCommandConfigValue, refreshConfigValueCache, resolveConfigValue } from "./resolve-config-value.ts";
+import {
+	clearConfigValueCacheEntry,
+	isCommandConfigValue,
+	refreshConfigValueCache,
+	resolveConfigValue,
+} from "./resolve-config-value.ts";
 
 type AuthStorageData = Record<string, Credential>;
 
@@ -475,6 +480,7 @@ export class AuthStorage implements CredentialStore {
 	): Promise<Credential | undefined> {
 		let latestData = this.readState.data;
 		let revision: string | undefined;
+		let written: Credential | undefined;
 		const result = await this.storage.withLockAsync(async (content) => {
 			const currentData = this.parseStorageData(content);
 			const next = await fn(currentData[provider]);
@@ -486,9 +492,13 @@ export class AuthStorage implements CredentialStore {
 
 			const merged: AuthStorageData = { ...currentData, [provider]: next };
 			latestData = merged;
+			written = next;
 			return { result: next, next: JSON.stringify(merged, null, 2) };
 		}, options);
 		this.updateReadState(latestData, revision);
+		// Command results are cached for the process. Saving a `!command` key, even the same one, runs it
+		// again, so signing in to a secrets manager and saving the key again recovers from a failure.
+		if (written?.type === "api_key" && written.key) clearConfigValueCacheEntry(written.key);
 		return result;
 	}
 

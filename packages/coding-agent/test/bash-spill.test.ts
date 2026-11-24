@@ -221,29 +221,42 @@ describe("native Bash spill backpressure", () => {
 		},
 	);
 
-	it.each(["tool", "executor"] as const)("fails a %s spill truthfully and reaps its producer", async (owner) => {
-		spillSink(5, true);
-		const controller = new AbortController();
-		const pidPath = join(directory, "producer.pid");
-		const command = producer(
-			`require('fs').writeFileSync(${JSON.stringify(pidPath)},String(process.pid));process.stdout.write('failed row\\n'.repeat(5000));setInterval(()=>{},1000);`,
-		);
-		const result =
-			owner === "tool"
-				? createBashTool(directory).execute("fail", { command }, controller.signal)
-				: executeBashWithOperations(command, directory, createLocalBashOperations(), { signal: controller.signal });
-		// Bound a broken fixture without letting cancellation masquerade as autonomous sink-error cleanup.
-		const guard = setTimeout(() => controller.abort(), 1000);
-		try {
-			await expect(result).rejects.toThrow("spill ENOSPC fixture");
-			expect(controller.signal.aborted).toBe(false);
-		} finally {
-			clearTimeout(guard);
-			controller.abort();
-		}
-		await expect.poll(() => processExists(Number(fs.readFileSync(pidPath, "utf8")))).toBe(false);
-		expect(spills.every((stream) => stream.closed && !stream.writableFinished)).toBe(true);
-	});
+	it.each(["tool", "executor"] as const)(
+		"resumes backpressure, drops the partial file and reports fullOutputError when a %s spill fails",
+		async (owner) => {
+			spillSink(5, true);
+			// Output over 1 MiB so backpressure engages before the write error arrives.
+			const rows = "failed row\n".repeat(150_000);
+			const expected = `${rows}END\n`;
+			const input = join(directory, "input");
+			fs.writeFileSync(input, expected);
+			const command = producer(`require('fs').createReadStream(${JSON.stringify(input)}).pipe(process.stdout)`);
+			if (owner === "tool") {
+				const result = await createBashTool(directory).execute("fail", { command });
+				expect(result.details?.fullOutputPath).toBeUndefined();
+				expect(result.details?.fullOutputError).toContain("spill ENOSPC fixture");
+				expect(result.structuredContent).toMatchObject({
+					exit_code: 0,
+					truncated: true,
+					full_output_error: expect.stringContaining("spill ENOSPC fixture"),
+				});
+				expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("END");
+			} else {
+				const result = await executeBashWithOperations(command, directory, createLocalBashOperations());
+				expect(result).toMatchObject({
+					exitCode: 0,
+					cancelled: false,
+					truncated: true,
+					fullOutputPath: undefined,
+					fullOutputError: expect.stringContaining("spill ENOSPC fixture"),
+				});
+				expect(result.output.endsWith("END")).toBe(true);
+			}
+			expect(spills.length).toBeGreaterThan(0);
+			expect(spills.every((stream) => stream.closed && !stream.writableFinished)).toBe(true);
+			expect(spills.every((stream) => !fs.existsSync(String(stream.path)))).toBe(true);
+		},
+	);
 
 	it.skipIf(process.platform === "win32").each(["symlink", "hardlink"] as const)(
 		"never overwrites a spill-path %s alias",
@@ -258,11 +271,11 @@ describe("native Bash spill backpressure", () => {
 				return stream;
 			});
 			syncBuiltinESMExports();
-			await expect(
-				createBashTool(directory).execute("alias", {
-					command: producer("process.stdout.write('private row\\n'.repeat(10000))"),
-				}),
-			).rejects.toThrow(/EEXIST/);
+			const result = await createBashTool(directory).execute("alias", {
+				command: producer("process.stdout.write('private row\\n'.repeat(10000))"),
+			});
+			expect(result.details?.fullOutputPath).toBeUndefined();
+			expect(result.details?.fullOutputError).toMatch(/EEXIST/);
 			expect(fs.readFileSync(target, "utf8")).toBe("DO NOT OVERWRITE\n");
 			expect(fs.statSync(target).mode & 0o777).toBe(0o600);
 		},

@@ -27,6 +27,8 @@
 - An aborted or timed-out `NodeExecutionEnv.exec()` shell command on macOS no longer lets a waiting shell go on to its later steps after the current step is killed. A step that the shell was starting when the kill landed, which that kill can miss, is now killed as soon as `NodeExecutionEnv` sees the shell exit; the same applies when `cleanup()` kills the command.
 - SQLite refuses oversized input and write admissions without failing the Session. An already queued input or write whose encoded entry cannot fit settles `unanswered` with `input_too_large` (without advancing head or resetting an active `postTools` run), preserving the current answer and allowing valid queued items to continue. Idle `Conversation.submit()` checks admission once per commit. Actual commit and uncertain storage failures remain fatal.
 - Fixed a native `NodeExecutionEnv.watch` that falls back to polling while it starts, because the system is out of watches or file descriptors, scanning twice per poll interval and keeping a poll timer for one interval after `stop()`.
+- Fixed `NodeExecutionEnv` on Windows not finding Git for Windows installed outside Program Files and running commands through the WSL launcher `System32\bash.exe` instead. It now asks the `git.exe` on `PATH` for its installation (`git var GIT_SHELL_PATH`, Git 2.47+) and uses its Git Bash before other `bash.exe` on `PATH` ([#12408](https://github.com/earendil-works/pi/issues/12408))
+
 ## [1.6.0] - 2026-11-20
 
 ### Breaking Changes

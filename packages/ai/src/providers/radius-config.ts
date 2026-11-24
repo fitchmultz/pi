@@ -1,5 +1,5 @@
 import type { OAuthCredential } from "../auth/types.ts";
-import type { Model, ModelCostRates, ThinkingLevelMap } from "../types.ts";
+import type { ClassifierModel, Model, ModelCostRates, ThinkingLevelMap } from "../types.ts";
 import { ownedSlice } from "../utils/text.ts";
 
 export const DEFAULT_RADIUS_GATEWAY = "https://radius.pi.dev";
@@ -15,9 +15,18 @@ export type RadiusGatewayModel = {
 	maxTokens: number;
 };
 
+export type RadiusGatewayClassifierModel = {
+	id: string;
+	name: string;
+	input: ("text" | "image")[];
+	cost: ClassifierModel<"pi-classifier">["cost"];
+	contextWindow: number;
+};
+
 export type RadiusGatewayConfig = {
 	baseUrl: string;
 	models: RadiusGatewayModel[];
+	classifiers?: RadiusGatewayClassifierModel[];
 };
 
 export type RadiusOAuthCredential = OAuthCredential & {
@@ -33,30 +42,37 @@ function hasCostRates(value: unknown): value is ModelCostRates {
 	});
 }
 
-function isRadiusGatewayModel(value: unknown): value is RadiusGatewayModel {
+function isRadiusGatewayClassifierModel(value: unknown): value is RadiusGatewayClassifierModel {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const model = value as Partial<RadiusGatewayModel>;
+	const model = value as Partial<RadiusGatewayClassifierModel>;
 	return (
 		typeof model.id === "string" &&
 		typeof model.name === "string" &&
-		typeof model.reasoning === "boolean" &&
 		Array.isArray(model.input) &&
 		hasCostRates(model.cost) &&
 		(model.cost.tiers === undefined ||
 			(Array.isArray(model.cost.tiers) &&
 				model.cost.tiers.every((tier) => hasCostRates(tier) && Number.isFinite(tier.inputTokensAbove)))) &&
-		typeof model.contextWindow === "number" &&
-		typeof model.maxTokens === "number"
+		typeof model.contextWindow === "number"
 	);
+}
+
+function isRadiusGatewayModel(value: unknown): value is RadiusGatewayModel {
+	if (!isRadiusGatewayClassifierModel(value)) return false;
+	const model = value as Partial<RadiusGatewayModel>;
+	return typeof model.reasoning === "boolean" && typeof model.maxTokens === "number";
 }
 
 function sanitizeRadiusGatewayConfig(config: unknown): RadiusGatewayConfig | undefined {
 	if (typeof config !== "object" || config === null || Array.isArray(config)) return undefined;
-	const { baseUrl, models } = config as Partial<RadiusGatewayConfig>;
+	const { baseUrl, models, classifiers } = config as Partial<RadiusGatewayConfig>;
 	if (typeof baseUrl !== "string" || !Array.isArray(models)) return undefined;
 	return {
 		baseUrl,
 		models: models.filter(isRadiusGatewayModel).map((model) => ({ ...model })),
+		...(Array.isArray(classifiers)
+			? { classifiers: classifiers.filter(isRadiusGatewayClassifierModel).map((model) => ({ ...model })) }
+			: {}),
 	};
 }
 
@@ -76,6 +92,24 @@ export function getRadiusModelsFromConfig(providerId: string, config: RadiusGate
 		provider: providerId,
 		baseUrl: config.baseUrl,
 	}));
+}
+
+export function getRadiusAllModelsFromConfig(
+	providerId: string,
+	config: RadiusGatewayConfig,
+): (Model<"pi-messages"> | ClassifierModel<"pi-classifier">)[] {
+	return [
+		...getRadiusModelsFromConfig(providerId, config),
+		...(config.classifiers ?? []).map(
+			(model): ClassifierModel<"pi-classifier"> => ({
+				...model,
+				type: "classifier",
+				api: "pi-classifier",
+				provider: providerId,
+				baseUrl: config.baseUrl,
+			}),
+		),
+	];
 }
 
 export function getRadiusModels(providerId: string, credential: OAuthCredential | undefined): Model<"pi-messages">[] {
