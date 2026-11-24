@@ -2,18 +2,25 @@
  * Tool discovery: a BM25 ranker over tool metadata, shared by `searchTools()` in codemode scripts and
  * the optional `tool_search` tool.
  *
- * `tool_search` searches the tools that are declared to the model only once loaded (`codemode` and
- * `deferred` exposure) and loads the good matches, so they are declared for the next model call. It
+ * `tool_search` searches the tools that are not declared upfront (`codemode` and `deferred`
+ * exposure). Normally it loads good matches into the active tool set so they are declared for the
+ * next model call, recorded in the transcript like any other tool change across `/tree`, resume,
+ * and fork until a compaction or context rollover prunes idle loaded tools back to deferred. When
+ * `codemode` is active on a model without cache-preserving mid-conversation tool additions
+ * (`getMidConvoToolSupport(model) === "none"`), it instead returns inline `codemode` declarations
+ * for those matches without mutating active tools so top-level tool declarations stay cached. It
  * lists weaker matches without loading them, and says when the query names a tool that is already
- * active or that it cannot load. Loading goes through the active tool set, so it is recorded in the
- * transcript like any other tool change and survives `/tree`, resume, and fork on that branch until
- * a compaction or context rollover prunes idle loaded tools back to deferred.
+ * active or that it cannot load.
  */
 
-import { resolveSchemaRef } from "@earendil-works/pi-codemode/declarations";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { getMidConvoToolSupport } from "@earendil-works/pi-ai";
+import type { CodemodeJsonSchema } from "@earendil-works/pi-codemode";
+import { renderToolSample, resolveSchemaRef, toCodemodeIdentifier } from "@earendil-works/pi-codemode/declarations";
 import { type Static, Type } from "typebox";
 import type {
 	ExtensionAPI,
+	ExtensionToolContext,
 	ToolDefinition,
 	ToolExposure,
 	ToolInfo,
@@ -21,6 +28,8 @@ import type {
 } from "../../core/extensions/types.ts";
 
 export const TOOL_SEARCH_TOOL_NAME = "tool_search";
+const CODEMODE_TOOL_NAME = "codemode";
+const TEXT_OUTPUT_SCHEMA: CodemodeJsonSchema = { type: "string" };
 export const DEFAULT_TOOL_SEARCH_LIMIT = 8;
 
 /** A tool as the ranker sees it: its name and the texts built by {@link createToolSearchDocument}. */
@@ -381,6 +390,8 @@ export type ToolSearchInput = Static<typeof toolSearchSchema>;
 export interface ToolSearchToolDetails {
 	/** Tools loaded by this call. */
 	loaded: string[];
+	/** Matching tools returned with inline `codemode` declarations without mutating active tools. */
+	inline?: string[];
 	/** The closest matches that the result lists when none is good. Not loaded. */
 	listed?: string[];
 	/** Tools that were already active: good matches, and tools named in the query. */
@@ -397,10 +408,18 @@ export interface ToolSearchToolOptions {
 	tools?: Pick<ExtensionAPI, "getAllTools" | "getActiveTools" | "setActiveTools">;
 }
 
+/** A matched tool returned inline for `codemode` without mutating top-level declarations. */
+interface InlineCodemodeTool {
+	info: ToolInfo;
+	callable: AgentTool<any>;
+}
+
 /** What one search found. */
 interface ToolSearchOutcome {
 	/** Good matches that were not active, best first: loaded by this call. */
 	loaded: ToolInfo[];
+	/** Good matches returned inline for `codemode` to avoid invalidating the prompt cache. */
+	inline: InlineCodemodeTool[];
 	/** The best matches when none is good, with whether each is active. Not loaded. */
 	closest: { tool: ToolInfo; active: boolean }[];
 	/** Tools that are already active: good matches, and tools named in the query. */
@@ -429,9 +448,17 @@ function searchAndLoad(
 	tools: NonNullable<ToolSearchToolOptions["tools"]>,
 	query: string,
 	limit: number,
+	ctx?: ExtensionToolContext,
 ): ToolSearchOutcome {
 	const activeNames = tools.getActiveTools();
 	const isActive = (tool: ToolInfo) => activeNames.includes(tool.name);
+	const preferInlineCodemode =
+		ctx?.model !== undefined &&
+		getMidConvoToolSupport(ctx.model) === "none" &&
+		activeNames.includes(CODEMODE_TOOL_NAME);
+	const callableByName = preferInlineCodemode
+		? new Map((ctx?.tools ?? []).map((callable) => [callable.name, callable]))
+		: undefined;
 	const all = tools.getAllTools();
 	const searchable = all.filter((tool) => isSearchable(tool.exposure));
 	const others = all.filter((tool) => !isSearchable(tool.exposure));
@@ -442,21 +469,28 @@ function searchAndLoad(
 		return tool ? [{ tool, strong: match.strong }] : [];
 	});
 	const loaded: ToolInfo[] = [];
+	const inline: InlineCodemodeTool[] = [];
 	const active: string[] = [];
 	// Good matches that are already active are reported when they rank above a tool this call loads, or
 	// when it loads none: the tool the model wants may be one of them.
 	let passed: string[] = [];
 	for (const { tool, strong } of matches) {
-		if (!strong || loaded.length === limit) break;
+		if (!strong || loaded.length + inline.length === limit) break;
 		if (isActive(tool)) {
 			passed.push(tool.name);
 		} else {
-			loaded.push(tool);
+			const callable = callableByName?.get(tool.name);
+			if (callable) {
+				inline.push({ info: tool, callable });
+			} else {
+				loaded.push(tool);
+			}
 			active.push(...passed);
 			passed = [];
 		}
 	}
-	if (loaded.length === 0) active.push(...passed);
+	const foundCount = loaded.length + inline.length;
+	if (foundCount === 0) active.push(...passed);
 	// `limit` bounds what one call returns, also for names.
 	active.splice(limit);
 	// Names in the query that the ranking does not answer for: tools it does not search, and names that
@@ -472,14 +506,14 @@ function searchAndLoad(
 			const terms = new Set([...tokenize(tool.name), ...tokenize(tool.namespace?.name ?? "")]);
 			return word.terms.every((term) => terms.has(term));
 		});
-		if (!known && loaded.length === 0) unknown.push(word.text);
+		if (!known && foundCount === 0) unknown.push(word.text);
 	}
 	const closest =
-		loaded.length > 0 || active.length > 0
+		foundCount > 0 || active.length > 0
 			? []
 			: matches.slice(0, limit).map(({ tool }) => ({ tool, active: isActive(tool) }));
 	if (loaded.length > 0) tools.setActiveTools([...activeNames, ...loaded.map((tool) => tool.name)]);
-	return { loaded, closest, active: [...new Set(active)], notOffered, unknown: [...new Set(unknown)] };
+	return { loaded, inline, closest, active: [...new Set(active)], notOffered, unknown: [...new Set(unknown)] };
 }
 
 /** The first line of a tool's description. */
@@ -487,11 +521,29 @@ function summary(tool: ToolInfo): string {
 	return tool.description.trim().split(/\r?\n/)[0];
 }
 
+/** Render a matched tool's description and TypeScript `tools.<name>` declaration for `codemode`. */
+function formatInlineCodemodeTool({ info, callable }: InlineCodemodeTool): string {
+	const id = toCodemodeIdentifier(callable.name);
+	const heading = id === callable.name ? `### \`${id}\`` : `### \`${id}\` (\`${callable.name}\`)`;
+	const bullets = (info.promptGuidelines ?? []).flatMap((guideline) =>
+		guideline.trim() ? [`- ${guideline.trim()}`] : [],
+	);
+	const description =
+		bullets.length > 0 ? `${callable.description.trim()}\n\n${bullets.join("\n")}` : callable.description;
+	const sample = renderToolSample({
+		name: callable.name,
+		description,
+		inputSchema: callable.parameters as CodemodeJsonSchema,
+		outputSchema: (callable.outputSchema as CodemodeJsonSchema | undefined) ?? TEXT_OUTPUT_SCHEMA,
+	}).trim();
+	return `${heading}\n${sample}`;
+}
+
 /**
  * The result text: first what the query named or matched that needs no loading or cannot be loaded, then the
- * loaded tools or, when there is no good match, the closest ones.
+ * loaded or inline `codemode` tools or, when there is no good match, the closest ones.
  */
-function describeOutcome({ loaded, closest, active, notOffered, unknown }: ToolSearchOutcome): string {
+function describeOutcome({ loaded, inline, closest, active, notOffered, unknown }: ToolSearchOutcome): string {
 	const lines: string[] = [];
 	if (active.length > 0) {
 		lines.push(
@@ -504,17 +556,24 @@ function describeOutcome({ loaded, closest, active, notOffered, unknown }: ToolS
 		);
 	}
 	if (unknown.length > 0) lines.push(`No tool or server in this session has ${unknown.join(" or ")} in its name.`);
+	if (inline.length > 0) {
+		lines.push(
+			`Found ${inline.length} tool${inline.length === 1 ? "" : "s"}. Call ${inline.length === 1 ? "it" : "them"} through \`${CODEMODE_TOOL_NAME}\` (\`await tools.<name>({ ... })\`) to keep the prompt cache intact (top-level tool declarations were not modified):`,
+			"",
+			inline.map(formatInlineCodemodeTool).join("\n\n"),
+		);
+	}
 	if (loaded.length > 0) {
 		lines.push(
 			`Loaded ${loaded.length} tool${loaded.length === 1 ? "" : "s"}. They are available from your next call:`,
 			...loaded.map((tool) => `- ${tool.name}: ${summary(tool)}`),
 		);
-	} else if (closest.length > 0) {
+	} else if (inline.length === 0 && closest.length > 0) {
 		lines.push(
 			"No tool is a close match, so none was loaded. Closest matches; search for an exact name to load one:",
 			...closest.map((match) => `- ${match.tool.name}: ${match.active ? "already active" : summary(match.tool)}`),
 		);
-	} else if (lines.length === 0) {
+	} else if (inline.length === 0 && lines.length === 0) {
 		lines.push("No matching tools found.");
 	}
 	return lines.join("\n");
@@ -524,7 +583,7 @@ function describeOutcome({ loaded, closest, active, notOffered, unknown }: ToolS
  * The `tool_search` description. It does not list the searchable tools or their namespaces, so it
  * stays the same while tools are registered, for example when MCP servers connect.
  */
-export const TOOL_SEARCH_DESCRIPTION = `# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nSome of the tools, such as tools of MCP servers, may not have been provided to you upfront, and you should use this tool (\`${TOOL_SEARCH_TOOL_NAME}\`) to search for the required tools. For MCP tool discovery, always use \`${TOOL_SEARCH_TOOL_NAME}\`.`;
+export const TOOL_SEARCH_DESCRIPTION = `# Tool discovery\n\nSearches over deferred tool metadata with BM25 and makes matching tools available (exposing them for the next model call, or returning inline \`codemode\` declarations on models that cannot add tools mid-conversation).\n\nSome of the tools, such as tools of MCP servers, may not have been provided to you upfront, and you should use this tool (\`${TOOL_SEARCH_TOOL_NAME}\`) to search for the required tools. For MCP tool discovery, always use \`${TOOL_SEARCH_TOOL_NAME}\`.`;
 
 export function createToolSearchToolDefinition(
 	options: ToolSearchToolOptions = {},
@@ -533,24 +592,25 @@ export function createToolSearchToolDefinition(
 		name: TOOL_SEARCH_TOOL_NAME,
 		label: TOOL_SEARCH_TOOL_NAME,
 		description: TOOL_SEARCH_DESCRIPTION,
-		promptSnippet: "Search for tools that are not loaded yet and load the matches",
+		promptSnippet: "Search for undeclared tools and load them or return inline codemode declarations",
 		parameters: toolSearchSchema,
 		// Scripts can search without loading tools into the model's next request.
 		exposure: "model-only",
 		// A query can match any tool that is not declared yet.
 		reachesTools: () => "all",
-		async execute(_toolCallId, { query, limit }) {
+		async execute(_toolCallId, { query, limit }, _signal, _onUpdate, ctx) {
 			if (query.trim() === "") throw new Error("query must not be empty");
 			const max = limit ?? DEFAULT_TOOL_SEARCH_LIMIT;
 			if (!Number.isInteger(max) || max <= 0) throw new Error("limit must be a positive integer");
 			if (!options.tools)
 				return { content: [{ type: "text", text: "No matching tools found." }], details: { loaded: [] } };
-			const outcome = searchAndLoad(options.tools, query, max);
+			const outcome = searchAndLoad(options.tools, query, max, ctx);
 			const unavailable = [...outcome.notOffered, ...outcome.unknown];
 			return {
 				content: [{ type: "text", text: describeOutcome(outcome) }],
 				details: {
 					loaded: outcome.loaded.map((tool) => tool.name),
+					...(outcome.inline.length > 0 ? { inline: outcome.inline.map(({ info }) => info.name) } : {}),
 					...(outcome.closest.length > 0 ? { listed: outcome.closest.map((match) => match.tool.name) } : {}),
 					...(outcome.active.length > 0 ? { active: outcome.active } : {}),
 					...(unavailable.length > 0 ? { unavailable } : {}),

@@ -1,3 +1,4 @@
+import type { Model } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { ToolResultMessage } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
@@ -5,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionAPI } from "../../src/core/extensions/types.ts";
 import { createCodemodeExtension } from "../../src/extensions/codemode/index.ts";
 import { createToolSearchExtension } from "../../src/extensions/tool-search/index.ts";
-import { createHarness, type Harness } from "./harness.ts";
+import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 /**
  * A tool that calls other tools, built only on the extension API: its own name, exposure, loadout
@@ -301,5 +302,67 @@ describe("tool_search", () => {
 			details: { loaded: [], unavailable: ["café"] },
 		});
 		expect(active).toEqual(["tool_search", "board_status"]);
+	});
+
+	it("returns inline codemode declarations without mutating active tools when codemode is active on a model without mid-convo tool additions", async () => {
+		const harness = await createHarness({
+			initialActiveToolNames: ["codemode", "tool_search", "board_status"],
+			extensionFactories: [createCodemodeExtension(), createToolSearchExtension(), searchCatalogExtension],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("tool_search", { query: "metrics_query" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage([fauxToolCall("codemode", { code: "return await tools.metrics_query({});" })], {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("done"),
+		]);
+		await harness.session.prompt("go");
+
+		const results = harness.session.messages.filter(
+			(message): message is ToolResultMessage => message.role === "toolResult",
+		);
+		expect(results[0]?.details).toEqual({ loaded: [], inline: ["metrics_query"] });
+		const searchText = (results[0]?.content[0] as { text: string }).text;
+		expect(searchText).toContain("codemode");
+		expect(searchText).toContain("declare const tools: { metrics_query(");
+		expect(searchText).toContain("top-level tool declarations were not modified");
+		expect(getMessageText(results[1])).toContain("metrics_query");
+		expect(harness.session.getActiveToolNames()).toEqual(["codemode", "tool_search", "board_status"]);
+	});
+
+	it("still loads tools via setActiveTools when codemode is active on a model with mid-convo tool additions", async () => {
+		const harness = await createHarness({
+			initialActiveToolNames: ["codemode", "tool_search", "board_status"],
+			extensionFactories: [createCodemodeExtension(), createToolSearchExtension(), searchCatalogExtension],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({});
+		// Mark the faux session model as supporting mid-convo tool additions (like OpenAI Responses tool search).
+		const faux = harness.getModel();
+		harness.session.agent.state.model = {
+			...faux,
+			api: "openai-responses",
+			compat: { supportsToolSearch: true },
+		} as Model<"openai-responses">;
+		harness.session.agent.streamFunction = (model, context, options) =>
+			harness.session.modelRuntime.streamSimple(harness.getModel(model.id) ?? faux, context, options);
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("tool_search", { query: "metrics_query" })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		await harness.session.prompt("go");
+
+		const result = harness.session.messages.find(
+			(message): message is ToolResultMessage => message.role === "toolResult",
+		);
+		expect(result?.details).toEqual({ loaded: ["metrics_query"] });
+		expect(harness.session.getActiveToolNames()).toEqual([
+			"codemode",
+			"tool_search",
+			"board_status",
+			"metrics_query",
+		]);
 	});
 });

@@ -195,7 +195,7 @@ Each server tool is registered as `mcp__<server>__<tool>`. The server's `exposur
 | Exposure | Behavior | Typical use |
 |---|---|---|
 | `codemode` (default) | Callable from [`codemode`](cli.md#tools) scripts, but neither declared to the model nor listed in the codemode description. Scripts find tools with `searchTools()`, `describeTool()`, or `ALL_TOOLS`. | General MCP servers, especially when scripts should combine or filter calls. |
-| `deferred` | Not declared until [`tool_search`](cli.md#tool-search) loads a good match for the next model call. | Large servers whose tools should be called directly after discovery. |
+| `deferred` | Not declared upfront; [`tool_search`](cli.md#tool-search) loads good matches for the next model call, or returns inline `codemode` declarations without mutating top-level tools when `codemode` is active on a model without cache-preserving mid-conversation tool additions. | Large servers whose tools should be discovered on demand via `tool_search` (and called directly when the model supports cache-preserving tool additions or `codemode` is inactive). |
 | `direct` | Declared to the model like a built-in tool and also callable from codemode. | Small, frequently used tool sets. |
 | `hidden` | Registered but unreachable. | Servers or tools that should remain unavailable. |
 
@@ -227,7 +227,7 @@ The [`toolExposure` setting](settings.md#tool-exposure) in `settings.json` uses 
 
 `pi mcp list` marks tools whose exposure differs from their server. The Tools view in `/mcp` also shows the effective exposure.
 
-Tools with `codemode` or `deferred` exposure can be reached through either indirect mechanism: codemode scripts can call them, and `tool_search` can load them. Codemode calls do not depend on the active tool set, so they remain available after `/tree`, resume, and fork. Tools loaded by `tool_search` are recorded in the transcript and stay declared on that branch until a compaction or context rollover prunes idle ones back to deferred (see [Compaction](compaction.md#how-it-works)).
+Tools with `codemode` or `deferred` exposure can be reached through either indirect mechanism: codemode scripts can call them, and `tool_search` can find them (loading them into active tools, or returning inline `codemode` declarations when `codemode` is active on a model without cache-preserving mid-conversation tool additions). Codemode calls do not depend on the active tool set, so they remain available after `/tree`, resume, and fork. Tools that `tool_search` loads into active tools are recorded in the transcript and stay declared on that branch until a compaction or context rollover prunes idle ones back to deferred (see [Compaction](compaction.md#how-it-works)).
 
 `--tools` does not remove MCP tools unless one of its entries starts with `mcp__`; `pi --tools read,codemode,'mcp__radius__*'` keeps only the tools of `radius`. An MCP tool that no entry names or matches is never declared directly, whatever its exposure; only `tool_search`, if listed, can load it, and it loads only tools with `codemode` or `deferred` exposure. `--exclude-tools` accepts the same patterns, and `--no-mcp` disables MCP for one run (see [Tools](cli.md#mcp-tools)).
 

@@ -157,7 +157,7 @@ Built-in extensions also add the following tools. `background_command` starts, i
 |---|---|
 | `background_command` | Start, inspect, and cancel durable background shell commands that survive Pi exit and report completion later |
 | `codemode` | Run JavaScript that calls the other tools, for example in parallel with `Promise.allSettled`; only the script's output reaches the model |
-| `tool_search` | Search tools that are not declared to the model (`codemode` and `deferred` exposure, such as MCP tools) and declare the good matches for the next call |
+| `tool_search` | Search tools that are not declared to the model (`codemode` and `deferred` exposure, such as MCP tools) and load or return inline `codemode` declarations for the good matches |
 
 ### Enable codemode
 
@@ -183,7 +183,9 @@ Scripts run in a QuickJS sandbox and reach the other tools through `tools.<name>
 
 ### Tool search
 
-`tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`. It uses the same ranking as `searchTools()` over the tools with `codemode` or `deferred` exposure and declares the good matches for the next model call, up to `limit` (default 8). Loaded tools are recorded in the session like other tool changes, staying declared on that branch until a compaction or context rollover prunes idle ones back to deferred (see [Compaction](compaction.md#how-it-works)).
+`tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`. It uses the same ranking as `searchTools()` over the tools with `codemode` or `deferred` exposure, up to `limit` (default 8). By default it declares the good matches for the next model call, recording loaded tools in the session like other tool changes until a compaction or context rollover prunes idle ones back to deferred (see [Compaction](compaction.md#how-it-works)).
+
+When `codemode` is active on a model that cannot add tools mid-conversation without rewriting the top-level tool list (such as Gemini 4 or Bedrock), `tool_search` keeps the prompt cache intact: instead of mutating active tools, it returns the matching tools' inline `codemode` TypeScript declarations (`await tools.<name>({ ... })`) in the search result. Models that support cache-preserving mid-conversation tool additions (such as Claude Opus 5.5, Fable 5.2, GPT-6.2, and Kimi K3) and sessions without `codemode` continue loading matched tools directly.
 
 A tool is a good match when one of these holds:
 

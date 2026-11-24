@@ -954,3 +954,81 @@ it("keeps Gemini 4 systemInstruction and contents prefix stable across mid-sessi
 		h.cleanup();
 	}
 });
+
+it("keeps Gemini 4 tools and prefix stable across tool_search when codemode is active", async () => {
+	const model = getBuiltinModel("google", "gemini-4-neon");
+	interface GoogleCapture {
+		contents?: unknown[];
+		config?: { systemInstruction?: string; tools?: unknown[] };
+	}
+	const captures: GoogleCapture[] = [];
+	const capture = async (context: TranscriptContext) => {
+		const result = await googleStream(model, context, {
+			apiKey: "offline-key",
+			onPayload(value: unknown) {
+				captures.push(JSON.parse(JSON.stringify(value)) as GoogleCapture);
+				throw new Error("offline payload captured");
+			},
+		}).result();
+		expect(result.errorMessage).toContain("offline payload captured");
+	};
+	const h = await createHarness({
+		initialActiveToolNames: ["codemode", "tool_search"],
+		extensionFactories: [
+			createCodemodeExtension(),
+			createToolSearchExtension(),
+			(pi) => {
+				pi.registerTool({
+					name: "linear_get_issue",
+					label: "linear_get_issue",
+					description: "Fetch a Linear issue by ID.",
+					exposure: "deferred",
+					parameters: Type.Object({ id: Type.String() }),
+					execute: async (_id, { id }) => ({ content: [{ type: "text", text: `issue:${id}` }], details: {} }),
+				});
+			},
+		],
+	});
+	try {
+		await h.session.bindExtensions({});
+		h.setResponses([
+			async (context) => {
+				await capture(context);
+				return fauxAssistantMessage(fauxToolCall("tool_search", { query: "linear issue" }), {
+					stopReason: "toolUse",
+				});
+			},
+			async (context) => {
+				await capture(context);
+				return fauxAssistantMessage(
+					fauxToolCall("codemode", { code: 'return await tools.linear_get_issue({ id: "LIN-1" });' }),
+					{ stopReason: "toolUse" },
+				);
+			},
+			async (context) => {
+				await capture(context);
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await h.session.prompt("Look up LIN-1");
+
+		expect(captures).toHaveLength(3);
+		const [first, second, third] = captures;
+		expect(second.config?.systemInstruction).toBe(first.config?.systemInstruction);
+		expect(third.config?.systemInstruction).toBe(first.config?.systemInstruction);
+		expect(JSON.stringify(second.config?.tools)).toBe(JSON.stringify(first.config?.tools));
+		expect(JSON.stringify(third.config?.tools)).toBe(JSON.stringify(first.config?.tools));
+		expect(JSON.stringify(first.config?.tools)).not.toContain('"linear_get_issue"');
+		expect(JSON.stringify(second.contents?.slice(0, first.contents?.length ?? 0))).toBe(
+			JSON.stringify(first.contents),
+		);
+		expect(JSON.stringify(third.contents?.slice(0, second.contents?.length ?? 0))).toBe(
+			JSON.stringify(second.contents),
+		);
+		expect(JSON.stringify(second.contents?.at(-1))).toContain("declare const tools: { linear_get_issue(");
+		expect(JSON.stringify(third.contents?.at(-1))).toContain("issue:LIN-1");
+		expect(h.session.getActiveToolNames()).toEqual(["codemode", "tool_search"]);
+	} finally {
+		h.cleanup();
+	}
+});

@@ -12,6 +12,7 @@
 
 ### Added
 
+- Updated `tool_search` to preserve prompt prefix caches on models without cache-preserving mid-conversation tool additions (such as Gemini 4 and Bedrock) when `codemode` is active: matched `codemode`-callable tools are returned with inline TypeScript declarations (`await tools.<name>({ ... })`) instead of calling `setActiveTools()`, keeping top-level tool declarations unchanged. Models with mid-conversation tool addition support and sessions without `codemode` keep existing loading behavior.
 - Preserved `CompactionProviderSummary.cacheIdentity` and projected block `outputTokens` onto leading system messages in `SessionManager` (counted in `compaction.ts` token estimates), and increased the `_requestProviderSummary` wall-clock timeout for OpenAI Responses `compaction_trigger` requests to 120 seconds with `maxRetries: 0`.
 - Added cache-stable model-aware `<model_guidance>` system prompt steering for GPT-6.2 models (`gpt-6.2-astra`, `gpt-6.2-sol`) and omitted the generic `"Be concise in your responses"` rule for GPT-6.2, diffed cleanly across mid-session model switches while keeping non-GPT-6.2 prompts unchanged.
 - Added automatic `reasoningSummary: null` forwarding in session requests when `hideThinkingBlock` is enabled (unless explicitly overridden), avoiding unused OpenAI Responses reasoning-summary latency while keeping encrypted reasoning intact.
