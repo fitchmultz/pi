@@ -2820,7 +2820,7 @@ When `search_tools` adds a match, the model receives the complete updated tool l
 - `direct` (default): declared to the model while active, and callable while active.
 - `model-only`: declared to the model while active, never callable. Use it for tools that orchestrate other tools or ask the user.
 - `codemode`: callable whenever registered, and listed by the `codemode` tool. Not declared to the model unless activated explicitly.
-- `deferred`: like `codemode`, but codemode tools do not list it; `tool_search` can find and activate it.
+- `deferred`: like `codemode`, but codemode tools do not list it; `tool_search` discovers it (activating it directly, or returning inline `codemode` declarations when `codemode` is active on a model without cache-preserving mid-conversation tool additions).
 - `hidden`: registered but unreachable. Re-register a tool with `exposure: "hidden"` to withdraw it, since tools cannot be unregistered.
 
 `namespace: { name, aliases, description, instructions }` groups related tools, as MCP servers do. Codemode tools list a namespace under one heading with its `description`. `instructions` holds longer usage guidance; it is not listed, and codemode scripts read it with `describeNamespace(name)`. `aliases` are other names scripts may look the namespace up by, for example the server name `docs` for `mcp__docs`; a name and the same name as a script identifier (`my-docs`, `my_docs`) match alike.

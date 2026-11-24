@@ -583,7 +583,7 @@ function describeOutcome({ loaded, inline, closest, active, notOffered, unknown 
  * The `tool_search` description. It does not list the searchable tools or their namespaces, so it
  * stays the same while tools are registered, for example when MCP servers connect.
  */
-export const TOOL_SEARCH_DESCRIPTION = `# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nSome of the tools, such as tools of MCP servers, may not have been provided to you upfront, and you should use this tool (\`${TOOL_SEARCH_TOOL_NAME}\`) to search for the required tools. For MCP tool discovery, always use \`${TOOL_SEARCH_TOOL_NAME}\`.`;
+export const TOOL_SEARCH_DESCRIPTION = `# Tool discovery\n\nSearches over deferred tool metadata with BM25 and makes matching tools available (exposing them for the next model call, or returning inline \`codemode\` declarations on models that cannot add tools mid-conversation).\n\nSome of the tools, such as tools of MCP servers, may not have been provided to you upfront, and you should use this tool (\`${TOOL_SEARCH_TOOL_NAME}\`) to search for the required tools. For MCP tool discovery, always use \`${TOOL_SEARCH_TOOL_NAME}\`.`;
 
 export function createToolSearchToolDefinition(
 	options: ToolSearchToolOptions = {},
@@ -592,7 +592,7 @@ export function createToolSearchToolDefinition(
 		name: TOOL_SEARCH_TOOL_NAME,
 		label: TOOL_SEARCH_TOOL_NAME,
 		description: TOOL_SEARCH_DESCRIPTION,
-		promptSnippet: "Search for tools that are not loaded yet and load the matches",
+		promptSnippet: "Search for undeclared tools and load them or return inline codemode declarations",
 		parameters: toolSearchSchema,
 		// Scripts can search without loading tools into the model's next request.
 		exposure: "model-only",
