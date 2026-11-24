@@ -4063,7 +4063,17 @@ export class InteractiveMode {
 						this.maybeSuggestBugReport(this.streamingMessage);
 					} else {
 						// Args are now complete - trigger diff computation for edit tools
-						for (const [, component] of this.pendingTools.entries()) {
+						const survivingToolCallIds = new Set(
+							this.streamingMessage.content
+								.filter((block) => block.type === "toolCall")
+								.map((block) => block.id),
+						);
+						for (const [toolCallId, component] of [...this.pendingTools.entries()]) {
+							if (!survivingToolCallIds.has(toolCallId)) {
+								this.chatContainer.removeChild(component);
+								this.pendingTools.delete(toolCallId);
+								continue;
+							}
 							component.setArgsComplete();
 						}
 						this.maybeShowThinkingDropNotice(this.streamingMessage);

@@ -1011,6 +1011,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			stream.push({ type: "start", partial: output });
 
 			const openBlocks = new Map<number, OpenBlock>();
+			let fallbackBoundaryIndex = 0;
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				await options?.onProviderStreamEvent?.(event, model);
@@ -1045,14 +1046,14 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						}
 						// Anthropic closes any open block before emitting `fallback`. When continuing a
 						// conversation after a mid-output fallback, keep pre-fallback `text` blocks and drop
-						// pre-fallback `thinking` and client `tool_use` blocks so Turn 2 replay stays valid
-						// and aborted pre-fallback tool calls are never executed.
+						// pre-fallback `thinking` and client `tool_use` blocks when finalizing the message so
+						// streaming `contentIndex` positions stay stable, Turn 2 replay stays valid, and aborted
+						// pre-fallback tool calls are never executed.
 						const hadPriorContent = output.content.length > 0;
-						const keptContent = output.content.filter((block) => block.type === "text");
-						const droppedBlocks = output.content.length - keptContent.length;
-						if (droppedBlocks > 0) {
-							output.content = keptContent;
-						}
+						const droppedBlocks = output.content
+							.slice(fallbackBoundaryIndex)
+							.filter((block) => block.type !== "text").length;
+						fallbackBoundaryIndex = output.content.length;
 						if (hadPriorContent) {
 							appendAssistantMessageDiagnostic(output, {
 								type: "anthropic_mid_output_fallback",
@@ -1252,6 +1253,11 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			}
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error(output.errorMessage || "An unknown error occurred");
+			}
+			if (fallbackBoundaryIndex > 0) {
+				output.content = output.content.filter(
+					(block, index) => index >= fallbackBoundaryIndex || block.type === "text",
+				);
 			}
 			if (thread) recordThreadReply(model, thread, params, output, isOAuth, compat.allowEmptySignature);
 			if (inputTransformations && inputTransformations.length > 0) {

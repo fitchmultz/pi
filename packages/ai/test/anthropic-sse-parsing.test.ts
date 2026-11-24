@@ -452,12 +452,22 @@ describe("Anthropic raw SSE parsing", () => {
 			{ event: "message_stop", data: JSON.stringify({ type: "message_stop" }) },
 		]);
 
-		const result = await streamAnthropic(
+		const startIndices: number[] = [];
+		const s = streamAnthropic(
 			model,
 			normalizeContext({ messages: [{ role: "user", content: "Hello", timestamp: 1 }] }),
 			{ client: createFakeAnthropicClient(response) },
-		).result();
+		);
+		for await (const event of s) {
+			if (event.type === "text_start" || event.type === "thinking_start" || event.type === "toolcall_start") {
+				startIndices.push(event.contentIndex);
+			}
+		}
+		const result = await s.result();
 
+		// Streamed contentIndex positions stay strictly increasing across the fallback; pre-fallback
+		// thinking and toolCall blocks are stripped only on finalization.
+		expect(startIndices).toEqual([0, 1, 2, 3, 4]);
 		expect(result.stopReason).toBe("stop");
 		expect(result.responseModel).toBe("claude-opus-5");
 		expect(result.content).toEqual([
