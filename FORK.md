@@ -2,7 +2,7 @@
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
 v1.0.0 and synchronized through upstream main at
-`9c4652688590abb836b40ebd1e4725ecf9a7c7d1` (2026-11-21), 44 commits after official v1.6.0.
+`433c1fd94c6aa3cf3fa408aad0d765f6763bd362` (2026-11-24), 96 commits after official v1.6.0.
 It is upstream plus the features below. Everything else follows upstream behavior and APIs.
 
 Supported and tested desktop platforms are Apple Silicon macOS and Linux (x64/arm64).
@@ -10,7 +10,8 @@ Android/Termux device functionality is retained. Windows and Intel macOS are not
 
 Each integration record documents its baseline, conflict decisions and verification, newest first:
 
-- [2026-11-21](docs/upstream-sync-2026-11-21.md), the current baseline
+- [2026-11-24](docs/upstream-sync-2026-11-24.md), the current baseline
+- [2026-11-21](docs/upstream-sync-2026-11-21.md)
 - [2026-11-20](docs/upstream-sync-2026-11-20.md), including official v1.6.0
 - [2026-11-19](docs/upstream-sync-2026-11-19.md)
 - [2026-11-18](docs/upstream-sync-2026-11-18.md)
@@ -116,6 +117,7 @@ Claude 5.5 catalog entries now use upstream's models.dev metadata rather than th
 OpenCode Go's Google adapter and inference endpoints now follow upstream; `packages/ai/test/opencode-provider-headers.test.ts` retains the Gemini routing regression guard.
 Local `read` stream open-abort handling ([#11956](https://github.com/earendil-works/pi/pull/11956)), Kitty fullscreen full-redraw placement clearing ([#12010](https://github.com/earendil-works/pi/pull/12010)), standalone Bun `--compile-autoload-package-json` flags ([#12012](https://github.com/earendil-works/pi/pull/12012)), Env daemon post-exit output draining under link backpressure (`b48c675a9`), and Google `httpOptions.fetch` forwarding with `automaticContinuation: false` ([#12103](https://github.com/earendil-works/pi/pull/12103), now on `@google/genai` 3.6.1) follow upstream; `read-streaming.test.ts`, `compiled-extension-packages.test.ts`, and `fetch-option.test.ts` remain as regression guards.
 OpenAI Codex leading `developer`/`system` input items (omitting top-level `instructions`, [#12273](https://github.com/earendil-works/pi/issues/12273)), Codex mid-conversation `configuration_update` effort changes including `off` -> `"none"` and `max_output_tokens` ([#12269](https://github.com/earendil-works/pi/issues/12269)), `openai_input_transformations` diagnostic recording (`03de604b8`), retry backoff abort-listener cleanup ([#10506](https://github.com/earendil-works/pi/issues/10506)), the Chord start-timer test's incarnation wait (`ff8970889`), `createProvider` publish-time model catalog merging ([#12311](https://github.com/earendil-works/pi/issues/12311)), and named-brain Radius status formatting (`1ca254257`) now follow upstream; the equivalent fork paths are retired.
+Gemini 4 `xhigh` thinking (`ThinkingLevel.XHIGH`), shared `getGoogleBudget()` across Google Generative AI and Vertex, Gemini 3.x finish-reason mappings (`001ffff32`), `formatGooglePromptBlockError()` + chunk-count incomplete-stream errors (`117eac3a0`, with fork's transient `PROHIBITED_CONTENT` retry retained), OpenAI Responses replayed tool-call `status: "completed"` (`69a699348`), Codex initial effort pinning via `prepareResponsesPrompt(..., { effortBaseline: "initial" })` (`a588a7bc4`), and non-crashing `OutputFileStream` temp-file failure handling (`943a99e3c`, `8209929fb`, with fork's non-rejecting write-completion backpressure retained) now follow upstream.
 `packages/tui/src/components/loader.ts`, `packages/ai/src/api/{azure-openai-responses,pi-messages}.ts`, and `apps/p3` behavior follow upstream with no fork code delta (`apps/p3/package.json` carries only the `ws` 8.23.0 bump).
 Chord's host, reference admission and link lifecycle follow upstream v2. The active extensions inspected for this integration do not import Chord. Coding-agent uses its `/json` helpers, while Durable uses its explicit foundation entry points and v2 store.
 See the [AI](packages/ai/CHANGELOG.md#unreleased), [agent](packages/coding-agent/CHANGELOG.md#unreleased),

@@ -294,6 +294,11 @@ export function refreshConfigValueCache(config: string): string | undefined {
 	return refreshed;
 }
 
+/** Forget the cached result of one config value, so its next resolution runs the command again. */
+export function clearConfigValueCacheEntry(config: string): void {
+	commandResultCache.delete(config);
+}
+
 /** Clear the config value command cache. */
 export function clearConfigValueCache(): void {
 	commandResultCache.clear();

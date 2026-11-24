@@ -20,7 +20,9 @@ describe("private shell spill logs", () => {
 				output.append(Buffer.from(data));
 				output.finish();
 				await output.closeTempFile();
-				path = output.snapshot().fullOutputPath!;
+				const file = output.snapshot().fullOutputFile;
+				expect(file?.kind).toBe("saved");
+				path = file?.kind === "saved" ? file.path : "";
 			} else {
 				path = (
 					await executeBashWithOperations("offline", process.cwd(), {

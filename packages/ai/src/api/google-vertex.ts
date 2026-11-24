@@ -7,15 +7,14 @@ import type {
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
-	ThinkingBudgets,
 	TranscriptContext,
 } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { providerHeadersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
-import type { GoogleApiThinkingLevel, ResolvedGoogleThinkingLevel } from "./google-shared.ts";
-import { resolveGoogleSimpleThinking, streamGoogle } from "./google-shared.ts";
+import type { GoogleApiThinkingLevel } from "./google-shared.ts";
+import { getGoogleBudget, resolveGoogleSimpleThinking, streamGoogle } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 export interface GoogleVertexOptions extends StreamOptions {
@@ -188,37 +187,4 @@ function resolveLocation(options?: GoogleVertexOptions): string {
 		throw new Error("Vertex AI requires a location. Set GOOGLE_CLOUD_LOCATION or pass location in options.");
 	}
 	return location;
-}
-
-function getGoogleBudget(
-	model: Model<"google-vertex">,
-	level: ResolvedGoogleThinkingLevel,
-	customBudgets?: ThinkingBudgets,
-): number {
-	const budgetLevel = level === "xhigh" ? "high" : level;
-	if (customBudgets?.[budgetLevel] !== undefined) {
-		return customBudgets[budgetLevel]!;
-	}
-
-	if (model.id.includes("2.5-pro")) {
-		const budgets: Record<Exclude<ResolvedGoogleThinkingLevel, "xhigh">, number> = {
-			minimal: 128,
-			low: 2048,
-			medium: 8192,
-			high: 32768,
-		};
-		return budgets[budgetLevel];
-	}
-
-	if (model.id.includes("2.5-flash")) {
-		const budgets: Record<Exclude<ResolvedGoogleThinkingLevel, "xhigh">, number> = {
-			minimal: 128,
-			low: 2048,
-			medium: 8192,
-			high: 24576,
-		};
-		return budgets[budgetLevel];
-	}
-
-	return -1;
 }

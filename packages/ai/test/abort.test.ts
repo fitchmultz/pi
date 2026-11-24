@@ -181,7 +181,7 @@ describe("AI Providers Abort Tests", () => {
 	});
 
 	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider Abort", () => {
-		const llm = getModel("mistral", "mistral-large-4");
+		const llm = getModel("mistral", "mistral-medium-latest");
 
 		it("should abort mid-stream", { retry: 3 }, async () => {
 			await testAbortSignal(llm);

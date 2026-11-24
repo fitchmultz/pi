@@ -119,6 +119,7 @@ export interface ProviderAuthFallback {
 	resolve(input: { ctx: AuthContext; signal: AbortSignal }): Promise<AuthResult | undefined>;
 }
 
+/** Whether and how a provider has auth. `configured: false` with `source: "stored"` is a stored credential that does not resolve. */
 export type AuthStatus = {
 	configured: boolean;
 	source?: "stored" | "runtime" | "environment" | "fallback" | "models_json_key" | "models_json_command";

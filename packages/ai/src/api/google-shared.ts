@@ -10,6 +10,7 @@ import {
 	type GenerateContentConfig,
 	type GenerateContentParameters,
 	type GenerateContentResponse,
+	type GenerateContentResponsePromptFeedback,
 	type GoogleGenAI,
 	ThinkingLevel as GoogleSdkThinkingLevel,
 	type Part,
@@ -25,6 +26,7 @@ import type {
 	StopReason,
 	StreamOptions,
 	TextContent,
+	ThinkingBudgets,
 	ThinkingContent,
 	ThinkingLevel,
 	Tool,
@@ -178,8 +180,8 @@ export function streamGoogle(
 
 			stream.push({ type: "start", partial: output });
 			let currentBlock: TextContent | ThinkingContent | null = null;
-			let promptBlockReason: BlockedReason | undefined;
-			let promptBlockMessage: string | undefined;
+			let promptBlockFeedback: GenerateContentResponsePromptFeedback | undefined;
+			let receivedChunkCount = 0;
 			const blocks = output.content;
 			const blockIndex = () => blocks.length - 1;
 			const endCurrentBlock = () => {
@@ -215,21 +217,21 @@ export function streamGoogle(
 			const seenContinuationTokens = new Set<string>();
 
 			for (let hopIndex = 0; ; hopIndex++) {
-				promptBlockReason = undefined;
-				promptBlockMessage = undefined;
+				promptBlockFeedback = undefined;
+				receivedChunkCount = 0;
 				let hopFinishReason: FinishReason | undefined;
 				let hopContinuationToken: string | undefined;
 				let hopUsage: Usage | undefined;
 
 				for await (const chunk of googleStream) {
 					await options?.onProviderStreamEvent?.(chunk, model);
+					receivedChunkCount++;
 					// @google/genai documents GenerateContentResponse.responseId as an output-only field
 					// used to identify each response. Keep the first non-empty one from the stream.
 					output.responseId ||= chunk.responseId;
 					const blockReason = chunk.promptFeedback?.blockReason;
 					if (blockReason && blockReason !== BlockedReason.BLOCKED_REASON_UNSPECIFIED) {
-						promptBlockReason = blockReason;
-						promptBlockMessage = chunk.promptFeedback?.blockReasonMessage;
+						promptBlockFeedback ??= chunk.promptFeedback;
 					}
 					const candidate = chunk.candidates?.[0];
 					if (candidate?.continuationToken) {
@@ -410,7 +412,7 @@ export function streamGoogle(
 
 				if (
 					options?.disableContinuation === true ||
-					promptBlockReason !== undefined ||
+					promptBlockFeedback !== undefined ||
 					hopFinishReason === undefined ||
 					hopFinishReason !== FinishReason.CONTINUATION ||
 					hopContinuationToken === undefined ||
@@ -456,17 +458,14 @@ export function streamGoogle(
 			}
 
 			if (output.stopReason === "pending") {
-				if (promptBlockReason) {
-					output.rawStopReason = promptBlockReason;
+				if (promptBlockFeedback?.blockReason) {
+					output.rawStopReason = promptBlockFeedback.blockReason;
 					output.stopReason = "error";
-					throw new Error(
-						promptBlockMessage
-							? `Prompt blocked (${promptBlockReason}): ${promptBlockMessage}`
-							: `Prompt blocked: ${promptBlockReason}`,
-					);
+					throw new Error(formatGooglePromptBlockError(providerLabel, promptBlockFeedback));
 				}
+				const chunkLabel = receivedChunkCount === 1 ? "chunk" : "chunks";
 				throw new Error(
-					`${api === "google-vertex" ? "Google Vertex" : "Google"} stream ended without a finish reason`,
+					`${providerLabel} stream ended without a finish reason after receiving ${receivedChunkCount} ${chunkLabel}`,
 				);
 			}
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
@@ -622,7 +621,7 @@ function buildParams(
 }
 
 /**
- * Thinking level for Gemini 3 models.
+ * Thinking level for Gemini models that use `thinkingLevel` instead of `thinkingBudget`.
  * Mirrors Google's ThinkingLevel enum values.
  */
 export type GoogleApiThinkingLevel = "THINKING_LEVEL_UNSPECIFIED" | "MINIMAL" | "LOW" | "MEDIUM" | "HIGH" | "XHIGH";
@@ -718,6 +717,50 @@ export function toGoogleThinkingLevel(level: ResolvedGoogleThinkingLevel): Googl
 		case "xhigh":
 			return "XHIGH";
 	}
+}
+
+/** Token budget for Gemini models that use `thinkingBudget`: custom budgets first, then per-model defaults, else -1 (dynamic). */
+export function getGoogleBudget<T extends GoogleApiType>(
+	model: Model<T>,
+	resolvedLevel: ResolvedGoogleThinkingLevel,
+	customBudgets?: ThinkingBudgets,
+): number {
+	// Budgets stop at high, so xhigh uses the high budget.
+	const level = resolvedLevel === "xhigh" ? "high" : resolvedLevel;
+	const customBudget = customBudgets?.[level];
+	if (customBudget !== undefined) return customBudget;
+
+	if (model.id.includes("2.5-pro")) {
+		const budgets: Record<keyof ThinkingBudgets, number> = {
+			minimal: 128,
+			low: 2048,
+			medium: 8192,
+			high: 32768,
+		};
+		return budgets[level];
+	}
+
+	if (model.id.includes("2.5-flash-lite")) {
+		const budgets: Record<keyof ThinkingBudgets, number> = {
+			minimal: 512,
+			low: 2048,
+			medium: 8192,
+			high: 24576,
+		};
+		return budgets[level];
+	}
+
+	if (model.id.includes("2.5-flash")) {
+		const budgets: Record<keyof ThinkingBudgets, number> = {
+			minimal: 128,
+			low: 2048,
+			medium: 8192,
+			high: 24576,
+		};
+		return budgets[level];
+	}
+
+	return -1;
 }
 
 export function toGoogleSdkThinkingLevel(level: GoogleApiThinkingLevel): GoogleSdkThinkingLevel {
@@ -1216,6 +1259,24 @@ export function resolveGoogleFunctionCallingMode(
 		return FunctionCallingConfigMode.VALIDATED;
 	}
 	return toolChoice ? mapToolChoice(toolChoice) : undefined;
+}
+
+/** Format prompt-block metadata returned instead of response candidates. */
+export function formatGooglePromptBlockError(
+	providerName: string,
+	feedback: GenerateContentResponsePromptFeedback,
+): string {
+	const details = [`${providerName} prompt blocked: ${feedback.blockReason ?? "unknown reason"}`];
+	if (feedback.blockReasonMessage) details.push(feedback.blockReasonMessage);
+	if (feedback.safetyRatings?.length) {
+		const ratings = feedback.safetyRatings.flatMap((rating) =>
+			rating.category ? [`${rating.category}${rating.probability ? ` (${rating.probability})` : ""}`] : [],
+		);
+		if (ratings.length > 0) {
+			details.push(`Safety rating${ratings.length === 1 ? "" : "s"}: ${ratings.join(", ")}`);
+		}
+	}
+	return details.join(". ");
 }
 
 /**

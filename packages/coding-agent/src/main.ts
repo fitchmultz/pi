@@ -814,7 +814,7 @@ export async function main(args: string[], options?: MainOptions) {
 	if (saved) startupSettingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
 	const startupSettingsDiagnostics = collectSettingsDiagnostics(startupSettingsManager);
 
-	// Experimental first-time setup: theme choice and analytics opt-in.
+	// Experimental first-time setup: analytics opt-in.
 	// Runs before any runtime services are created so the chosen settings apply everywhere.
 	if (
 		!saved &&

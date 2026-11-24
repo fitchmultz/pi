@@ -69,7 +69,7 @@ Every callable tool is a method of `tools`, named by its identifier: characters 
 
 What other calls resolve to depends on the tool:
 
-- Tools with an output schema resolve to a structured value. `bash` resolves to `{ output, truncated, full_output_path?, exit_code, wall_time_seconds }`, also for non-zero exit codes. Its `output` is not limited to the 2000 lines or 50KB the model sees: it holds up to 1 MiB, and longer output keeps its first and last 512 KiB around an omission marker, with `truncated` set and the full output in `full_output_path`.
+- Tools with an output schema resolve to a structured value. `bash` resolves to `{ output, truncated, full_output_path?, full_output_error?, exit_code, wall_time_seconds }`, also for non-zero exit codes. Its `output` is not limited to the 2000 lines or 50KB the model sees: it holds up to 1 MiB, and longer output keeps its first and last 512 KiB around an omission marker, with `truncated` set and the full output in `full_output_path`. When the full output could not be saved (for example a full temp directory), `full_output_error` says why and `output` holds only the retained tail.
 - MCP tools resolve to their `CallToolResult`, including `isError` and `structuredContent`.
 - `read` resolves to the file's text, or to an image block for an image. See [Read files](#read-files).
 - Other tools, such as `edit` and `write`, resolve to their text output.
@@ -206,6 +206,8 @@ interface ClassifierResult {
   /** Answers by question ID. */
   answers: Record<string, ClassifierAnswer>;
   usage?: ModelUsage;
+  /** Provider-specific response ID when reported, such as OpenRouter's generation ID. */
+  responseId?: string;
   stopReason: "stop" | "error" | "aborted";
   errorMessage?: string;
 }

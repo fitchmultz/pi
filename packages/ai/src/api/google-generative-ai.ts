@@ -1,8 +1,8 @@
-import type { Model, SimpleStreamOptions, StreamFunction, ThinkingBudgets, TranscriptContext } from "../types.ts";
+import type { Model, SimpleStreamOptions, StreamFunction, TranscriptContext } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { createGoogleClient, resolveGoogleApiKey } from "./google-client.ts";
-import type { GoogleOptions, ResolvedGoogleThinkingLevel } from "./google-shared.ts";
-import { resolveGoogleSimpleThinking, streamGoogle } from "./google-shared.ts";
+import type { GoogleOptions } from "./google-shared.ts";
+import { getGoogleBudget, resolveGoogleSimpleThinking, streamGoogle } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 // This adapter takes the shared options unchanged; the type stays exported from this path.
@@ -45,46 +45,3 @@ export const streamSimple: StreamFunction<"google-generative-ai", SimpleStreamOp
 		),
 	} satisfies GoogleOptions);
 };
-
-function getGoogleBudget(
-	model: Model<"google-generative-ai">,
-	level: ResolvedGoogleThinkingLevel,
-	customBudgets?: ThinkingBudgets,
-): number {
-	const budgetLevel = level === "xhigh" ? "high" : level;
-	if (customBudgets?.[budgetLevel] !== undefined) {
-		return customBudgets[budgetLevel]!;
-	}
-
-	if (model.id.includes("2.5-pro")) {
-		const budgets: Record<Exclude<ResolvedGoogleThinkingLevel, "xhigh">, number> = {
-			minimal: 128,
-			low: 2048,
-			medium: 8192,
-			high: 32768,
-		};
-		return budgets[budgetLevel];
-	}
-
-	if (model.id.includes("2.5-flash-lite")) {
-		const budgets: Record<Exclude<ResolvedGoogleThinkingLevel, "xhigh">, number> = {
-			minimal: 512,
-			low: 2048,
-			medium: 8192,
-			high: 24576,
-		};
-		return budgets[budgetLevel];
-	}
-
-	if (model.id.includes("2.5-flash")) {
-		const budgets: Record<Exclude<ResolvedGoogleThinkingLevel, "xhigh">, number> = {
-			minimal: 128,
-			low: 2048,
-			medium: 8192,
-			high: 24576,
-		};
-		return budgets[budgetLevel];
-	}
-
-	return -1;
-}

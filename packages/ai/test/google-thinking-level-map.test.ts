@@ -180,7 +180,8 @@ describe("Google thinking level maps", () => {
 		expect(payload.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingLevel: "MEDIUM" });
 	});
 
-	it.each(googleAdapters)("maps xhigh thinking level for Gemini 4 Hydrogen on $name", async ({ capture }) => {
+	// Regression test for https://github.com/earendil-works/pi/issues/12184
+	it.each(googleAdapters)("sends xhigh as XHIGH for Gemini 4 models that support it on $name", async ({ capture }) => {
 		const payload = await capture(
 			"gemini-4-hydrogen",
 			{ off: null, minimal: null, low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: null },
@@ -213,10 +214,30 @@ describe("Google thinking level maps", () => {
 		expect(payload).toMatchObject({ config: { thinkingConfig: { thinkingBudget: 1234 } } });
 	});
 
+	it("uses the high token budget for xhigh on Google Generative AI", async () => {
+		const payload = await captureGooglePayload(googleModel("gemini-2.5-flash", { xhigh: "xhigh" }), "xhigh", {
+			high: 1234,
+		});
+
+		expect(payload).toMatchObject({ config: { thinkingConfig: { thinkingBudget: 1234 } } });
+	});
+
 	it("maps Google Vertex extended levels", async () => {
 		const payload = await captureVertexPayload(vertexModel("gemini-3.7-flash", { xhigh: "high" }), "xhigh");
 
 		expect(payload).toMatchObject({ config: { thinkingConfig: { includeThoughts: true, thinkingLevel: "HIGH" } } });
+	});
+
+	it("uses the high token budget for xhigh on Google Vertex", async () => {
+		const payload = await captureVertexPayload(vertexModel("gemini-2.5-pro", { xhigh: "xhigh" }), "xhigh");
+
+		expect(payload).toMatchObject({ config: { thinkingConfig: { thinkingBudget: 32768 } } });
+	});
+
+	it("uses Gemini 2.5 Flash-Lite token budgets on Google Vertex", async () => {
+		const payload = await captureVertexPayload(vertexModel("gemini-2.5-flash-lite", {}), "minimal");
+
+		expect(payload).toMatchObject({ config: { thinkingConfig: { thinkingBudget: 512 } } });
 	});
 
 	it("uses mapped Google Vertex levels for token budgets", async () => {
@@ -225,14 +246,6 @@ describe("Google thinking level maps", () => {
 		});
 
 		expect(payload).toMatchObject({ config: { thinkingConfig: { thinkingBudget: 4321 } } });
-	});
-
-	it("retains provider-specific Gemini 2.5 Flash Lite minimum budgets", async () => {
-		const google = await captureGooglePayload(googleModel("gemini-2.5-flash-lite", {}), "minimal");
-		const vertex = await captureVertexPayload(vertexModel("gemini-2.5-flash-lite", {}), "minimal");
-
-		expect(google.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingBudget: 512 });
-		expect(vertex.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingBudget: 128 });
 	});
 
 	it("sets includeThoughts: false when thinkingDisplay is omitted on Google Generative AI and Vertex", async () => {

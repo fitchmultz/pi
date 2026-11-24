@@ -45,6 +45,10 @@ import {
 	isOpenRouterModel,
 	type OpenRouterUsageAccounting,
 } from "../utils/openrouter-cost.ts";
+import {
+	applyOpenRouterNativeFinishReason,
+	readOpenRouterNativeFinishReason,
+} from "../utils/openrouter-finish-reason.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
@@ -417,6 +421,9 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 			let openText: OpenText | undefined;
 			let openThinking: OpenThinking | undefined;
 			let hasFinishReason = false;
+			const isOpenRouter = isOpenRouterModel(model);
+			// Kept across chunks so a trailing chunk that repeats finish_reason without it does not drop it.
+			let nativeFinishReason: string | undefined;
 			// Finish blocks in content order, not by correlation key.
 			const openBlocks: OpenBlock[] = [];
 			// Alternate correlation keys for one tool call: its stream index, which stays stable when a provider changes ids
@@ -581,12 +588,19 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 					output.usage = parseChunkUsage((choice as any).usage, model);
 				}
 
+				if (isOpenRouter) {
+					nativeFinishReason = readOpenRouterNativeFinishReason(choice) ?? nativeFinishReason;
+				}
+
 				if (choice.finish_reason) {
 					output.rawStopReason = choice.finish_reason;
 					const finishReasonResult = mapStopReason(choice.finish_reason);
 					output.stopReason = finishReasonResult.stopReason;
 					if (finishReasonResult.errorMessage) {
 						output.errorMessage = finishReasonResult.errorMessage;
+					}
+					if (nativeFinishReason) {
+						applyOpenRouterNativeFinishReason(output, choice.finish_reason, nativeFinishReason);
 					}
 					hasFinishReason = true;
 				}

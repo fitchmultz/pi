@@ -19,7 +19,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { hasCredentialHeader, headersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
-import { getDeclaredTools, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getDeclaredTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import {
@@ -31,12 +31,11 @@ import {
 } from "./openai-prompt-cache.ts";
 import {
 	applyServiceTierPricing,
-	convertResponsesMessages,
-	convertResponsesTools,
 	getOpenAIProviderSummaryBlock,
 	OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	type OpenAIResponsesStreamOptions,
+	prepareResponsesPrompt,
 	processResponsesStream,
 	resolveOpenAIConfigurationUpdateEffort,
 	resolveOpenAIResponsesContext,
@@ -393,8 +392,7 @@ function buildParams(
 	configurationUpdateEffort: string | undefined,
 ) {
 	const toolSupport = getMidConvoToolSupport(model, compat);
-	const transcriptTools = resolveTranscriptTools(context.messages, toolSupport);
-	const messages = convertResponsesMessages(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
+	const { input, requestTools } = prepareResponsesPrompt(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: compat.supportsMidConvoSystemMessages,
 		toolSupport,
@@ -413,7 +411,7 @@ function buildParams(
 	const omitUnsupportedFields = isChatGPTSignIn(model, options?.apiKey);
 	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
-		input: messages,
+		input,
 		stream: true,
 		prompt_cache_key: sendPromptCacheKey ? clampOpenAIPromptCacheKey(options?.sessionId) : undefined,
 		prompt_cache_retention: omitUnsupportedFields ? undefined : getOpenAIPromptCacheRetention(compat, cacheRetention),
@@ -439,12 +437,7 @@ function buildParams(
 		params.service_tier = options.serviceTier;
 	}
 
-	if (transcriptTools.requestTools.length > 0) {
-		params.tools = convertResponsesTools(transcriptTools.requestTools, {
-			supportsStrictMode: compat.supportsStrictMode,
-			supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,
-		});
-	}
+	if (requestTools.length > 0) params.tools = requestTools;
 
 	if (options?.toolChoice !== undefined) {
 		params.tool_choice = options.toolChoice;
