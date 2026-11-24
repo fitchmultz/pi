@@ -28,6 +28,21 @@ const DEFAULT_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 const DEFAULT_GENTLE_MAX_BYTES = 4.5 * 1024 * 1024;
 const MIN_TARGET_IMAGE_BYTES = 16 * 1024;
 
+/**
+ * Fixed descending base64 byte tiers for tighter oldest-first passes when Phase 3 still exceeds
+ * `byteBudget`. Because each tier is a fixed constant independent of whole-request excess, every
+ * historical image maps to a stable cache key and stays byte-identical as later turns append.
+ */
+const TIGHTER_MAX_BYTES_TIERS = [
+	1024 * 1024,
+	512 * 1024,
+	256 * 1024,
+	128 * 1024,
+	64 * 1024,
+	32 * 1024,
+	MIN_TARGET_IMAGE_BYTES,
+] as const;
+
 const OMITTED_PER_MESSAGE_TEXT = "[Image omitted: exceeds model per-message image limit.]";
 const OMITTED_PER_REQUEST_TEXT = "[Image omitted: exceeds model per-request image limit.]";
 const OMITTED_REQUEST_BYTES_TEXT = "[Image omitted: exceeds model request size limit.]";
@@ -472,28 +487,20 @@ export async function fitContextImagesToRequestLimit(
 			}
 
 			// Phase 4: tighter proportional oldest-first resize from original bytes if still over budget.
-			if (totalBytes > byteBudget) {
-				const remaining = slots.filter((slot) => !slot.dropped);
-				for (let i = 0; i < remaining.length && totalBytes > byteBudget; i++) {
-					const slot = remaining[i]!;
+			// Phase 4: tighter oldest-first resize through fixed descending byte tiers so each image's
+			// resize options stay independent of request-wide excess (preserving cache hits and prompt prefixes).
+			const configuredMaxBytes = limits.resizeOptions?.maxBytes ?? DEFAULT_GENTLE_MAX_BYTES;
+			for (const tierMaxBytes of TIGHTER_MAX_BYTES_TIERS) {
+				if (totalBytes <= byteBudget) break;
+				const effectiveTierMaxBytes = Math.min(configuredMaxBytes, tierMaxBytes);
+				for (const slot of activeImages) {
+					if (totalBytes <= byteBudget) break;
+					if (slot.dropped || slot.currentPart.type !== "image") continue;
+					if (slot.currentPart.data.length <= effectiveTierMaxBytes) continue;
 					throwIfAborted(signal);
-					const remainingBytes = remaining
-						.slice(i)
-						.reduce(
-							(sum, item) => sum + (item.currentPart.type === "image" ? item.currentPart.data.length : 0),
-							0,
-						);
-					const currentDataLen = slot.currentPart.type === "image" ? slot.currentPart.data.length : 0;
-					if (remainingBytes <= 0 || currentDataLen <= MIN_TARGET_IMAGE_BYTES) continue;
-
-					const neededReduction = totalBytes - byteBudget;
-					const share = Math.ceil((neededReduction * currentDataLen) / remainingBytes);
-					const targetMaxBytes = Math.max(MIN_TARGET_IMAGE_BYTES, currentDataLen - share - 256);
-					if (targetMaxBytes >= currentDataLen) continue;
-
 					const resized = await cache.getOrResize(slot.sourceData, slot.sourceMimeType, {
 						...limits.resizeOptions,
-						maxBytes: targetMaxBytes,
+						maxBytes: effectiveTierMaxBytes,
 					});
 					if (resized) {
 						const delta = applyResizedSlot(slot, resized);
@@ -517,5 +524,5 @@ export async function fitContextImagesToRequestLimit(
 
 	if (!changed) return context;
 	const nextMessages = buildUpdatedMessages(context.messages, slots);
-	return { messages: nextMessages } as TranscriptContext;
+	return { ...context, messages: nextMessages };
 }

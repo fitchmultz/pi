@@ -334,28 +334,40 @@ describe("fitContextImagesToRequestLimit", () => {
 		);
 	});
 
-	it("applies tighter proportional resize when gentle resize alone still exceeds maxRequestBytes", async () => {
-		// Two 320x200 noisy PNGs; default gentle resize (2000x2000, quality 80) yields ~40 KiB JPEG each (~80 KiB total).
-		// Cap maxRequestBytes at 65 KiB so Phase 3 gentle resize is insufficient and Phase 4 tighter resize shrinks oldest further while keeping both images.
+	it("applies fixed-tier tighter resize when gentle resize alone still exceeds maxRequestBytes and keeps earlier images byte-identical as later turns append", async () => {
+		const img4 = makeNoisyPngBase64(320, 200, 4);
+		// Two 320x200 noisy PNGs compress to ~115 KiB JPEG each after gentle resize (~230 KiB total).
+		// Cap maxRequestBytes at 205 KiB so Phase 3 alone is insufficient and Phase 4 steps message 0
+		// down to a fixed byte tier (64 KiB). Appending a third image keeps message 0 byte-identical.
 		const model = makeModel({
 			inputLimits: {
-				maxRequestBytes: 65 * 1024,
+				maxRequestBytes: 205 * 1024,
 				images: { maxPerRequest: 10 },
 			},
 		});
-		const context = normalizeContext({
+		const cache = new RequestImageFitCache();
+		const turn1 = normalizeContext({
 			messages: [toolResultWithImage("call_1", img1), toolResultWithImage("call_2", img2)],
 		});
 
-		const fitted = await fitContextImagesToRequestLimit(model, context);
-		const parts0 = (fitted.messages[0] as ToolResultMessage).content;
-		const parts1 = (fitted.messages[1] as ToolResultMessage).content;
+		const fitted1 = await fitContextImagesToRequestLimit(model, turn1, cache);
+		const parts0 = (fitted1.messages[0] as ToolResultMessage).content;
+		const parts1 = (fitted1.messages[1] as ToolResultMessage).content;
 		const out0 = parts0.find((p): p is ImageContent => p.type === "image");
 		const out1 = parts1.find((p): p is ImageContent => p.type === "image");
 
 		expect(out0).toBeDefined();
 		expect(out1).toBeDefined();
-		expect(Buffer.byteLength(JSON.stringify(fitted.messages), "utf8")).toBeLessThanOrEqual(65 * 1024);
+		expect(out0!.data.length).toBeLessThanOrEqual(64 * 1024);
+		expect(Buffer.byteLength(JSON.stringify(fitted1.messages), "utf8")).toBeLessThanOrEqual(205 * 1024);
+
+		// Appending a 3rd image enters Phase 4 again; message 0 must reuse the exact same fixed-tier encoding.
+		const turn2 = normalizeContext({
+			messages: [...turn1.messages, toolResultWithImage("call_4", img4)],
+		});
+		const fitted2 = await fitContextImagesToRequestLimit(model, turn2, cache);
+		expect(fitted2.messages[0]).toEqual(fitted1.messages[0]);
+		expect(Buffer.byteLength(JSON.stringify(fitted2.messages), "utf8")).toBeLessThanOrEqual(205 * 1024);
 	});
 
 	it("integrates into ModelRuntime.streamSimple and ModelRuntime.stream so providers receive the fitted context", async () => {
