@@ -9,6 +9,7 @@ import type {
 	ClassifierContext,
 	ImageContent,
 	ImagesContext,
+	ImagesOptions,
 	ModelType,
 	ModelTypeMap,
 	TextContent,
@@ -260,6 +261,29 @@ function checkImagesContext(context: unknown): ImagesContext {
 		throw fail(`context.input[${index}] must be a text or image block, got ${describeValue(block)}`);
 	});
 	return context as unknown as ImagesContext;
+}
+
+/** Check optional script-supplied image options (`aspectRatio`, `imageSize`) without allowing auth/transport overrides. */
+function checkImagesOptions(options: unknown): Pick<ImagesOptions, "aspectRatio" | "imageSize"> | undefined {
+	if (options === undefined || options === null) return undefined;
+	const fail = (problem: string) =>
+		new Error(
+			`models.generateImages() ${problem}. Expected options: { aspectRatio?: string, imageSize?: string }. See "Generate images" in ${CODEMODE_DOCS_PATH}.`,
+		);
+	if (typeof options !== "object" || Array.isArray(options)) {
+		throw fail(`expects an options object as its third argument, got ${describeValue(options)}`);
+	}
+	const { aspectRatio, imageSize } = options as Record<string, unknown>;
+	if (aspectRatio !== undefined && typeof aspectRatio !== "string") {
+		throw fail(`options.aspectRatio must be a string, got ${describeValue(aspectRatio)}`);
+	}
+	if (imageSize !== undefined && typeof imageSize !== "string") {
+		throw fail(`options.imageSize must be a string, got ${describeValue(imageSize)}`);
+	}
+	return {
+		...(aspectRatio !== undefined ? { aspectRatio } : {}),
+		...(imageSize !== undefined ? { imageSize } : {}),
+	};
 }
 
 /** The fields of `ClassifierResult` and `AssistantImages` that a nested call row reports. */
@@ -972,18 +996,21 @@ function createModelGlobals(
 			runModelCall("models.classify", "classifier", args as unknown[], checkClassifierContext, (resolved, context) =>
 				models.classify(resolved, context, { signal }),
 			),
-		"models.generateImages": (args, { signal }) =>
-			runModelCall(
+		"models.generateImages": (args, { signal }) => {
+			const rawArgs = args as unknown[];
+			const imageOptions = checkImagesOptions(rawArgs[2]);
+			return runModelCall(
 				"models.generateImages",
 				"image",
-				args as unknown[],
+				rawArgs,
 				checkImagesContext,
 				async (resolved, context) => {
-					const result = await models.generateImages(resolved, context, { signal });
+					const result = await models.generateImages(resolved, context, { ...imageOptions, signal });
 					addGeneratedImages(result.output.filter((block) => block.type === "image").length);
 					return result;
 				},
-			),
+			);
+		},
 	};
 	return Object.entries(implementations).map(([name, execute]) => ({ name, spread: true, execute }));
 }

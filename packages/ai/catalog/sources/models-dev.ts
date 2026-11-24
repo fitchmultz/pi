@@ -60,7 +60,7 @@ export interface ModelsDevV2Model {
 		structured_output?: boolean;
 	};
 	limit?: { context?: number; input?: number; output?: number };
-	cost?: { text?: V2ModalityCost };
+	cost?: { text?: V2ModalityCost; image?: V2ModalityCost };
 	api: Record<string, V2ApiEntry>;
 }
 
@@ -70,6 +70,7 @@ export type ModelsDevV2Catalog = Record<string, { models?: Record<string, Models
 export interface ModelsDevCost {
 	input?: number;
 	output?: number;
+	imageOutput?: number;
 	cacheRead?: number;
 	cacheWrite?: number;
 	/** Context-size tiers. Unlisted rates fall back to the base rates. */
@@ -133,8 +134,15 @@ function contextThreshold(when: Record<string, unknown>): number | undefined {
 function normalizeCost(cost: ModelsDevV2Model["cost"]): ModelsDevCost {
 	const input = cost?.text?.input;
 	const output = cost?.text?.output;
+	const imageOutput = cost?.image?.output;
 	const perToken = (unit: string | undefined) => unit === undefined || unit === "token";
-	if (!input || !output || !perToken(input.unit) || !perToken(output.unit)) return {};
+	const imageOutputPrice = imageOutput && perToken(imageOutput.unit) ? imageOutput.price : undefined;
+	if (!input || !output || !perToken(input.unit) || !perToken(output.unit)) {
+		return {
+			...(input && perToken(input.unit) ? { input: input.price } : {}),
+			...(imageOutputPrice !== undefined ? { imageOutput: imageOutputPrice } : {}),
+		};
+	}
 
 	// Only context-size overrides map onto pi's cost tiers. Region, service-tier,
 	// and time-based prices have no pi equivalent yet.
@@ -165,6 +173,7 @@ function normalizeCost(cost: ModelsDevV2Model["cost"]): ModelsDevCost {
 	return {
 		input: input.price,
 		output: output.price,
+		...(imageOutputPrice !== undefined ? { imageOutput: imageOutputPrice } : {}),
 		cacheRead: input.cache?.read,
 		cacheWrite: cacheWritePrice(input.cache),
 		...(tiers.size > 0 ? { tiers: [...tiers.values()] } : {}),
@@ -239,4 +248,13 @@ export function modelsDevChatModels(catalog: ModelsDevV2Catalog, provider: strin
 			.filter(({ type }) => type === "chat")
 			.map(normalizeModelsDevModel)
 	);
+}
+
+/**
+ * Image generation models of one models.dev provider.
+ */
+export function modelsDevImageModels(catalog: ModelsDevV2Catalog, provider: string): ModelsDevModel[] {
+	return Object.values(catalog[provider]?.models ?? {})
+		.filter(({ type }) => type === "image")
+		.map(normalizeModelsDevModel);
 }

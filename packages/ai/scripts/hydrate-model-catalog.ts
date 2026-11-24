@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { normalizeCloudflareModel, withCloudflareGatewayDecisionsModels } from "../src/api/cloudflare.ts";
@@ -36,6 +36,32 @@ function isCatalogEntry(value: unknown): value is CatalogEntry {
 }
 
 /**
+ * Keep `google-images` entries generated from models.dev (`catalog/google-images.generated.json`)
+ * when hydrating an upstream `models.all.json` snapshot (e.g. clean-checkout Nix builds) that does
+ * not yet carry Google image models. Upstream snapshots that already carry `google-images` win unchanged.
+ */
+const GOOGLE_IMAGE_FALLBACKS_PATH = join(
+	dirname(fileURLToPath(import.meta.url)),
+	"..",
+	"catalog",
+	"google-images.generated.json",
+);
+
+function loadGeneratedGoogleImageFallbacks(): CatalogEntry[] {
+	if (!existsSync(GOOGLE_IMAGE_FALLBACKS_PATH)) return [];
+	const parsed: unknown = JSON.parse(readFileSync(GOOGLE_IMAGE_FALLBACKS_PATH, "utf8"));
+	return Array.isArray(parsed) ? parsed.filter(isCatalogEntry) : [];
+}
+
+function withFallbackGoogleImageModels<T extends { api?: unknown }>(
+	provider: string,
+	entries: T[],
+): Array<T | CatalogEntry> {
+	if (provider !== "google" || entries.some((entry) => entry.api === "google-images")) return entries;
+	return [...entries, ...loadGeneratedGoogleImageFallbacks()];
+}
+
+/**
  * Hydrate the checkout's provider data files from a published typed catalog
  * (`models.all.json`) without network access. With `validateOnly`, stage and
  * validate the data without replacing the checkout's current data.
@@ -65,11 +91,11 @@ export function hydrateModelCatalog(
 			);
 			entries.push({ ...normalized, type: model.type });
 		}
-		const withForkClassifiers = withGoogleDecisionsModels(
+		const withForkModels = withFallbackGoogleImageModels(
 			provider,
-			withCloudflareGatewayDecisionsModels(provider, entries, openaiEntries),
+			withGoogleDecisionsModels(provider, withCloudflareGatewayDecisionsModels(provider, entries, openaiEntries)),
 		);
-		const grouped = groupProviderModelData(provider, withForkClassifiers as CatalogEntry[]);
+		const grouped = groupProviderModelData(provider, withForkModels as CatalogEntry[]);
 		structure[provider] = grouped.structure;
 		files[`${provider}.json`] = `${JSON.stringify(grouped.groups)}\n`;
 	}

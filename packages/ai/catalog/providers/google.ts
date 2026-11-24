@@ -5,9 +5,10 @@ import {
 	isGemini4ModelId,
 } from "../../src/api/google-catalog.ts";
 import { GEMINI_DECISION_1_MODEL } from "../../src/api/google-decisions-catalog.ts";
+import type { ImageModel } from "../../src/types.ts";
 import { defineProvider, modelsDevModels, withInputLimits } from "../define.ts";
 import { googleThinkingLevels } from "../families/google.ts";
-import { modelsDevChatModels, modelsDevCost } from "../sources/models-dev.ts";
+import { modelsDevChatModels, modelsDevCost, modelsDevImageModels } from "../sources/models-dev.ts";
 
 // Rolling aliases take their metadata from the model they currently point to.
 export const GOOGLE_ALIAS_TARGETS: Record<string, string> = {
@@ -40,6 +41,26 @@ export default defineProvider({
 			},
 		});
 	},
+	images: (ctx): ImageModel<"google-images">[] =>
+		modelsDevImageModels(ctx.sources.modelsDev, "google")
+			.filter((source) => source.status !== "deprecated")
+			.filter((source) => source.apis.some((api) => api.protocol === "generate-content"))
+			.map((source) => ({
+				type: "image",
+				id: source.id,
+				name: source.name || source.id,
+				api: "google-images",
+				provider: "google",
+				baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+				input: source.imageInput ? ["text", "image"] : ["text"],
+				output: source.textOutput ? ["text", "image"] : ["image"],
+				cost: {
+					input: source.cost.input || 0,
+					output: source.cost.imageOutput ?? source.cost.output ?? 0,
+					cacheRead: source.cost.cacheRead || 0,
+					cacheWrite: source.cost.cacheWrite || 0,
+				},
+			})),
 	classifiers: () => [{ ...GEMINI_DECISION_1_MODEL }],
 	finalize: (model) =>
 		withInputLimits(model, { maxRequestBytes: GOOGLE_MAX_REQUEST_BYTES, images: { maxPerRequest: 3600 } }),

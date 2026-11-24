@@ -496,8 +496,10 @@ describe("generated model data validation", () => {
 		expect(() => readModelDataStructure(packageRoot)).toThrow("aggregator and provider shards do not match");
 	});
 
-	it("preserves google/gemini-decision-1 when hydrating upstream catalogs without it", () => {
+	it("preserves google/gemini-decision-1 and fallback google-images entries when hydrating clean-checkout upstream catalogs without them", () => {
 		const { dataDir, packageRoot, values } = createFixture("google");
+		// Simulate a clean checkout (e.g. Nix build) where gitignored src/providers/data/ does not exist.
+		rmSync(dataDir, { recursive: true, force: true });
 		const catalogPath = join(packageRoot, "models.all.json");
 		const chatEntry = { ...(values["chat:model-a"] as Record<string, unknown>), api: "google-generative-ai" };
 		writeFileSync(catalogPath, JSON.stringify({ google: [chatEntry] }));
@@ -513,6 +515,38 @@ describe("generated model data validation", () => {
 			api: "google-decisions",
 			contextWindow: 262144,
 		});
+		expect(hydrated["google-images"]?.["image:gemini-nano-banana-2.1"]).toMatchObject({
+			id: "gemini-nano-banana-2.1",
+			api: "google-images",
+			provider: "google",
+			output: ["text", "image"],
+			cost: { input: 1.5, output: 30, cacheRead: 0, cacheWrite: 0 },
+		});
+		expect(Object.keys(hydrated["google-images"] ?? {}).sort()).toEqual([
+			"image:gemini-3-pro-image",
+			"image:gemini-3.1-flash-lite-image",
+			"image:gemini-nano-banana-2.1",
+		]);
+
+		// When an upstream snapshot already carries google-images entries, those entries win unchanged.
+		const upstreamImage = {
+			type: "image",
+			id: "gemini-nano-banana-3",
+			name: "Nano Banana 3",
+			api: "google-images",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			input: ["text", "image"],
+			output: ["text", "image"],
+			cost: { input: 1, output: 25, cacheRead: 0, cacheWrite: 0 },
+		};
+		writeFileSync(catalogPath, JSON.stringify({ google: [chatEntry, upstreamImage] }));
+		hydrateModelCatalog(packageRoot, catalogPath);
+		const hydratedUpstream = JSON.parse(readFileSync(join(dataDir, "google.json"), "utf8")) as Record<
+			string,
+			Record<string, unknown>
+		>;
+		expect(Object.keys(hydratedUpstream["google-images"] ?? {})).toEqual(["image:gemini-nano-banana-3"]);
 	});
 
 	it("normalizes canonical google maxRequestBytes to 100 MiB and Gemini 4 Carbon/Argon maxTokens to 65536 during hydration", () => {

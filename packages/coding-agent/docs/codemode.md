@@ -170,7 +170,7 @@ declare const models: {
   /** Answer `context.questions` about `context.state`; answers are in `result.answers` by question ID. */
   classify(model: ModelInfo, context: ClassifierContext): Promise<ClassifierResult>;
   /** Generate images from `context.input` text and image blocks; show `result.output` blocks with image(). Can take minutes. */
-  generateImages(model: ModelInfo, context: ImagesContext): Promise<ImagesResult>;
+  generateImages(model: ModelInfo, context: ImagesContext, options?: ImagesOptions): Promise<ImagesResult>;
 };
 ```
 
@@ -277,6 +277,13 @@ interface ImagesContext {
   input: (TextBlock | ImageBlock)[];
 }
 
+interface ImagesOptions {
+  /** Output aspect ratio, such as "1:1", "16:9", or "3:2". Ignored by APIs that do not support it. */
+  aspectRatio?: string;
+  /** Output image size, such as "1K", "2K", or "4K". Ignored by APIs that do not support it. */
+  imageSize?: string;
+}
+
 interface ImagesResult {
   provider: string;
   model: string;
@@ -296,10 +303,15 @@ Show generated images with `image(block)`. Do not print `data` with `text()`, `c
 
 ```js
 // @options: {"timeout_ms": 300000}
-const painter = await models.getModelOfType("image", "openrouter", "google/gemini-2.5-flash-image");
+const googleImages = await models.getAvailableOfType("image", "google");
+const painter =
+  googleImages.find((model) => model.id === "gemini-nano-banana-2.1") ??
+  googleImages[0] ??
+  (await models.getAvailableOfType("image", "openrouter"))[0];
+if (!painter) return "No image generation model is available with current credentials.";
 const result = await models.generateImages(painter, {
   input: [{ type: "text", text: "A red fox in the snow, watercolor" }],
-});
+}, { aspectRatio: "16:9", imageSize: "2K" });
 if (result.stopReason !== "stop") return result.errorMessage;
 for (const block of result.output) {
   if (block.type === "image") image(block);
