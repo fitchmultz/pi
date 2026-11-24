@@ -1506,8 +1506,14 @@ describe("openai-completions tool_choice", () => {
 		expect(messages[0]).not.toHaveProperty("reasoning");
 	});
 
-	it("sends thinking disabled for OpenCode Kimi K2.6 when thinking is off", async () => {
-		const model = getModel("opencode", "kimi-k2.6")!;
+	it("sends thinking disabled for OpenCode Kimi K2.6 compat when thinking is off", async () => {
+		const baseModel = getModel("opencode", "kimi-k3")!;
+		const model: Model<"openai-completions"> = {
+			...baseModel,
+			id: "kimi-k2.6",
+			thinkingLevelMap: undefined,
+			compat: { ...baseModel.compat, thinkingFormat: "deepseek", supportsReasoningEffort: false },
+		};
 		let payload: unknown;
 
 		await streamSimple(
@@ -1528,8 +1534,14 @@ describe("openai-completions tool_choice", () => {
 		expect(params.reasoning_effort).toBeUndefined();
 	});
 
-	it("sends thinking enabled for OpenCode Kimi K2.6 when thinking is enabled", async () => {
-		const model = getModel("opencode", "kimi-k2.6")!;
+	it("sends thinking enabled for OpenCode Kimi K2.6 compat when thinking is enabled", async () => {
+		const baseModel = getModel("opencode", "kimi-k3")!;
+		const model: Model<"openai-completions"> = {
+			...baseModel,
+			id: "kimi-k2.6",
+			thinkingLevelMap: undefined,
+			compat: { ...baseModel.compat, thinkingFormat: "deepseek", supportsReasoningEffort: false },
+		};
 		let payload: unknown;
 
 		await streamSimple(
@@ -1600,7 +1612,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("sends max_tokens for OpenCode completions models", async () => {
-		const cases = [getModel("opencode-go", "kimi-k3")!, getModel("opencode", "kimi-k2.6")!] as const;
+		const cases = [getModel("opencode-go", "kimi-k3")!, getModel("opencode", "kimi-k3")!] as const;
 
 		for (const model of cases) {
 			let payload: unknown;
