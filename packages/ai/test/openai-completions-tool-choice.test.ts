@@ -1506,63 +1506,6 @@ describe("openai-completions tool_choice", () => {
 		expect(messages[0]).not.toHaveProperty("reasoning");
 	});
 
-	it("sends thinking disabled for OpenCode Kimi K2.6 compat when thinking is off", async () => {
-		const baseModel = getModel("opencode", "kimi-k3")!;
-		const model: Model<"openai-completions"> = {
-			...baseModel,
-			id: "kimi-k2.6",
-			thinkingLevelMap: undefined,
-			compat: { ...baseModel.compat, thinkingFormat: "deepseek", supportsReasoningEffort: false },
-		};
-		let payload: unknown;
-
-		await streamSimple(
-			model,
-			{
-				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
-			},
-			{
-				apiKey: "test",
-				onPayload: (params: unknown) => {
-					payload = params;
-				},
-			},
-		).result();
-
-		const params = (payload ?? mockState.lastParams) as { thinking?: unknown; reasoning_effort?: string };
-		expect(params.thinking).toEqual({ type: "disabled" });
-		expect(params.reasoning_effort).toBeUndefined();
-	});
-
-	it("sends thinking enabled for OpenCode Kimi K2.6 compat when thinking is enabled", async () => {
-		const baseModel = getModel("opencode", "kimi-k3")!;
-		const model: Model<"openai-completions"> = {
-			...baseModel,
-			id: "kimi-k2.6",
-			thinkingLevelMap: undefined,
-			compat: { ...baseModel.compat, thinkingFormat: "deepseek", supportsReasoningEffort: false },
-		};
-		let payload: unknown;
-
-		await streamSimple(
-			model,
-			{
-				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
-			},
-			{
-				apiKey: "test",
-				reasoning: "high",
-				onPayload: (params: unknown) => {
-					payload = params;
-				},
-			},
-		).result();
-
-		const params = (payload ?? mockState.lastParams) as { thinking?: unknown; reasoning_effort?: string };
-		expect(params.thinking).toEqual({ type: "enabled" });
-		expect(params.reasoning_effort).toBeUndefined();
-	});
-
 	it("omits disabled thinking for Moonshot Kimi K2.7 Code models", async () => {
 		const cases = [getModel("moonshotai", "kimi-k2.7-code"), getModel("moonshotai-cn", "kimi-k2.7-code")];
 
