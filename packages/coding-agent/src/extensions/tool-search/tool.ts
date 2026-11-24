@@ -2,12 +2,15 @@
  * Tool discovery: a BM25 ranker over tool metadata, shared by `searchTools()` in codemode scripts and
  * the optional `tool_search` tool.
  *
- * `tool_search` searches the tools that are declared to the model only once loaded (`codemode` and
- * `deferred` exposure) and loads the good matches, so they are declared for the next model call. It
+ * `tool_search` searches the tools that are not declared upfront (`codemode` and `deferred`
+ * exposure). Normally it loads good matches into the active tool set so they are declared for the
+ * next model call, recorded in the transcript like any other tool change across `/tree`, resume,
+ * and fork until a compaction or context rollover prunes idle loaded tools back to deferred. When
+ * `codemode` is active on a model without cache-preserving mid-conversation tool additions
+ * (`getMidConvoToolSupport(model) === "none"`), it instead returns inline `codemode` declarations
+ * for those matches without mutating active tools so top-level tool declarations stay cached. It
  * lists weaker matches without loading them, and says when the query names a tool that is already
- * active or that it cannot load. Loading goes through the active tool set, so it is recorded in the
- * transcript like any other tool change and survives `/tree`, resume, and fork on that branch until
- * a compaction or context rollover prunes idle loaded tools back to deferred.
+ * active or that it cannot load.
  */
 
 import type { AgentTool } from "@earendil-works/pi-agent-core";
