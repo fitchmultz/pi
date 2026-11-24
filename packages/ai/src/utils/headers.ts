@@ -22,6 +22,19 @@ export function providerHeadersToRecord(
 	return merged.size > 0 ? Object.fromEntries(merged.values()) : undefined;
 }
 
+/** Lowercased header names explicitly removed (`null`) by the final merged provider header sources. */
+export function removedProviderHeaderNames(...headerSources: (ProviderHeaders | undefined)[]): Set<string> {
+	const removed = new Set<string>();
+	for (const source of headerSources) {
+		for (const [name, value] of Object.entries(source ?? {})) {
+			const normalizedName = name.toLowerCase();
+			if (value === null) removed.add(normalizedName);
+			else removed.delete(normalizedName);
+		}
+	}
+	return removed;
+}
+
 const CREDENTIAL_HEADERS = new Set(["authorization", "cf-aig-authorization"]);
 
 /**

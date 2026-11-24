@@ -45,6 +45,12 @@ export const CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS = 0.05;
  */
 export const CACHE_WARMING_IDLE_CONTINUATION_PROBABILITY = 0.15;
 
+/**
+ * Gemini implicit prefix caching leaves an uncached tail of ~2,048 tokens billed at full input rate
+ * on cache hits and warm replays, and does not cache prompts at or below this threshold.
+ */
+export const GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS = 2048;
+
 /** Refresh at 90% of the TTL while preserving at least ten seconds of margin. */
 export function getCacheWarmingDelayMs(ttlMs: number): number | undefined {
 	if (ttlMs <= 10_000) return undefined;
@@ -59,11 +65,15 @@ export function getEffectiveCacheRetention(
 	const retention =
 		options?.cacheRetention ??
 		(getProviderEnvValue("PI_CACHE_RETENTION", options?.env) === "long" ? "long" : "short");
-	return retention === "long" &&
-		hasApi(model, "anthropic-messages") &&
-		model.compat?.supportsLongCacheRetention === false
-		? "short"
-		: retention;
+	if (retention !== "long") return retention;
+	if (hasApi(model, "anthropic-messages") && model.compat?.supportsLongCacheRetention === false) {
+		return "short";
+	}
+	if (hasApi(model, "google-generative-ai") || hasApi(model, "google-vertex")) {
+		// Google implicit caching has only one short sliding TTL and ignores long-retention requests.
+		return "short";
+	}
+	return retention;
 }
 
 /**
@@ -102,7 +112,12 @@ export function evaluateCacheWarming(
 	phase: CacheWarmingPhase,
 	retention: CacheRetention = "short",
 ): CacheWarmingDecision {
-	const cacheHitCost = price(model, { cacheRead: promptTokens });
+	const isGoogleImplicitCache = model.api === "google-generative-ai" || model.api === "google-vertex";
+	const cachedPromptTokens = isGoogleImplicitCache
+		? Math.max(0, promptTokens - GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS)
+		: promptTokens;
+	const uncachedTailTokens = promptTokens - cachedPromptTokens;
+	const cacheHitCost = price(model, { input: uncachedTailTokens, cacheRead: cachedPromptTokens });
 	const longWrite =
 		(model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") && retention === "long";
 	const hasWritePrice = model.cost.cacheWrite > 0 || model.cost.tiers?.some((tier) => tier.cacheWrite > 0);
@@ -112,7 +127,7 @@ export function evaluateCacheWarming(
 			? { cacheWrite: promptTokens, cacheWrite1h: longWrite ? promptTokens : 0 }
 			: { input: promptTokens },
 	);
-	const warmCost = price(model, { cacheRead: promptTokens, output: 1 });
+	const warmCost = price(model, { input: uncachedTailTokens, cacheRead: cachedPromptTokens, output: 1 });
 	const missCost = Math.max(0, cacheMissCost - cacheHitCost);
 	const continuationProbability = phase === "idle" ? CACHE_WARMING_IDLE_CONTINUATION_PROBABILITY : 1;
 	const economicsAvailable = promptTokens > 0 && (cacheHitCost > 0 || cacheMissCost > 0);

@@ -50,9 +50,10 @@ export interface AiBinding {
  * `cf-aig-authorization`) before dispatch; binding calls are pre-authenticated, so pass
  * `cf-aig-authorization: Bearer ${CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL}` to satisfy
  * the check. The gateway ignores (and strips) `cf-aig-authorization` on binding-routed
- * requests. Pair it with `Authorization: null` / `x-api-key: null` so the SDKs' placeholder
- * auth headers never reach the gateway, which would treat a request-supplied auth header as a
- * BYOK provider key that overrides its stored keys — the same as it would over HTTPS.
+ * requests. Pair it with `Authorization: null` / `x-api-key: null` — or `x-goog-api-key: null`
+ * for `/google-ai-studio` routes — so the SDKs' placeholder auth headers never reach the
+ * gateway, which would treat a request-supplied auth header as a BYOK provider key that
+ * overrides its stored keys — the same as it would over HTTPS.
  */
 export const CLOUDFLARE_GATEWAY_BINDING_AUTH_SENTINEL = "cloudflare-gateway-binding";
 

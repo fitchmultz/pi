@@ -3,7 +3,10 @@ import {
 	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
+	evaluateCacheWarming,
+	GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS,
 	getCacheWarmingDelayMs,
+	getEffectiveCacheRetention,
 	getPromptCacheTtlMs,
 	isCacheWarmingReplayable,
 	type Model,
@@ -999,6 +1002,33 @@ describe("cache warming", () => {
 		expect(formatCacheWarmingUsage(entry.usage.cost.total, entry.note)).toBe(
 			"Cache warmed (extension override): $0.029497",
 		);
+	});
+
+	it("maps Google long retention to short and accounts for the 2,048-token implicit-cache tail", () => {
+		const gemini4Neon = getBuiltinModel("google", "gemini-4-neon");
+		expect(gemini4Neon.promptCache).toEqual({ short: 180 });
+		expect(getEffectiveCacheRetention(gemini4Neon, { cacheRetention: "long" })).toBe("short");
+		expect(getEffectiveCacheRetention(gemini4Neon, { cacheRetention: "none" })).toBe("none");
+		expect(getPromptCacheTtlMs(gemini4Neon, { cacheRetention: "long" })).toBe(180_000);
+		expect(getCacheWarmingDelayMs(180_000)).toBe(162_000);
+		expect(isCacheWarmingReplayable(gemini4Neon, { reasoning: "xhigh" })).toBe(true);
+
+		const atTailThreshold = evaluateCacheWarming(
+			gemini4Neon,
+			GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS,
+			"streaming",
+		);
+		expect(atTailThreshold.missCost).toBe(0);
+		expect(atTailThreshold.action).toBe("stop");
+
+		const mediumStreaming = evaluateCacheWarming(gemini4Neon, 100_000, "streaming");
+		// 97,952 cached @ $0.15/M + 2,048 tail @ $3/M + 1 output @ $15/M
+		expect(mediumStreaming.warmCost).toBeCloseTo((97_952 * 0.15 + 2_048 * 3 + 15) / 1_000_000, 9);
+		expect(mediumStreaming.missCost).toBeCloseTo((97_952 * (3 - 0.15)) / 1_000_000, 9);
+		expect(mediumStreaming.action).toBe("warm");
+
+		expect(evaluateCacheWarming(gemini4Neon, 100_000, "idle").action).toBe("stop");
+		expect(evaluateCacheWarming(gemini4Neon, 250_000, "idle").action).toBe("warm");
 	});
 });
 

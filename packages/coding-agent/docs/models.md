@@ -144,6 +144,8 @@ For Anthropic Messages, `compat.supportsLongCacheRetention: false` makes a reque
 
 Canonical Cloudflare AI Gateway Opus 5.5 and Fable 5.2 default to five-minute `short` and one-hour `long` lifetimes when the catalog omits `promptCache`. Explicit empty or partial catalog metadata is preserved: an omitted tier remains unknown and is not warmed. Catalog entries with a non-canonical `baseUrl` do not receive these defaults.
 
+Canonical `google` Gemini 4 models (`gemini-4-neon`, `gemini-4-carbon`, `gemini-4-argon`, `gemini-4-hydrogen`) default to a three-minute (`180` s) `short` implicit-cache lifetime when the catalog omits `promptCache`. Explicit `promptCache` values (including `{}`) are preserved. Because Gemini's implicit cache has only one short sliding TTL and ignores `long` retention requests, cache warming uses `promptCache.short` even when `PI_CACHE_RETENTION=long` is set globally, and accounts for Gemini's ~2,048-token uncached prefix tail when estimating refresh cost and savings.
+
 A provider-level `baseUrl` override in `models.json` or an extension is applied after catalog normalization and retains the model's metadata, including these lifetimes. To replace the lifetimes, redefine the model under `models` with its complete metadata, including `input`, `reasoning`, `thinkingLevelMap`, `cost`, limits and `compat`; `promptCache: {}` leaves both tiers unknown and disables warming for that model. An empty `promptCache` in `modelOverrides` does not remove inherited tiers.
 
 ### Configure sampling by thinking level

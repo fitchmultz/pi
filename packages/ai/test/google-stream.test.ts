@@ -1053,4 +1053,52 @@ describe("Google SDK streaming protocol", () => {
 		expect(result.usage.cost.output).toBeCloseTo(20 * 1.8, 6);
 		expect(result.usage.cost.cacheRead).toBeCloseTo(60 * 1.8, 6);
 	});
+
+	it("recognizes Workers AI binding /google-ai-studio URLs, strips null headers, clamps usage.input, and prices prefixed model IDs", async () => {
+		const fetch = respond([
+			{
+				candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+				usageMetadata: {
+					promptTokenCount: 20,
+					cachedContentTokenCount: 50,
+					candidatesTokenCount: 10,
+					totalTokenCount: 60,
+					serviceTier: "priority",
+				},
+			},
+		]);
+		const bindingModel: Model<"google-generative-ai"> = {
+			...model("google-generative-ai"),
+			id: "models/gemini-4-neon",
+			provider: "google-binding",
+			baseUrl: "https://workers-binding.ai/ai-gateway/gateways/workos/google-ai-studio/v1beta",
+		};
+
+		let capturedPayload: GenerateContentParameters | undefined;
+		const stream = streamGoogleSimple(bindingModel, context, {
+			headers: {
+				"cf-aig-authorization": "Bearer cloudflare-gateway-binding",
+				"x-goog-api-key": null,
+			},
+			onPayload: (payload) => {
+				capturedPayload = payload as GenerateContentParameters;
+				return payload;
+			},
+		});
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(fetch).toHaveBeenCalledOnce();
+		const [reqInput, reqInit] = fetch.mock.calls[0]!;
+		const sentHeaders = new Headers(reqInit?.headers ?? (reqInput instanceof Request ? reqInput.headers : undefined));
+		expect(sentHeaders.get("cf-aig-authorization")).toBe("Bearer cloudflare-gateway-binding");
+		expect(sentHeaders.get("x-goog-api-key")).toBeNull();
+		expect((capturedPayload?.config as Record<string, unknown> | undefined)?.store).toBe(false);
+		// Clamped to 0 when cachedContentTokenCount exceeds promptTokenCount.
+		expect(result.usage.input).toBe(0);
+		expect(result.usage.cost.input).toBe(0);
+		// Prefixed model ID ("models/gemini-4-neon") still gets Priority 1.8x pricing.
+		expect(result.usage.cost.output).toBeCloseTo(20 * 1.8, 6);
+		expect(result.usage.cost.cacheRead).toBeCloseTo(150 * 1.8, 6);
+	});
 });
