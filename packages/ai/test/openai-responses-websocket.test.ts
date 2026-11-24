@@ -519,4 +519,45 @@ describe("openai-responses WebSocket mode", () => {
 		expect(fetchSpy).toHaveBeenCalledTimes(2);
 		expect(customFetch).toHaveBeenCalledTimes(1);
 	});
+
+	it("closes and evicts the pooled socket when the consumer exits mid-stream", async () => {
+		const harness = new FakeWebSocketHarness();
+		harness.onSend((socket) => {
+			socket.emitMessage({ type: "response.created", sequence_number: 0, response: { id: "resp_abandoned" } });
+		});
+		harness.onSend((socket) => {
+			emitSimpleReply(socket, "resp_fresh", "msg_fresh", "Fresh reply");
+		});
+		harness.install();
+
+		const first = await streamOpenAIResponses(
+			createOpenAIModel(),
+			normalizeContext({ messages: [{ role: "user", content: "first", timestamp: 1 }] }),
+			{
+				apiKey: "sk-test",
+				sessionId: "sess-early-exit",
+				transport: "auto",
+				onProviderStreamEvent: () => {
+					throw new Error("consumer aborted mid-stream");
+				},
+			},
+		).result();
+		expect(first.stopReason).toBe("error");
+		expect(first.errorMessage).toContain("consumer aborted mid-stream");
+		expect(harness.sockets).toHaveLength(1);
+		expect(harness.sockets[0]?.closed).toBe(true);
+
+		const second = await streamOpenAIResponses(
+			createOpenAIModel(),
+			normalizeContext({ messages: [{ role: "user", content: "second", timestamp: 2 }] }),
+			{
+				apiKey: "sk-test",
+				sessionId: "sess-early-exit",
+				transport: "auto",
+			},
+		).result();
+		expect(second.stopReason).toBe("stop");
+		expect(second.responseId).toBe("resp_fresh");
+		expect(harness.sockets).toHaveLength(2);
+	});
 });

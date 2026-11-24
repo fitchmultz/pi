@@ -964,7 +964,7 @@ export async function* streamOpenAIResponsesWebSocket(
 		lease.entry.continuation = undefined;
 	}
 
-	let keepConnection = true;
+	let keepConnection = false;
 	let started = false;
 	let completedResponseId: string | undefined;
 
@@ -989,6 +989,7 @@ export async function* streamOpenAIResponsesWebSocket(
 			yield event as unknown as ResponseStreamEvent;
 		}
 
+		keepConnection = true;
 		const responseId = output.responseId || completedResponseId;
 		if (!options.signal?.aborted && incremental && lease.entry && responseId) {
 			const responseItems = convertResponsesMessages(
@@ -1004,6 +1005,7 @@ export async function* streamOpenAIResponsesWebSocket(
 		keepConnection = false;
 		throw wrapDirectOpenAITransportError(error, options.signal);
 	} finally {
+		if (!keepConnection && lease.entry) lease.entry.continuation = undefined;
 		lease.release({ keep: keepConnection && !options.signal?.aborted });
 	}
 }
