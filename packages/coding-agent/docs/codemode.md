@@ -65,7 +65,7 @@ Calls a script makes share one nested-call queue with other scripts. A tool that
 
 Every callable tool is a method of `tools`, named by its identifier: characters that are not valid in a JavaScript identifier become `_`, so the MCP tool `mcp__dev-radius__search` is `tools.mcp__dev_radius__search`. Each method takes one object with the tool's arguments. Tools with `model-only` or `hidden` exposure are excluded.
 
-`await tools.tool_search({ query, limit?, namespace? })` is an alias for `await searchTools(query, { limit, namespace })`. Both return ranked `{ name, description }` matches for tools the script can call. Neither loads tools into the model's next request. The standalone `tool_search` tool still loads deferred matches for direct calls.
+`await tools.tool_search({ query, limit?, namespace? })` is an alias for `await searchTools(query, { limit, namespace })`. Both return ranked `{ name, description }` matches for tools the script can call. Neither loads tools into the model's next request. The standalone `tool_search` tool loads deferred matches for direct calls except when `codemode` is active on a model without cache-preserving mid-conversation tool additions (such as Gemini 4 or Bedrock), where it returns inline `codemode` declarations instead so top-level tool declarations stay cached.
 
 What other calls resolve to depends on the tool:
 

@@ -65,8 +65,9 @@ export function isMcpToolName(name: string): boolean {
  * - `codemode`: tools are callable from codemode scripts but neither declared to the model nor
  *   listed in the codemode description, which lists only the server's namespace. Scripts find them
  *   with `searchTools()`. `codemode-deferred` is accepted as an alias.
- * - `deferred`: not declared to the model until the `tool_search` tool loads them; the model then
- *   calls them directly. Does not need codemode.
+ * - `deferred`: not declared upfront; `tool_search` loads good matches for direct calls, or returns
+ *   inline `codemode` declarations without mutating active tools when `codemode` is active on a
+ *   model without cache-preserving mid-conversation tool additions. Does not need codemode.
  * - `direct`: tools are declared to the model like any other tool (and callable from codemode).
  * - `hidden`: tools are registered but unreachable.
  */
