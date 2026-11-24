@@ -11,7 +11,7 @@ import type {
 	ChatCompletionSystemMessageParam,
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
-import { calculateCost, clampThinkingLevel } from "../models.ts";
+import { calculateCost, clampThinkingLevel, getMidConvoToolSupport } from "../models.ts";
 import type {
 	AssistantMessage,
 	CacheRetention,
@@ -791,13 +791,6 @@ function createClient(
 	});
 }
 
-function resolveOpenAITranscriptToolSupport(compat: ResolvedOpenAICompletionsCompat): "none" | "additions" | "changes" {
-	if (compat.supportsMidConvoSystemMessages !== true) return "none";
-	if (compat.supportsMidConvoToolChanges === true) return "changes";
-	if (compat.supportsMidConvoToolAdditions === true) return "additions";
-	return "none";
-}
-
 function buildParams(
 	model: Model<"openai-completions">,
 	context: TranscriptContext,
@@ -809,7 +802,7 @@ function buildParams(
 		compat.supportsOpenAIGrammarTools,
 	),
 ) {
-	const transcriptTools = resolveTranscriptTools(context.messages, resolveOpenAITranscriptToolSupport(compat));
+	const transcriptTools = resolveTranscriptTools(context.messages, getMidConvoToolSupport(model, compat));
 	const messages = convertMessages(model, context, compat, {
 		grammarToolInputProperties,
 	});
@@ -1230,7 +1223,7 @@ export function convertMessages(
 	};
 
 	const transformedMessages = transformMessages(normalizedContext.messages, model, (id) => normalizeToolCallId(id));
-	const transcriptToolSupport = resolveOpenAITranscriptToolSupport(compat);
+	const transcriptToolSupport = getMidConvoToolSupport(model, compat);
 	const transcriptTools = resolveTranscriptTools(normalizedContext.messages, transcriptToolSupport);
 	const instructionRole = model.reasoning && compat.supportsDeveloperRole ? "developer" : "system";
 

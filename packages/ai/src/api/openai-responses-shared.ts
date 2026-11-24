@@ -188,8 +188,8 @@ export interface ConvertResponsesMessagesOptions {
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
 	/** Whether later system messages are sent in place; otherwise they are folded into the leading prompt. */
 	supportsMidConvoSystemMessages?: boolean;
-	supportsAdditionalTools?: boolean;
-	supportsToolSearch?: boolean;
+	/** Pre-resolved mid-conversation tool support from `getMidConvoToolSupport()`. */
+	toolSupport: TranscriptToolSupport;
 	toolOptions?: ConvertResponsesToolsOptions;
 	/**
 	 * Effort for the reply being generated. When set, the thinking level is sent as
@@ -217,25 +217,6 @@ export interface ConvertResponsesToolsOptions {
 // =============================================================================
 // Message conversion
 // =============================================================================
-
-/**
- * How a Responses transport expresses tool changes.
- *
- * `additional_tools` items accumulate: a later item adds tools and replaces same-name
- * definitions from earlier items, but it cannot replace a top-level tool and cannot remove any
- * tool (verified with strict schemas on the OpenAI, Codex, and Copilot backends, October 2026).
- * Like Codex, every tool is therefore declared in `additional_tools` items, starting with one
- * at the head of the input, and removals are announced as text. Synthetic tool search can
- * only add tools. Without mid-conversation system messages there is nothing to anchor.
- */
-export function getResponsesToolSupport(options: {
-	supportsMidConvoSystemMessages?: boolean;
-	supportsAdditionalTools?: boolean;
-	supportsToolSearch?: boolean;
-}): TranscriptToolSupport {
-	if (options.supportsMidConvoSystemMessages && options.supportsAdditionalTools) return "changes";
-	return options.supportsToolSearch ? "additions" : "none";
-}
 
 /**
  * Precedes every additional_tools item after the first. Without it, models read the latest item as
@@ -287,7 +268,7 @@ export function convertResponsesMessages<TApi extends Api>(
 	};
 
 	const transformedMessages = transformMessages(normalizedContext.messages, model, normalizeToolCallId);
-	const toolSupport = getResponsesToolSupport(options ?? {});
+	const toolSupport = options?.toolSupport ?? "none";
 	const transcriptTools = resolveTranscriptTools(normalizedContext.messages, toolSupport);
 	let declaredAdditionalTools = false;
 	/** Tools announced as removed and not declared again since. */

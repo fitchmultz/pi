@@ -1414,5 +1414,21 @@ describe("Models runtime", () => {
 				api: "openrouter-images",
 			} as unknown as Model<Api>),
 		).toBe("none");
+		// compatOverride passes an adapter's resolved compat flags.
+		expect(
+			getMidConvoToolSupport(
+				{ ...base, api: "openai-completions" },
+				{ supportsMidConvoSystemMessages: true, supportsMidConvoToolAdditions: true },
+			),
+		).toBe("additions");
+		// Partial overrides inherit omitted flags from model.compat and explicit false wins over model.compat true.
+		const responsesWithChanges = {
+			...base,
+			api: "openai-responses" as const,
+			compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true },
+		};
+		expect(getMidConvoToolSupport(responsesWithChanges, {})).toBe("changes");
+		expect(getMidConvoToolSupport(responsesWithChanges, { supportsAdditionalTools: true })).toBe("changes");
+		expect(getMidConvoToolSupport(responsesWithChanges, { supportsAdditionalTools: false })).toBe("none");
 	});
 });

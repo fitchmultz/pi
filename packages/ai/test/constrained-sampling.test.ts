@@ -261,6 +261,7 @@ describe("constrained tool sampling", () => {
 			expect(() =>
 				convertResponsesMessages(makeModel(), context, new Set(["openai"]), {
 					grammarToolInputProperties: new Map([["sample_tool", "payload"]]),
+					toolSupport: "none",
 				}),
 			).toThrow('Grammar tool call "sample_tool" requires argument "payload" to be a string');
 		}
@@ -268,6 +269,7 @@ describe("constrained tool sampling", () => {
 		replayedToolCall.arguments = { payload: "abc" };
 		const messages = convertResponsesMessages(makeModel(), context, new Set(["openai"]), {
 			grammarToolInputProperties: new Map([["sample_tool", "payload"]]),
+			toolSupport: "none",
 		});
 
 		expect(messages).toContainEqual({
@@ -312,6 +314,7 @@ describe("constrained tool sampling", () => {
 
 		const messages = convertResponsesMessages(makeModel(), context, new Set(["openai"]), {
 			grammarToolInputProperties: new Map([["sample_tool", "payload"]]),
+			toolSupport: "none",
 		});
 
 		const call = messages.find((item) => "type" in item && item.type === "custom_tool_call");

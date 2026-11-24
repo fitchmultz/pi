@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
-import { clampThinkingLevel } from "../models.ts";
+import { clampThinkingLevel, getMidConvoToolSupport } from "../models.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -32,7 +32,6 @@ import {
 	convertResponsesMessages,
 	convertResponsesTools,
 	getOpenAIProviderSummaryBlock,
-	getResponsesToolSupport,
 	OPENAI_CONFIGURATION_UPDATE_REQUEST_EFFORT,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
@@ -301,12 +300,12 @@ function buildParams(
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	configurationUpdateEffort: string | undefined,
 ) {
-	const transcriptTools = resolveTranscriptTools(context.messages, getResponsesToolSupport(compat));
+	const toolSupport = getMidConvoToolSupport(model, compat);
+	const transcriptTools = resolveTranscriptTools(context.messages, toolSupport);
 	const messages = convertResponsesMessages(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: compat.supportsMidConvoSystemMessages,
-		supportsAdditionalTools: compat.supportsAdditionalTools,
-		supportsToolSearch: compat.supportsToolSearch,
+		toolSupport,
 		toolOptions: {
 			supportsStrictMode: compat.supportsStrictMode,
 			supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,

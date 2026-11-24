@@ -6,7 +6,7 @@ import type {
 	ResponseInput,
 	ResponseStreamEvent,
 } from "openai/resources/responses/responses.js";
-import { clampThinkingLevel } from "../models.ts";
+import { clampThinkingLevel, getMidConvoToolSupport } from "../models.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
@@ -39,7 +39,6 @@ import {
 	convertResponsesMessages,
 	convertResponsesTools,
 	getOpenAIProviderSummaryBlock,
-	getResponsesToolSupport,
 	OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
 	processResponsesStream,
 	resolveOpenAIResponsesContext,
@@ -626,24 +625,15 @@ function buildRequestBody(
 ): RequestBody {
 	const supportsStrictMode = model.compat?.supportsStrictMode ?? true;
 	const supportsOpenAIGrammarTools = model.compat?.supportsOpenAIGrammarTools ?? false;
-	const supportsAdditionalTools = model.compat?.supportsAdditionalTools ?? false;
-	const supportsToolSearch = model.compat?.supportsToolSearch ?? false;
-	const transcriptTools = resolveTranscriptTools(
-		context.messages,
-		getResponsesToolSupport({
-			supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
-			supportsAdditionalTools,
-			supportsToolSearch,
-		}),
-	);
+	const toolSupport = getMidConvoToolSupport(model);
+	const transcriptTools = resolveTranscriptTools(context.messages, toolSupport);
 	// The system prompt goes into a leading developer item, not top-level `instructions`, as in Codex.
 	// From GPT-6.2 on, the backend appends `instructions` after `input`, so every new turn changed the
 	// prompt before the system prompt and it was never served from the prompt cache (#12273).
 	const messages = convertResponsesMessages(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
-		supportsAdditionalTools,
-		supportsToolSearch,
+		toolSupport,
 		toolOptions: { strict: null, supportsStrictMode, supportsOpenAIGrammarTools },
 		configurationUpdateEffort,
 		summaryBlock: getOpenAIProviderSummaryBlock(model, context.messages),
@@ -1686,7 +1676,7 @@ async function processWebSocketStream(
 				model,
 				normalizeContext({ messages: [output] }),
 				OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
-				{ grammarToolInputProperties },
+				{ grammarToolInputProperties, toolSupport: "none" },
 			).filter((item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output");
 			entry.continuation = {
 				lastRequestBody: fullBody,
