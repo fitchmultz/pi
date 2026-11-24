@@ -66,7 +66,7 @@ async function captureOpenAIResponseHeaders(
 			systemPrompt: "sys",
 			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 		}),
-		{ apiKey: "sk-test-key", ...options },
+		{ apiKey: "sk-test-key", transport: "sse", ...options },
 	);
 
 	for await (const event of stream) {
@@ -147,6 +147,7 @@ describe("openai-responses provider defaults", () => {
 			}),
 			{
 				apiKey: "sk-test-key",
+				transport: "sse",
 				toolChoice: "required",
 				onPayload: (payload) => {
 					capturedPayload = payload;
@@ -255,6 +256,7 @@ describe("openai-responses provider defaults", () => {
 			}),
 			{
 				apiKey: "sk-test-key",
+				transport: "sse",
 				onPayload: (payload) => {
 					capturedPayload = payload;
 				},
@@ -291,6 +293,7 @@ describe("openai-responses provider defaults", () => {
 				}),
 				{
 					apiKey: "sk-test-key",
+					transport: "sse",
 					onPayload: (payload) => {
 						capturedPayload = payload;
 					},
@@ -333,6 +336,7 @@ describe("openai-responses provider defaults", () => {
 			}),
 			{
 				apiKey: "sk-test-key",
+				transport: "sse",
 				sessionId,
 				onPayload: (payload) => {
 					capturedPayload = payload as Pick<CapturedResponsesPayload, "prompt_cache_key">;
@@ -538,7 +542,7 @@ describe("openai-responses provider defaults", () => {
 					systemPrompt: "sys",
 					messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 				}),
-				{ apiKey: "sk-test-key", serviceTier },
+				{ apiKey: "sk-test-key", transport: "sse", serviceTier },
 			);
 
 			const result = await stream.result();
@@ -566,7 +570,7 @@ describe("openai-responses provider defaults", () => {
 				systemPrompt: "sys",
 				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
 			}),
-			{ apiKey: "sk-test-key" },
+			{ apiKey: "sk-test-key", transport: "sse" },
 		).result();
 
 		expect(result.stopReason).toBe("error");
@@ -597,6 +601,7 @@ describe("openai-responses max_output_tokens compat", () => {
 			}),
 			{
 				apiKey: "sk-test-key",
+				transport: "sse",
 				maxTokens: 1024,
 				onPayload: (payload) => {
 					capturedPayload = payload as { max_output_tokens?: number };
@@ -634,6 +639,7 @@ describe("openai-responses max_output_tokens compat", () => {
 			}),
 			{
 				apiKey: "sk-test-key",
+				transport: "sse",
 				maxTokens: 1024,
 				onPayload: (payload) => {
 					capturedPayload = payload as { max_output_tokens?: number };
