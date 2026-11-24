@@ -9,6 +9,8 @@ interface ProviderRetryOptions {
 	signal?: AbortSignal;
 	/** HTTP statuses that fail at once although the default policy would retry them. */
 	noRetryStatuses?: readonly number[];
+	/** Optional caller guard; when false, fail immediately without consuming a retry. */
+	shouldRetry?: (error: unknown) => boolean;
 }
 
 interface ProviderError extends Error {
@@ -121,7 +123,14 @@ export async function retryProviderRequest<T>(
 			return await request();
 		} catch (error) {
 			if (options.signal?.aborted) throw createAbortError();
-			if (retriesRemaining <= 0 || !isProviderError(error) || !isRetryableProviderError(error)) throw error;
+			if (
+				retriesRemaining <= 0 ||
+				options.shouldRetry?.(error) === false ||
+				!isProviderError(error) ||
+				!isRetryableProviderError(error)
+			) {
+				throw error;
+			}
 			if (error.status !== undefined && options.noRetryStatuses?.includes(error.status)) throw error;
 			// Test the text callers report, which carries the response body.
 			if (isProviderLimitError(formatProviderError(normalizeProviderError(error)))) throw error;
