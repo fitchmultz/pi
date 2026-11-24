@@ -1365,27 +1365,29 @@ export function getMidConvoToolSupport(
 ): MidConvoToolSupport {
 	if (!model || !isModelType(model, "chat")) return "none";
 	if (hasApi(model, "anthropic-messages")) {
-		const compat = compatOverride ?? model.compat;
-		return compat?.supportsMidConvoSystemMessages === true && compat?.supportsMidConvoToolChanges === true
-			? "changes"
-			: "none";
+		const flag = (key: "supportsMidConvoSystemMessages" | "supportsMidConvoToolChanges") =>
+			(compatOverride?.[key] ?? model.compat?.[key]) === true;
+		return flag("supportsMidConvoSystemMessages") && flag("supportsMidConvoToolChanges") ? "changes" : "none";
 	}
 	if (
 		hasApi(model, "openai-responses") ||
 		hasApi(model, "openai-codex-responses") ||
 		hasApi(model, "azure-openai-responses")
 	) {
-		const compat = compatOverride ?? model.compat;
-		if (compat?.supportsMidConvoSystemMessages === true && compat?.supportsAdditionalTools === true) {
+		const flag = (key: "supportsMidConvoSystemMessages" | "supportsAdditionalTools" | "supportsToolSearch") =>
+			(compatOverride?.[key] ?? model.compat?.[key]) === true;
+		if (flag("supportsMidConvoSystemMessages") && flag("supportsAdditionalTools")) {
 			return "changes";
 		}
-		return compat?.supportsToolSearch === true ? "additions" : "none";
+		return flag("supportsToolSearch") ? "additions" : "none";
 	}
 	if (hasApi(model, "openai-completions")) {
-		const compat = compatOverride ?? model.compat;
-		if (compat?.supportsMidConvoSystemMessages !== true) return "none";
-		if (compat?.supportsMidConvoToolChanges === true) return "changes";
-		if (compat?.supportsMidConvoToolAdditions === true) return "additions";
+		const flag = (
+			key: "supportsMidConvoSystemMessages" | "supportsMidConvoToolChanges" | "supportsMidConvoToolAdditions",
+		) => (compatOverride?.[key] ?? model.compat?.[key]) === true;
+		if (!flag("supportsMidConvoSystemMessages")) return "none";
+		if (flag("supportsMidConvoToolChanges")) return "changes";
+		if (flag("supportsMidConvoToolAdditions")) return "additions";
 		return "none";
 	}
 	return "none";

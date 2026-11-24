@@ -1421,5 +1421,14 @@ describe("Models runtime", () => {
 				{ supportsMidConvoSystemMessages: true, supportsMidConvoToolAdditions: true },
 			),
 		).toBe("additions");
+		// Partial overrides inherit omitted flags from model.compat and explicit false wins over model.compat true.
+		const responsesWithChanges = {
+			...base,
+			api: "openai-responses" as const,
+			compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true },
+		};
+		expect(getMidConvoToolSupport(responsesWithChanges, {})).toBe("changes");
+		expect(getMidConvoToolSupport(responsesWithChanges, { supportsAdditionalTools: true })).toBe("changes");
+		expect(getMidConvoToolSupport(responsesWithChanges, { supportsAdditionalTools: false })).toBe("none");
 	});
 });
