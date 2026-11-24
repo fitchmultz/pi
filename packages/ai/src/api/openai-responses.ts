@@ -300,12 +300,12 @@ function buildParams(
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	configurationUpdateEffort: string | undefined,
 ) {
-	const transcriptTools = resolveTranscriptTools(context.messages, getMidConvoToolSupport(model, compat));
+	const toolSupport = getMidConvoToolSupport(model, compat);
+	const transcriptTools = resolveTranscriptTools(context.messages, toolSupport);
 	const messages = convertResponsesMessages(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: compat.supportsMidConvoSystemMessages,
-		supportsAdditionalTools: compat.supportsAdditionalTools,
-		supportsToolSearch: compat.supportsToolSearch,
+		toolSupport,
 		toolOptions: {
 			supportsStrictMode: compat.supportsStrictMode,
 			supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,

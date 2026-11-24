@@ -216,14 +216,12 @@ function buildParams(
 	),
 	configurationUpdateEffort?: string,
 ) {
-	const supportsAdditionalTools = model.compat?.supportsAdditionalTools ?? false;
-	const supportsToolSearch = model.compat?.supportsToolSearch ?? false;
-	const transcriptTools = resolveTranscriptTools(context.messages, getMidConvoToolSupport(model));
+	const toolSupport = getMidConvoToolSupport(model);
+	const transcriptTools = resolveTranscriptTools(context.messages, toolSupport);
 	const messages = convertResponsesMessages(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
-		supportsAdditionalTools,
-		supportsToolSearch,
+		toolSupport,
 		toolOptions: {
 			supportsStrictMode: model.compat?.supportsStrictMode ?? true,
 			supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,

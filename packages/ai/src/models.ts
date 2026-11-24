@@ -1355,9 +1355,35 @@ export interface MidConvoToolSupportCompat {
 	supportsToolSearch?: boolean;
 }
 
+function mergeMidConvoCompat(
+	base: MidConvoToolSupportCompat | undefined,
+	override: MidConvoToolSupportCompat | undefined,
+): MidConvoToolSupportCompat | undefined {
+	if (!override) return base;
+	if (!base) return override;
+	const merged: MidConvoToolSupportCompat = { ...base };
+	if (override.supportsMidConvoSystemMessages !== undefined) {
+		merged.supportsMidConvoSystemMessages = override.supportsMidConvoSystemMessages;
+	}
+	if (override.supportsMidConvoToolChanges !== undefined) {
+		merged.supportsMidConvoToolChanges = override.supportsMidConvoToolChanges;
+	}
+	if (override.supportsMidConvoToolAdditions !== undefined) {
+		merged.supportsMidConvoToolAdditions = override.supportsMidConvoToolAdditions;
+	}
+	if (override.supportsAdditionalTools !== undefined) {
+		merged.supportsAdditionalTools = override.supportsAdditionalTools;
+	}
+	if (override.supportsToolSearch !== undefined) {
+		merged.supportsToolSearch = override.supportsToolSearch;
+	}
+	return merged;
+}
+
 /**
  * Whether `model` supports cache-preserving mid-conversation tool additions or changes.
  * Provider adapters that resolve derived compat flags pass their resolved compat as `compatOverride`.
+ * Defined flags in `compatOverride` override `model.compat`; omitted keys inherit from `model.compat`.
  */
 export function getMidConvoToolSupport(
 	model: AnyModel | undefined,
@@ -1365,7 +1391,7 @@ export function getMidConvoToolSupport(
 ): MidConvoToolSupport {
 	if (!model || !isModelType(model, "chat")) return "none";
 	if (hasApi(model, "anthropic-messages")) {
-		const compat = compatOverride ?? model.compat;
+		const compat = mergeMidConvoCompat(model.compat, compatOverride);
 		return compat?.supportsMidConvoSystemMessages === true && compat?.supportsMidConvoToolChanges === true
 			? "changes"
 			: "none";
@@ -1375,14 +1401,14 @@ export function getMidConvoToolSupport(
 		hasApi(model, "openai-codex-responses") ||
 		hasApi(model, "azure-openai-responses")
 	) {
-		const compat = compatOverride ?? model.compat;
+		const compat = mergeMidConvoCompat(model.compat, compatOverride);
 		if (compat?.supportsMidConvoSystemMessages === true && compat?.supportsAdditionalTools === true) {
 			return "changes";
 		}
 		return compat?.supportsToolSearch === true ? "additions" : "none";
 	}
 	if (hasApi(model, "openai-completions")) {
-		const compat = compatOverride ?? model.compat;
+		const compat = mergeMidConvoCompat(model.compat, compatOverride);
 		if (compat?.supportsMidConvoSystemMessages !== true) return "none";
 		if (compat?.supportsMidConvoToolChanges === true) return "changes";
 		if (compat?.supportsMidConvoToolAdditions === true) return "additions";

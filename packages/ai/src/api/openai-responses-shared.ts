@@ -17,7 +17,7 @@ import type {
 	ResponseStreamEvent,
 	ResponseToolSearchOutputItemParam,
 } from "openai/resources/responses/responses.js";
-import { calculateCost, getMidConvoToolSupport } from "../models.ts";
+import { calculateCost } from "../models.ts";
 import { wroteProviderSummary } from "../provider-summary.ts";
 import type {
 	Api,
@@ -42,7 +42,12 @@ import { shortHash } from "../utils/hash.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate, renderToolRemovalNotice } from "../utils/text.ts";
-import { getInitialSystemMessage, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import {
+	getInitialSystemMessage,
+	resolveTranscript,
+	resolveTranscriptTools,
+	type TranscriptToolSupport,
+} from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
 	closeGrammarToolInputJson,
@@ -183,8 +188,8 @@ export interface ConvertResponsesMessagesOptions {
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
 	/** Whether later system messages are sent in place; otherwise they are folded into the leading prompt. */
 	supportsMidConvoSystemMessages?: boolean;
-	supportsAdditionalTools?: boolean;
-	supportsToolSearch?: boolean;
+	/** Pre-resolved mid-conversation tool support from `getMidConvoToolSupport()`. Defaults to `"none"`. */
+	toolSupport?: TranscriptToolSupport;
 	toolOptions?: ConvertResponsesToolsOptions;
 	/**
 	 * Effort for the reply being generated. When set, the thinking level is sent as
@@ -263,7 +268,7 @@ export function convertResponsesMessages<TApi extends Api>(
 	};
 
 	const transformedMessages = transformMessages(normalizedContext.messages, model, normalizeToolCallId);
-	const toolSupport = getMidConvoToolSupport(model, options);
+	const toolSupport = options?.toolSupport ?? "none";
 	const transcriptTools = resolveTranscriptTools(normalizedContext.messages, toolSupport);
 	let declaredAdditionalTools = false;
 	/** Tools announced as removed and not declared again since. */

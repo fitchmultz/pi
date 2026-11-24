@@ -625,17 +625,15 @@ function buildRequestBody(
 ): RequestBody {
 	const supportsStrictMode = model.compat?.supportsStrictMode ?? true;
 	const supportsOpenAIGrammarTools = model.compat?.supportsOpenAIGrammarTools ?? false;
-	const supportsAdditionalTools = model.compat?.supportsAdditionalTools ?? false;
-	const supportsToolSearch = model.compat?.supportsToolSearch ?? false;
-	const transcriptTools = resolveTranscriptTools(context.messages, getMidConvoToolSupport(model));
+	const toolSupport = getMidConvoToolSupport(model);
+	const transcriptTools = resolveTranscriptTools(context.messages, toolSupport);
 	// The system prompt goes into a leading developer item, not top-level `instructions`, as in Codex.
 	// From GPT-6.2 on, the backend appends `instructions` after `input`, so every new turn changed the
 	// prompt before the system prompt and it was never served from the prompt cache (#12273).
 	const messages = convertResponsesMessages(model, context, OPENAI_RESPONSES_TOOL_CALL_PROVIDERS, {
 		grammarToolInputProperties,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
-		supportsAdditionalTools,
-		supportsToolSearch,
+		toolSupport,
 		toolOptions: { strict: null, supportsStrictMode, supportsOpenAIGrammarTools },
 		configurationUpdateEffort,
 		summaryBlock: getOpenAIProviderSummaryBlock(model, context.messages),
