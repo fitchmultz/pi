@@ -532,6 +532,8 @@ describe("generated model data validation", () => {
 					{ ...baseGoogle, id: "gemini-4-carbon", maxTokens: 32768 },
 					{ ...baseGoogle, id: "gemini-4-argon", maxTokens: 32768 },
 					{ ...baseGoogle, id: "gemini-4-neon", maxTokens: 65536 },
+					{ ...baseGoogle, id: "gemini-4-hydrogen", maxTokens: 65536, promptCache: {} },
+					{ ...baseGoogle, id: "gemini-3.8-flash", maxTokens: 65536 },
 				],
 			}),
 		);
@@ -545,15 +547,25 @@ describe("generated model data validation", () => {
 		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-carbon"]).toMatchObject({
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+			promptCache: { short: 180 },
 		});
 		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-argon"]).toMatchObject({
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+			promptCache: { short: 180 },
 		});
 		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-neon"]).toMatchObject({
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+			promptCache: { short: 180 },
 		});
+		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-hydrogen"]).toMatchObject({
+			promptCache: {},
+		});
+		expect(
+			(hydrated["google-generative-ai"]?.["chat:gemini-3.8-flash"] as Record<string, unknown> | undefined)
+				?.promptCache,
+		).toBeUndefined();
 	});
 
 	it("adds OpenAI's Decisions classifiers to cloudflare-ai-gateway when hydrating upstream catalogs without them", () => {

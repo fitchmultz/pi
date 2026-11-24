@@ -34,7 +34,7 @@ import type {
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import { headersToRecord } from "../utils/headers.ts";
+import { headersToRecord, removedProviderHeaderNames } from "../utils/headers.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
@@ -109,20 +109,36 @@ function createGoogleFetch(
 	// by the HTTP client's idle bodyTimeout so long reasoning responses are never cut off mid-stream.
 	const effectiveHeaderTimeoutMs =
 		timeoutMs !== undefined && timeoutMs < MAX_HEADER_TIMEOUT_MS ? Math.floor(timeoutMs) : undefined;
+	const removedHeaders = removedProviderHeaderNames(model.headers, options?.headers);
 
 	return async (input, init) => {
 		onFailedHeaders(undefined);
+		let requestInput = input;
+		let requestInit = init;
+		if (removedHeaders.size > 0) {
+			const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+			for (const name of removedHeaders) {
+				headers.delete(name);
+			}
+			if (input instanceof Request) {
+				requestInput = new Request(input, { ...init, headers });
+				requestInit = undefined;
+			} else {
+				requestInit = { ...init, headers };
+			}
+		}
 		let response: Response;
 		if (effectiveHeaderTimeoutMs !== undefined) {
 			const headerTimeoutController = new AbortController();
-			const existingSignal = init?.signal ?? undefined;
+			const existingSignal =
+				requestInit?.signal ?? (requestInput instanceof Request ? requestInput.signal : undefined);
 			const signal = existingSignal
 				? AbortSignal.any([existingSignal, headerTimeoutController.signal])
 				: headerTimeoutController.signal;
 			const timer = setTimeout(() => headerTimeoutController.abort(), effectiveHeaderTimeoutMs);
 			timer.unref?.();
 			try {
-				response = await baseFetch(input, { ...init, signal });
+				response = await baseFetch(requestInput, { ...requestInit, signal });
 			} catch (error) {
 				if (headerTimeoutController.signal.aborted && !existingSignal?.aborted) {
 					throw new Error(`${providerLabel} response headers timed out after ${effectiveHeaderTimeoutMs}ms`);
@@ -132,7 +148,7 @@ function createGoogleFetch(
 				clearTimeout(timer);
 			}
 		} else {
-			response = await baseFetch(input, init);
+			response = await baseFetch(requestInput, requestInit);
 		}
 
 		if (!response.ok) {
@@ -551,9 +567,9 @@ const GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS = new Map<string, { flex: number; pr
 ]);
 
 const CLOUDFLARE_AI_GATEWAY_GOOGLE_AI_STUDIO_URL_PATTERN =
-	/^https:\/\/gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+\/google-ai-studio(?:\/|$)/;
+	/^https:\/\/(?:gateway\.ai\.cloudflare\.com\/v1\/[^/]+\/[^/]+|workers-binding\.ai\/ai-gateway\/gateways\/[^/]+)\/google-ai-studio(?:\/|$)/;
 
-/** Whether `baseUrl` targets a Cloudflare AI Gateway `/google-ai-studio` passthrough endpoint. */
+/** Whether `baseUrl` targets a Cloudflare AI Gateway `/google-ai-studio` passthrough (HTTPS or Workers AI binding). */
 export function isCloudflareGoogleAiStudioUrl(baseUrl: string | undefined): boolean {
 	return baseUrl !== undefined && CLOUDFLARE_AI_GATEWAY_GOOGLE_AI_STUDIO_URL_PATTERN.test(baseUrl);
 }
@@ -573,7 +589,8 @@ function sendsToGeminiApi(model: Model<GoogleApiType>): boolean {
 }
 
 function applyGoogleServiceTierPricing(model: Model<GoogleApiType>, usage: Usage, serviceTier: unknown): void {
-	const cacheMultipliers = GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS.get(model.id);
+	const normalizedModelId = model.id.replace(/^.*\//, "").toLowerCase();
+	const cacheMultipliers = GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS.get(normalizedModelId);
 	if (!sendsToGeminiApi(model) || !cacheMultipliers) return;
 
 	const multiplier = serviceTier === "flex" ? 0.5 : serviceTier === "priority" ? 1.8 : 1;
@@ -594,7 +611,7 @@ function buildHopUsage(
 	const cacheRead = usageMetadata.cachedContentTokenCount || 0;
 	const thoughts = usageMetadata.thoughtsTokenCount || 0;
 	const usage: Usage = {
-		input: promptTokens - cacheRead,
+		input: Math.max(0, promptTokens - cacheRead),
 		output: (usageMetadata.candidatesTokenCount || 0) + thoughts,
 		cacheRead,
 		cacheWrite: 0,

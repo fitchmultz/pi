@@ -146,6 +146,7 @@ describe("remote catalog provider", () => {
 				name: "Published Gemini 4 Carbon",
 				maxTokens: 32768,
 				inputLimits: { maxRequestBytes: 20 * 1024 * 1024 },
+				promptCache: undefined,
 			},
 		];
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(
@@ -175,12 +176,14 @@ describe("remote catalog provider", () => {
 		expect(provider.getModels()[0]).toMatchObject({
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+			promptCache: { short: 180 },
 		});
 		const restored = makeProvider();
 		await refreshProvider(restored, store, { allowNetwork: false });
 		expect(restored.getModels()[0]).toMatchObject({
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
+			promptCache: { short: 180 },
 		});
 	});
 
