@@ -272,7 +272,7 @@ describe("Azure OpenAI Responses parity with OpenAI Responses", () => {
 		const long = await capture(optInModel, "long");
 		expect(long.payload?.prompt_cache_key).toBe("sess-azure-1");
 		expect(long.payload?.prompt_cache_retention).toBeUndefined();
-		expect(long.payload?.prompt_cache_options).toEqual({ ttl: "30m" });
+		expect(long.payload?.prompt_cache_options).toEqual({ ttl: "12h" });
 		expect(long.sessionIdHeader).toBe("sess-azure-1");
 		expect(long.clientRequestIdHeader).toBe("sess-azure-1");
 	});

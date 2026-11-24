@@ -37,6 +37,9 @@ export function combineUsage(first: Usage, second: Usage): Usage {
 		...(first.cacheWrite1h !== undefined || second.cacheWrite1h !== undefined
 			? { cacheWrite1h: (first.cacheWrite1h ?? 0) + (second.cacheWrite1h ?? 0) }
 			: {}),
+		...(first.cacheWrite12h !== undefined || second.cacheWrite12h !== undefined
+			? { cacheWrite12h: (first.cacheWrite12h ?? 0) + (second.cacheWrite12h ?? 0) }
+			: {}),
 		...(first.reasoning !== undefined || second.reasoning !== undefined
 			? { reasoning: (first.reasoning ?? 0) + (second.reasoning ?? 0) }
 			: {}),

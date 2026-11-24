@@ -40,7 +40,7 @@ export function getOpenAIPromptCacheOptions(
 ): ResponseCreateParamsStreaming["prompt_cache_options"] {
 	if (!compat.supportsExplicitPromptCacheMode) return undefined;
 	if (cacheRetention === "none") return { mode: "explicit" };
-	if (cacheRetention === "long" && compat.supportsLongCacheRetention) return { ttl: "30m" };
+	if (cacheRetention === "long" && compat.supportsLongCacheRetention) return { ttl: "12h" };
 	return undefined;
 }
 

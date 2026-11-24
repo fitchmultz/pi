@@ -1404,13 +1404,15 @@ export function calculateCost(model: AnyModel, usage: Usage): Usage["cost"] {
 		}
 	}
 
-	// Anthropic charges 2x base input for 1h cache writes.
-	const longWrite = usage.cacheWrite1h ?? 0;
-	const shortWrite = usage.cacheWrite - longWrite;
+	// Anthropic charges 2x base input for 1h cache writes; OpenAI charges 2.5x for 12h cache writes.
+	const longWrite1h = usage.cacheWrite1h ?? 0;
+	const longWrite12h = usage.cacheWrite12h ?? 0;
+	const shortWrite = Math.max(0, usage.cacheWrite - longWrite1h - longWrite12h);
 	usage.cost.input = (rates.input / 1000000) * usage.input;
 	usage.cost.output = (rates.output / 1000000) * usage.output;
 	usage.cost.cacheRead = (rates.cacheRead / 1000000) * usage.cacheRead;
-	usage.cost.cacheWrite = (rates.cacheWrite * shortWrite + rates.input * 2 * longWrite) / 1000000;
+	usage.cost.cacheWrite =
+		(rates.cacheWrite * shortWrite + rates.input * 2 * longWrite1h + rates.input * 2.5 * longWrite12h) / 1000000;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	usage.cost.totalFromProvider = false;
 	return usage.cost;

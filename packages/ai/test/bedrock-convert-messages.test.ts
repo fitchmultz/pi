@@ -579,4 +579,46 @@ describe("Bedrock message conversion", () => {
 		});
 		expect(toolArguments.edits[1]).toEqual({ oldText: "second", newText: "updated second", "": "" });
 	});
+
+	it("replays signature-only Claude thinking blocks from thinkingDisplay: omitted", async () => {
+		const messages: Message[] = [
+			{ role: "user", content: "Solve this", timestamp: 1 },
+			{
+				role: "assistant",
+				content: [
+					{ type: "thinking", thinking: "", thinkingSignature: "sig_omitted_bedrock" },
+					{ type: "text", text: "Answer" },
+				],
+				api: "bedrock-converse-stream",
+				provider: "amazon-bedrock",
+				model: baseModel.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 2,
+			},
+			{ role: "user", content: "Follow up", timestamp: 3 },
+		];
+
+		const payload = await capturePayload({ messages });
+		const p = payload as {
+			messages: Array<{
+				role: string;
+				content: Array<{
+					reasoningContent?: { reasoningText?: { text?: string; signature?: string } };
+					text?: string;
+				}>;
+			}>;
+		};
+		expect(p.messages[1]?.content).toEqual([
+			{ reasoningContent: { reasoningText: { text: "", signature: "sig_omitted_bedrock" } } },
+			{ text: "Answer" },
+		]);
+	});
 });

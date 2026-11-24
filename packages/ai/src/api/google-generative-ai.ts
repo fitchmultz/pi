@@ -37,8 +37,11 @@ export const streamSimple: StreamFunction<"google-generative-ai", SimpleStreamOp
 	} satisfies GoogleOptions;
 	return stream(model, context, {
 		...base,
-		thinking: resolveGoogleSimpleThinking(model, options?.reasoning, (level) =>
-			getGoogleBudget(model, level, options?.thinkingBudgets),
+		thinking: resolveGoogleSimpleThinking(
+			model,
+			options?.reasoning,
+			(level) => getGoogleBudget(model, level, options?.thinkingBudgets),
+			options?.thinkingDisplay,
 		),
 	} satisfies GoogleOptions);
 };

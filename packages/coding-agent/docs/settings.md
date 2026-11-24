@@ -16,7 +16,7 @@ Add `"$schema": "https://pi.dev/schemas/settings.schema.json"` to `settings.json
 | `modelThinkingLevels` | object | None | Per-model startup thinking levels keyed by exact `provider/modelId`. |
 | `thinkingBudgets` | object | Built-in budgets | Token budgets for `minimal`, `low`, `medium`, and `high` thinking levels. |
 | `enabledModels` | `string[]` | All available models | Model patterns used for startup selection and model cycling. Uses the same format as `--models`. |
-| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. On OpenAI Responses models, also omits `reasoning.summary` from requests while keeping encrypted reasoning for multi-turn replay; saved sessions and exports omit summary text for turns recorded while enabled. |
+| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in the transcript. Also requests omitted reasoning text while keeping encrypted/signed continuity tokens on supporting providers: OpenAI Responses omits `reasoning.summary`, Anthropic and Bedrock send `thinking.display: "omitted"`, and Google Gemini sends `includeThoughts: false`. Saved sessions and exports omit summary text for turns recorded while enabled. |
 | `showCacheMissNotices` | boolean | `false` | Show significant cache overlap estimates, successful cache warming, compaction usage, and provider recovery. |
 | `cacheWarming` | `"off" \| "streaming" \| "idle"` | `"idle"` | Keep eligible provider prompt caches warm during active runs and, with `"idle"`, for up to 30 minutes between runs. `"streaming"` warms only during active runs. Global setting only. |
 

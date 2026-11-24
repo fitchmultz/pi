@@ -21,6 +21,7 @@ import type {
 	FetchFunction,
 	ImageContent,
 	Model,
+	SimpleStreamOptions,
 	StopReason,
 	StreamOptions,
 	TextContent,
@@ -63,6 +64,7 @@ export interface GoogleOptions extends StreamOptions {
 		enabled: boolean;
 		budgetTokens?: number; // -1 for dynamic, 0 to disable
 		level?: GoogleApiThinkingLevel;
+		includeThoughts?: boolean;
 	};
 }
 
@@ -598,7 +600,7 @@ function buildParams(
 	};
 
 	if (options.thinking?.enabled && model.reasoning) {
-		const thinkingConfig: ThinkingConfig = { includeThoughts: true };
+		const thinkingConfig: ThinkingConfig = { includeThoughts: options.thinking.includeThoughts ?? true };
 		if (options.thinking.level !== undefined) {
 			thinkingConfig.thinkingLevel = toGoogleSdkThinkingLevel(options.thinking.level);
 		} else if (options.thinking.budgetTokens !== undefined) {
@@ -640,6 +642,7 @@ export function resolveGoogleSimpleThinking(
 	model: Model<GoogleApiType>,
 	reasoning: ThinkingLevel | undefined,
 	getBudget: (level: ResolvedGoogleThinkingLevel) => number,
+	thinkingDisplay?: SimpleStreamOptions["thinkingDisplay"],
 ): NonNullable<GoogleOptions["thinking"]> {
 	if (!reasoning) return { enabled: false };
 
@@ -647,9 +650,18 @@ export function resolveGoogleSimpleThinking(
 	if (clampedReasoning === "off") return { enabled: false };
 
 	const resolvedLevel = resolveGoogleThinkingLevel(model, clampedReasoning);
+	const includeThoughts = thinkingDisplay === "omitted" ? false : undefined;
 	return usesGoogleThinkingLevel(model)
-		? { enabled: true, level: toGoogleThinkingLevel(resolvedLevel) }
-		: { enabled: true, budgetTokens: getBudget(resolvedLevel) };
+		? {
+				enabled: true,
+				level: toGoogleThinkingLevel(resolvedLevel),
+				...(includeThoughts !== undefined ? { includeThoughts } : {}),
+			}
+		: {
+				enabled: true,
+				budgetTokens: getBudget(resolvedLevel),
+				...(includeThoughts !== undefined ? { includeThoughts } : {}),
+			};
 }
 
 /** Resolve a supported pi level or model-specific Google mapping to a standard Google level. */

@@ -1,6 +1,11 @@
-import type { AnyModel, Api, Model } from "../types.ts";
+import type { AnthropicMessagesCompat, AnyModel, Api, Model } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
-import { GPT_6_NO_NONE_EFFORT_MODEL_IDS } from "./openai-catalog.ts";
+import { anthropicMaxImagesPerRequest } from "./anthropic-catalog.ts";
+import {
+	GPT_6_NO_NONE_EFFORT_MODEL_IDS,
+	OPENAI_EXPLICIT_PROMPT_CACHE_TTL,
+	OPENAI_RESPONSES_INPUT_LIMITS,
+} from "./openai-catalog.ts";
 
 /** Workers AI direct endpoint. */
 export const CLOUDFLARE_WORKERS_AI_BASE_URL =
@@ -115,13 +120,30 @@ function normalizeCloudflareInputLimits(model: Model<Api>): Model<Api>["inputLim
 	if (!model.input.includes("image") || !CLOUDFLARE_AI_GATEWAY_URL_PATTERN.test(model.baseUrl)) {
 		return model.inputLimits;
 	}
-	const current = model.inputLimits?.maxRequestBytes;
-	if (current !== undefined && current <= CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES) {
-		return model.inputLimits;
-	}
+	const currentBytes = model.inputLimits?.maxRequestBytes;
+	const needsByteCap = currentBytes === undefined || currentBytes > CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES;
+	const needsAnthropicImageLimit =
+		model.api === "anthropic-messages" &&
+		CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN.test(model.baseUrl) &&
+		model.inputLimits?.images?.maxPerRequest === undefined;
+	const needsOpenAIImageLimit =
+		model.api === "openai-responses" &&
+		CLOUDFLARE_AI_GATEWAY_OPENAI_URL_PATTERN.test(model.baseUrl) &&
+		model.inputLimits?.images?.maxPerRequest === undefined;
+	if (!needsByteCap && !needsAnthropicImageLimit && !needsOpenAIImageLimit) return model.inputLimits;
 	return {
 		...model.inputLimits,
-		maxRequestBytes: CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES,
+		...(needsByteCap ? { maxRequestBytes: CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES } : {}),
+		...(needsAnthropicImageLimit || needsOpenAIImageLimit
+			? {
+					images: {
+						...model.inputLimits?.images,
+						maxPerRequest: needsAnthropicImageLimit
+							? anthropicMaxImagesPerRequest(model.contextWindow)
+							: OPENAI_RESPONSES_INPUT_LIMITS.images.maxPerRequest,
+					},
+				}
+			: {}),
 	};
 }
 
@@ -138,6 +160,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 		return {
 			...model,
 			...(inputLimitsChanged ? { inputLimits } : {}),
+			...(supportsToolFeatures ? { promptCache: model.promptCache ?? { ...OPENAI_EXPLICIT_PROMPT_CACHE_TTL } } : {}),
 			compat: {
 				supportsMidConvoSystemMessages: true,
 				...(supportsToolFeatures
@@ -153,12 +176,18 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 			},
 		};
 	}
-	if (
-		model.api !== "anthropic-messages" ||
-		!supportsCloudflareClaudeMidConvoSystemMessages(model.id) ||
-		!CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN.test(model.baseUrl)
-	) {
+	if (model.api !== "anthropic-messages" || !CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN.test(model.baseUrl)) {
 		return inputLimitsChanged ? { ...model, inputLimits } : model;
+	}
+	if (!supportsCloudflareClaudeMidConvoSystemMessages(model.id)) {
+		const anthropicCompat = model.compat as AnthropicMessagesCompat | undefined;
+		const needsStrictTools = anthropicCompat?.supportsStrictTools === undefined;
+		if (!inputLimitsChanged && !needsStrictTools) return model;
+		return {
+			...model,
+			...(inputLimitsChanged ? { inputLimits } : {}),
+			...(needsStrictTools ? { compat: { supportsStrictTools: true, ...anthropicCompat } } : {}),
+		};
 	}
 	const midConvoEffort = supportsCloudflareClaudeMidConvoEffort(model.id);
 	const lowerId = model.id.toLowerCase();
@@ -169,6 +198,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 	const compat = {
 		supportsMidConvoSystemMessages: true,
 		supportsMidConvoToolChanges: true,
+		supportsStrictTools: true,
 		...(midConvoEffort ? { supportsMidConvoEffort: true } : {}),
 		forceAdaptiveThinking: true,
 		...(temperatureUnsupported ? { supportsTemperature: false } : {}),

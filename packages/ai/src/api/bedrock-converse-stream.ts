@@ -602,6 +602,7 @@ export const streamSimple: StreamFunction<"bedrock-converse-stream", SimpleStrea
 	const base = {
 		...buildBaseOptions(model, context, options, undefined),
 		toolChoice: options?.toolChoice,
+		...(options?.thinkingDisplay !== undefined ? { thinkingDisplay: options.thinkingDisplay } : {}),
 	} satisfies BedrockOptions;
 	if (!options?.reasoning) {
 		return stream(model, context, { ...base, reasoning: undefined } satisfies BedrockOptions);
@@ -1103,9 +1104,11 @@ function convertMessages(
 								}
 								continue;
 							}
-							// Skip empty thinking blocks
+							// Skip empty thinking blocks unless a Bedrock Claude signature is present
+							// (e.g. from `thinkingDisplay: "omitted"`, where the signature carries continuity).
 							const thinking = sanitizeSurrogates(c.thinking);
-							if (thinking.trim().length === 0) continue;
+							const hasSignature = !!c.thinkingSignature && c.thinkingSignature.trim().length > 0;
+							if (thinking.trim().length === 0 && !(isAnthropicClaudeModel(model) && hasSignature)) continue;
 							// Only Anthropic models support the signature field in reasoningText.
 							// For other models, we omit the signature to avoid errors like:
 							// "This model doesn't support the reasoningContent.reasoningText.signature field"
@@ -1113,7 +1116,7 @@ function convertMessages(
 								// Signatures arrive after thinking deltas. If a partial or externally
 								// persisted message lacks a signature, Bedrock rejects the replayed
 								// reasoning block. Fall back to plain text, matching Anthropic.
-								if (!c.thinkingSignature || c.thinkingSignature.trim().length === 0) {
+								if (!hasSignature) {
 									contentBlocks.push({ text: thinking });
 								} else {
 									contentBlocks.push({

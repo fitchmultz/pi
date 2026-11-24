@@ -883,6 +883,14 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			let client: Anthropic;
 			let isOAuth: boolean;
 			let usageModel = model;
+			const resolveUsageModel = (responseModel: string): Model<"anthropic-messages"> => {
+				if (responseModel === model.id) return model;
+				const fallbackCost = model.compat?.allowedFallbackModels?.find(
+					(fallback) => fallback.provider === model.provider && fallback.model === responseModel,
+				)?.cost;
+				// Preserve the requested model's pricing if the fallback model isn't in the catalog allowlist.
+				return fallbackCost ? { ...model, id: responseModel, cost: fallbackCost } : model;
+			};
 			let inputTransformations: BetaInputTransformation[] | undefined;
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
@@ -1003,6 +1011,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			stream.push({ type: "start", partial: output });
 
 			const openBlocks = new Map<number, OpenBlock>();
+			let fallbackBoundaryIndex = 0;
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				await options?.onProviderStreamEvent?.(event, model);
@@ -1012,13 +1021,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					if (Array.isArray(transformations)) inputTransformations = transformations;
 					const responseModel = event.message.model;
 					if (responseModel !== model.id) output.responseModel = responseModel;
-					const fallbackCost =
-						responseModel === model.id
-							? undefined
-							: model.compat?.allowedFallbackModels?.find(
-									(fallback) => fallback.provider === model.provider && fallback.model === responseModel,
-								)?.cost;
-					usageModel = fallbackCost ? { ...model, id: responseModel, cost: fallbackCost } : model;
+					usageModel = resolveUsageModel(responseModel);
 					// Capture initial token usage from message_start event
 					// This ensures we have input token counts even if the stream is aborted early
 					output.usage.input = event.message.usage.input_tokens || 0;
@@ -1033,8 +1036,34 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					calculateCost(usageModel, output.usage);
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "fallback") {
-						if (output.content.length > 0) {
-							throw new Error("Anthropic performed an unsupported mid-output model fallback");
+						const fallbackBlock = event.content_block;
+						const fallbackModel = fallbackBlock.to?.model;
+						if (fallbackModel) {
+							if (fallbackModel !== model.id) {
+								output.responseModel = fallbackModel;
+							}
+							usageModel = resolveUsageModel(fallbackModel);
+						}
+						// Anthropic closes any open block before emitting `fallback`. When continuing a
+						// conversation after a mid-output fallback, keep pre-fallback `text` blocks and drop
+						// pre-fallback `thinking` and client `tool_use` blocks when finalizing the message so
+						// streaming `contentIndex` positions stay stable, Turn 2 replay stays valid, and aborted
+						// pre-fallback tool calls are never executed.
+						const hadPriorContent = output.content.length > 0;
+						const droppedBlocks = output.content
+							.slice(fallbackBoundaryIndex)
+							.filter((block) => block.type !== "text").length;
+						fallbackBoundaryIndex = output.content.length;
+						if (hadPriorContent) {
+							appendAssistantMessageDiagnostic(output, {
+								type: "anthropic_mid_output_fallback",
+								timestamp: Date.now(),
+								details: {
+									fromModel: fallbackBlock.from?.model,
+									toModel: fallbackModel,
+									droppedBlocks,
+								},
+							});
 						}
 						continue;
 					}
@@ -1225,6 +1254,11 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
+			if (fallbackBoundaryIndex > 0) {
+				output.content = output.content.filter(
+					(block, index) => index >= fallbackBoundaryIndex || block.type === "text",
+				);
+			}
 			if (thread) recordThreadReply(model, thread, params, output, isOAuth, compat.allowEmptySignature);
 			if (inputTransformations && inputTransformations.length > 0) {
 				appendAssistantMessageDiagnostic(output, {
@@ -1301,6 +1335,7 @@ export const streamSimple: StreamFunction<"anthropic-messages", SimpleStreamOpti
 	const base = {
 		...buildBaseOptions(model, context, options, options?.apiKey),
 		toolChoice: options?.toolChoice,
+		...(options?.thinkingDisplay !== undefined ? { thinkingDisplay: options.thinkingDisplay } : {}),
 	} satisfies AnthropicOptions;
 	if (!options?.reasoning) {
 		return stream(model, context, {

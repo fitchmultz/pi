@@ -44,6 +44,14 @@ describe("Cloudflare OpenAI positional defaults", () => {
 				images: { maxPerRequest: 1500 },
 			});
 		}
+		const gpt62Sol = routed.find((model) => model.id === "gpt-6.2-sol");
+		expect(gpt62Sol?.promptCache).toEqual({ short: 1800, long: 43200 });
+		for (const codexModel of getBuiltinModels("openai-codex")) {
+			expect(codexModel.inputLimits).toMatchObject({
+				maxRequestBytes: 512 * 1024 * 1024,
+				images: { maxPerRequest: 1500 },
+			});
+		}
 	});
 
 	it("keeps explicit values and leaves custom endpoints alone", () => {
@@ -119,7 +127,21 @@ describe("Cloudflare Anthropic passthrough positional defaults", () => {
 		);
 		for (const model of routedAnthropic.filter((entry) => entry.input.includes("image"))) {
 			expect(model.inputLimits?.maxRequestBytes).toBe(CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES);
+			expect(model.inputLimits?.images?.maxPerRequest).toBe(model.contextWindow === 200000 ? 100 : 600);
 		}
+		for (const model of routedAnthropic) {
+			expect((model.compat as AnthropicMessagesCompat | undefined)?.supportsStrictTools).toBe(true);
+		}
+		const fable52 = routedAnthropic.find((entry) => entry.id === "claude-fable-5-2");
+		const opus5 = routedAnthropic.find((entry) => entry.id === "claude-opus-5");
+		if (!opus5) throw new Error("Missing Cloudflare claude-opus-5");
+		expect((fable52?.compat as AnthropicMessagesCompat | undefined)?.allowedFallbackModels).toEqual([
+			{
+				provider: "cloudflare-ai-gateway",
+				model: "claude-opus-5",
+				cost: opus5.cost,
+			},
+		]);
 		expect(actual.find((entry) => entry.id === "claude-sonnet-5-5")).toEqual({
 			id: "claude-sonnet-5-5",
 			systemMessages: true,

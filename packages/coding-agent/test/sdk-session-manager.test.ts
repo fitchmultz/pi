@@ -166,4 +166,62 @@ describe("createAgentSession session manager defaults", () => {
 		expect(capturedPayload?.reasoning).toEqual({ effort: "medium" });
 		session.dispose();
 	});
+
+	it("passes thinkingDisplay: omitted to Anthropic and Gemini when hideThinkingBlock is enabled", async () => {
+		const claudeModel = getModel("anthropic", "claude-opus-5-5");
+		const geminiModel = getModel("google", "gemini-4-neon");
+		expect(claudeModel).toBeTruthy();
+		expect(geminiModel).toBeTruthy();
+
+		const settingsManager = SettingsManager.inMemory({ hideThinkingBlock: true });
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			model: claudeModel!,
+			thinkingLevel: "medium",
+			sessionManager: SessionManager.inMemory(cwd),
+			settingsManager,
+		});
+
+		let claudePayload: { thinking?: { type?: string; display?: string } } | undefined;
+		await (
+			await session.agent.streamFunction(
+				claudeModel!,
+				normalizeContext({
+					systemPrompt: "sys",
+					messages: [{ role: "user", content: "hi", timestamp: 1 }],
+				}),
+				{
+					apiKey: "sk-ant-test-key",
+					reasoning: "medium",
+					onPayload: (payload) => {
+						claudePayload = payload as { thinking?: { type?: string; display?: string } };
+						throw new Error("captured");
+					},
+				},
+			)
+		).result();
+		expect(claudePayload?.thinking?.display).toBe("omitted");
+
+		let geminiPayload: { config?: { thinkingConfig?: { includeThoughts?: boolean } } } | undefined;
+		await (
+			await session.agent.streamFunction(
+				geminiModel!,
+				normalizeContext({
+					systemPrompt: "sys",
+					messages: [{ role: "user", content: "hi", timestamp: 1 }],
+				}),
+				{
+					apiKey: "goog-test-key",
+					reasoning: "medium",
+					onPayload: (payload) => {
+						geminiPayload = payload as { config?: { thinkingConfig?: { includeThoughts?: boolean } } };
+						throw new Error("captured");
+					},
+				},
+			)
+		).result();
+		expect(geminiPayload?.config?.thinkingConfig?.includeThoughts).toBe(false);
+		session.dispose();
+	});
 });

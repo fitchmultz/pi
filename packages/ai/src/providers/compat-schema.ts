@@ -402,7 +402,7 @@ const OpenAIResponsesCompatProperties = {
 	}),
 	supportsLongCacheRetention: optionalCompatBoolean({
 		description:
-			'Whether the provider supports long prompt cache retention. This uses prompt_cache_options.ttl: "30m" on GPT-5.6+ and prompt_cache_retention: "24h" on earlier models. Defaults are API-specific: true on openai-responses and false on azure-openai-responses until Azure support is verified.',
+			'Whether the provider supports long prompt cache retention. This uses prompt_cache_options.ttl: "12h" on GPT-5.6+ and prompt_cache_retention: "24h" on earlier models. Defaults are API-specific: true on openai-responses and false on azure-openai-responses until Azure support is verified.',
 	}),
 	supportsStrictMode: optionalCompatBoolean({
 		description:

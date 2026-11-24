@@ -7,6 +7,7 @@ import { normalizeCloudflareModel, withCloudflareGatewayDecisionsModels } from "
 import { normalizeGoogleModel } from "../src/api/google-catalog.ts";
 import { withGoogleDecisionsModels } from "../src/api/google-decisions-catalog.ts";
 import { restoreKimiK3CacheWriteCost } from "../src/api/kimi.ts";
+import { normalizeOpenAIModel } from "../src/api/openai-catalog.ts";
 import { normalizeZaiModel } from "../src/api/zai-catalog.ts";
 import type { AnyModel } from "../src/types.ts";
 import {
@@ -87,7 +88,11 @@ export function hydrateModelCatalog(
 		for (const model of models) {
 			if (!isCatalogEntry(model)) throw new Error(`Model catalog has an invalid entry for provider ${provider}`);
 			const normalized = normalizeZaiModel(
-				normalizeGoogleModel(restoreKimiK3CacheWriteCost(normalizeCloudflareModel(model as CatalogEntry & AnyModel))),
+				normalizeOpenAIModel(
+					normalizeGoogleModel(
+						restoreKimiK3CacheWriteCost(normalizeCloudflareModel(model as CatalogEntry & AnyModel)),
+					),
+				),
 			);
 			entries.push({ ...normalized, type: model.type });
 		}

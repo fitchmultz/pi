@@ -24,6 +24,7 @@ export interface GoogleVertexOptions extends StreamOptions {
 		enabled: boolean;
 		budgetTokens?: number; // -1 for dynamic, 0 to disable
 		level?: GoogleApiThinkingLevel;
+		includeThoughts?: boolean;
 	};
 	project?: string;
 	location?: string;
@@ -64,8 +65,11 @@ export const streamSimple: StreamFunction<"google-vertex", SimpleStreamOptions> 
 	} satisfies GoogleVertexOptions;
 	return stream(model, context, {
 		...base,
-		thinking: resolveGoogleSimpleThinking(model, options?.reasoning, (level) =>
-			getGoogleBudget(model, level, options?.thinkingBudgets),
+		thinking: resolveGoogleSimpleThinking(
+			model,
+			options?.reasoning,
+			(level) => getGoogleBudget(model, level, options?.thinkingBudgets),
+			options?.thinkingDisplay,
 		),
 	} satisfies GoogleVertexOptions);
 };

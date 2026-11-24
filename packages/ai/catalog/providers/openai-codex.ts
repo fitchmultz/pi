@@ -1,3 +1,4 @@
+import { normalizeOpenAIModel } from "../../src/api/openai-catalog.ts";
 import type { Model } from "../../src/types.ts";
 import { defineProvider, mergeCompat, mergeThinking } from "../define.ts";
 import {
@@ -71,5 +72,6 @@ export default defineProvider({
 		if (OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id)) {
 			mergeCompat(model as Model<"openai-codex-responses">, { supportsMidConvoEffort: true });
 		}
+		Object.assign(model, normalizeOpenAIModel(model));
 	},
 });

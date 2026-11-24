@@ -66,7 +66,12 @@ export function getEffectiveCacheRetention(
 		options?.cacheRetention ??
 		(getProviderEnvValue("PI_CACHE_RETENTION", options?.env) === "long" ? "long" : "short");
 	if (retention !== "long") return retention;
-	if (hasApi(model, "anthropic-messages") && model.compat?.supportsLongCacheRetention === false) {
+	if (
+		(hasApi(model, "anthropic-messages") ||
+			hasApi(model, "openai-responses") ||
+			hasApi(model, "azure-openai-responses")) &&
+		model.compat?.supportsLongCacheRetention === false
+	) {
 		return "short";
 	}
 	if (hasApi(model, "google-generative-ai") || hasApi(model, "google-vertex")) {
@@ -118,13 +123,21 @@ export function evaluateCacheWarming(
 		: promptTokens;
 	const uncachedTailTokens = promptTokens - cachedPromptTokens;
 	const cacheHitCost = price(model, { input: uncachedTailTokens, cacheRead: cachedPromptTokens });
-	const longWrite =
+	const longAnthropicWrite =
 		(model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") && retention === "long";
+	const longOpenAiWrite =
+		(hasApi(model, "openai-responses") || hasApi(model, "azure-openai-responses")) &&
+		model.compat?.supportsExplicitPromptCacheMode === true &&
+		retention === "long";
 	const hasWritePrice = model.cost.cacheWrite > 0 || model.cost.tiers?.some((tier) => tier.cacheWrite > 0);
 	const cacheMissCost = price(
 		model,
-		longWrite || hasWritePrice
-			? { cacheWrite: promptTokens, cacheWrite1h: longWrite ? promptTokens : 0 }
+		longAnthropicWrite || longOpenAiWrite || hasWritePrice
+			? {
+					cacheWrite: promptTokens,
+					cacheWrite1h: longAnthropicWrite ? promptTokens : 0,
+					cacheWrite12h: longOpenAiWrite ? promptTokens : 0,
+				}
 			: { input: promptTokens },
 	);
 	const warmCost = price(model, { input: uncachedTailTokens, cacheRead: cachedPromptTokens, output: 1 });
@@ -145,7 +158,7 @@ export function evaluateCacheWarming(
 
 function price(
 	model: Model<Api>,
-	tokens: Partial<Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "cacheWrite1h">>,
+	tokens: Partial<Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "cacheWrite1h" | "cacheWrite12h">>,
 ): number {
 	const usage: Usage = {
 		input: 0,

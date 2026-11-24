@@ -57,7 +57,7 @@ describe("OpenAI Responses with Sign in with ChatGPT", () => {
 		const apiKeyPayload = await capturePayload("sk-proj-test", explicitCacheModel);
 
 		expect(signInPayload.prompt_cache_options).toBeUndefined();
-		expect(apiKeyPayload.prompt_cache_options).toEqual({ ttl: "30m" });
+		expect(apiKeyPayload.prompt_cache_options).toEqual({ ttl: "12h" });
 	});
 
 	it.each([

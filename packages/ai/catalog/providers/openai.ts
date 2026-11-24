@@ -1,13 +1,6 @@
+import { normalizeOpenAIModel } from "../../src/api/openai-catalog.ts";
 import type { ClassifierModel, Model } from "../../src/types.ts";
-import {
-	addMissing,
-	type ChatModel,
-	defineProvider,
-	mergeCompat,
-	mergeThinking,
-	modelsDevModels,
-	withInputLimits,
-} from "../define.ts";
+import { addMissing, type ChatModel, defineProvider, mergeCompat, mergeThinking, modelsDevModels } from "../define.ts";
 import {
 	enableOpenAiGrammarTools,
 	enableOpenAiMidConvoSystemMessages,
@@ -136,10 +129,12 @@ export default defineProvider({
 		// OpenAI charges prompt-cache writes starting with the GPT-5.6 family, and exactly
 		// those models accept `prompt_cache_options`; older models reject the parameter.
 		// https://developers.openai.com/api/docs/guides/prompt-caching
-		if (model.cost.cacheWrite > 0) mergeCompat(responsesModel, { supportsExplicitPromptCacheMode: true });
+		if (model.cost.cacheWrite > 0) {
+			mergeCompat(responsesModel, { supportsExplicitPromptCacheMode: true });
+		}
 		if (OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id)) {
 			mergeCompat(responsesModel, { supportsMidConvoEffort: true });
 		}
-		withInputLimits(model, { maxRequestBytes: 512 * 1024 * 1024, images: { maxPerRequest: 1500 } });
+		Object.assign(model, normalizeOpenAIModel(model));
 	},
 });

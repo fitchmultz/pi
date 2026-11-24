@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { streamSimple as streamSimpleGoogle } from "../src/api/google-generative-ai.ts";
 import { resolveGoogleThinkingLevel } from "../src/api/google-shared.ts";
 import { streamSimple as streamSimpleVertex } from "../src/api/google-vertex.ts";
-import type { Model, ThinkingBudgets, ThinkingLevel, ThinkingLevelMap } from "../src/types.ts";
+import type { Model, SimpleStreamOptions, ThinkingBudgets, ThinkingLevel, ThinkingLevelMap } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const context = normalizeContext({
@@ -46,12 +46,14 @@ async function captureGooglePayload(
 	model: Model<"google-generative-ai">,
 	reasoning?: ThinkingLevel,
 	thinkingBudgets?: ThinkingBudgets,
+	thinkingDisplay?: SimpleStreamOptions["thinkingDisplay"],
 ): Promise<GenerateContentParameters> {
 	let payload: GenerateContentParameters | undefined;
 	const result = await streamSimpleGoogle(model, context, {
 		apiKey: "test",
 		reasoning,
 		thinkingBudgets,
+		thinkingDisplay,
 		onPayload: (request) => {
 			payload = request as GenerateContentParameters;
 			throw new Error("payload captured");
@@ -67,12 +69,14 @@ async function captureVertexPayload(
 	model: Model<"google-vertex">,
 	reasoning?: ThinkingLevel,
 	thinkingBudgets?: ThinkingBudgets,
+	thinkingDisplay?: SimpleStreamOptions["thinkingDisplay"],
 ): Promise<GenerateContentParameters> {
 	let payload: GenerateContentParameters | undefined;
 	const result = await streamSimpleVertex(model, context, {
 		apiKey: "test",
 		reasoning,
 		thinkingBudgets,
+		thinkingDisplay,
 		onPayload: (request) => {
 			payload = request as GenerateContentParameters;
 			throw new Error("payload captured");
@@ -229,5 +233,23 @@ describe("Google thinking level maps", () => {
 
 		expect(google.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingBudget: 512 });
 		expect(vertex.config?.thinkingConfig).toEqual({ includeThoughts: true, thinkingBudget: 128 });
+	});
+
+	it("sets includeThoughts: false when thinkingDisplay is omitted on Google Generative AI and Vertex", async () => {
+		const googlePayload = await captureGooglePayload(
+			googleModel("gemini-4-neon", { xhigh: "xhigh" }),
+			"xhigh",
+			undefined,
+			"omitted",
+		);
+		const vertexPayload = await captureVertexPayload(
+			vertexModel("gemini-4-neon", { xhigh: "xhigh" }),
+			"xhigh",
+			undefined,
+			"omitted",
+		);
+
+		expect(googlePayload.config?.thinkingConfig).toEqual({ includeThoughts: false, thinkingLevel: "XHIGH" });
+		expect(vertexPayload.config?.thinkingConfig).toEqual({ includeThoughts: false, thinkingLevel: "XHIGH" });
 	});
 });

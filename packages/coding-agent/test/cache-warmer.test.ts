@@ -1030,6 +1030,18 @@ describe("cache warming", () => {
 		expect(evaluateCacheWarming(gemini4Neon, 100_000, "idle").action).toBe("stop");
 		expect(evaluateCacheWarming(gemini4Neon, 250_000, "idle").action).toBe("warm");
 	});
+
+	it("uses OpenAI 30m/12h promptCache lifetimes and 2.5x 12h write pricing for GPT-6.2 warming", () => {
+		const gpt62Sol = getBuiltinModel("openai", "gpt-6.2-sol");
+		expect(gpt62Sol.promptCache).toEqual({ short: 1800, long: 43200 });
+		expect(getPromptCacheTtlMs(gpt62Sol, { cacheRetention: "short" })).toBe(1_800_000);
+		expect(getPromptCacheTtlMs(gpt62Sol, { cacheRetention: "long" })).toBe(43_200_000);
+
+		const longDecision = evaluateCacheWarming(gpt62Sol, 200_000, "idle", "long");
+		// Short context tier: input=$2/M, cacheRead=$0.1/M, 12h write=$5/M (2.5x)
+		expect(longDecision.missCost).toBeCloseTo((200_000 * (5 - 0.1)) / 1_000_000, 9);
+		expect(longDecision.action).toBe("warm");
+	});
 });
 
 describe("ExtensionRunner.emitCacheWarmingDecision", () => {
