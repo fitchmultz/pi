@@ -16,8 +16,6 @@ const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
 const SESSION_WEBSOCKET_IDLE_TTL_MS = 5 * 60 * 1000;
 // OpenAI closes Responses WebSocket connections after 60 minutes; rotate proactively at 55 minutes.
 const SESSION_WEBSOCKET_MAX_AGE_MS = 55 * 60 * 1000;
-const WEBSOCKET_SSE_FALLBACK_TTL_MS = 5 * 60 * 1000;
-const WEBSOCKET_SSE_FALLBACK_MAX_ENTRIES = 1_000;
 
 const WEBSOCKET_STRIPPED_HEADERS = new Set(["accept", "content-type", "x-stainless-retry-count"]);
 
@@ -74,7 +72,7 @@ export class OpenAIResponsesWebSocketServerError extends Error {
 
 const sessionConnections = new Map<string, CachedConnection>();
 const activeConnections = new Set<CachedConnection>();
-const sseFallbackSessions = new Map<string, number>();
+const sseFallbackSessions = new Set<string>();
 
 let cachedBunWebSocket: WebSocketConstructor | null = null;
 
@@ -142,29 +140,12 @@ registerSessionResourceCleanup((sessionId) => {
 });
 
 export function isOpenAIResponsesWebSocketSseFallbackActive(sessionId: string | undefined): boolean {
-	if (!sessionId) return false;
-	const recordedAt = sseFallbackSessions.get(sessionId);
-	if (recordedAt === undefined) return false;
-	if (Date.now() - recordedAt >= WEBSOCKET_SSE_FALLBACK_TTL_MS) {
-		sseFallbackSessions.delete(sessionId);
-		return false;
-	}
-	return true;
+	return Boolean(sessionId && sseFallbackSessions.has(sessionId));
 }
 
 export function recordOpenAIResponsesWebSocketSseFallback(sessionId: string | undefined): void {
 	if (!sessionId) return;
-	const now = Date.now();
-	if (sseFallbackSessions.size >= WEBSOCKET_SSE_FALLBACK_MAX_ENTRIES) {
-		for (const [key, ts] of sseFallbackSessions) {
-			if (now - ts >= WEBSOCKET_SSE_FALLBACK_TTL_MS) sseFallbackSessions.delete(key);
-		}
-		if (sseFallbackSessions.size >= WEBSOCKET_SSE_FALLBACK_MAX_ENTRIES) {
-			const oldest = sseFallbackSessions.keys().next().value;
-			if (oldest !== undefined) sseFallbackSessions.delete(oldest);
-		}
-	}
-	sseFallbackSessions.set(sessionId, now);
+	sseFallbackSessions.add(sessionId);
 }
 
 function toWebSocketUrl(httpUrl: string): string {

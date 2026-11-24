@@ -201,7 +201,6 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				options?.fetch === undefined &&
 				paramsRecord.background !== true &&
 				options?.providerSummary === undefined &&
-				typeof client.buildRequest === "function" &&
 				!isOpenAIResponsesWebSocketSseFallbackActive(cacheSessionId);
 
 			let websocketCompleted = false;
