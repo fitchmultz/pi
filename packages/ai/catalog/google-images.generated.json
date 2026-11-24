@@ -1,0 +1,98 @@
+[
+  {
+    "type": "image",
+    "id": "gemini-3-pro-image",
+    "name": "Nano Banana Pro",
+    "api": "google-images",
+    "provider": "google",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+    "input": [
+      "text",
+      "image"
+    ],
+    "output": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 2,
+      "output": 120,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "inputLimits": {
+      "images": {
+        "resize": {
+          "maxWidth": 2000,
+          "maxHeight": 2000,
+          "maxBytes": 4718592,
+          "jpegQuality": 80
+        }
+      }
+    }
+  },
+  {
+    "type": "image",
+    "id": "gemini-3.1-flash-lite-image",
+    "name": "Nano Banana 2 Lite",
+    "api": "google-images",
+    "provider": "google",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+    "input": [
+      "text",
+      "image"
+    ],
+    "output": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 0.25,
+      "output": 30,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "inputLimits": {
+      "images": {
+        "resize": {
+          "maxWidth": 2000,
+          "maxHeight": 2000,
+          "maxBytes": 4718592,
+          "jpegQuality": 80
+        }
+      }
+    }
+  },
+  {
+    "type": "image",
+    "id": "gemini-nano-banana-2.1",
+    "name": "Nano Banana 2.1",
+    "api": "google-images",
+    "provider": "google",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+    "input": [
+      "text",
+      "image"
+    ],
+    "output": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 1.5,
+      "output": 30,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "inputLimits": {
+      "images": {
+        "resize": {
+          "maxWidth": 2000,
+          "maxHeight": 2000,
+          "maxBytes": 4718592,
+          "jpegQuality": 80
+        }
+      }
+    }
+  }
+]

@@ -212,6 +212,11 @@ async function generateModels(generatorOptions: GeneratorOptions): Promise<void>
 				for (const entry of readdirSync(providersDir)) {
 					if (entry.endsWith(".models.ts") && !generatedShardFiles.has(entry)) rmSync(join(providersDir, entry));
 				}
+				// Committed fallback snapshot for offline/Nix hydration of upstream catalogs that omit google-images.
+				writeFileSync(
+					join(packageRoot, "catalog/google-images.generated.json"),
+					`${JSON.stringify(Object.values(jsonImageProviders.google ?? {}), null, 2)}\n`,
+				);
 
 				let output = generatedHeader;
 				for (const providerId of sortedProviderIds) {

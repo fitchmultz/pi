@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { normalizeCloudflareModel, withCloudflareGatewayDecisionsModels } from "../src/api/cloudflare.ts";
@@ -8,7 +8,7 @@ import { normalizeGoogleModel } from "../src/api/google-catalog.ts";
 import { withGoogleDecisionsModels } from "../src/api/google-decisions-catalog.ts";
 import { restoreKimiK3CacheWriteCost } from "../src/api/kimi.ts";
 import { normalizeZaiModel } from "../src/api/zai-catalog.ts";
-import type { AnyModel, ImageModel } from "../src/types.ts";
+import type { AnyModel } from "../src/types.ts";
 import {
 	createModelDataManifest,
 	groupProviderModelData,
@@ -36,53 +36,29 @@ function isCatalogEntry(value: unknown): value is CatalogEntry {
 }
 
 /**
- * Offline fallback entries for active Google Nano Banana image models when hydrating an upstream
- * `models.all.json` snapshot (e.g. Nix/release builds from a clean checkout without `src/providers/data/`)
- * that does not yet carry `google-images` models. Live `generate-models` reads models.dev v2 directly,
- * and any upstream snapshot that already carries `google-images` entries wins unchanged.
+ * Keep `google-images` entries generated from models.dev (`catalog/google-images.generated.json`)
+ * when hydrating an upstream `models.all.json` snapshot (e.g. clean-checkout Nix builds) that does
+ * not yet carry Google image models. Upstream snapshots that already carry `google-images` win unchanged.
  */
-const OFFLINE_GOOGLE_IMAGE_FALLBACKS: readonly ImageModel<"google-images">[] = [
-	{
-		type: "image",
-		id: "gemini-nano-banana-2.1",
-		name: "Nano Banana 2.1",
-		api: "google-images",
-		provider: "google",
-		baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-		input: ["text", "image"],
-		output: ["text", "image"],
-		cost: { input: 1.5, output: 30, cacheRead: 0, cacheWrite: 0 },
-	},
-	{
-		type: "image",
-		id: "gemini-3.1-flash-lite-image",
-		name: "Nano Banana 2 Lite",
-		api: "google-images",
-		provider: "google",
-		baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-		input: ["text", "image"],
-		output: ["text", "image"],
-		cost: { input: 0.25, output: 30, cacheRead: 0, cacheWrite: 0 },
-	},
-	{
-		type: "image",
-		id: "gemini-3-pro-image",
-		name: "Nano Banana Pro",
-		api: "google-images",
-		provider: "google",
-		baseUrl: "https://generativelanguage.googleapis.com/v1beta",
-		input: ["text", "image"],
-		output: ["text", "image"],
-		cost: { input: 2, output: 120, cacheRead: 0, cacheWrite: 0 },
-	},
-];
+const GOOGLE_IMAGE_FALLBACKS_PATH = join(
+	dirname(fileURLToPath(import.meta.url)),
+	"..",
+	"catalog",
+	"google-images.generated.json",
+);
+
+function loadGeneratedGoogleImageFallbacks(): CatalogEntry[] {
+	if (!existsSync(GOOGLE_IMAGE_FALLBACKS_PATH)) return [];
+	const parsed: unknown = JSON.parse(readFileSync(GOOGLE_IMAGE_FALLBACKS_PATH, "utf8"));
+	return Array.isArray(parsed) ? parsed.filter(isCatalogEntry) : [];
+}
 
 function withFallbackGoogleImageModels<T extends { api?: unknown }>(
 	provider: string,
 	entries: T[],
-): Array<T | ImageModel<"google-images">> {
+): Array<T | CatalogEntry> {
 	if (provider !== "google" || entries.some((entry) => entry.api === "google-images")) return entries;
-	return [...entries, ...OFFLINE_GOOGLE_IMAGE_FALLBACKS.map((model) => ({ ...model }))];
+	return [...entries, ...loadGeneratedGoogleImageFallbacks()];
 }
 
 /**
