@@ -18,6 +18,16 @@ Each key under `providers` is a provider ID. A built-in provider ID changes that
 | `api` | string |  | API for the provider's models, such as "openai-completions", "openai-responses", "anthropic-messages", or "google-generative-ai". |
 | `oauth` | `"radius"` |  | OAuth login flow. Requires baseUrl. |
 | `headers` | object |  | Request headers. Values resolve like apiKey. |
+| `inputLimits` | object |  |  |
+| `inputLimits.maxRequestBytes` | integer |  | Maximum serialized provider request size in bytes. |
+| `inputLimits.images` | object |  |  |
+| `inputLimits.images.resize` | object |  | Cache-safe resize profile applied before a new image enters conversation history. |
+| `inputLimits.images.resize.maxWidth` | integer |  |  |
+| `inputLimits.images.resize.maxHeight` | integer |  |  |
+| `inputLimits.images.resize.maxBytes` | integer |  | Maximum base64-encoded payload size in bytes. |
+| `inputLimits.images.resize.jpegQuality` | integer |  |  |
+| `inputLimits.images.maxPerMessage` | integer |  | Maximum images accepted in one provider message. |
+| `inputLimits.images.maxPerRequest` | integer |  | Maximum images accepted across one provider request. |
 | `compat` | [object](#compatibility) |  | Provider and model compatibility overrides. |
 | `authHeader` | boolean | `false` | Whether to send the resolved API key as Authorization: Bearer. |
 | `preferLocalLoopback` | boolean | `false` | Whether plain http:// baseUrls resolving to this machine's own interfaces should connect via loopback (127.0.0.1 / [::1]) when reachable. |
