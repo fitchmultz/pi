@@ -1,7 +1,6 @@
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
-	CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES,
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	cloudflareGatewayDecisionsModels,
 	normalizeCloudflareModel,
@@ -107,12 +106,7 @@ export default defineProvider({
 	finalize: (model) => {
 		if (model.api === "openai-responses") {
 			mergeCompat(model as Model<"openai-responses">, { supportsStrictMode: true });
-			withInputLimits(model, {
-				maxRequestBytes: CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES,
-				images: { maxPerRequest: 1500 },
-			});
-		} else if (model.input.includes("image")) {
-			withInputLimits(model, { maxRequestBytes: CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES });
+			withInputLimits(model, { images: { maxPerRequest: 1500 } });
 		}
 		enableOpenAiGrammarTools(model);
 		Object.assign(model, normalizeCloudflareModel(model));
