@@ -1,46 +1,12 @@
-import { GoogleGenAI, type HttpOptions } from "@google/genai";
-import type {
-	FetchFunction,
-	Model,
-	ProviderHeaders,
-	SimpleStreamOptions,
-	StreamFunction,
-	ThinkingBudgets,
-	TranscriptContext,
-} from "../types.ts";
+import type { Model, SimpleStreamOptions, StreamFunction, ThinkingBudgets, TranscriptContext } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import { providerHeadersToRecord } from "../utils/headers.ts";
-import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
+import { createGoogleClient, resolveGoogleApiKey } from "./google-client.ts";
 import type { GoogleOptions, ResolvedGoogleThinkingLevel } from "./google-shared.ts";
-import { isCloudflareGoogleAiStudioUrl, resolveGoogleSimpleThinking, streamGoogle } from "./google-shared.ts";
+import { resolveGoogleSimpleThinking, streamGoogle } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 
 // This adapter takes the shared options unchanged; the type stays exported from this path.
 export type { GoogleOptions };
-
-/**
- * Resolve the SDK `apiKey` for `@google/genai`:
- * - Explicit `options.apiKey` or `x-goog-api-key` header takes precedence.
- * - For Cloudflare AI Gateway `/google-ai-studio` passthroughs (BYOK / Unified Billing) without a
- *   Google key, pass the `cf-aig-authorization` token directly as `apiKey` per Cloudflare's
- *   `@google/genai` guide.
- */
-function resolveGoogleApiKey(
-	model: Model<"google-generative-ai">,
-	apiKey: string | undefined,
-	optionsHeaders: ProviderHeaders | undefined,
-): string | undefined {
-	if (apiKey) return apiKey;
-	const merged = providerHeadersToRecord(model.headers, optionsHeaders);
-	if (!merged) return undefined;
-	const headers = new Headers(merged);
-	const explicitHeaderKey = headers.get("x-goog-api-key")?.trim();
-	if (explicitHeaderKey) return explicitHeaderKey;
-	if (!isCloudflareGoogleAiStudioUrl(model.baseUrl)) return undefined;
-	const gatewayAuth = headers.get("cf-aig-authorization")?.trim();
-	if (!gatewayAuth) return undefined;
-	return gatewayAuth.replace(/^Bearer\s+/i, "").trim() || undefined;
-}
 
 export const stream: StreamFunction<"google-generative-ai", GoogleOptions> = (
 	model: Model<"google-generative-ai">,
@@ -52,7 +18,7 @@ export const stream: StreamFunction<"google-generative-ai", GoogleOptions> = (
 		if (!apiKey) {
 			throw new Error(`No API key for provider: ${model.provider}`);
 		}
-		return createClient(model, apiKey, options?.headers, options?.identity, fetch);
+		return createGoogleClient(model, apiKey, options?.headers, options?.identity, fetch);
 	});
 
 export const streamSimple: StreamFunction<"google-generative-ai", SimpleStreamOptions> = (
@@ -76,28 +42,6 @@ export const streamSimple: StreamFunction<"google-generative-ai", SimpleStreamOp
 		),
 	} satisfies GoogleOptions);
 };
-
-function createClient(
-	model: Model<"google-generative-ai">,
-	apiKey?: string,
-	optionsHeaders?: ProviderHeaders,
-	identity?: ClientIdentity,
-	fetch?: FetchFunction,
-): GoogleGenAI {
-	// Always pass fetch: without one, @google/genai adds a per-request dispatcher that disables
-	// undici's header and body timeouts, bypassing the idle timeouts of the global dispatcher.
-	const httpOptions: HttpOptions = { fetch: fetch ?? globalThis.fetch };
-	if (model.baseUrl) {
-		httpOptions.baseUrl = model.baseUrl;
-		httpOptions.apiVersion = ""; // baseUrl already includes version path, don't append
-	}
-	const headers = providerHeadersToRecord(getIdentityHeaders(model, identity), model.headers, optionsHeaders);
-	if (headers) {
-		httpOptions.headers = headers;
-	}
-
-	return new GoogleGenAI({ apiKey, httpOptions });
-}
 
 function getGoogleBudget(
 	model: Model<"google-generative-ai">,

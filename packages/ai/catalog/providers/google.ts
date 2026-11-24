@@ -5,6 +5,7 @@ import {
 	isGemini4ModelId,
 } from "../../src/api/google-catalog.ts";
 import { GEMINI_DECISION_1_MODEL } from "../../src/api/google-decisions-catalog.ts";
+import { GOOGLE_IMAGE_CATALOG_MODELS } from "../../src/api/google-images-catalog.ts";
 import { defineProvider, modelsDevModels, withInputLimits } from "../define.ts";
 import { googleThinkingLevels } from "../families/google.ts";
 import { modelsDevChatModels, modelsDevCost } from "../sources/models-dev.ts";
@@ -40,6 +41,7 @@ export default defineProvider({
 			},
 		});
 	},
+	images: () => GOOGLE_IMAGE_CATALOG_MODELS.map((model) => ({ ...model })),
 	classifiers: () => [{ ...GEMINI_DECISION_1_MODEL }],
 	finalize: (model) =>
 		withInputLimits(model, { maxRequestBytes: GOOGLE_MAX_REQUEST_BYTES, images: { maxPerRequest: 3600 } }),

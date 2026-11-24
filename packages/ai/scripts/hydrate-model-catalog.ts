@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { normalizeCloudflareModel, withCloudflareGatewayDecisionsModels } from "../src/api/cloudflare.ts";
 import { normalizeGoogleModel } from "../src/api/google-catalog.ts";
 import { withGoogleDecisionsModels } from "../src/api/google-decisions-catalog.ts";
+import { withGoogleImageModels } from "../src/api/google-images-catalog.ts";
 import { restoreKimiK3CacheWriteCost } from "../src/api/kimi.ts";
 import { normalizeZaiModel } from "../src/api/zai-catalog.ts";
 import type { AnyModel } from "../src/types.ts";
@@ -65,11 +66,11 @@ export function hydrateModelCatalog(
 			);
 			entries.push({ ...normalized, type: model.type });
 		}
-		const withForkClassifiers = withGoogleDecisionsModels(
+		const withForkModels = withGoogleImageModels(
 			provider,
-			withCloudflareGatewayDecisionsModels(provider, entries, openaiEntries),
+			withGoogleDecisionsModels(provider, withCloudflareGatewayDecisionsModels(provider, entries, openaiEntries)),
 		);
-		const grouped = groupProviderModelData(provider, withForkClassifiers as CatalogEntry[]);
+		const grouped = groupProviderModelData(provider, withForkModels as CatalogEntry[]);
 		structure[provider] = grouped.structure;
 		files[`${provider}.json`] = `${JSON.stringify(grouped.groups)}\n`;
 	}

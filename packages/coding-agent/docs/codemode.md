@@ -296,7 +296,9 @@ Show generated images with `image(block)`. Do not print `data` with `text()`, `c
 
 ```js
 // @options: {"timeout_ms": 300000}
-const painter = await models.getModelOfType("image", "openrouter", "google/gemini-2.5-flash-image");
+const painter =
+  (await models.getModelOfType("image", "google", "gemini-nano-banana-2.1")) ??
+  (await models.getModelOfType("image", "openrouter", "google/gemini-2.5-flash-image"));
 const result = await models.generateImages(painter, {
   input: [{ type: "text", text: "A red fox in the snow, watercolor" }],
 });

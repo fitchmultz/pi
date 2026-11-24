@@ -513,6 +513,19 @@ describe("generated model data validation", () => {
 			api: "google-decisions",
 			contextWindow: 262144,
 		});
+		expect(hydrated["google-images"]?.["image:gemini-nano-banana-2.1"]).toMatchObject({
+			id: "gemini-nano-banana-2.1",
+			api: "google-images",
+			provider: "google",
+			output: ["text", "image"],
+		});
+		expect(Object.keys(hydrated["google-images"] ?? {}).sort()).toEqual([
+			"image:gemini-2.5-flash-image",
+			"image:gemini-3-pro-image",
+			"image:gemini-3.1-flash-image",
+			"image:gemini-3.1-flash-lite-image",
+			"image:gemini-nano-banana-2.1",
+		]);
 	});
 
 	it("normalizes canonical google maxRequestBytes to 100 MiB and Gemini 4 Carbon/Argon maxTokens to 65536 during hydration", () => {
