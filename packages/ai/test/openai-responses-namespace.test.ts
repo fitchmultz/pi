@@ -164,6 +164,7 @@ describe("OpenAI Responses tool-call namespaces", () => {
 
 		const replayed = convertResponsesMessages(model, normalizeContext({ messages: [output] }), new Set(["openai"]), {
 			grammarToolInputProperties,
+			toolSupport: "none",
 		}).find((item) => item.type === "custom_tool_call");
 		expect(replayed).toMatchObject({
 			type: "custom_tool_call",
@@ -212,6 +213,7 @@ describe("OpenAI Responses tool-call namespaces", () => {
 				new Set(["openai"]),
 				{
 					grammarToolInputProperties: new Map([["query", "input"]]),
+					toolSupport: "none",
 				},
 			);
 			const functionCall = replayed.find((item) => item.type === "function_call");

@@ -188,8 +188,8 @@ export interface ConvertResponsesMessagesOptions {
 	grammarToolInputProperties?: ReadonlyMap<string, string>;
 	/** Whether later system messages are sent in place; otherwise they are folded into the leading prompt. */
 	supportsMidConvoSystemMessages?: boolean;
-	/** Pre-resolved mid-conversation tool support from `getMidConvoToolSupport()`. Defaults to `"none"`. */
-	toolSupport?: TranscriptToolSupport;
+	/** Pre-resolved mid-conversation tool support from `getMidConvoToolSupport()`. */
+	toolSupport: TranscriptToolSupport;
 	toolOptions?: ConvertResponsesToolsOptions;
 	/**
 	 * Effort for the reply being generated. When set, the thinking level is sent as

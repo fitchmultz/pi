@@ -61,6 +61,7 @@ describe("OpenAI Responses tool call replay status", () => {
 
 		const input = convertResponsesMessages(model, context, new Set(["openai", "openai-codex", "opencode"]), {
 			grammarToolInputProperties: new Map([["codemode", "code"]]),
+			toolSupport: "none",
 		});
 
 		const fnCall = input.find((item) => item.type === "function_call");

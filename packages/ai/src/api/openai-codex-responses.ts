@@ -1676,7 +1676,7 @@ async function processWebSocketStream(
 				model,
 				normalizeContext({ messages: [output] }),
 				OPENAI_RESPONSES_TOOL_CALL_PROVIDERS,
-				{ grammarToolInputProperties },
+				{ grammarToolInputProperties, toolSupport: "none" },
 			).filter((item) => item.type !== "function_call_output" && item.type !== "custom_tool_call_output");
 			entry.continuation = {
 				lastRequestBody: fullBody,
