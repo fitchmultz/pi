@@ -20,27 +20,22 @@ import type {
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
-import { createGoogleClient, createGoogleFetch, resolveGoogleApiKey, retryGoogleRequest } from "./google-client.ts";
-import { GOOGLE_IMAGE_CATALOG_MODELS, withGoogleImageModels } from "./google-images-catalog.ts";
-
-export { GOOGLE_IMAGE_CATALOG_MODELS, withGoogleImageModels };
-
-/** Request options accepted by the native `google-images` adapter. */
-export interface GoogleImagesOptions extends ImagesOptions {
-	/** Output aspect ratio (e.g. `"1:1"`, `"16:9"`, `"3:2"`, `"9:16"`). */
-	aspectRatio?: string;
-	/** Output image size (e.g. `"1K"`, `"2K"`, `"4K"`). */
-	imageSize?: string;
-}
+import {
+	createGoogleClient,
+	createGoogleFetch,
+	resolveGoogleApiKey,
+	retryGoogleRequest,
+	sendsToGeminiApi,
+} from "./google-client.ts";
 
 /**
  * Native Google Gemini image generation over `POST /v1beta/models/{model}:generateContent`
- * (Nano Banana / Nano Banana 2 / Nano Banana 2.1 / Nano Banana Pro).
+ * (Nano Banana 2.1 / Nano Banana 2 Lite / Nano Banana Pro).
  */
-export const generateImages: ImagesFunction<GoogleImagesOptions> = async (
+export const generateImages: ImagesFunction<ImagesOptions> = async (
 	model: ImageModel<ImageApi>,
 	context: ImagesContext,
-	options?: GoogleImagesOptions,
+	options?: ImagesOptions,
 ) => {
 	const output: AssistantImages = {
 		api: model.api,
@@ -124,7 +119,7 @@ export const generateImages: ImagesFunction<GoogleImagesOptions> = async (
 function buildParams(
 	model: ImageModel<ImageApi>,
 	context: ImagesContext,
-	options?: GoogleImagesOptions,
+	options?: ImagesOptions,
 ): GenerateContentParameters {
 	const parts: Part[] = context.input.map((item): Part => {
 		if (item.type === "text") {
@@ -146,6 +141,8 @@ function buildParams(
 		model: model.id,
 		contents: [{ role: "user", parts }],
 		config: {
+			// Opt out of Gemini Developer API request logging (matches google-generative-ai chat).
+			...(sendsToGeminiApi(model) && { store: false }),
 			responseModalities: model.output.includes("text") ? ["TEXT", "IMAGE"] : ["IMAGE"],
 			...(Object.keys(imageConfig).length > 0 ? { imageConfig } : {}),
 			...(options?.signal ? { abortSignal: options.signal } : {}),

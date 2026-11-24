@@ -43,7 +43,12 @@ import {
 	withoutInitialSystemMessage,
 } from "../utils/transcript.ts";
 import { resolveStrictJsonSchema } from "./constrained-sampling.ts";
-import { createGoogleFetch, isCloudflareGoogleAiStudioUrl, retryGoogleRequest } from "./google-client.ts";
+import {
+	createGoogleFetch,
+	isCloudflareGoogleAiStudioUrl,
+	retryGoogleRequest,
+	sendsToGeminiApi,
+} from "./google-client.ts";
 import { createStrictToolLimitSessionTracker, planStrictTools, type StrictToolPlan } from "./strict-tool-limits.ts";
 import { canReplayGoogleThoughtSignature, transformMessages } from "./transform-messages.ts";
 
@@ -499,20 +504,6 @@ const GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS = new Map<string, { flex: number; pr
 	["gemini-2.5-flash", { flex: 1, priority: 1.8 }],
 	["gemini-2.5-flash-lite", { flex: 1, priority: 1.8 }],
 ]);
-
-/**
- * Whether requests for `model` target the Gemini Developer API (rather than Vertex AI or an
- * unrelated third-party endpoint). Without a base URL the SDK sends to generativelanguage.googleapis.com.
- */
-function sendsToGeminiApi(model: Model<GoogleApiType>): boolean {
-	return (
-		model.api === "google-generative-ai" &&
-		(model.provider === "google" ||
-			!model.baseUrl ||
-			(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com") ||
-			isCloudflareGoogleAiStudioUrl(model.baseUrl))
-	);
-}
 
 function applyGoogleServiceTierPricing(model: Model<GoogleApiType>, usage: Usage, serviceTier: unknown): void {
 	const normalizedModelId = model.id.replace(/^.*\//, "").toLowerCase();

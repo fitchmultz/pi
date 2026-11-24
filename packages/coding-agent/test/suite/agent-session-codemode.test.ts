@@ -933,6 +933,8 @@ describe("codemode models", () => {
 		baseUrl: string;
 		apiKey: string | undefined;
 		input: ImagesContext["input"];
+		aspectRatio?: string;
+		imageSize?: string;
 	}
 
 	async function setup() {
@@ -951,7 +953,13 @@ describe("codemode models", () => {
 			images: {
 				"test-images": {
 					generateImages: async (model, context, options): Promise<AssistantImages> => {
-						imageRequests.push({ baseUrl: model.baseUrl, apiKey: options?.apiKey, input: context.input });
+						imageRequests.push({
+							baseUrl: model.baseUrl,
+							apiKey: options?.apiKey,
+							input: context.input,
+							aspectRatio: options?.aspectRatio,
+							imageSize: options?.imageSize,
+						});
 						const prompt = context.input.find((block) => block.type === "text")?.text;
 						const base = { api: model.api, provider: model.provider, model: model.id, timestamp: 0 };
 						if (prompt === "explode") {
@@ -1103,6 +1111,7 @@ describe("codemode models", () => {
 			const generated = await models.generateImages(
 				{ ...model, baseUrl: "https://evil.test" },
 				{ input: [{ type: "text", text: "a fox" }, reference] },
+				{ aspectRatio: "16:9", imageSize: "2K", apiKey: "ignored-key" },
 			);
 			for (const block of generated.output) {
 				if (block.type === "image") image(block);
@@ -1115,6 +1124,9 @@ describe("codemode models", () => {
 				stopReason: generated.stopReason,
 				failed: [failed.stopReason, failed.errorMessage],
 				wrongType: await attempt(() => models.generateImages({ provider: "scorer", id: "judge" }, { input: [] })),
+				badOptions: await attempt(() =>
+					models.generateImages(model, { input: [{ type: "text", text: "a fox" }] }, { aspectRatio: 16 }),
+				),
 			};
 		`,
 		);
@@ -1131,12 +1143,14 @@ describe("codemode models", () => {
 			failed: ["error", "painter exploded"],
 			wrongType:
 				'"scorer/judge" is a classifier model, not an image model. List the image models you can use with models.getAvailableOfType("image").',
+			badOptions: expect.stringContaining("options.aspectRatio must be a string"),
 		});
 		expect(result.content[2]).toEqual({ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" });
 		expect(imageRequests.map((request) => [request.baseUrl, request.apiKey])).toEqual([
 			["https://images.test/v1", "secret-key"],
 			["https://images.test/v1", "secret-key"],
 		]);
+		expect(imageRequests[0]).toMatchObject({ aspectRatio: "16:9", imageSize: "2K" });
 		expect(imageRequests[0].input).toEqual([
 			{ type: "text", text: "a fox" },
 			{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" },

@@ -1,12 +1,11 @@
 #!/usr/bin/env node
 
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { normalizeCloudflareModel, withCloudflareGatewayDecisionsModels } from "../src/api/cloudflare.ts";
 import { normalizeGoogleModel } from "../src/api/google-catalog.ts";
 import { withGoogleDecisionsModels } from "../src/api/google-decisions-catalog.ts";
-import { withGoogleImageModels } from "../src/api/google-images-catalog.ts";
 import { restoreKimiK3CacheWriteCost } from "../src/api/kimi.ts";
 import { normalizeZaiModel } from "../src/api/zai-catalog.ts";
 import type { AnyModel } from "../src/types.ts";
@@ -34,6 +33,24 @@ function isCatalogEntry(value: unknown): value is CatalogEntry {
 		typeof value.api === "string" &&
 		value.api.length > 0
 	);
+}
+
+/**
+ * Preserve existing checked-in `google-images` entries (generated from models.dev) when hydrating
+ * an upstream catalog snapshot that does not yet carry Google image models.
+ */
+function preserveExistingGoogleImageModels<T extends { api?: unknown }>(
+	packageRoot: string,
+	provider: string,
+	entries: T[],
+): Array<T | CatalogEntry> {
+	if (provider !== "google" || entries.some((entry) => entry.api === "google-images")) return entries;
+	const existingPath = join(packageRoot, "src", "providers", "data", "google.json");
+	if (!existsSync(existingPath)) return entries;
+	const parsed: unknown = JSON.parse(readFileSync(existingPath, "utf8"));
+	if (!isRecord(parsed) || !isRecord(parsed["google-images"])) return entries;
+	const existingImages = Object.values(parsed["google-images"]).filter(isCatalogEntry);
+	return existingImages.length > 0 ? [...entries, ...existingImages] : entries;
 }
 
 /**
@@ -66,7 +83,8 @@ export function hydrateModelCatalog(
 			);
 			entries.push({ ...normalized, type: model.type });
 		}
-		const withForkModels = withGoogleImageModels(
+		const withForkModels = preserveExistingGoogleImageModels(
+			packageRoot,
 			provider,
 			withGoogleDecisionsModels(provider, withCloudflareGatewayDecisionsModels(provider, entries, openaiEntries)),
 		);

@@ -15,6 +15,20 @@ export function isCloudflareGoogleAiStudioUrl(baseUrl: string | undefined): bool
 }
 
 /**
+ * Whether requests for `model` target the Gemini Developer API (rather than Vertex AI or an
+ * unrelated third-party endpoint). Without a base URL the SDK sends to generativelanguage.googleapis.com.
+ */
+export function sendsToGeminiApi(model: Pick<BaseModel<string>, "api" | "provider" | "baseUrl">): boolean {
+	return (
+		(model.api === "google-generative-ai" || model.api === "google-images") &&
+		(model.provider === "google" ||
+			!model.baseUrl ||
+			(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com") ||
+			isCloudflareGoogleAiStudioUrl(model.baseUrl))
+	);
+}
+
+/**
  * Resolve the SDK `apiKey` for `@google/genai`:
  * - Explicit `options.apiKey` or `x-goog-api-key` header takes precedence.
  * - For Cloudflare AI Gateway `/google-ai-studio` passthroughs (BYOK / Unified Billing) without a

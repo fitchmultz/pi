@@ -496,8 +496,25 @@ describe("generated model data validation", () => {
 		expect(() => readModelDataStructure(packageRoot)).toThrow("aggregator and provider shards do not match");
 	});
 
-	it("preserves google/gemini-decision-1 when hydrating upstream catalogs without it", () => {
+	it("preserves google/gemini-decision-1 and existing google-images entries when hydrating upstream catalogs without them", () => {
 		const { dataDir, packageRoot, values } = createFixture("google");
+		const existingGoogle = JSON.parse(readFileSync(join(dataDir, "google.json"), "utf8")) as Record<
+			string,
+			Record<string, unknown>
+		>;
+		const existingImageEntry = {
+			type: "image",
+			id: "gemini-nano-banana-2.1",
+			name: "Nano Banana 2.1",
+			api: "google-images",
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+			input: ["text", "image"],
+			output: ["text", "image"],
+			cost: { input: 1.5, output: 30, cacheRead: 0, cacheWrite: 0 },
+		};
+		existingGoogle["google-images"] = { "image:gemini-nano-banana-2.1": existingImageEntry };
+		writeFileSync(join(dataDir, "google.json"), `${JSON.stringify(existingGoogle)}\n`);
 		const catalogPath = join(packageRoot, "models.all.json");
 		const chatEntry = { ...(values["chat:model-a"] as Record<string, unknown>), api: "google-generative-ai" };
 		writeFileSync(catalogPath, JSON.stringify({ google: [chatEntry] }));
@@ -518,14 +535,9 @@ describe("generated model data validation", () => {
 			api: "google-images",
 			provider: "google",
 			output: ["text", "image"],
+			cost: { input: 1.5, output: 30, cacheRead: 0, cacheWrite: 0 },
 		});
-		expect(Object.keys(hydrated["google-images"] ?? {}).sort()).toEqual([
-			"image:gemini-2.5-flash-image",
-			"image:gemini-3-pro-image",
-			"image:gemini-3.1-flash-image",
-			"image:gemini-3.1-flash-lite-image",
-			"image:gemini-nano-banana-2.1",
-		]);
+		expect(Object.keys(hydrated["google-images"] ?? {})).toEqual(["image:gemini-nano-banana-2.1"]);
 	});
 
 	it("normalizes canonical google maxRequestBytes to 100 MiB and Gemini 4 Carbon/Argon maxTokens to 65536 during hydration", () => {
