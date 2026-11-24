@@ -61,6 +61,7 @@ import {
 	resolveProviderSummary,
 	type SimpleStreamOptions,
 	type StreamOptions,
+	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import * as builtinProviderCatalog from "@earendil-works/pi-ai/providers/all";
 import { personalizeOpenRouterCatalog } from "@earendil-works/pi-ai/providers/openrouter";
@@ -96,6 +97,7 @@ import {
 	validateExtensionProvider,
 } from "./provider-composer.ts";
 import { withPersonalizedCatalog, withRemoteCatalog } from "./remote-catalog-provider.ts";
+import { fitContextImagesToRequestLimit, RequestImageFitCache } from "./request-image-budget.ts";
 import { RuntimeCredentials } from "./runtime-credentials.ts";
 import {
 	createVirtualModel,
@@ -323,6 +325,7 @@ export class ModelRuntime implements Models {
 	private availabilityError: string | undefined;
 	private authCheckErrors: ReadonlyMap<string, Error> = new Map();
 	private readonly credentialOperations = new Map<string, Promise<unknown>>();
+	private readonly requestImageFitCache = new RequestImageFitCache();
 
 	private constructor(
 		credentials: RuntimeCredentials,
@@ -1031,16 +1034,19 @@ export class ModelRuntime implements Models {
 		dispatch: (
 			prepared: PreparedRequest<Model<Api>, TOptions>,
 			onStatus?: (status: number) => void,
+			preparedContext?: TranscriptContext,
 		) => AssistantMessageEventStream,
 		onPrepared?: (
 			model: Model<Api>,
 			options: Omit<TOptions, "transformHeaders"> & ProviderRequestOptions<Model<Api>>,
 		) => void,
+		prepareContext?: (model: Model<Api>, signal?: AbortSignal) => Promise<TranscriptContext>,
 	): Promise<AsyncIterable<AssistantMessageEvent>> {
 		const prepared = await this.prepareRequest(model, options);
+		let preparedContext = prepareContext ? await prepareContext(prepared.model, prepared.options.signal) : undefined;
 		onPrepared?.(prepared.model, prepared.options);
 		if (!this.canObserveCommandAuth(model.provider, options?.apiKey)) {
-			return dispatch(prepared);
+			return dispatch(prepared, undefined, preparedContext);
 		}
 		let observedStatus: number | undefined;
 		const onStatus = (status: number): void => {
@@ -1051,15 +1057,18 @@ export class ModelRuntime implements Models {
 		let iterator: AsyncIterator<AssistantMessageEvent>;
 		let first: IteratorResult<AssistantMessageEvent>;
 		try {
-			firstStream = statusObserverStorage.run(onStatus, () => dispatch(prepared, onStatus));
+			firstStream = statusObserverStorage.run(onStatus, () => dispatch(prepared, onStatus, preparedContext));
 			iterator = firstStream[Symbol.asyncIterator]();
 			first = await iterator.next();
 		} catch (error) {
 			if (!options?.signal?.aborted && isAuthStatus(observedStatus)) {
 				const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
 				if (refreshed) {
+					preparedContext = prepareContext
+						? await prepareContext(refreshed.model, refreshed.options.signal)
+						: undefined;
 					onPrepared?.(refreshed.model, refreshed.options);
-					return dispatch(refreshed, () => {});
+					return dispatch(refreshed, () => {}, preparedContext);
 				}
 			}
 			throw error;
@@ -1076,12 +1085,28 @@ export class ModelRuntime implements Models {
 			while (!(await iterator.next()).done) {}
 			const refreshed = await this.prepareRefreshedCommandRequest(model, options, prepared);
 			if (refreshed) {
+				preparedContext = prepareContext
+					? await prepareContext(refreshed.model, refreshed.options.signal)
+					: undefined;
 				onPrepared?.(refreshed.model, refreshed.options);
-				return dispatch(refreshed, () => {});
+				return dispatch(refreshed, () => {}, preparedContext);
 			}
 		}
 
 		return replayCheckedStream(firstStream, first, iterator);
+	}
+
+	private async prepareStreamContext(
+		model: Model<Api>,
+		transcript: TranscriptContext,
+		signal?: AbortSignal,
+	): Promise<TranscriptContext> {
+		return fitContextImagesToRequestLimit(
+			model,
+			resolveProviderSummary(model, transcript),
+			this.requestImageFitCache,
+			signal,
+		);
 	}
 
 	stream<TApi extends Api>(
@@ -1097,14 +1122,16 @@ export class ModelRuntime implements Models {
 				return this.runStreamWithCommandAuthRefresh(
 					model,
 					options as (StreamOptions & ModelsRequestTransforms) | undefined,
-					(prepared, onStatus) =>
+					(prepared, onStatus, preparedContext) =>
 						prepared.provider.stream(
 							prepared.model,
-							resolveProviderSummary(prepared.model, transcript),
+							preparedContext ?? resolveProviderSummary(prepared.model, transcript),
 							(onStatus
 								? withStatusObserver(prepared.model, prepared.options, onStatus)
 								: prepared.options) as ApiStreamOptions<TApi>,
 						),
+					undefined,
+					(preparedModel, signal) => this.prepareStreamContext(preparedModel, transcript, signal),
 				);
 			},
 			undefined,
@@ -1164,16 +1191,17 @@ export class ModelRuntime implements Models {
 				return this.runStreamWithCommandAuthRefresh(
 					model,
 					options,
-					(prepared, onStatus) =>
+					(prepared, onStatus, preparedContext) =>
 						prepared.provider.streamSimple(
 							prepared.model,
 							// Session requests and cache warming pass here with the model that will answer.
-							resolveProviderSummary(prepared.model, transcript),
+							preparedContext ?? resolveProviderSummary(prepared.model, transcript),
 							(onStatus
 								? withStatusObserver(prepared.model, prepared.options, onStatus)
 								: prepared.options) as SimpleStreamOptions,
 						),
 					onPrepared,
+					(preparedModel, signal) => this.prepareStreamContext(preparedModel, transcript, signal),
 				);
 			},
 			undefined,

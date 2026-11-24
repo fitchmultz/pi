@@ -128,7 +128,7 @@ Use `inputLimits.images.resize` to control how Pi encodes new image attachments,
 }
 ```
 
-`maxBytes` limits the base64-encoded payload. Omitted resize fields use conservative defaults of 2000 by 2000 pixels, 4.5 MiB encoded, and JPEG quality 80. Images are encoded once; changing models does not rewrite historical images. The catalog can also describe hard request limits with `inputLimits.maxRequestBytes`, `images.maxPerMessage`, and `images.maxPerRequest`, but Pi does not yet rewrite or reject history based on them.
+`maxBytes` limits the base64-encoded payload. Omitted resize fields use conservative defaults of 2000 by 2000 pixels, 4.5 MiB encoded, and JPEG quality 80. Images are encoded once in session history; changing models does not rewrite saved history. At request dispatch time, Pi enforces hard model request limits (`inputLimits.maxRequestBytes`, `images.maxPerMessage`, and `images.maxPerRequest`, plus a 32 MiB request ceiling on Cloudflare AI Gateway routes) on the projected request copy only when a request would otherwise exceed them: full-size images stay untouched while the request fits, and when over limit Pi shrinks oldest images first (caching resized outputs for prompt-cache stability and keeping the newest images full-size whenever possible), omitting oldest images only as a last resort.
 
 <a id="prompt-cache-lifetimes"></a>
 
