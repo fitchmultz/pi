@@ -108,6 +108,9 @@ export default defineProvider({
 			mergeCompat(model as Model<"openai-responses">, { supportsStrictMode: true });
 			withInputLimits(model, { images: { maxPerRequest: 1500 } });
 		}
+		if (model.api === "anthropic-messages") {
+			mergeCompat(model as Model<"anthropic-messages">, { supportsStrictTools: true });
+		}
 		enableOpenAiGrammarTools(model);
 		Object.assign(model, normalizeCloudflareModel(model));
 	},

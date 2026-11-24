@@ -358,8 +358,19 @@ describe("Anthropic raw SSE parsing", () => {
 		expect(result.usage.cost.output).toBeCloseTo(0.0001, 10);
 	});
 
-	it("fails safely when Anthropic falls back after output begins", async () => {
-		const model = getModel("anthropic", "claude-opus-5");
+	it("continues streaming across a mid-output fallback, drops pre-fallback thinking and tool calls, and bills the fallback model", async () => {
+		const model: Model<"anthropic-messages"> = {
+			...getModel("anthropic", "claude-fable-5-2"),
+			compat: {
+				allowedFallbackModels: [
+					{
+						provider: "anthropic",
+						model: "claude-opus-5",
+						cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+					},
+				],
+			},
+		};
 		const response = createSseResponse([
 			{
 				event: "message_start",
@@ -367,8 +378,8 @@ describe("Anthropic raw SSE parsing", () => {
 					type: "message_start",
 					message: {
 						id: "msg_fallback",
-						model: "claude-opus-5",
-						usage: { input_tokens: 1, output_tokens: 0 },
+						model: "claude-fable-5-2",
+						usage: { input_tokens: 100, output_tokens: 0 },
 					},
 				}),
 			},
@@ -377,7 +388,7 @@ describe("Anthropic raw SSE parsing", () => {
 				data: JSON.stringify({
 					type: "content_block_start",
 					index: 0,
-					content_block: { type: "text", text: "partial" },
+					content_block: { type: "thinking", thinking: "pre-fallback thought", signature: "sig_old" },
 				}),
 			},
 			{ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 0 }) },
@@ -386,13 +397,59 @@ describe("Anthropic raw SSE parsing", () => {
 				data: JSON.stringify({
 					type: "content_block_start",
 					index: 1,
+					content_block: { type: "text", text: "partial" },
+				}),
+			},
+			{ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 1 }) },
+			{
+				event: "content_block_start",
+				data: JSON.stringify({
+					type: "content_block_start",
+					index: 2,
+					content_block: { type: "tool_use", id: "toolu_aborted", name: "bash", input: { command: "rm -rf" } },
+				}),
+			},
+			{ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 2 }) },
+			{
+				event: "content_block_start",
+				data: JSON.stringify({
+					type: "content_block_start",
+					index: 3,
 					content_block: {
 						type: "fallback",
-						from: { model: "claude-opus-5" },
-						to: { model: "claude-opus-4-8" },
+						from: { model: "claude-fable-5-2" },
+						to: { model: "claude-opus-5" },
 					},
 				}),
 			},
+			{ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 3 }) },
+			{
+				event: "content_block_start",
+				data: JSON.stringify({
+					type: "content_block_start",
+					index: 4,
+					content_block: { type: "thinking", thinking: "opus thought", signature: "sig_opus" },
+				}),
+			},
+			{ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 4 }) },
+			{
+				event: "content_block_start",
+				data: JSON.stringify({
+					type: "content_block_start",
+					index: 5,
+					content_block: { type: "text", text: " continued" },
+				}),
+			},
+			{ event: "content_block_stop", data: JSON.stringify({ type: "content_block_stop", index: 5 }) },
+			{
+				event: "message_delta",
+				data: JSON.stringify({
+					type: "message_delta",
+					delta: { stop_reason: "end_turn" },
+					usage: { input_tokens: 100, output_tokens: 20 },
+				}),
+			},
+			{ event: "message_stop", data: JSON.stringify({ type: "message_stop" }) },
 		]);
 
 		const result = await streamAnthropic(
@@ -401,8 +458,26 @@ describe("Anthropic raw SSE parsing", () => {
 			{ client: createFakeAnthropicClient(response) },
 		).result();
 
-		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("unsupported mid-output model fallback");
+		expect(result.stopReason).toBe("stop");
+		expect(result.responseModel).toBe("claude-opus-5");
+		expect(result.content).toEqual([
+			{ type: "text", text: "partial" },
+			{ type: "thinking", thinking: "opus thought", thinkingSignature: "sig_opus" },
+			{ type: "text", text: " continued" },
+		]);
+		// Billed at Opus 5 fallback rates ($5/M input, $25/M output), not Fable 5.2 ($8/$40).
+		expect(result.usage.cost.input).toBeCloseTo(0.0005, 10);
+		expect(result.usage.cost.output).toBeCloseTo(0.0005, 10);
+		expect(result.diagnostics).toContainEqual(
+			expect.objectContaining({
+				type: "anthropic_mid_output_fallback",
+				details: {
+					fromModel: "claude-fable-5-2",
+					toModel: "claude-opus-5",
+					droppedBlocks: 2,
+				},
+			}),
+		);
 	});
 
 	it("forces streaming after an onPayload replacement", async () => {

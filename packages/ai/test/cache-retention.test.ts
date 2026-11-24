@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import { stream as streamOpenAICompletions } from "../src/api/openai-completions.ts";
 import { stream as streamOpenAIResponses } from "../src/api/openai-responses.ts";
-import { getModel, normalizeContext, stream } from "../src/compat.ts";
+import { calculateCost, getModel, normalizeContext, stream } from "../src/compat.ts";
 import { MODELS } from "../src/models.generated.ts";
-import type { Model } from "../src/types.ts";
+import type { Model, Usage } from "../src/types.ts";
 
 class PayloadCaptured extends Error {
 	constructor() {
@@ -19,7 +19,7 @@ interface OpenAICompletionsCachePayload {
 }
 
 interface OpenAIResponsesCachePayload extends OpenAICompletionsCachePayload {
-	prompt_cache_options?: { mode?: "explicit"; ttl?: "30m" };
+	prompt_cache_options?: { mode?: "explicit"; ttl?: "30m" | "12h" };
 }
 
 function stopAfterPayload<TPayload>(capture: (payload: TPayload) => void): (payload: unknown) => never {
@@ -250,8 +250,8 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			"gpt-6.1-terra",
 			"gpt-6.2-astra",
 			"gpt-6.2-sol",
-		] as const)("does not enable cache warming from the documented TTL alone for %s", (modelId) => {
-			expect(getModel("openai", modelId).promptCache).toBeUndefined();
+		] as const)("sets validated 30m/12h promptCache lifetimes for %s", (modelId) => {
+			expect(getModel("openai", modelId).promptCache).toEqual({ short: 1800, long: 43200 });
 		});
 
 		it.skipIf(!process.env.OPENAI_API_KEY)(
@@ -414,9 +414,10 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 
 		it.each([
 			["gpt-4o-mini", "24h", undefined],
-			["gpt-6-astra", undefined, { ttl: "30m" }],
-			["gpt-6-sol", undefined, { ttl: "30m" }],
-			["gpt-6-luna", undefined, { ttl: "30m" }],
+			["gpt-6-astra", undefined, { ttl: "12h" }],
+			["gpt-6-sol", undefined, { ttl: "12h" }],
+			["gpt-6-luna", undefined, { ttl: "12h" }],
+			["gpt-6.2-sol", undefined, { ttl: "12h" }],
 		] as const)("should use the supported long cache field for %s", async (modelId, retention, cacheOptions) => {
 			const model = getModel("openai", modelId);
 			let capturedPayload: OpenAIResponsesCachePayload | undefined;
@@ -441,6 +442,22 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			expect(capturedPayload?.prompt_cache_key).toBe("session-2");
 			expect(capturedPayload?.prompt_cache_retention).toBe(retention);
 			expect(capturedPayload?.prompt_cache_options).toEqual(cacheOptions);
+		});
+
+		it("prices OpenAI 12h cache writes at 2.5x base input while keeping 30m writes at cacheWrite rate", () => {
+			const model = getModel("openai", "gpt-6.2-sol");
+			const usage: Usage = {
+				input: 100_000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 1_000_000,
+				cacheWrite12h: 400_000,
+				totalTokens: 1_100_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			};
+			const cost = calculateCost(model, usage);
+			// Above 272k long-context tier: gpt-6.2-sol input=$4/M, cacheWrite=$5/M (1.25x), 12h=$10/M (2.5x)
+			expect(cost.cacheWrite).toBeCloseTo((600_000 * 5 + 400_000 * 10) / 1_000_000, 10);
 		});
 	});
 

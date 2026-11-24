@@ -413,6 +413,13 @@ export interface SimpleStreamOptions extends StreamOptions {
 	reasoning?: ThinkingLevel;
 	/** Reasoning summary preference for OpenAI Responses APIs. Pass `null` to omit `reasoning.summary`. */
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
+	/**
+	 * Thinking text display preference for providers that support omitting visible reasoning while
+	 * keeping replay signatures: `"summarized"` returns thinking text (default), `"omitted"` omits it
+	 * (Anthropic `thinking.display: "omitted"`, Bedrock `thinkingDisplay: "omitted"`, Google Gemini
+	 * `includeThoughts: false`).
+	 */
+	thinkingDisplay?: "summarized" | "omitted";
 	/** Ask a capable provider to return a durable handle and continue the request asynchronously. */
 	deferred?: boolean | { window?: "15m" | "1h" | "24h" };
 	/** Custom token budgets for thinking levels (token-based providers only) */
@@ -498,6 +505,8 @@ export interface Usage {
 	cacheWrite: number;
 	/** Subset of `cacheWrite` written with 1h retention. Only Anthropic reports this split. */
 	cacheWrite1h?: number;
+	/** Subset of `cacheWrite` written with 12h retention. Only OpenAI Responses reports this split. */
+	cacheWrite12h?: number;
 	/**
 	 * Reasoning/thinking tokens, when the provider reports them. This is a subset of
 	 * `output`: `output` already includes these tokens. Set to a number (possibly 0) by

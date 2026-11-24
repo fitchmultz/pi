@@ -552,6 +552,11 @@ export async function createAgentSessionWithDiagnostics(
 				: settingsManager.getHideThinkingBlock()
 					? { reasoningSummary: null }
 					: {}),
+			...(options.thinkingDisplay !== undefined
+				? {}
+				: settingsManager.getHideThinkingBlock()
+					? { thinkingDisplay: "omitted" as const }
+					: {}),
 			timeoutMs: options.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs,
 			websocketConnectTimeoutMs: options.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
 			maxRetries: options.maxRetries ?? providerRetrySettings.maxRetries,
