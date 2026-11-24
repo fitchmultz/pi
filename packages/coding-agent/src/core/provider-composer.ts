@@ -248,7 +248,7 @@ function modelFromJson(
 		reasoning: definition.reasoning ?? false,
 		thinkingLevelMap: definition.thinkingLevelMap,
 		input: (definition.input ?? ["text"]) as ("text" | "image")[],
-		inputLimits: definition.inputLimits,
+		inputLimits: mergeInputLimits(providerConfig.inputLimits, definition.inputLimits),
 		cost: definition.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		promptCache: definition.promptCache,
 		contextWindow: definition.contextWindow ?? 128000,
@@ -324,6 +324,7 @@ function applyModelsJson(
 		!config.models?.length &&
 		!config.baseUrl &&
 		!config.headers &&
+		!config.inputLimits &&
 		!config.compat &&
 		!hasOverrides &&
 		!hasClassifierOverrides &&
@@ -333,13 +334,20 @@ function applyModelsJson(
 		config.preferLocalLoopback === undefined
 	) {
 		throw new Error(
-			`Provider ${providerId}: must specify "baseUrl", "headers", "compat", "modelOverrides", "classifierOverrides", or "models".`,
+			`Provider ${providerId}: must specify "baseUrl", "headers", "inputLimits", "compat", "modelOverrides", "classifierOverrides", or "models".`,
 		);
 	}
 
 	const models: AnyModel[] = baseModels.map((model) => {
 		const baseUrl = config.oauth === "radius" ? model.baseUrl : (config.baseUrl ?? model.baseUrl);
-		if (isModelType(model, "chat")) return { ...model, baseUrl, compat: mergeCompat(model.compat, config.compat) };
+		if (isModelType(model, "chat")) {
+			return {
+				...model,
+				baseUrl,
+				compat: mergeCompat(model.compat, config.compat),
+				inputLimits: mergeInputLimits(model.inputLimits, config.inputLimits),
+			};
+		}
 		// Classifier APIs read their own compat fields, such as how a System One service takes images.
 		if (isModelType(model, "classifier") && config.compat) {
 			return { ...model, baseUrl, compat: { ...model.compat, ...config.compat } };

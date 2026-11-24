@@ -50,6 +50,9 @@
               },
               "description": "Request headers. Values resolve like apiKey."
             },
+            "inputLimits": {
+              "$ref": "#/$defs/ModelInputLimits"
+            },
             "compat": {
               "$ref": "#/$defs/ProviderCompat",
               "description": "Provider and model compatibility overrides."

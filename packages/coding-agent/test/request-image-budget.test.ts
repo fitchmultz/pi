@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { deflateSync } from "node:zlib";
 import {
 	type Api,
@@ -15,10 +18,8 @@ import { describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 import {
-	CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES,
+	createRequestImageFitCache,
 	fitContextImagesToRequestLimit,
-	isCloudflareAiGatewayUrl,
-	RequestImageFitCache,
 	resolveEffectiveImageRequestLimits,
 } from "../src/core/request-image-budget.ts";
 
@@ -117,30 +118,65 @@ function toolResultWithImage(id: string, data: string, details?: JsonObject): To
 }
 
 describe("resolveEffectiveImageRequestLimits", () => {
-	it("caps Cloudflare AI Gateway routes at 32 MiB while preserving smaller explicit overrides and direct Google 100 MiB", () => {
-		expect(isCloudflareAiGatewayUrl("https://gateway.ai.cloudflare.com/v1/acc/workos/google-ai-studio/v1beta")).toBe(
-			true,
-		);
-		expect(isCloudflareAiGatewayUrl("https://generativelanguage.googleapis.com/v1beta")).toBe(false);
+	it("reads configured model inputLimits without hostname special-casing", () => {
+		const configured = resolveEffectiveImageRequestLimits(makeModel());
+		expect(configured?.maxRequestBytes).toBe(100 * 1024 * 1024);
+		expect(configured?.maxImagesPerRequest).toBe(3600);
 
-		const directGoogle = resolveEffectiveImageRequestLimits(makeModel());
-		expect(directGoogle?.maxRequestBytes).toBe(100 * 1024 * 1024);
-
-		const cfGoogle = resolveEffectiveImageRequestLimits(
-			makeModel({ baseUrl: "https://gateway.ai.cloudflare.com/v1/acc/workos/google-ai-studio/v1beta" }),
-		);
-		expect(cfGoogle?.maxRequestBytes).toBe(CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES);
-
-		const cfSmallerOverride = resolveEffectiveImageRequestLimits(
+		const gatewayConfigured = resolveEffectiveImageRequestLimits(
 			makeModel({
 				baseUrl: "https://gateway.ai.cloudflare.com/v1/acc/workos/google-ai-studio/v1beta",
-				inputLimits: { maxRequestBytes: 16 * 1024 * 1024 },
+				inputLimits: { maxRequestBytes: 32 * 1024 * 1024 },
 			}),
 		);
-		expect(cfSmallerOverride?.maxRequestBytes).toBe(16 * 1024 * 1024);
+		expect(gatewayConfigured?.maxRequestBytes).toBe(32 * 1024 * 1024);
+
+		const unlimited = resolveEffectiveImageRequestLimits(makeModel({ inputLimits: undefined }));
+		expect(unlimited).toBeUndefined();
 
 		const textOnly = resolveEffectiveImageRequestLimits(makeModel({ input: ["text"] }));
 		expect(textOnly).toBeUndefined();
+	});
+
+	it("applies provider-level inputLimits from models.json while letting modelOverrides specialize them", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "pi-provider-input-limits-"));
+		const modelsPath = join(dir, "models.json");
+		try {
+			writeFileSync(
+				modelsPath,
+				JSON.stringify({
+					providers: {
+						google: {
+							baseUrl: "https://gateway.ai.cloudflare.com/v1/acc/workos/google-ai-studio/v1beta",
+							inputLimits: {
+								maxRequestBytes: 33554432,
+							},
+							modelOverrides: {
+								"gemini-4-carbon": {
+									inputLimits: {
+										maxRequestBytes: 16777216,
+									},
+								},
+							},
+						},
+					},
+				}),
+			);
+
+			const runtime = await ModelRuntime.create({
+				credentials: AuthStorage.inMemory({ google: { type: "api_key", key: "test-key" } }),
+				modelsPath,
+			});
+
+			const neon = runtime.getModel("google", "gemini-4-neon");
+			const carbon = runtime.getModel("google", "gemini-4-carbon");
+			expect(neon?.inputLimits?.maxRequestBytes).toBe(33554432);
+			expect(neon?.inputLimits?.images?.maxPerRequest).toBe(3600);
+			expect(carbon?.inputLimits?.maxRequestBytes).toBe(16777216);
+			expect(carbon?.inputLimits?.images?.maxPerRequest).toBe(3600);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
@@ -165,8 +201,6 @@ describe("fitContextImagesToRequestLimit", () => {
 	});
 
 	it("shrinks oldest images first when over maxRequestBytes, keeping newest full-size untouched and never mutating saved history", async () => {
-		// Three noisy 320x200 PNGs are ~240 KiB base64 each (~720 KiB total).
-		// Set maxRequestBytes so 2 full-size + 1 shrunk fits (~560 KiB), forcing only the oldest image to shrink.
 		const singleLen = img1.length;
 		const model = makeModel({
 			inputLimits: {
@@ -181,7 +215,7 @@ describe("fitContextImagesToRequestLimit", () => {
 			toolResultWithImage("call_3", img3),
 		];
 		const context = normalizeContext({ messages: originalMessages });
-		const cache = new RequestImageFitCache();
+		const cache = createRequestImageFitCache();
 
 		const fitted = await fitContextImagesToRequestLimit(model, context, cache);
 		expect(fitted).not.toBe(context);
@@ -194,7 +228,6 @@ describe("fitContextImagesToRequestLimit", () => {
 		const fittedImg1 = m1.content.find((p): p is ImageContent => p.type === "image");
 		const fittedImg2 = m2.content.find((p): p is ImageContent => p.type === "image");
 
-		// Oldest image was resized and gained a dimension note; newest two stayed byte-identical full-size!
 		expect(fittedImg0).toBeDefined();
 		expect(fittedImg0!.data.length).toBeLessThan(img1.length);
 		expect(m0.content.some((p) => p.type === "text" && p.text.includes("original 320x200"))).toBe(true);
@@ -211,15 +244,13 @@ describe("fitContextImagesToRequestLimit", () => {
 
 	it("compresses uncompressed PNGs within 2000x2000 without downscaling or emitting a no-op dimension note, keeping prefix byte-identical as later turns append", async () => {
 		const img4 = makeNoisyPngBase64(320, 200, 4);
-		// Default resize options (2000x2000, 4.5 MiB) cover 320x200 PNGs; cap maxRequestBytes so oldest PNGs
-		// re-encode to JPEG at native 320x200 while the newest screenshot stays untouched full-size PNG.
 		const model = makeModel({
 			inputLimits: {
 				maxRequestBytes: Math.floor(img1.length * 2.8),
 				images: { maxPerRequest: 10 },
 			},
 		});
-		const cache = new RequestImageFitCache();
+		const cache = createRequestImageFitCache();
 
 		const turn1 = normalizeContext({
 			messages: [
@@ -233,14 +264,11 @@ describe("fitContextImagesToRequestLimit", () => {
 		const out0Turn1 = m0Turn1.content.find((p): p is ImageContent => p.type === "image");
 		expect(out0Turn1?.mimeType).toBe("image/jpeg");
 		expect(out0Turn1!.data.length).toBeLessThan(img1.length);
-		// Dimensions stayed 320x200, so no redundant "Multiply x coordinates by 320/320" note is added.
 		expect(m0Turn1.content.some((p) => p.type === "text" && p.text.includes("Multiply x coordinates"))).toBe(false);
-		// Newest screenshot stayed full-size PNG untouched.
 		expect((fitted1.messages[2] as ToolResultMessage).content.find((p) => p.type === "image")).toEqual(
 			imagePart(img3),
 		);
 
-		// Appending a 4th screenshot keeps message 0 byte-identical for prompt-cache prefix reuse.
 		const turn2 = normalizeContext({
 			messages: [...turn1.messages, toolResultWithImage("call_4", img4)],
 		});
@@ -269,20 +297,17 @@ describe("fitContextImagesToRequestLimit", () => {
 
 		const fitted = await fitContextImagesToRequestLimit(model, context);
 
-		// userMsg had 3 images > maxPerMessage(2), so its oldest (img1) dropped, leaving img2 & img3.
 		const fittedUser = fitted.messages[2] as UserMessage;
 		const userParts = fittedUser.content as Array<{ type: string; data?: string; text?: string }>;
 		expect(userParts[0]).toEqual({ type: "text", text: "[Image omitted: exceeds model per-message image limit.]" });
 		expect(userParts[1]?.data).toBe(img2);
 		expect(userParts[2]?.data).toBe(img3);
 
-		// Across the whole request, 4 remained (call_old, call_mid, img2, img3) > maxPerRequest(3), so call_old dropped.
 		const fittedOld = fitted.messages[0] as ToolResultMessage;
 		expect(fittedOld.content[1]).toEqual({
 			type: "text",
 			text: "[Image omitted: exceeds model per-request image limit.]",
 		});
-		// call_mid stayed intact.
 		expect((fitted.messages[1] as ToolResultMessage).content[1]).toEqual(imagePart(img2));
 	});
 
@@ -305,8 +330,10 @@ describe("fitContextImagesToRequestLimit", () => {
 	});
 
 	it("falls back to omitting oldest images when even resized images cannot fit a tiny byte cap", async () => {
+		// Two toolResult envelopes with omitted placeholders are ~390 bytes; a 420-byte cap leaves
+		// too little room for even a minimal 1x1 PNG, exercising the Phase 5 omission fallback.
 		const model = makeModel({
-			inputLimits: { maxRequestBytes: 1_500 },
+			inputLimits: { maxRequestBytes: 420 },
 		});
 		const context = normalizeContext({
 			messages: [toolResultWithImage("call_1", img1), toolResultWithImage("call_2", img2)],
@@ -334,18 +361,18 @@ describe("fitContextImagesToRequestLimit", () => {
 		);
 	});
 
-	it("applies fixed-tier tighter resize when gentle resize alone still exceeds maxRequestBytes and keeps earlier images byte-identical as later turns append", async () => {
+	it("applies deterministic halving tiers when gentle resize alone still exceeds maxRequestBytes and keeps earlier images byte-identical as later turns append", async () => {
 		const img4 = makeNoisyPngBase64(320, 200, 4);
 		// Two 320x200 noisy PNGs compress to ~115 KiB JPEG each after gentle resize (~230 KiB total).
 		// Cap maxRequestBytes at 205 KiB so Phase 3 alone is insufficient and Phase 4 steps message 0
-		// down to a fixed byte tier (64 KiB). Appending a third image keeps message 0 byte-identical.
+		// down to a deterministic halving tier (~72 KiB). Appending a third image keeps message 0 byte-identical.
 		const model = makeModel({
 			inputLimits: {
 				maxRequestBytes: 205 * 1024,
 				images: { maxPerRequest: 10 },
 			},
 		});
-		const cache = new RequestImageFitCache();
+		const cache = createRequestImageFitCache();
 		const turn1 = normalizeContext({
 			messages: [toolResultWithImage("call_1", img1), toolResultWithImage("call_2", img2)],
 		});
@@ -358,10 +385,10 @@ describe("fitContextImagesToRequestLimit", () => {
 
 		expect(out0).toBeDefined();
 		expect(out1).toBeDefined();
-		expect(out0!.data.length).toBeLessThanOrEqual(64 * 1024);
+		expect(out0!.data.length).toBeLessThan(75 * 1024);
 		expect(Buffer.byteLength(JSON.stringify(fitted1.messages), "utf8")).toBeLessThanOrEqual(205 * 1024);
 
-		// Appending a 3rd image enters Phase 4 again; message 0 must reuse the exact same fixed-tier encoding.
+		// Appending a 3rd image enters Phase 4 again; message 0 must reuse the exact same halving-tier encoding.
 		const turn2 = normalizeContext({
 			messages: [...turn1.messages, toolResultWithImage("call_4", img4)],
 		});

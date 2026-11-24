@@ -97,7 +97,7 @@ import {
 	validateExtensionProvider,
 } from "./provider-composer.ts";
 import { withPersonalizedCatalog, withRemoteCatalog } from "./remote-catalog-provider.ts";
-import { fitContextImagesToRequestLimit, RequestImageFitCache } from "./request-image-budget.ts";
+import { createRequestImageFitCache, fitContextImagesToRequestLimit } from "./request-image-budget.ts";
 import { RuntimeCredentials } from "./runtime-credentials.ts";
 import {
 	createVirtualModel,
@@ -325,7 +325,7 @@ export class ModelRuntime implements Models {
 	private availabilityError: string | undefined;
 	private authCheckErrors: ReadonlyMap<string, Error> = new Map();
 	private readonly credentialOperations = new Map<string, Promise<unknown>>();
-	private readonly requestImageFitCache = new RequestImageFitCache();
+	private readonly requestImageFitCache = createRequestImageFitCache();
 
 	private constructor(
 		credentials: RuntimeCredentials,

@@ -9,39 +9,21 @@ import type {
 	TranscriptContext,
 	UserMessage,
 } from "@earendil-works/pi-ai";
-import { formatDimensionNote, type ImageResizeOptions, type ResizedImage, resizeImage } from "../utils/image-resize.ts";
-
-const CLOUDFLARE_AI_GATEWAY_HOST = "gateway.ai.cloudflare.com";
-
-/**
- * Conservative request byte ceiling for Cloudflare AI Gateway passthrough routes.
- * Cloudflare Workers isolates have a 128 MiB memory limit; measured live on the WorkOS
- * gateway (`google-ai-studio`), 27–37 MiB requests succeeded while 46–60 MiB streaming
- * requests evicted isolates mid-stream without logging.
- */
-export const CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES = 32 * 1024 * 1024;
-
-/** Reserve headroom for provider-specific wire framing/escaping beyond TranscriptContext JSON. */
-const WIRE_FRAMING_RESERVE_RATIO = 0.05;
-const MAX_WIRE_FRAMING_RESERVE_BYTES = 2 * 1024 * 1024;
-const DEFAULT_CACHE_MAX_BYTES = 64 * 1024 * 1024;
-const DEFAULT_GENTLE_MAX_BYTES = 4.5 * 1024 * 1024;
-const MIN_TARGET_IMAGE_BYTES = 16 * 1024;
+import { LRUCache } from "lru-cache";
+import {
+	DEFAULT_IMAGE_RESIZE_MAX_BYTES,
+	formatDimensionNote,
+	type ImageResizeOptions,
+	type ResizedImage,
+	resizeImage,
+} from "../utils/image-resize.ts";
 
 /**
- * Fixed descending base64 byte tiers for tighter oldest-first passes when Phase 3 still exceeds
- * `byteBudget`. Because each tier is a fixed constant independent of whole-request excess, every
- * historical image maps to a stable cache key and stays byte-identical as later turns append.
+ * Matches Google's 100 MiB inline request payload limit (`packages/ai/src/api/google-catalog.ts`),
+ * the largest inline multimodal `maxRequestBytes` limit across Google (100 MiB), Anthropic (32 MiB),
+ * and Bedrock (25 MiB), so a single full-limit request never evicts its own prefix entries.
  */
-const TIGHTER_MAX_BYTES_TIERS = [
-	1024 * 1024,
-	512 * 1024,
-	256 * 1024,
-	128 * 1024,
-	64 * 1024,
-	32 * 1024,
-	MIN_TARGET_IMAGE_BYTES,
-] as const;
+const DEFAULT_IMAGE_FIT_CACHE_MAX_BYTES = 100 * 1024 * 1024;
 
 const OMITTED_PER_MESSAGE_TEXT = "[Image omitted: exceeds model per-message image limit.]";
 const OMITTED_PER_REQUEST_TEXT = "[Image omitted: exceeds model per-request image limit.]";
@@ -49,37 +31,27 @@ const OMITTED_REQUEST_BYTES_TEXT = "[Image omitted: exceeds model request size l
 
 export interface EffectiveImageRequestLimits {
 	maxRequestBytes?: number;
-	byteBudget?: number;
 	maxImagesPerRequest?: number;
 	maxImagesPerMessage?: number;
 	resizeOptions?: ImageResizeOptions;
 }
 
-function isPositiveLimit(value: number | undefined): value is number {
-	return typeof value === "number" && Number.isFinite(value) && value >= 1;
+export interface CachedResizeResult {
+	result: ResizedImage | null;
 }
 
-export function isCloudflareAiGatewayUrl(baseUrl: string | undefined): boolean {
-	if (!baseUrl) return false;
-	try {
-		return new URL(baseUrl).hostname.toLowerCase() === CLOUDFLARE_AI_GATEWAY_HOST;
-	} catch {
-		return false;
-	}
+export type RequestImageFitCache = LRUCache<string, CachedResizeResult>;
+
+function isPositiveLimit(value: number | undefined): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 1;
 }
 
 export function resolveEffectiveImageRequestLimits(model: Model<Api>): EffectiveImageRequestLimits | undefined {
 	if (!model.input.includes("image")) return undefined;
 
-	const rawMaxBytes = isPositiveLimit(model.inputLimits?.maxRequestBytes)
+	const maxRequestBytes = isPositiveLimit(model.inputLimits?.maxRequestBytes)
 		? Math.floor(model.inputLimits.maxRequestBytes)
 		: undefined;
-	const maxRequestBytes = isCloudflareAiGatewayUrl(model.baseUrl)
-		? rawMaxBytes !== undefined
-			? Math.min(rawMaxBytes, CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES)
-			: CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES
-		: rawMaxBytes;
-
 	const maxImagesPerRequest = isPositiveLimit(model.inputLimits?.images?.maxPerRequest)
 		? Math.floor(model.inputLimits.images.maxPerRequest)
 		: undefined;
@@ -91,24 +63,12 @@ export function resolveEffectiveImageRequestLimits(model: Model<Api>): Effective
 		return undefined;
 	}
 
-	const reserve =
-		maxRequestBytes !== undefined
-			? Math.min(Math.floor(maxRequestBytes * WIRE_FRAMING_RESERVE_RATIO), MAX_WIRE_FRAMING_RESERVE_BYTES)
-			: undefined;
-	const byteBudget =
-		maxRequestBytes !== undefined && reserve !== undefined ? Math.max(1, maxRequestBytes - reserve) : undefined;
-
 	return {
-		...(maxRequestBytes !== undefined ? { maxRequestBytes, byteBudget } : {}),
+		...(maxRequestBytes !== undefined ? { maxRequestBytes } : {}),
 		...(maxImagesPerRequest !== undefined ? { maxImagesPerRequest } : {}),
 		...(maxImagesPerMessage !== undefined ? { maxImagesPerMessage } : {}),
 		...(model.inputLimits?.images?.resize ? { resizeOptions: model.inputLimits.images.resize } : {}),
 	};
-}
-
-interface CacheEntry {
-	result: ResizedImage | null;
-	bytes: number;
 }
 
 function cacheKey(sourceData: string, sourceMimeType: string, options?: ImageResizeOptions): string {
@@ -128,49 +88,26 @@ function cacheKey(sourceData: string, sourceMimeType: string, options?: ImageRes
  * Stores only resized outputs (never retains full-size source strings), so repeated turns and
  * cache-warming replays emit byte-identical images without redoing Photon work.
  */
-export class RequestImageFitCache {
-	private readonly entries = new Map<string, CacheEntry>();
-	private totalBytes = 0;
-	private readonly maxBytes: number;
+export function createRequestImageFitCache(maxSize: number = DEFAULT_IMAGE_FIT_CACHE_MAX_BYTES): RequestImageFitCache {
+	return new LRUCache<string, CachedResizeResult>({
+		maxSize,
+		sizeCalculation: (entry) => Math.max(1, entry.result ? entry.result.data.length : 1),
+	});
+}
 
-	constructor(maxBytes: number = DEFAULT_CACHE_MAX_BYTES) {
-		this.maxBytes = maxBytes;
-	}
+async function resizeCached(
+	cache: RequestImageFitCache,
+	sourceData: string,
+	sourceMimeType: string,
+	options?: ImageResizeOptions,
+): Promise<ResizedImage | null> {
+	const key = cacheKey(sourceData, sourceMimeType, options);
+	const cached = cache.get(key);
+	if (cached !== undefined) return cached.result;
 
-	clear(): void {
-		this.entries.clear();
-		this.totalBytes = 0;
-	}
-
-	async getOrResize(
-		sourceData: string,
-		sourceMimeType: string,
-		options?: ImageResizeOptions,
-	): Promise<ResizedImage | null> {
-		const key = cacheKey(sourceData, sourceMimeType, options);
-		const cached = this.entries.get(key);
-		if (cached !== undefined) {
-			// Refresh LRU recency.
-			this.entries.delete(key);
-			this.entries.set(key, cached);
-			return cached.result;
-		}
-
-		const result = await resizeImage(Buffer.from(sourceData, "base64"), sourceMimeType, options).catch(() => null);
-		const entryBytes = result ? result.data.length * 2 + 256 : 128;
-		if (entryBytes <= this.maxBytes) {
-			this.entries.set(key, { result, bytes: entryBytes });
-			this.totalBytes += entryBytes;
-			while (this.totalBytes > this.maxBytes) {
-				const oldestKey = this.entries.keys().next().value;
-				if (oldestKey === undefined) break;
-				const oldest = this.entries.get(oldestKey);
-				if (oldest) this.totalBytes -= oldest.bytes;
-				this.entries.delete(oldestKey);
-			}
-		}
-		return result;
-	}
+	const result = await resizeImage(Buffer.from(sourceData, "base64"), sourceMimeType, options).catch(() => null);
+	cache.set(key, { result });
+	return result;
 }
 
 type ImageBearingMessage =
@@ -212,7 +149,7 @@ function measureWireMessageBytes(message: Message): number {
 	}
 }
 
-function roughWireUpperBoundBytes(messages: readonly Message[]): { imageBytes: number; roughTotal: number } {
+function roughWireUpperBoundBytes(messages: readonly Message[]): number {
 	let imageBytes = 0;
 	let nonImageChars = 0;
 	for (const message of messages) {
@@ -261,7 +198,7 @@ function roughWireUpperBoundBytes(messages: readonly Message[]): { imageBytes: n
 		}
 	}
 	// UTF-8 multi-byte + JSON escaping worst-case multiplier for non-base64 text.
-	return { imageBytes, roughTotal: imageBytes + nonImageChars * 4 + messages.length * 128 };
+	return imageBytes + nonImageChars * 4 + messages.length * 128;
 }
 
 interface ImageSlot {
@@ -273,6 +210,7 @@ interface ImageSlot {
 	notePart?: TextContent;
 	currentBytes: number;
 	dropped: boolean;
+	exhausted: boolean;
 }
 
 function slotSerializedBytes(part: ImageContent | TextContent, notePart?: TextContent): number {
@@ -357,8 +295,7 @@ function applyResizedSlot(slot: ImageSlot, resized: ResizedImage): number {
 
 /**
  * Enforce `model.inputLimits` (`maxRequestBytes`, `images.maxPerMessage`, `images.maxPerRequest`)
- * plus Cloudflare AI Gateway's 32 MiB request ceiling on a projected transcript context without
- * mutating saved session history.
+ * on a projected transcript context without mutating saved session history.
  *
  * When the request already fits within all active limits, returns `context` unchanged so images
  * remain at full resolution with zero resizing overhead. When a limit would be exceeded, shrinks
@@ -368,7 +305,7 @@ function applyResizedSlot(slot: ImageSlot, resized: ResizedImage): number {
 export async function fitContextImagesToRequestLimit(
 	model: Model<Api>,
 	context: TranscriptContext,
-	cache: RequestImageFitCache = new RequestImageFitCache(),
+	cache: RequestImageFitCache = createRequestImageFitCache(),
 	signal?: AbortSignal,
 ): Promise<TranscriptContext> {
 	const limits = resolveEffectiveImageRequestLimits(model);
@@ -394,6 +331,7 @@ export async function fitContextImagesToRequestLimit(
 				currentPart: part,
 				currentBytes: 0,
 				dropped: false,
+				exhausted: false,
 			};
 			slots.push(slot);
 			const list = slotsByMessage.get(messageIndex);
@@ -410,9 +348,8 @@ export async function fitContextImagesToRequestLimit(
 	const exceedsPerRequest = limits.maxImagesPerRequest !== undefined && slots.length > limits.maxImagesPerRequest;
 
 	if (!exceedsPerMessage && !exceedsPerRequest) {
-		if (limits.byteBudget === undefined) return context;
-		const { roughTotal } = roughWireUpperBoundBytes(context.messages);
-		if (roughTotal <= limits.byteBudget) return context;
+		if (limits.maxRequestBytes === undefined) return context;
+		if (roughWireUpperBoundBytes(context.messages) <= limits.maxRequestBytes) return context;
 	}
 
 	// Exact wire-byte accounting only when near/above a limit.
@@ -424,11 +361,8 @@ export async function fitContextImagesToRequestLimit(
 		slot.currentBytes = slotSerializedBytes(slot.currentPart);
 	}
 
-	if (
-		!exceedsPerMessage &&
-		!exceedsPerRequest &&
-		(limits.byteBudget === undefined || totalBytes <= limits.byteBudget)
-	) {
+	const maxRequestBytes = limits.maxRequestBytes;
+	if (!exceedsPerMessage && !exceedsPerRequest && (maxRequestBytes === undefined || totalBytes <= maxRequestBytes)) {
 		return context;
 	}
 
@@ -455,28 +389,28 @@ export async function fitContextImagesToRequestLimit(
 		}
 	}
 
-	const byteBudget = limits.byteBudget;
-	if (byteBudget !== undefined && totalBytes > byteBudget) {
+	if (maxRequestBytes !== undefined && totalBytes > maxRequestBytes) {
 		const omittedBytes = slotSerializedBytes({ type: "text", text: OMITTED_REQUEST_BYTES_TEXT });
 		const activeImages = slots.filter((slot) => !slot.dropped);
 		const nonImageBytes =
 			totalBytes - activeImages.reduce((sum, slot) => sum + Math.max(0, slot.currentBytes - omittedBytes), 0);
 
-		// Phase 2: if text/tool history alone exceeds the byte limit, image changes cannot make the request fit.
-		if (nonImageBytes <= byteBudget) {
-			// Phase 3: gentle oldest-first resize using model's resize profile (keeps newest screenshots full-size).
+		// Phase 2: if text/tool history alone exceeds maxRequestBytes, image changes cannot make the request fit.
+		if (nonImageBytes <= maxRequestBytes) {
+			const configuredMaxBytes = limits.resizeOptions?.maxBytes ?? DEFAULT_IMAGE_RESIZE_MAX_BYTES;
+
+			// Phase 3: gentle oldest-first resize using the model's resize profile (keeps newest full-size).
 			// Cap maxBytes at this image's own source base64 length (intrinsic to the image, independent of
 			// later turns for prompt-cache stability) so uncompressed PNGs within 2000x2000 still re-encode
 			// to compact JPEG instead of short-circuiting unchanged.
 			for (const slot of activeImages) {
-				if (totalBytes <= byteBudget) break;
+				if (totalBytes <= maxRequestBytes) break;
 				throwIfAborted(signal);
-				const configuredMaxBytes = limits.resizeOptions?.maxBytes ?? DEFAULT_GENTLE_MAX_BYTES;
 				const gentleOptions: ImageResizeOptions = {
 					...limits.resizeOptions,
-					maxBytes: Math.min(configuredMaxBytes, Math.max(MIN_TARGET_IMAGE_BYTES, slot.sourceData.length)),
+					maxBytes: Math.min(configuredMaxBytes, slot.sourceData.length),
 				};
-				const resized = await cache.getOrResize(slot.sourceData, slot.sourceMimeType, gentleOptions);
+				const resized = await resizeCached(cache, slot.sourceData, slot.sourceMimeType, gentleOptions);
 				if (resized) {
 					const delta = applyResizedSlot(slot, resized);
 					if (delta < 0) {
@@ -486,35 +420,39 @@ export async function fitContextImagesToRequestLimit(
 				}
 			}
 
-			// Phase 4: tighter proportional oldest-first resize from original bytes if still over budget.
-			// Phase 4: tighter oldest-first resize through fixed descending byte tiers so each image's
-			// resize options stay independent of request-wide excess (preserving cache hits and prompt prefixes).
-			const configuredMaxBytes = limits.resizeOptions?.maxBytes ?? DEFAULT_GENTLE_MAX_BYTES;
-			for (const tierMaxBytes of TIGHTER_MAX_BYTES_TIERS) {
-				if (totalBytes <= byteBudget) break;
-				const effectiveTierMaxBytes = Math.min(configuredMaxBytes, tierMaxBytes);
+			// Phase 4: tighter oldest-first resize through deterministic halving steps from `configuredMaxBytes`.
+			// Because each step depends only on the model's resize cap (not session-wide excess), historical
+			// images hit the same cache keys and remain byte-identical as later turns append.
+			for (
+				let tierMaxBytes = Math.floor(configuredMaxBytes / 2);
+				tierMaxBytes >= 1 && totalBytes > maxRequestBytes;
+				tierMaxBytes = Math.floor(tierMaxBytes / 2)
+			) {
+				if (tierMaxBytes >= maxRequestBytes) continue;
 				for (const slot of activeImages) {
-					if (totalBytes <= byteBudget) break;
-					if (slot.dropped || slot.currentPart.type !== "image") continue;
-					if (slot.currentPart.data.length <= effectiveTierMaxBytes) continue;
+					if (totalBytes <= maxRequestBytes) break;
+					if (slot.dropped || slot.exhausted || slot.currentPart.type !== "image") continue;
+					if (slot.currentPart.data.length <= tierMaxBytes) continue;
 					throwIfAborted(signal);
-					const resized = await cache.getOrResize(slot.sourceData, slot.sourceMimeType, {
+					const resized = await resizeCached(cache, slot.sourceData, slot.sourceMimeType, {
 						...limits.resizeOptions,
-						maxBytes: effectiveTierMaxBytes,
+						maxBytes: tierMaxBytes,
 					});
-					if (resized) {
-						const delta = applyResizedSlot(slot, resized);
-						if (delta < 0) {
-							totalBytes += delta;
-							changed = true;
-						}
+					if (!resized) {
+						slot.exhausted = true;
+						continue;
+					}
+					const delta = applyResizedSlot(slot, resized);
+					if (delta < 0) {
+						totalBytes += delta;
+						changed = true;
 					}
 				}
 			}
 
-			// Phase 5: last-resort oldest-first omission if images still cannot fit inside byteBudget.
+			// Phase 5: last-resort oldest-first omission if images still cannot fit inside maxRequestBytes.
 			for (const slot of slots) {
-				if (totalBytes <= byteBudget) break;
+				if (totalBytes <= maxRequestBytes) break;
 				if (slot.dropped) continue;
 				totalBytes += dropSlot(slot, OMITTED_REQUEST_BYTES_TEXT);
 				changed = true;
