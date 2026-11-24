@@ -1,13 +1,6 @@
+import { normalizeOpenAIModel } from "../../src/api/openai-catalog.ts";
 import type { ClassifierModel, Model } from "../../src/types.ts";
-import {
-	addMissing,
-	type ChatModel,
-	defineProvider,
-	mergeCompat,
-	mergeThinking,
-	modelsDevModels,
-	withInputLimits,
-} from "../define.ts";
+import { addMissing, type ChatModel, defineProvider, mergeCompat, mergeThinking, modelsDevModels } from "../define.ts";
 import {
 	enableOpenAiGrammarTools,
 	enableOpenAiMidConvoSystemMessages,
@@ -138,13 +131,10 @@ export default defineProvider({
 		// https://developers.openai.com/api/docs/guides/prompt-caching
 		if (model.cost.cacheWrite > 0) {
 			mergeCompat(responsesModel, { supportsExplicitPromptCacheMode: true });
-			// OpenAI documents 30m default TTL and 12h extended TTL via prompt_cache_options.ttl.
-			// Live-verified warm replays at max_output_tokens: 16 hit the cached prefix cleanly.
-			model.promptCache = { short: 1800, long: 43200 };
 		}
 		if (OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id)) {
 			mergeCompat(responsesModel, { supportsMidConvoEffort: true });
 		}
-		withInputLimits(model, { maxRequestBytes: 512 * 1024 * 1024, images: { maxPerRequest: 1500 } });
+		Object.assign(model, normalizeOpenAIModel(model));
 	},
 });

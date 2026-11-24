@@ -1,3 +1,4 @@
+import { applyAnthropicAllowedFallbackModels } from "../../src/api/anthropic-catalog.ts";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
@@ -6,7 +7,8 @@ import {
 	normalizeCloudflareModel,
 } from "../../src/api/cloudflare.ts";
 import type { Model } from "../../src/types.ts";
-import { type ChatModel, defineProvider, mergeCompat, modelsDevModels, withInputLimits } from "../define.ts";
+import { type ChatModel, defineProvider, mergeCompat, modelsDevModels } from "../define.ts";
+import { supportsClaudeMidConvoEffort } from "../families/anthropic.ts";
 import { enableOpenAiGrammarTools, OPENAI_STANDARD_COSTS, withOpenAiLongContextPricing } from "../families/openai.ts";
 import { OPENAI_DECISIONS_MODELS } from "./openai.ts";
 
@@ -106,12 +108,14 @@ export default defineProvider({
 	finalize: (model) => {
 		if (model.api === "openai-responses") {
 			mergeCompat(model as Model<"openai-responses">, { supportsStrictMode: true });
-			withInputLimits(model, { images: { maxPerRequest: 1500 } });
 		}
 		if (model.api === "anthropic-messages") {
 			mergeCompat(model as Model<"anthropic-messages">, { supportsStrictTools: true });
 		}
 		enableOpenAiGrammarTools(model);
 		Object.assign(model, normalizeCloudflareModel(model));
+	},
+	finalizeAll: (models) => {
+		applyAnthropicAllowedFallbackModels(models, supportsClaudeMidConvoEffort);
 	},
 });

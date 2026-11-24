@@ -133,11 +133,13 @@ describe("Cloudflare Anthropic passthrough positional defaults", () => {
 			expect((model.compat as AnthropicMessagesCompat | undefined)?.supportsStrictTools).toBe(true);
 		}
 		const fable52 = routedAnthropic.find((entry) => entry.id === "claude-fable-5-2");
+		const opus5 = routedAnthropic.find((entry) => entry.id === "claude-opus-5");
+		if (!opus5) throw new Error("Missing Cloudflare claude-opus-5");
 		expect((fable52?.compat as AnthropicMessagesCompat | undefined)?.allowedFallbackModels).toEqual([
 			{
 				provider: "cloudflare-ai-gateway",
 				model: "claude-opus-5",
-				cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+				cost: opus5.cost,
 			},
 		]);
 		expect(actual.find((entry) => entry.id === "claude-sonnet-5-5")).toEqual({

@@ -1,6 +1,11 @@
 import type { AnthropicMessagesCompat, AnyModel, Api, Model } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
-import { GPT_6_NO_NONE_EFFORT_MODEL_IDS } from "./openai-catalog.ts";
+import { anthropicMaxImagesPerRequest } from "./anthropic-catalog.ts";
+import {
+	GPT_6_NO_NONE_EFFORT_MODEL_IDS,
+	OPENAI_EXPLICIT_PROMPT_CACHE_TTL,
+	OPENAI_RESPONSES_INPUT_LIMITS,
+} from "./openai-catalog.ts";
 
 /** Workers AI direct endpoint. */
 export const CLOUDFLARE_WORKERS_AI_BASE_URL =
@@ -94,18 +99,6 @@ const CLAUDE_TEMPERATURE_UNSUPPORTED_FRAGMENTS = [
 	"mythos-5.2",
 ];
 
-/**
- * Default Anthropic server-side fallback allowlist for Cloudflare `/anthropic` passthrough models,
- * matching `catalog/providers/anthropic.ts` (filtered for mid-conversation effort compatibility).
- */
-const CLAUDE_FABLE_5_2_FALLBACKS = [
-	{
-		provider: "cloudflare-ai-gateway",
-		model: "claude-opus-5",
-		cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-	},
-];
-
 function supportsCloudflareClaudeMidConvoSystemMessages(modelId: string): boolean {
 	return (
 		/^claude-opus-(?:4[.-]8|5(?:[.-]5)?)(?:-\d{8})?$/.test(modelId) ||
@@ -133,15 +126,21 @@ function normalizeCloudflareInputLimits(model: Model<Api>): Model<Api>["inputLim
 		model.api === "anthropic-messages" &&
 		CLOUDFLARE_AI_GATEWAY_ANTHROPIC_URL_PATTERN.test(model.baseUrl) &&
 		model.inputLimits?.images?.maxPerRequest === undefined;
-	if (!needsByteCap && !needsAnthropicImageLimit) return model.inputLimits;
+	const needsOpenAIImageLimit =
+		model.api === "openai-responses" &&
+		CLOUDFLARE_AI_GATEWAY_OPENAI_URL_PATTERN.test(model.baseUrl) &&
+		model.inputLimits?.images?.maxPerRequest === undefined;
+	if (!needsByteCap && !needsAnthropicImageLimit && !needsOpenAIImageLimit) return model.inputLimits;
 	return {
 		...model.inputLimits,
 		...(needsByteCap ? { maxRequestBytes: CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES } : {}),
-		...(needsAnthropicImageLimit
+		...(needsAnthropicImageLimit || needsOpenAIImageLimit
 			? {
 					images: {
 						...model.inputLimits?.images,
-						maxPerRequest: model.contextWindow === 200000 ? 100 : 600,
+						maxPerRequest: needsAnthropicImageLimit
+							? anthropicMaxImagesPerRequest(model.contextWindow)
+							: OPENAI_RESPONSES_INPUT_LIMITS.images.maxPerRequest,
 					},
 				}
 			: {}),
@@ -161,7 +160,7 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 		return {
 			...model,
 			...(inputLimitsChanged ? { inputLimits } : {}),
-			...(supportsToolFeatures ? { promptCache: model.promptCache ?? { short: 1800, long: 43200 } } : {}),
+			...(supportsToolFeatures ? { promptCache: model.promptCache ?? { ...OPENAI_EXPLICIT_PROMPT_CACHE_TTL } } : {}),
 			compat: {
 				supportsMidConvoSystemMessages: true,
 				...(supportsToolFeatures
@@ -196,14 +195,10 @@ export function normalizeCloudflareModel<TModel extends AnyModel>(model: TModel)
 		lowerId.includes(fragment),
 	);
 	const disablesOff = midConvoEffort && !CLAUDE_DISABLED_THINKING_MODELS.has(lowerId.replace(/-\d{8}$/, ""));
-	const isFable52 = /^claude-fable-5[.-]2(?:-\d{8})?$/.test(lowerId);
 	const compat = {
 		supportsMidConvoSystemMessages: true,
 		supportsMidConvoToolChanges: true,
 		supportsStrictTools: true,
-		...(isFable52
-			? { allowedFallbackModels: CLAUDE_FABLE_5_2_FALLBACKS.map((entry) => ({ ...entry, cost: { ...entry.cost } })) }
-			: {}),
 		...(midConvoEffort ? { supportsMidConvoEffort: true } : {}),
 		forceAdaptiveThinking: true,
 		...(temperatureUnsupported ? { supportsTemperature: false } : {}),

@@ -703,13 +703,7 @@ export async function processResponsesStream<TApi extends Api>(
 			output.responseId = response.id;
 		}
 		if (response?.usage) {
-			const inputDetails = response.usage.input_tokens_details as
-				| {
-						cached_tokens?: number;
-						cache_write_tokens?: number;
-						cache_write_tokens_details?: { ttl_12h_tokens?: number; ttl_30m_tokens?: number };
-				  }
-				| undefined;
+			const inputDetails = response.usage.input_tokens_details;
 			const cachedTokens = inputDetails?.cached_tokens || 0;
 			const cacheWriteTokens = inputDetails?.cache_write_tokens || 0;
 			const cacheWrite12hTokens = inputDetails?.cache_write_tokens_details?.ttl_12h_tokens || 0;

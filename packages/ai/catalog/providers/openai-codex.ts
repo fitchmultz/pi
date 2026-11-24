@@ -1,5 +1,6 @@
+import { normalizeOpenAIModel } from "../../src/api/openai-catalog.ts";
 import type { Model } from "../../src/types.ts";
-import { defineProvider, mergeCompat, mergeThinking, withInputLimits } from "../define.ts";
+import { defineProvider, mergeCompat, mergeThinking } from "../define.ts";
 import {
 	enableOpenAiGrammarTools,
 	enableOpenAiMidConvoSystemMessages,
@@ -71,6 +72,6 @@ export default defineProvider({
 		if (OPENAI_MID_CONVO_EFFORT_MODEL_IDS.has(model.id)) {
 			mergeCompat(model as Model<"openai-codex-responses">, { supportsMidConvoEffort: true });
 		}
-		withInputLimits(model, { maxRequestBytes: 512 * 1024 * 1024, images: { maxPerRequest: 1500 } });
+		Object.assign(model, normalizeOpenAIModel(model));
 	},
 });
