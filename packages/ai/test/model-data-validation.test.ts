@@ -148,6 +148,56 @@ describe("published model catalog hydration", () => {
 		},
 	);
 
+	it("hydrates Z.AI GLM-5.3+ entries onto OpenAI Responses while preserving custom URLs and zai-coding-cn completions", () => {
+		const { dataDir, packageRoot, values } = createFixture("zai");
+		const catalogPath = join(packageRoot, "catalog.json");
+		const base = chatModel(values);
+		writeFileSync(
+			catalogPath,
+			JSON.stringify({
+				zai: [
+					{
+						...base,
+						id: "glm-5.4",
+						provider: "zai",
+						api: "openai-completions",
+						baseUrl: "https://api.z.ai/api/coding/paas/v4",
+						compat: { thinkingFormat: "zai", zaiToolStream: true, supportsStrictMode: true },
+					},
+					{
+						...base,
+						id: "glm-5.2",
+						provider: "zai",
+						api: "openai-completions",
+						baseUrl: "https://api.z.ai/api/coding/paas/v4",
+						compat: { thinkingFormat: "zai", zaiToolStream: true },
+					},
+				],
+			}),
+		);
+		hydrateModelCatalog(packageRoot, catalogPath);
+		const groups: Record<string, Record<string, Record<string, unknown>>> = JSON.parse(
+			readFileSync(join(dataDir, "zai.json"), "utf8"),
+		);
+		expect(groups["openai-responses"]["chat:glm-5.4"]).toMatchObject({
+			api: "openai-responses",
+			baseUrl: "https://api.z.ai/api/v1",
+			compat: {
+				supportsDeveloperRole: true,
+				supportsMidConvoSystemMessages: true,
+				supportsStrictMode: true,
+				supportsOpenAIGrammarTools: true,
+				supportsLongCacheRetention: false,
+			},
+		});
+		expect(groups["openai-responses"]["chat:glm-5.4"].compat).not.toHaveProperty("thinkingFormat");
+		expect(groups["openai-completions"]["chat:glm-5.2"]).toMatchObject({
+			api: "openai-completions",
+			baseUrl: "https://api.z.ai/api/coding/paas/v4",
+		});
+		expect(() => validateModelDataDirectory(readModelDataStructure(packageRoot), dataDir)).not.toThrow();
+	});
+
 	it("groups models by API and keys them by type and id", () => {
 		const { packageRoot, values } = createFixture();
 		const catalogPath = join(packageRoot, "catalog.json");

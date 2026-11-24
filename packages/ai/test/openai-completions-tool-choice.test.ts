@@ -459,9 +459,9 @@ describe("openai-completions tool_choice", () => {
 			});
 		}
 
+		expect(getModel("zai-coding-cn", "glm-5.3")!.compat?.supportsReasoningEffort).toBe(true);
 		for (const provider of ["zai", "zai-coding-cn"] as const) {
 			const glm53 = getModel(provider, "glm-5.3")!;
-			expect(glm53.compat?.supportsReasoningEffort).toBe(true);
 			expect(glm53.thinkingLevelMap).toEqual({
 				off: null,
 				minimal: null,

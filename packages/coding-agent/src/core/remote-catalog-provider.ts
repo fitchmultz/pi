@@ -10,6 +10,7 @@ import {
 import { normalizeCloudflareModel } from "@earendil-works/pi-ai/api/cloudflare";
 import { normalizeGoogleModel } from "@earendil-works/pi-ai/api/google-catalog";
 import { restoreKimiK3CacheWriteCost } from "@earendil-works/pi-ai/api/kimi";
+import { normalizeZaiModel } from "@earendil-works/pi-ai/api/zai-catalog";
 import { VERSION } from "../config.ts";
 import { fetchWithRetry } from "../utils/management-http.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
@@ -35,7 +36,9 @@ function isSupportedModelType(model: { type?: unknown }): boolean {
 function mergeModels(baseline: readonly AnyModel[], dynamic: readonly AnyModel[]): AnyModel[] {
 	const merged = new Map<string, AnyModel>();
 	for (const model of [...baseline, ...dynamic]) {
-		const normalized = normalizeGoogleModel(restoreKimiK3CacheWriteCost(normalizeCloudflareModel(model)));
+		const normalized = normalizeZaiModel(
+			normalizeGoogleModel(restoreKimiK3CacheWriteCost(normalizeCloudflareModel(model))),
+		);
 		merged.set(`${getModelType(normalized)}\0${normalized.id}`, normalized);
 	}
 	return [...merged.values()];

@@ -39,6 +39,49 @@ it("uses API-equivalent reference costs for Coding Plan models", () => {
 	}
 });
 
+it("exposes GLM-5.3+ on Z.AI via OpenAI Responses with verified compat defaults", () => {
+	for (const id of ["glm-5.3", "glm-5.3-flash", "glm-5.3-highspeed", "glm-5.4"] as const) {
+		expect(getBuiltinModel("zai", id), `zai/${id}`).toMatchObject({
+			id,
+			provider: "zai",
+			api: "openai-responses",
+			baseUrl: "https://api.z.ai/api/v1",
+			reasoning: true,
+			contextWindow: 1000000,
+			maxTokens: 131072,
+			thinkingLevelMap: {
+				off: null,
+				minimal: null,
+				low: "low",
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: "max",
+			},
+			compat: {
+				supportsDeveloperRole: true,
+				supportsMidConvoSystemMessages: true,
+				supportsStrictMode: true,
+				supportsOpenAIGrammarTools: true,
+				supportsLongCacheRetention: false,
+			},
+		});
+	}
+	expect(getBuiltinModel("zai", "glm-5.4").input).toEqual(["text", "image"]);
+	expect(getBuiltinModel("zai-coding-cn", "glm-5.4")).toMatchObject({
+		id: "glm-5.4",
+		provider: "zai-coding-cn",
+		api: "openai-completions",
+		baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+		input: ["text", "image"],
+		compat: {
+			thinkingFormat: "zai",
+			zaiToolStream: true,
+			supportsMidConvoSystemMessages: true,
+		},
+	});
+});
+
 it("keeps zero costs for Coding Plan models without a matching API price", () => {
 	const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 

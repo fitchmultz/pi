@@ -69,6 +69,7 @@ export const OPENAI_RESPONSES_TOOL_CALL_PROVIDERS: ReadonlySet<string> = new Set
 	"opencode",
 	"cloudflare-ai-gateway",
 	"azure",
+	"zai",
 ]);
 
 /** Fixed `reasoning.effort` while `configuration_update` items carry the effective thinking level. */
