@@ -73,6 +73,24 @@ describe("Cloudflare OpenAI positional defaults", () => {
 		});
 		const custom = { ...astra, baseUrl: "https://proxy.invalid/openai", compat: { supportsStrictMode: true } };
 		expect(normalizeCloudflareModel(custom)).toBe(custom);
+
+		const stale512 = normalizeCloudflareModel({
+			...astra,
+			inputLimits: { maxRequestBytes: 512 * 1024 * 1024, images: { maxPerRequest: 1500 } },
+		});
+		expect(stale512.inputLimits).toEqual({
+			maxRequestBytes: CLOUDFLARE_AI_GATEWAY_MAX_REQUEST_BYTES,
+			images: { maxPerRequest: 1500 },
+		});
+
+		const smaller16 = normalizeCloudflareModel({
+			...astra,
+			inputLimits: { maxRequestBytes: 16 * 1024 * 1024, images: { maxPerRequest: 1500 } },
+		});
+		expect(smaller16.inputLimits).toEqual({
+			maxRequestBytes: 16 * 1024 * 1024,
+			images: { maxPerRequest: 1500 },
+		});
 	});
 });
 
