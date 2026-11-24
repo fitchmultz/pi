@@ -17,7 +17,7 @@ import type {
 	ResponseStreamEvent,
 	ResponseToolSearchOutputItemParam,
 } from "openai/resources/responses/responses.js";
-import { calculateCost } from "../models.ts";
+import { calculateCost, getMidConvoToolSupport } from "../models.ts";
 import { wroteProviderSummary } from "../provider-summary.ts";
 import type {
 	Api,
@@ -42,12 +42,7 @@ import { shortHash } from "../utils/hash.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate, renderToolRemovalNotice } from "../utils/text.ts";
-import {
-	getInitialSystemMessage,
-	resolveTranscript,
-	resolveTranscriptTools,
-	type TranscriptToolSupport,
-} from "../utils/transcript.ts";
+import { getInitialSystemMessage, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
 	closeGrammarToolInputJson,
@@ -219,25 +214,6 @@ export interface ConvertResponsesToolsOptions {
 // =============================================================================
 
 /**
- * How a Responses transport expresses tool changes.
- *
- * `additional_tools` items accumulate: a later item adds tools and replaces same-name
- * definitions from earlier items, but it cannot replace a top-level tool and cannot remove any
- * tool (verified with strict schemas on the OpenAI, Codex, and Copilot backends, October 2026).
- * Like Codex, every tool is therefore declared in `additional_tools` items, starting with one
- * at the head of the input, and removals are announced as text. Synthetic tool search can
- * only add tools. Without mid-conversation system messages there is nothing to anchor.
- */
-export function getResponsesToolSupport(options: {
-	supportsMidConvoSystemMessages?: boolean;
-	supportsAdditionalTools?: boolean;
-	supportsToolSearch?: boolean;
-}): TranscriptToolSupport {
-	if (options.supportsMidConvoSystemMessages && options.supportsAdditionalTools) return "changes";
-	return options.supportsToolSearch ? "additions" : "none";
-}
-
-/**
  * Precedes every additional_tools item after the first. Without it, models read the latest item as
  * the complete tool set once a removal was announced; Codex precedes its incremental tool batches
  * with the same guidance. Restating the tools that are still unavailable keeps smaller models
@@ -287,7 +263,7 @@ export function convertResponsesMessages<TApi extends Api>(
 	};
 
 	const transformedMessages = transformMessages(normalizedContext.messages, model, normalizeToolCallId);
-	const toolSupport = getResponsesToolSupport(options ?? {});
+	const toolSupport = getMidConvoToolSupport(model, options);
 	const transcriptTools = resolveTranscriptTools(normalizedContext.messages, toolSupport);
 	let declaredAdditionalTools = false;
 	/** Tools announced as removed and not declared again since. */

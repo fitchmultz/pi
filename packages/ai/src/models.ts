@@ -1347,11 +1347,26 @@ export function hasApi<TApi extends Api>(model: AnyModel, api: TApi): model is M
  */
 export type MidConvoToolSupport = "none" | "additions" | "changes";
 
-/** Whether `model` supports cache-preserving mid-conversation tool additions or changes. */
-export function getMidConvoToolSupport(model: AnyModel | undefined): MidConvoToolSupport {
+export interface MidConvoToolSupportCompat {
+	supportsMidConvoSystemMessages?: boolean;
+	supportsMidConvoToolChanges?: boolean;
+	supportsMidConvoToolAdditions?: boolean;
+	supportsAdditionalTools?: boolean;
+	supportsToolSearch?: boolean;
+}
+
+/**
+ * Whether `model` supports cache-preserving mid-conversation tool additions or changes.
+ * Provider adapters that resolve derived compat flags pass their resolved compat as `compatOverride`.
+ */
+export function getMidConvoToolSupport(
+	model: AnyModel | undefined,
+	compatOverride?: MidConvoToolSupportCompat,
+): MidConvoToolSupport {
 	if (!model || !isModelType(model, "chat")) return "none";
 	if (hasApi(model, "anthropic-messages")) {
-		return model.compat?.supportsMidConvoSystemMessages === true && model.compat?.supportsMidConvoToolChanges === true
+		const compat = compatOverride ?? model.compat;
+		return compat?.supportsMidConvoSystemMessages === true && compat?.supportsMidConvoToolChanges === true
 			? "changes"
 			: "none";
 	}
@@ -1360,15 +1375,17 @@ export function getMidConvoToolSupport(model: AnyModel | undefined): MidConvoToo
 		hasApi(model, "openai-codex-responses") ||
 		hasApi(model, "azure-openai-responses")
 	) {
-		if (model.compat?.supportsMidConvoSystemMessages === true && model.compat?.supportsAdditionalTools === true) {
+		const compat = compatOverride ?? model.compat;
+		if (compat?.supportsMidConvoSystemMessages === true && compat?.supportsAdditionalTools === true) {
 			return "changes";
 		}
-		return model.compat?.supportsToolSearch === true ? "additions" : "none";
+		return compat?.supportsToolSearch === true ? "additions" : "none";
 	}
 	if (hasApi(model, "openai-completions")) {
-		if (model.compat?.supportsMidConvoSystemMessages !== true) return "none";
-		if (model.compat?.supportsMidConvoToolChanges === true) return "changes";
-		if (model.compat?.supportsMidConvoToolAdditions === true) return "additions";
+		const compat = compatOverride ?? model.compat;
+		if (compat?.supportsMidConvoSystemMessages !== true) return "none";
+		if (compat?.supportsMidConvoToolChanges === true) return "changes";
+		if (compat?.supportsMidConvoToolAdditions === true) return "additions";
 		return "none";
 	}
 	return "none";

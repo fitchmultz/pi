@@ -22,7 +22,7 @@ import {
 	ANTHROPIC_SERVICE_ACCOUNT_ID_ENV,
 	ANTHROPIC_WORKSPACE_ID_ENV,
 } from "../env-api-keys.ts";
-import { calculateCost } from "../models.ts";
+import { calculateCost, getMidConvoToolSupport } from "../models.ts";
 import { wroteProviderSummary } from "../provider-summary.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
@@ -266,10 +266,13 @@ function getAnthropicCompat(model: Model<"anthropic-messages">) {
  * deferred, so there must be an initial active tool to anchor the placeholder. Otherwise the
  * current tool list is sent.
  */
-function usesNativeToolChanges(compat: ReturnType<typeof getAnthropicCompat>, context: TranscriptContext): boolean {
+function usesNativeToolChanges(
+	model: Model<"anthropic-messages">,
+	compat: ReturnType<typeof getAnthropicCompat>,
+	context: TranscriptContext,
+): boolean {
 	return (
-		compat.supportsMidConvoSystemMessages &&
-		compat.supportsMidConvoToolChanges &&
+		getMidConvoToolSupport(model, compat) === "changes" &&
 		(getInitialSystemMessage(context.messages)?.toolsAdded?.length ?? 0) > 0
 	);
 }
@@ -851,7 +854,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	const compat = getAnthropicCompat(model);
 	// Native tool changes send the tool changes of the leading system messages in place: the
 	// request-level tool list is the first message's, and folding would add their tools to it.
-	const normalizedContext = usesNativeToolChanges(compat, context)
+	const normalizedContext = usesNativeToolChanges(model, compat, context)
 		? context
 		: resolveTranscript(context, compat.supportsMidConvoSystemMessages);
 	const currentTools = getCurrentTools(normalizedContext.messages);
@@ -1537,7 +1540,7 @@ function buildParams(
 	const initialSystemText = initialSystemMessage ? getSystemMessageText(initialSystemMessage) : "";
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 	const conversationMessages = initialSystemMessage ? transformedMessages.slice(1) : transformedMessages;
-	const nativeToolChanges = usesNativeToolChanges(compat, context);
+	const nativeToolChanges = usesNativeToolChanges(model, compat, context);
 	const requestToolList = nativeToolChanges
 		? (initialSystemMessage?.toolsAdded ?? [])
 		: getCurrentTools(context.messages);
