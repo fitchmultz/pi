@@ -1338,6 +1338,42 @@ export function hasApi<TApi extends Api>(model: AnyModel, api: TApi): model is M
 	return isModelType(model, "chat") && model.api === api;
 }
 
+/**
+ * How a chat model accepts mid-conversation tool changes without rewriting the leading
+ * request-level tool list and invalidating the prompt prefix cache:
+ * - `"changes"`: supports adding, updating, and removing tools inline in the transcript.
+ * - `"additions"`: supports adding tools mid-conversation without rewriting prior tools.
+ * - `"none"`: mutating tools rewrites the top-level request tool list.
+ */
+export type MidConvoToolSupport = "none" | "additions" | "changes";
+
+/** Whether `model` supports cache-preserving mid-conversation tool additions or changes. */
+export function getMidConvoToolSupport(model: AnyModel | undefined): MidConvoToolSupport {
+	if (!model || !isModelType(model, "chat")) return "none";
+	if (hasApi(model, "anthropic-messages")) {
+		return model.compat?.supportsMidConvoSystemMessages === true && model.compat?.supportsMidConvoToolChanges === true
+			? "changes"
+			: "none";
+	}
+	if (
+		hasApi(model, "openai-responses") ||
+		hasApi(model, "openai-codex-responses") ||
+		hasApi(model, "azure-openai-responses")
+	) {
+		if (model.compat?.supportsMidConvoSystemMessages === true && model.compat?.supportsAdditionalTools === true) {
+			return "changes";
+		}
+		return model.compat?.supportsToolSearch === true ? "additions" : "none";
+	}
+	if (hasApi(model, "openai-completions")) {
+		if (model.compat?.supportsMidConvoSystemMessages !== true) return "none";
+		if (model.compat?.supportsMidConvoToolChanges === true) return "changes";
+		if (model.compat?.supportsMidConvoToolAdditions === true) return "additions";
+		return "none";
+	}
+	return "none";
+}
+
 export function calculateCost(model: AnyModel, usage: Usage): Usage["cost"] {
 	const inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
 	let rates: ModelCostRates = model.cost;

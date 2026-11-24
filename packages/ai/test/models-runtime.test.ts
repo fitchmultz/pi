@@ -5,6 +5,7 @@ import {
 	calculateCost,
 	createModels,
 	createProvider,
+	getMidConvoToolSupport,
 	hasApi,
 	type MutableModels,
 	type Provider,
@@ -1356,5 +1357,62 @@ describe("Models runtime", () => {
 		expect(events).toEqual(["start", "done"]);
 		const message = await stream.result();
 		expect(message.stopReason).toBe("stop");
+	});
+
+	it("reports mid-conversation tool addition/change support accurately per API and compat flags", () => {
+		const base = testModel("p", "m");
+		expect(getMidConvoToolSupport(undefined)).toBe("none");
+		expect(getMidConvoToolSupport({ ...base, api: "google-generative-ai" })).toBe("none");
+		expect(getMidConvoToolSupport({ ...base, api: "google-vertex" })).toBe("none");
+		expect(getMidConvoToolSupport({ ...base, api: "bedrock-converse-stream" })).toBe("none");
+		expect(
+			getMidConvoToolSupport({
+				...base,
+				api: "anthropic-messages",
+				compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true },
+			}),
+		).toBe("changes");
+		expect(
+			getMidConvoToolSupport({
+				...base,
+				api: "anthropic-messages",
+				compat: { supportsMidConvoToolChanges: true },
+			}),
+		).toBe("none");
+		expect(
+			getMidConvoToolSupport({
+				...base,
+				api: "openai-responses",
+				compat: { supportsMidConvoSystemMessages: true, supportsAdditionalTools: true },
+			}),
+		).toBe("changes");
+		expect(
+			getMidConvoToolSupport({
+				...base,
+				api: "openai-responses",
+				compat: { supportsToolSearch: true },
+			}),
+		).toBe("additions");
+		expect(
+			getMidConvoToolSupport({
+				...base,
+				api: "openai-completions",
+				compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolAdditions: true },
+			}),
+		).toBe("additions");
+		expect(
+			getMidConvoToolSupport({
+				...base,
+				api: "openai-completions",
+				compat: { supportsMidConvoSystemMessages: true, supportsMidConvoToolChanges: true },
+			}),
+		).toBe("changes");
+		expect(
+			getMidConvoToolSupport({
+				...base,
+				type: "image",
+				api: "openrouter-images",
+			} as unknown as Model<Api>),
+		).toBe("none");
 	});
 });

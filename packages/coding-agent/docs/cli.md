@@ -185,6 +185,8 @@ Scripts run in a QuickJS sandbox and reach the other tools through `tools.<name>
 
 `tool_search` is off by default; enable it with `"defaultTools": ["+tool_search"]` or `--tools`. It uses the same ranking as `searchTools()` over the tools with `codemode` or `deferred` exposure and declares the good matches for the next model call, up to `limit` (default 8). Loaded tools are recorded in the session like other tool changes, staying declared on that branch until a compaction or context rollover prunes idle ones back to deferred (see [Compaction](compaction.md#how-it-works)).
 
+When `codemode` is active on a model that cannot add tools mid-conversation without rewriting the top-level tool list (such as Gemini 4 or Bedrock), `tool_search` keeps the prompt cache intact: instead of mutating active tools, it returns the matching tools' inline `codemode` TypeScript declarations (`await tools.<name>({ ... })`) in the search result. Models that support cache-preserving mid-conversation tool additions (such as Claude Opus 5.5, Fable 5.2, GPT-6.2, and Kimi K3) and sessions without `codemode` continue loading matched tools directly.
+
 A tool is a good match when one of these holds:
 
 - The query names it. The whole query is its name, or the part of its name after a `__` separator, with `_` or spaces between the parts: `linear_list_teams` and `linear list teams` name `mcp__linear__list_teams`. One word of a longer query names a tool when it is written as a name: with an underscore, or as `+word`.
