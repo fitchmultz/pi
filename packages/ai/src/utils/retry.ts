@@ -34,9 +34,16 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 	// workspace admin. Only the admin can raise it.
 	"subscription_sharing_workplace_individual_usage_limit_exceeded",
 
-	// Zhipu/Z.ai (open.bigmodel.cn) error code 1308: the plan's usage limit is
-	// reached, sent as HTTP 429. It resets after hours, not seconds (#11537).
-	'"code"\\s*:\\s*"?1308(?![0-9])',
+	// Zhipu/Z.ai error codes 1308–1321 (sent as HTTP 429): Coding Plan usage limits,
+	// expired packages, plan entitlement blocks, and fair-usage limits reset after hours/days
+	// or require a plan change (#11537).
+	'"code"\\s*:\\s*"?(?:1308|1309|1310|1311|1313|1314|1315|1316|1317|1318|1319|1320|1321)(?![0-9])',
+	// Z.ai OpenAI Responses API equivalents for the same non-retryable HTTP 429 plan/quota limits.
+	"subscription plan does not yet include access",
+	"weekly/monthly limit exhausted",
+	"coding plan package has expired",
+	"fair usage policy",
+	"usage limit reached for the past",
 ]);
 
 const RETRYABLE_RAW_STOP_REASONS = new Set([

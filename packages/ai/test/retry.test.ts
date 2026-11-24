@@ -212,6 +212,26 @@ describe("provider retry classification", () => {
 	});
 
 	it.each([
+		'429 {"error":{"code":"1309","message":"Your GLM Coding Plan package has expired"}}',
+		'429 {"error":{"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-30"}}',
+		'429 {"error":{"code":"1311","message":"Your current subscription plan does not yet include access to glm-5.3-highspeed"}}',
+		'429 {"error":{"code":"1313","message":"Fair Usage Policy"}}',
+		'429 {"error":{"code":"1316","message":"Usage limit reached for the past 5 hours. Insufficient balance for extra usage."}}',
+		'429 {"error":{"code":"1321","message":"Usage limit reached for the past 7 days. Extra usage is not available due to monthly spend limit."}}',
+		'zai API error (429): {"error":{"code":"permission_denied","message":"Your current subscription plan does not yet include access to GLM-5.3-Highspeed","type":"permission_denied"}}',
+	])("does not retry Z.AI Coding Plan subscription or quota limit errors: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+
+	it.each([
+		'429 {"error":{"code":"1302","message":"Rate limit reached for requests"}}',
+		'429 {"error":{"code":"1305","message":"The service may be temporarily overloaded, please try again later"}}',
+		'zai API error (429): {"error":{"code":"overloaded","message":"The service may be temporarily overloaded, please try again later","type":"overloaded"}}',
+	])("still retries transient Z.AI rate-limit and overload errors: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each([
 		"subscription_sharing_usage_unavailable: Usage cannot be checked.",
 		"subscription_sharing_user_unavailable: User cannot be loaded.",
 	])("retries temporary ChatGPT subscription errors: %s", (errorMessage) => {

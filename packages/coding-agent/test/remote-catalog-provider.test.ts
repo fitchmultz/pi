@@ -430,6 +430,73 @@ describe("remote catalog provider", () => {
 		expect(provider.getModels().map((entry) => entry.id)).toEqual(["static", "dynamic"]);
 	});
 
+	it("upgrades fetched pi.dev Z.AI GLM-5.4 completions overlays onto OpenAI Responses with fork compat", async () => {
+		const remote = [
+			{
+				...model("glm-5.4"),
+				provider: "zai",
+				api: "openai-completions",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+				reasoning: true,
+				input: ["text", "image"],
+				compat: {
+					supportsStore: false,
+					supportsReasoningEffort: true,
+					maxTokensField: "max_tokens",
+					thinkingFormat: "zai",
+					supportsStrictMode: true,
+					zaiToolStream: true,
+				},
+			},
+		];
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify(remote), { headers: { "last-modified": "Mon, 23 Nov 2026 00:00:00 GMT" } }),
+		);
+		const provider = withRemoteCatalog(
+			createProvider({
+				id: "zai",
+				auth: { apiKey: { name: "Z.AI", resolve: async () => ({ auth: {} }) } },
+				models: [],
+				api: {
+					"openai-completions": {
+						stream: () => {
+							throw new Error("unused");
+						},
+						streamSimple: () => {
+							throw new Error("unused");
+						},
+					},
+					"openai-responses": {
+						stream: () => {
+							throw new Error("unused");
+						},
+						streamSimple: () => {
+							throw new Error("unused");
+						},
+					},
+				},
+			}),
+			"https://pi.dev",
+		);
+		const store = new InMemoryModelsStore();
+		await refreshProvider(provider, store);
+		const resolved = provider.getModels().find((entry) => entry.id === "glm-5.4");
+		expect(resolved).toMatchObject({
+			id: "glm-5.4",
+			provider: "zai",
+			api: "openai-responses",
+			baseUrl: "https://api.z.ai/api/v1",
+			compat: {
+				supportsDeveloperRole: true,
+				supportsMidConvoSystemMessages: true,
+				supportsStrictMode: true,
+				supportsOpenAIGrammarTools: true,
+				supportsLongCacheRetention: false,
+			},
+		});
+		expect(resolved?.compat).not.toHaveProperty("thinkingFormat");
+	});
+
 	it("treats unimplemented pi.dev catalog routes as an unavailable overlay", async () => {
 		vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("not implemented", { status: 501 }));
 		const provider = testProvider();
