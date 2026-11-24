@@ -5,7 +5,7 @@ export const ZAI_CODING_COMPLETIONS_BASE_URL = "https://api.z.ai/api/coding/paas
 export const ZAI_RESPONSES_BASE_URL = "https://api.z.ai/api/v1";
 export const ZAI_CODING_CN_COMPLETIONS_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4";
 
-const ZAI_MID_CONVO_SYSTEM_MODEL_PATTERN = /^glm-5\.[34](?:$|-)/i;
+const ZAI_GLM_VERSION_PATTERN = /^glm-(\d+)(?:\.(\d+))?(?:$|-)/i;
 
 /**
  * Verified OpenAI Responses compat for Z.AI GLM-5.3+ on `https://api.z.ai/api/v1`:
@@ -22,7 +22,11 @@ export const ZAI_RESPONSES_COMPAT: OpenAIResponsesCompat = {
 };
 
 export function isZaiMidConvoSystemModel(modelId: string): boolean {
-	return ZAI_MID_CONVO_SYSTEM_MODEL_PATTERN.test(modelId);
+	const match = ZAI_GLM_VERSION_PATTERN.exec(modelId);
+	if (!match) return false;
+	const major = Number(match[1]);
+	const minor = match[2] === undefined ? 0 : Number(match[2]);
+	return major > 5 || (major === 5 && minor >= 3);
 }
 
 /**

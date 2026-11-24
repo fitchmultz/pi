@@ -1,4 +1,5 @@
 import { expect, it } from "vitest";
+import { isZaiMidConvoSystemModel } from "../src/api/zai-catalog.ts";
 import { getBuiltinModel } from "../src/providers/all.ts";
 
 it("exposes GLM-4.6V on the China Coding Plan catalog", () => {
@@ -80,6 +81,14 @@ it("exposes GLM-5.3+ on Z.AI via OpenAI Responses with verified compat defaults"
 			supportsMidConvoSystemMessages: true,
 		},
 	});
+	expect(isZaiMidConvoSystemModel("glm-5.3")).toBe(true);
+	expect(isZaiMidConvoSystemModel("glm-5.4")).toBe(true);
+	expect(isZaiMidConvoSystemModel("glm-5.5")).toBe(true);
+	expect(isZaiMidConvoSystemModel("glm-6")).toBe(true);
+	expect(isZaiMidConvoSystemModel("glm-6.1-flash")).toBe(true);
+	expect(isZaiMidConvoSystemModel("glm-5.2")).toBe(false);
+	expect(isZaiMidConvoSystemModel("glm-5-turbo")).toBe(false);
+	expect(isZaiMidConvoSystemModel("glm-4.7")).toBe(false);
 });
 
 it("keeps zero costs for Coding Plan models without a matching API price", () => {

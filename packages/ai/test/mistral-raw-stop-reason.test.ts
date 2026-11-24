@@ -4,7 +4,7 @@ import { getModel, normalizeContext } from "../src/compat.ts";
 import type { FetchFunction } from "../src/types.ts";
 import { isRetryableAssistantError } from "../src/utils/retry.ts";
 
-const model = getModel("mistral", "devstral-medium-latest");
+const model = getModel("mistral", "mistral-large-4");
 const context = normalizeContext({
 	messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 });
