@@ -251,10 +251,10 @@ pub fn run(
                 let now = Instant::now();
                 if now < idle {
                     idle - now
-                } else if gate.held() {
-                    // Silence while the link holds the reader up is not the end of the output.
-                    idle_until = Some(now + EXIT_GRACE);
-                    EXIT_GRACE
+                } else if let Some(until) = gate.extend_grace(now, EXIT_GRACE) {
+                    // Silence while the link held the reader up is not the end of the output: allow a full grace after release.
+                    idle_until = Some(until);
+                    until.saturating_duration_since(now)
                 } else {
                     // A background job may keep the terminal open after the program exited.
                     break;
