@@ -123,6 +123,15 @@ function truncateText(text: string, maxChars: number): string {
 	return text.length > maxChars ? `${sliceHead(text, maxChars - 3)}...` : text;
 }
 
+function previewError(text: string): string {
+	if (text.length <= ERROR_PREVIEW_CHARS) return text;
+	const omission = "\n...\n";
+	const available = ERROR_PREVIEW_CHARS - omission.length;
+	// Tools like bash put their diagnosis and recovery instructions after their output.
+	const headChars = Math.floor(available / 3);
+	return `${sliceHead(text, headChars)}${omission}${sliceTail(text, available - headChars)}`;
+}
+
 function previewArgs(args: unknown): string {
 	if (args === undefined) return "";
 	try {
@@ -678,7 +687,7 @@ function startScript(
 			record.durationMs = performance.now() - callStartedAt;
 			if (outcome.isError) {
 				record.status = callSignal.aborted ? "cancelled" : "error";
-				record.error = truncateText(textOf(outcome.result) || `Tool "${tool.name}" failed`, ERROR_PREVIEW_CHARS);
+				record.error = previewError(textOf(outcome.result) || `Tool "${tool.name}" failed`);
 			} else {
 				record.status = "ok";
 			}

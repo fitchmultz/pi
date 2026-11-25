@@ -295,14 +295,23 @@ export function createGrepToolDefinition(
 								return;
 							}
 							if (!killedDueToLimit && code !== 0 && code !== 1) {
-								const errorMsg = stderr.trim() || `ripgrep exited with code ${code}`;
+								let errorMsg = stderr.trim() || `ripgrep exited with code ${code}`;
+								if (
+									errorMsg.startsWith("rg: regex parse error:") ||
+									errorMsg.startsWith(String.raw`rg: the literal "\n" is not allowed in a regex`)
+								) {
+									errorMsg +=
+										"\n\ngrep uses ripgrep's default regex engine (no --pcre2 or --multiline). Use literal: true for exact text, or use regex syntax supported by the default engine.";
+								}
 								settle(() => reject(new Error(errorMsg)));
 								return;
 							}
 							if (matchCount === 0) {
-								settle(() =>
-									resolve({ content: [{ type: "text", text: "No matches found" }], details: undefined }),
-								);
+								const text =
+									isDirectory && glob === "null"
+										? 'No matches found\n\n[glob: "null" searched for the literal name "null"; omit glob to search all files.]'
+										: "No matches found";
+								settle(() => resolve({ content: [{ type: "text", text }], details: undefined }));
 								return;
 							}
 

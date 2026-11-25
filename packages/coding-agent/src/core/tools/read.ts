@@ -23,7 +23,11 @@ import {
 const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+	limit: Type.Optional(
+		Type.Number({
+			description: `Maximum number of lines to read. In codemode, omit for the full text from offset (up to ${STRUCTURED_MAX_BYTES / (1024 * 1024)} MiB). Set limit (even ${DEFAULT_MAX_LINES}) for a page capped at ${DEFAULT_MAX_BYTES / 1024} KiB with a continuation notice when cut short.`,
+		}),
+	),
 	json: Type.Optional(readJsonSchema),
 });
 
@@ -385,7 +389,7 @@ export function createReadToolDefinition(
 	return {
 		name: "read",
 		label: "read",
-		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete. Use json.path/json.fields to select a JSON subtree or object fields before truncation; offset/limit then page the formatted selection.`,
+		description: `Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. Text pages show up to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024} KiB, with a [Showing ...] notice when capped. Use offset to continue. In codemode, omit limit to get the full text from offset to the end when it fits in ${STRUCTURED_MAX_BYTES / (1024 * 1024)} MiB. Setting limit (even ${DEFAULT_MAX_LINES}) returns a page. Use json.path/json.fields to select a JSON subtree or object fields; the same rules apply to the formatted selection.`,
 		promptSnippet: readToolSystemPromptContribution.snippet,
 		promptGuidelines: [...readToolSystemPromptContribution.guidelines],
 		parameters: readSchema,

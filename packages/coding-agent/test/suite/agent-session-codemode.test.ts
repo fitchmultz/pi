@@ -685,6 +685,30 @@ describe("codemode options and store", () => {
 		expect(resultText(result)).toBe('["out\\n",3,"number"]');
 	});
 
+	it.each([
+		{ ending: "exit 3", expected: "Command exited with code 3", promiseStatus: "fulfilled" },
+		{ ending: "sleep 5", expected: "Command timed out after 0.5 seconds", promiseStatus: "rejected" },
+	])(
+		"keeps the diagnosis from a long bash error ($ending) in the nested call record",
+		async ({ ending, expected, promiseStatus }) => {
+			const harness = await createHarness({
+				initialActiveToolNames: ["codemode", "bash"],
+				extensionFactories: [createCodemodeExtension()],
+			});
+			harnesses.push(harness);
+			const command = `printf 'started\\n%0800d\\n' 0; ${ending}`;
+			const args = JSON.stringify({ command, timeout: 0.5 });
+			const result = await run(harness, `return (await Promise.allSettled([tools.bash(${args})]))[0].status;`);
+			expect(result.isError).toBe(false);
+			expect(resultText(result)).toBe(promiseStatus);
+			const [call] = (result.details as unknown as CodemodeToolDetails).calls;
+			expect(call.status).toBe("error");
+			expect(call.error).toMatch(/^started\n/);
+			expect(call.error?.endsWith(expected)).toBe(true);
+			expect(call.error?.length).toBeLessThanOrEqual(500);
+		},
+	);
+
 	// https://github.com/earendil-works/pi/issues/10251
 	it("resolves read calls to text for text files and to image blocks that image() shows", async () => {
 		const harness = await createHarness({

@@ -269,7 +269,7 @@ export function createShellToolDefinition(
 					exitCode = result.exitCode;
 				} catch (err) {
 					const snapshot = await finishOutput();
-					const { text } = formatOutput(snapshot, "");
+					const { text, details } = formatOutput(snapshot, "");
 					if (err instanceof Error && err.message === "aborted") {
 						throw new Error(appendStatus(text, "Command aborted"));
 					}
@@ -277,14 +277,24 @@ export function createShellToolDefinition(
 						const timeoutSecs = err.message.split(":")[1];
 						let status = `Command timed out after ${timeoutSecs} seconds`;
 						if (timeout === undefined) {
-							status += " (the default limit; pass an explicit timeout for longer commands)";
+							status += " (the default limit)";
 						}
 						if (err instanceof ShellTimeoutError && err.shellExit) {
 							// Both facts matter: the command's real result, and that its background processes
 							// were still writing output when the timeout hit (#11613).
 							status += `. The shell exited with code ${err.shellExit.exitCode} after ${err.shellExit.afterSeconds} seconds, but background processes it started kept writing output until the timeout.`;
 						}
-						throw new Error(appendStatus(text, status));
+						if (timeout === undefined) {
+							status +=
+								"\n\nUse background_command for long builds, tests, and watches. Pass an explicit timeout if you need the foreground result in this turn.";
+						}
+						// Do not return structuredContent: a timeout can have no exit code, and scripts must
+						// still reject even if the shell had exited before its output pipes closed.
+						return {
+							content: [{ type: "text", text: appendStatus(text, status) }],
+							details,
+							isError: true,
+						};
 					}
 					throw err;
 				}
