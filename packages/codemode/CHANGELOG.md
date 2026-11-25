@@ -7,6 +7,8 @@
 - Added the `show(...calls)` script global: it prints the result of each tool call under a label of the call, prints a failed call's error in its place, and resolves to the `Promise.allSettled()` results. `show` is now a reserved global name.
 - Added a `background` source option and an optional `CodemodeSourceCapabilities` argument to `parseCodemodeSource()`. A caller that can report a result after the tool call returns passes `{ background: true }`; every other caller keeps rejecting the field with the existing error text.
 
+## [1.6.1] - 2026-11-25
+
 ## [1.6.0] - 2026-11-20
 
 ## [1.5.2] - 2026-11-10

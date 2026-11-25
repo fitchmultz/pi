@@ -190,9 +190,11 @@ Pi first clamps unsupported thinking levels, then merges model `samplingParams`,
 
 Compatibility settings should describe verified differences in the endpoint's request or response behavior. Do not enable them based only on an endpoint advertising OpenAI or Anthropic compatibility.
 
-## Use classifier models
+<a id="use-classifier-models"></a>
 
-Classifier models do not chat. They answer typed questions about JSON state: pick one of several choices, answer yes or no, or give a score, each with probabilities. Pi includes TypeSafe's Jev model from these providers, Cloudflare's Clef, Clef Flash, and Clef Omni models from Workers AI and OpenRouter, OpenAI's GPT-6 Luna through the [Decisions API](https://developers.openai.com/api/docs/guides/decisions) from OpenAI and Cloudflare AI Gateway, Google's Gemini Decision 1 through the [Gemini Decisions API](https://ai.google.dev/gemini-api/docs/decisions), and GPT-6 Luna Decisions and Microsoft-Decision-1 through GitHub Copilot:
+## Use decision models
+
+Decision models (listed in Pi's API under the `classifier` model type) do not chat. They answer typed questions about JSON state: pick one of several choices, answer yes or no, or give a score, each with probabilities. Pi includes TypeSafe's Jev model from these providers, Cloudflare's Clef, Clef Flash, and Clef Omni models from Workers AI and OpenRouter, OpenAI's GPT-6 Luna through the [Decisions API](https://developers.openai.com/api/docs/guides/decisions) from OpenAI and Cloudflare AI Gateway, Google's Gemini Decision 1 through the [Gemini Decisions API](https://ai.google.dev/gemini-api/docs/decisions), and GPT-6 Luna Decisions and Microsoft-Decision-1 through GitHub Copilot:
 
 | Provider | Model IDs | Authentication |
 |---|---|---|
@@ -206,15 +208,15 @@ Classifier models do not chat. They answer typed questions about JSON state: pic
 | `google` | `gemini-decision-1` | `GEMINI_API_KEY` |
 | `github-copilot` | `gpt-6-luna-decisions`, `microsoft-decision-1` | `COPILOT_GITHUB_TOKEN` or `/login` |
 
-Chat models on a [llama.cpp router](llama-cpp.md#classification) are also listed as classifier models.
+Chat models on a [llama.cpp router](llama-cpp.md#classification) are also listed under the `classifier` model type.
 
 OpenAI's Decisions API needs an API key. Sign in with ChatGPT credentials do not work with it, so `gpt-6-luna` is not listed as available while `openai` is logged in through `/login`, even when `OPENAI_API_KEY` is set; log out of `openai` to use the key. The API rejects inputs above 922K tokens, but requests that run longer than about five seconds, currently above roughly 600K input tokens, fail with a gateway timeout.
 
 The `cloudflare-ai-gateway` provider serves the same `gpt-6-luna` through the gateway's OpenAI passthrough. It authenticates with the gateway token, so it stays available while `openai` uses Sign in with ChatGPT. The gateway itself needs access to OpenAI, as described in [Cloudflare AI Gateway](providers.md#cloudflare-ai-gateway).
 
-Which GitHub Copilot classifiers an account can use depends on its plan: Microsoft-Decision-1 is limited to Business and Enterprise, and organizations can turn models off. With `/login`, pi lists only the classifiers in the account's Copilot model catalog. With `COPILOT_GITHUB_TOKEN` it lists both.
+Which GitHub Copilot decision models an account can use depends on its plan: Microsoft-Decision-1 is limited to Business and Enterprise, and organizations can turn models off. With `/login`, pi lists only the decision models in the account's Copilot model catalog. With `COPILOT_GITHUB_TOKEN` it lists both.
 
-Classifier models do not appear in `/model`. The model reaches them through the [`codemode`](cli.md#enable-codemode) tool, which is off unless an MCP server turned it on. Enable it with `"defaultTools": ["+codemode"]` in [settings](settings.md#tools). Scripts then list classifier models with `models.getAvailableOfType("classifier")` and call `models.classify(model, { state, questions })`:
+Decision models do not appear in `/model`. The model reaches them through the [`codemode`](cli.md#enable-codemode) tool, which is off unless an MCP server turned it on. Enable it with `"defaultTools": ["+codemode"]` in [settings](settings.md#tools). Scripts then list decision models with `models.getAvailableOfType("classifier")` and call `models.classify(model, { state, questions })`:
 
 ```js
 const jev = await models.getModelOfType("classifier", "typesafe", "jev-latest");
@@ -233,13 +235,13 @@ return result.answers;
 
 [Codemode](codemode.md#classify) describes the question and answer types.
 
-Classifier models whose `input` includes `"image"` also judge images passed in `images`; other classifier models return an error for them. Image input works with GPT-6 Luna, with Gemini Decision 1, with Jev from `typesafe` and `cloudflare-workers-ai`, with Clef from `cloudflare-workers-ai`, and with the OpenRouter models whose catalog lists image input. Jev takes PNG and JPEG images, and image input is experimental on TypeSafe's own API. Clef takes PNG, JPEG, and WebP images, at most four per request. Jev from `vercel-ai-gateway` and `opencode` takes text only.
+Decision models whose `input` includes `"image"` also judge images passed in `images`; other decision models return an error for them. Image input works with GPT-6 Luna, with Gemini Decision 1, with Jev from `typesafe` and `cloudflare-workers-ai`, with Clef from `cloudflare-workers-ai`, and with the OpenRouter models whose catalog lists image input. Jev takes PNG and JPEG images, and image input is experimental on TypeSafe's own API. Clef takes PNG, JPEG, and WebP images, at most four per request. Jev from `vercel-ai-gateway` and `opencode` takes text only.
 
-Each System One service takes images in its own request format, set by the model's `compat.imageInput`. Built-in models set it, so overriding a provider's `baseUrl` keeps it. A custom provider that proxies another service's classifiers sets it in its provider-level `compat` in `models.json` (see [System One compatibility](models-configuration.md#typesafe-system-one)). OpenRouter in particular answers requests in TypeSafe's format without an error but drops the images.
+Each System One service takes images in its own request format, set by the model's `compat.imageInput`. Built-in models set it, so overriding a provider's `baseUrl` keeps it. A custom provider that proxies another service's decision models sets it in its provider-level `compat` in `models.json` (see [System One compatibility](models-configuration.md#typesafe-system-one)). OpenRouter in particular answers requests in TypeSafe's format without an error but drops the images.
 
-When the service reports token counts, as all System One services do, `result.usage` carries them with their cost. Pi adds the usage of a script's classifier calls to the `codemode` tool result, so it counts toward the session cost in the footer and `/session`. The cost uses the model's catalog price; models without one, such as TypeSafe's direct `jev-latest`, report tokens at no cost.
+When the service reports token counts, as all System One services do, `result.usage` carries them with their cost. Pi adds the usage of a script's `classify()` calls to the `codemode` tool result, so it counts toward the session cost in the footer and `/session`. The cost uses the model's catalog price; models without one, such as TypeSafe's direct `jev-latest`, report tokens at no cost.
 
-Extensions call classifiers through `ctx.modelRegistry.classify()`, without codemode. [Virtual models](virtual-models.md#route-requests) can use them to route requests; see the `jev-router.ts` example.
+Extensions call decision models through `ctx.modelRegistry.classify()`, without codemode. [Virtual models](virtual-models.md#route-requests) can use them to route requests; see the `jev-router.ts` example.
 
 A provider's `headers` in `models.json` reach all of its models, and `modelOverrides` changes chat models only. To send headers with one classifier model, use the provider's `classifierOverrides`. For example, a [Cloudflare AI Gateway](https://developers.cloudflare.com/ai-gateway/configuration/request-handling/) in front of `google` can retry failed requests. This configuration makes the gateway try each Gemini Decision 1 request only once, while Google's chat models keep the gateway's retries:
 
@@ -262,7 +264,7 @@ See [Classifier overrides](models-configuration.md#classifier-overrides).
 
 Image models generate images from a prompt and optional input images. Pi lists Google's native Gemini image models (such as `gemini-nano-banana-2.1`, `gemini-3.1-flash-lite-image`, and `gemini-3-pro-image`) under the `google` provider (`google-images`) using the same `GEMINI_API_KEY` or gateway credentials as Google chat models, and OpenRouter's image models (such as `google/gemini-2.5-flash-image` and `black-forest-labs/flux.2-pro`) under the `openrouter` provider using `OPENROUTER_API_KEY` or `/login`.
 
-Like classifier models, image models do not appear in `/model`; the model reaches them through the [`codemode`](cli.md#enable-codemode) tool. Scripts list them with `models.getAvailableOfType("image")` and call `models.generateImages(model, { input })`. The result's `output` holds base64 image blocks, which `image()` attaches to the `codemode` result so the model sees them:
+Like decision models, image models do not appear in `/model`; the model reaches them through the [`codemode`](cli.md#enable-codemode) tool. Scripts list them with `models.getAvailableOfType("image")` and call `models.generateImages(model, { input })`. The result's `output` holds base64 image blocks, which `image()` attaches to the `codemode` result so the model sees them:
 
 ```js
 const painter = await models.getModelOfType("image", "openrouter", "google/gemini-2.5-flash-image");

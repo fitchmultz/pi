@@ -68,7 +68,13 @@ export const generateImages: ImagesFunction<ImagesOptions> = async (
 				lastFailedHeaders = undefined;
 				return client.models.generateContent(params);
 			},
-			options,
+			model,
+			// createGoogleFetch already reports every HTTP response with its real headers to options.onResponse.
+			{
+				maxRetries: options?.maxRetries,
+				maxRetryDelayMs: options?.maxRetryDelayMs,
+				signal: options?.signal,
+			},
 			() => lastFailedHeaders,
 		);
 

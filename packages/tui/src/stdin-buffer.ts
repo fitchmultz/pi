@@ -307,8 +307,10 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	private timeout: ReturnType<typeof setTimeout> | null = null;
 	private readonly timeoutMs: number;
 	private readonly escapeTimeoutMs: number;
-	/** Bracketed paste received so far, or undefined outside a paste. getBuffer() and flush() never expose it. */
-	private pasteBuffer: string | undefined;
+	private pasteMode: boolean = false;
+	private pasteBuffer: string = "";
+	/** The last characters of the paste so far, which may start an end marker split across chunks. */
+	private pasteTail: string = "";
 	private pendingKittyPrintableCodepoint: number | undefined;
 
 	constructor(options: StdinBufferOptions = {}) {
@@ -343,12 +345,34 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return;
 		}
 
-		if (this.pasteBuffer !== undefined) {
-			this.receivePaste(this.pasteBuffer + str);
+		this.buffer += str;
+
+		if (this.pasteMode) {
+			// Only the new text is searched, so a large paste arriving in many chunks is not rescanned per chunk.
+			const searched = this.pasteTail + this.buffer;
+			const found = searched.indexOf(BRACKETED_PASTE_END);
+			const endIndex = found === -1 ? -1 : this.pasteBuffer.length - this.pasteTail.length + found;
+			this.pasteBuffer += this.buffer;
+			this.pasteTail = searched.slice(1 - BRACKETED_PASTE_END.length);
+			this.buffer = "";
+
+			if (endIndex !== -1) {
+				const pastedContent = this.pasteBuffer.slice(0, endIndex);
+				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
+
+				this.pasteMode = false;
+				this.pasteBuffer = "";
+				this.pasteTail = "";
+				this.pendingKittyPrintableCodepoint = undefined;
+
+				this.emit("paste", pastedContent);
+
+				if (remaining.length > 0) {
+					this.process(remaining);
+				}
+			}
 			return;
 		}
-
-		this.buffer += str;
 
 		const startIndex = this.buffer.indexOf(BRACKETED_PASTE_START);
 		if (startIndex !== -1) {
@@ -361,9 +385,28 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			}
 
 			this.pendingKittyPrintableCodepoint = undefined;
-			const afterStart = this.buffer.slice(startIndex + BRACKETED_PASTE_START.length);
+			this.buffer = this.buffer.slice(startIndex + BRACKETED_PASTE_START.length);
+			this.pasteMode = true;
+			this.pasteBuffer = this.buffer;
+			this.pasteTail = this.buffer.slice(1 - BRACKETED_PASTE_END.length);
 			this.buffer = "";
-			this.receivePaste(afterStart);
+
+			const endIndex = this.pasteBuffer.indexOf(BRACKETED_PASTE_END);
+			if (endIndex !== -1) {
+				const pastedContent = this.pasteBuffer.slice(0, endIndex);
+				const remaining = this.pasteBuffer.slice(endIndex + BRACKETED_PASTE_END.length);
+
+				this.pasteMode = false;
+				this.pasteBuffer = "";
+				this.pasteTail = "";
+				this.pendingKittyPrintableCodepoint = undefined;
+
+				this.emit("paste", pastedContent);
+
+				if (remaining.length > 0) {
+					this.process(remaining);
+				}
+			}
 			return;
 		}
 
@@ -409,24 +452,6 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.emit("data", sequence);
 	}
 
-	/** Holds a paste until its end marker, then emits it and decodes the input after the marker. */
-	private receivePaste(received: string): void {
-		const endIndex = received.indexOf(BRACKETED_PASTE_END);
-		if (endIndex === -1) {
-			this.pasteBuffer = received;
-			return;
-		}
-
-		const remaining = received.slice(endIndex + BRACKETED_PASTE_END.length);
-		this.pasteBuffer = undefined;
-		this.pendingKittyPrintableCodepoint = undefined;
-		this.emit("paste", received.slice(0, endIndex));
-
-		if (remaining.length > 0) {
-			this.process(remaining);
-		}
-	}
-
 	flush(): string[] {
 		if (this.timeout) {
 			clearTimeout(this.timeout);
@@ -449,7 +474,9 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			this.timeout = null;
 		}
 		this.buffer = "";
-		this.pasteBuffer = undefined;
+		this.pasteMode = false;
+		this.pasteBuffer = "";
+		this.pasteTail = "";
 		this.pendingKittyPrintableCodepoint = undefined;
 	}
 

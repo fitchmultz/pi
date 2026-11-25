@@ -297,8 +297,6 @@ class RemoteTextLineReader implements TextLineReader {
 	readonly #decoder = new StreamDecoder();
 	#offset = 0;
 	#buffered = "";
-	#bufferedOffset = 0;
-	readonly #fragments: string[] = [];
 	#ended = false;
 	#closed = false;
 
@@ -312,36 +310,28 @@ class RemoteTextLineReader implements TextLineReader {
 		if (aborted) return aborted;
 		if (this.#closed) return err(new FileError("invalid", "Text line reader is closed", path));
 		try {
-			while (true) {
-				const newline = this.#buffered.indexOf("\n", this.#bufferedOffset);
-				if (newline !== -1) {
-					const tail = this.#buffered.slice(this.#bufferedOffset, newline);
-					const text = this.#fragments.length === 0 ? tail : this.#fragments.join("") + tail;
-					this.#fragments.length = 0;
-					this.#bufferedOffset = newline + 1;
-					return ok({ text, terminated: true });
-				}
-				const tail = this.#buffered.slice(this.#bufferedOffset);
-				if (tail !== "") this.#fragments.push(tail);
-				this.#buffered = "";
-				this.#bufferedOffset = 0;
-				if (this.#ended) {
-					if (this.#fragments.length === 0) return ok(undefined);
-					const text = this.#fragments.join("");
-					this.#fragments.length = 0;
-					return ok({ text, terminated: false });
-				}
+			let newline = this.#buffered.indexOf("\n");
+			while (newline === -1 && !this.#ended) {
 				const bytes = await this.#handle.pread(this.#offset, LINE_CHUNK);
 				const afterReadAbort = abortResult<TextLine | undefined>(context.abortSignal, path);
 				if (afterReadAbort) return afterReadAbort;
 				this.#offset += bytes.length;
-				if (bytes.length === 0) {
-					this.#buffered = this.#decoder.decode();
-					this.#ended = true;
-				} else {
-					this.#buffered = this.#decoder.decode(bytes);
-				}
+				this.#ended = bytes.length === 0;
+				const text = this.#ended ? this.#decoder.decode() : this.#decoder.decode(bytes);
+				// Only the new text is scanned, so a line longer than one read is not rescanned per read.
+				const found = text.indexOf("\n");
+				if (found !== -1) newline = this.#buffered.length + found;
+				this.#buffered += text;
 			}
+			if (newline !== -1) {
+				const text = this.#buffered.slice(0, newline);
+				this.#buffered = this.#buffered.slice(newline + 1);
+				return ok({ text, terminated: true });
+			}
+			if (this.#buffered.length === 0) return ok(undefined);
+			const text = this.#buffered;
+			this.#buffered = "";
+			return ok({ text, terminated: false });
 		} catch (error) {
 			return err(toFileError(error, path));
 		}
@@ -351,7 +341,6 @@ class RemoteTextLineReader implements TextLineReader {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#buffered = "";
-		this.#fragments.length = 0;
 		await this.#handle.close();
 	}
 }

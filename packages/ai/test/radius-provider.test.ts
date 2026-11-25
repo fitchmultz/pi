@@ -182,7 +182,7 @@ describe("Radius provider catalogs", () => {
 					headers: { "content-type": "application/json" },
 				});
 			}
-			if (url === "https://radius.example/v1/classify") {
+			if (url === "https://radius.example/v1/decision") {
 				return new Response(
 					JSON.stringify({
 						answers: { approved: { type: "bool", probability: 0.91 } },
@@ -213,7 +213,7 @@ describe("Radius provider catalogs", () => {
 		const classifier = models.getModelOfType("classifier", "radius", "jev-latest");
 		expect(classifier).toMatchObject({
 			type: "classifier",
-			api: "pi-classifier",
+			api: "pi-decision",
 			provider: "radius",
 			baseUrl: "https://radius.example/v1",
 			contextWindow: 262144,

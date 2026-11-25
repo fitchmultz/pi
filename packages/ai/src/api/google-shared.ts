@@ -136,6 +136,12 @@ export function streamGoogle(
 			const googleFetch = createGoogleFetch(providerLabel, model, options, (headers) => {
 				lastFailedHeaders = headers;
 			});
+			// createGoogleFetch already reports every HTTP response with its real headers to options.onResponse.
+			const retryOptions = {
+				maxRetries: options?.maxRetries,
+				maxRetryDelayMs: options?.maxRetryDelayMs,
+				signal: options?.signal,
+			};
 			const client = createClient(googleFetch);
 			let disablePreferredStrictTools = googleStrictToolLimitSessions.hasExceeded(options?.sessionId);
 			let baseParams: GenerateContentParameters;
@@ -153,7 +159,8 @@ export function streamGoogle(
 							lastFailedHeaders = undefined;
 							return client.models.generateContentStream(baseParams);
 						},
-						options,
+						model,
+						retryOptions,
 						() => lastFailedHeaders,
 					);
 					break;
@@ -446,7 +453,8 @@ export function streamGoogle(
 						lastFailedHeaders = undefined;
 						return client.models.generateContentStream(nextHopParams);
 					},
-					options,
+					model,
+					retryOptions,
 					() => lastFailedHeaders,
 				);
 			}

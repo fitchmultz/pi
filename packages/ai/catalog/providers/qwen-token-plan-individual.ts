@@ -19,7 +19,7 @@ export const INDIVIDUAL_MODEL_IDS = new Set<string>([
 	"qwen3.7-plus",
 	"qwen3.8-flash",
 	"qwen3.8-max",
-	"qwen4-max-preview",
+	"qwen4-max",
 ]);
 
 export default defineProvider({

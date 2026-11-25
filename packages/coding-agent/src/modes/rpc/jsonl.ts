@@ -31,31 +31,26 @@ export function attachJsonlLineReader(
 	};
 
 	const onData = (chunk: string | Buffer) => {
-		buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
-
-		while (true) {
-			const newlineIndex = buffer.indexOf("\n");
-			if (newlineIndex === -1) {
-				onPending?.(
-					buffer.length > 0 ||
-						(typeof chunk === "string"
-							? !chunk.endsWith("\n")
-							: chunk.length > 0 && chunk[chunk.length - 1] !== 10),
-				);
-				return;
-			}
-
-			emitLine(buffer.slice(0, newlineIndex));
-			buffer = buffer.slice(newlineIndex + 1);
+		const text = typeof chunk === "string" ? chunk : decoder.write(chunk);
+		// Only the new text is scanned, so a long line arriving in many chunks is not rescanned per chunk.
+		let start = 0;
+		for (let newlineIndex = text.indexOf("\n"); newlineIndex !== -1; newlineIndex = text.indexOf("\n", start)) {
+			const line = buffer + text.slice(start, newlineIndex);
+			buffer = "";
+			start = newlineIndex + 1;
+			emitLine(line);
 		}
+		buffer += text.slice(start);
+		onPending?.(
+			buffer.length > 0 ||
+				(typeof chunk === "string" ? !chunk.endsWith("\n") : chunk.length > 0 && chunk[chunk.length - 1] !== 10),
+		);
 	};
 
 	const onEnd = () => {
-		buffer += decoder.end();
-		if (buffer.length > 0) {
-			emitLine(buffer);
-			buffer = "";
-		}
+		const line = buffer + decoder.end();
+		buffer = "";
+		if (line.length > 0) emitLine(line);
 		onPending?.(false);
 	};
 

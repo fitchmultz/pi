@@ -441,8 +441,6 @@ class NodeTextLineReader implements TextLineReader {
 	private readonly chunk = new Uint8Array(64 * 1024);
 	private byteOffset = 0;
 	private buffered = "";
-	private textOffset = 0;
-	private readonly fragments: string[] = [];
 	private ended = false;
 	private closed = false;
 
@@ -457,42 +455,29 @@ class NodeTextLineReader implements TextLineReader {
 		if (this.closed) return err(new FileError("invalid", "Text line reader is closed", this.path));
 
 		try {
-			while (true) {
-				const newline = this.buffered.indexOf("\n", this.textOffset);
-				if (newline !== -1) {
-					let text = this.buffered.slice(this.textOffset, newline);
-					if (this.fragments.length > 0) {
-						this.fragments.push(text);
-						text = this.fragments.join("");
-						this.fragments.length = 0;
-					}
-					this.textOffset = newline + 1;
-					return ok({ text, terminated: true });
-				}
-				if (this.textOffset < this.buffered.length) {
-					this.fragments.push(this.buffered.slice(this.textOffset));
-				}
-				this.buffered = "";
-				this.textOffset = 0;
-				if (this.ended) {
-					if (this.fragments.length === 0) return ok(undefined);
-					const text = this.fragments.join("");
-					this.fragments.length = 0;
-					return ok({ text, terminated: false });
-				}
-
+			let newline = this.buffered.indexOf("\n");
+			while (newline === -1 && !this.ended) {
 				// Explicit positions allow an aborted read to be retried without skipping bytes.
 				const { bytesRead } = await this.file.read(this.chunk, 0, this.chunk.length, this.byteOffset);
 				const afterReadAbort = abortResult<TextLine | undefined>(context.abortSignal, this.path);
 				if (afterReadAbort) return afterReadAbort;
 				this.byteOffset += bytesRead;
-				if (bytesRead === 0) {
-					this.buffered = this.decoder.decode();
-					this.ended = true;
-				} else {
-					this.buffered = this.decoder.decode(this.chunk.subarray(0, bytesRead));
-				}
+				this.ended = bytesRead === 0;
+				const text = this.ended ? this.decoder.decode() : this.decoder.decode(this.chunk.subarray(0, bytesRead));
+				// Only the new text is scanned, so a line longer than one read is not rescanned per read.
+				const found = text.indexOf("\n");
+				if (found !== -1) newline = this.buffered.length + found;
+				this.buffered += text;
 			}
+			if (newline !== -1) {
+				const text = this.buffered.slice(0, newline);
+				this.buffered = this.buffered.slice(newline + 1);
+				return ok({ text, terminated: true });
+			}
+			if (this.buffered.length === 0) return ok(undefined);
+			const text = this.buffered;
+			this.buffered = "";
+			return ok({ text, terminated: false });
 		} catch (error) {
 			return err(toFileError(error, this.path));
 		}
@@ -502,8 +487,6 @@ class NodeTextLineReader implements TextLineReader {
 		if (this.closed) return;
 		this.closed = true;
 		this.buffered = "";
-		this.textOffset = 0;
-		this.fragments.length = 0;
 		try {
 			await this.file.close();
 		} catch {

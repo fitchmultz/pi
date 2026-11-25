@@ -10,6 +10,12 @@
 
 - Fixed `agentLoop()` and `agentLoopContinue()` streams never ending, and leaving an unhandled rejection, when the run throws, for example from `prepareRequest`. The stream now ends with an error assistant message (`aborted` after cancellation), `turn_end` and `agent_end`, and `result()` keeps the messages accepted before the failure.
 
+## [1.6.1] - 2026-11-25
+
+### Fixed
+
+- Fixed `streamProxy()` rescanning an incomplete line on every chunk, which made large proxy events take time quadratic in their size ([#12224](https://github.com/earendil-works/pi/issues/12224))
+
 ## [1.6.0] - 2026-11-20
 
 ### Fixed
