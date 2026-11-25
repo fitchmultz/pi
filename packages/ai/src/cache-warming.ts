@@ -59,7 +59,7 @@ export const GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS = 2048;
 
 /** Whether the API uses Google's short sliding implicit-cache policy. */
 export function usesGoogleImplicitCache(api: Api): boolean {
-	return api === "google-generative-ai" || api === "google-vertex";
+	return api === "google-generative-ai" || api === "google-vertex" || api === "google-interactions";
 }
 
 /** Refresh at 90% of the TTL while preserving at least ten seconds of margin. */

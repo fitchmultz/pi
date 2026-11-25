@@ -80,16 +80,19 @@ export interface CacheWarmRequest {
 }
 
 /** When a run's next refresh is due and how late it may still be sent; fixed when it is scheduled. */
-interface RefreshTimes {
+interface ScheduledRefresh {
+	kind: "scheduled";
+	timer: ReturnType<typeof setTimeout>;
 	nextWarmAt: number;
 	/** Latest safe time to send this refresh, leaving half the original expiry margin. */
 	refreshDeadlineAt: number;
 }
 
 type RefreshCycle =
-	| (RefreshTimes & { kind: "scheduled"; timer: ReturnType<typeof setTimeout> })
-	| (RefreshTimes & { kind: "deciding" })
-	| (RefreshTimes & { kind: "refreshing"; extensionOverride: boolean });
+	| { kind: "awaiting-response" }
+	| ScheduledRefresh
+	| { kind: "deciding"; nextWarmAt: number }
+	| { kind: "refreshing"; nextWarmAt: number; extensionOverride: boolean };
 
 interface ActiveRun extends CacheWarmRequest {
 	/** False once the session's model or messages no longer match the request. */
@@ -152,8 +155,9 @@ export class CacheWarmer {
 		const run = this.run;
 		if (!run) return this.inactive;
 		if (!run.isCurrent()) return { state: "inactive", reason: "conversation context changed" };
-		const decision = this.evaluate(run);
 		const { cycle } = run;
+		if (cycle.kind === "awaiting-response") return { state: "inactive", reason: "waiting for response" };
+		const decision = this.evaluate(run);
 		if (!decision.economicsAvailable && cycle.kind === "scheduled") {
 			return { state: "inactive", reason: "cache economics unavailable" };
 		}
@@ -202,18 +206,18 @@ export class CacheWarmer {
 			controller: new AbortController(),
 			phase: "streaming",
 		};
-		const cycle = this.schedule(run);
+		// The latest Google request's cache usage is not known until its response finishes.
+		const cycle: RefreshCycle | undefined = usesGoogleImplicitCache(prepared.model.api)
+			? { kind: "awaiting-response" }
+			: this.schedule(run);
 		if (cycle) this.run = { ...run, cycle };
 	}
 
 	/** Anchor Google's next warm and idle window to the real response, before any tool work. */
 	onResponseCompleted(): void {
 		const run = this.run;
-		if (!run || !usesGoogleImplicitCache(run.model.api)) return;
+		if (!run || run.cycle.kind !== "awaiting-response" || !this.validateRun(run)) return;
 		run.completedAt = Date.now();
-		// A refresh already in progress accounts for its usage and schedules its own successor.
-		if (run.cycle.kind !== "scheduled") return;
-		clearTimeout(run.cycle.timer);
 		const next = this.schedule(run);
 		if (next) run.cycle = next;
 	}
@@ -223,6 +227,10 @@ export class CacheWarmer {
 		if (!run) return;
 		if (this.getMode() === "streaming") {
 			this.stop("agent run settled");
+			return;
+		}
+		if (run.cycle.kind === "awaiting-response") {
+			this.stop("request did not complete");
 			return;
 		}
 		run.phase = "idle";
@@ -257,7 +265,7 @@ export class CacheWarmer {
 		this.inactive = { state: "inactive", reason, ...stopped };
 	}
 
-	private schedule(run: Omit<ActiveRun, "cycle">): RefreshCycle | undefined {
+	private schedule(run: Omit<ActiveRun, "cycle">): ScheduledRefresh | undefined {
 		const nextWarmAt = Date.now() + run.delayMs;
 		const { deadline, reason } = getSafetyLimit(run);
 		if (nextWarmAt > deadline || Date.now() >= deadline) {
@@ -272,7 +280,7 @@ export class CacheWarmer {
 			Math.max(0, nextWarmAt - Date.now()),
 		);
 		timer.unref?.();
-		const cycle: RefreshCycle = {
+		const cycle: ScheduledRefresh = {
 			kind: "scheduled",
 			timer,
 			nextWarmAt,
@@ -285,10 +293,12 @@ export class CacheWarmer {
 	}
 
 	private async refresh(run: ActiveRun): Promise<void> {
-		const { nextWarmAt, refreshDeadlineAt } = run.cycle;
-		run.cycle = { kind: "deciding", nextWarmAt, refreshDeadlineAt };
+		const { cycle } = run;
+		if (cycle.kind !== "scheduled") return;
+		const { nextWarmAt, refreshDeadlineAt } = cycle;
+		run.cycle = { kind: "deciding", nextWarmAt };
 		if (!this.validateRun(run)) return;
-		if (this.refreshDeadlineMissed(run)) return;
+		if (this.refreshDeadlineMissed(run, refreshDeadlineAt)) return;
 		const promptTokens = lastPromptTokens(this.sessionManager.getBranch());
 		const decision = this.evaluate(run, promptTokens);
 		const { warmCost, missCost, continuationProbability } = decision;
@@ -304,7 +314,7 @@ export class CacheWarmer {
 		} catch {
 			// Extension failures fall back to pi's own decision.
 		}
-		if (!this.validateRun(run) || this.refreshDeadlineMissed(run)) return;
+		if (!this.validateRun(run) || this.refreshDeadlineMissed(run, refreshDeadlineAt)) return;
 		const extensionOverride = action !== decision.action;
 		if (action === "stop") {
 			const reason = extensionOverride
@@ -316,7 +326,7 @@ export class CacheWarmer {
 			return;
 		}
 
-		run.cycle = { kind: "refreshing", nextWarmAt, refreshDeadlineAt, extensionOverride };
+		run.cycle = { kind: "refreshing", nextWarmAt, extensionOverride };
 		try {
 			const message = await this.models
 				.streamSimple(
@@ -324,7 +334,7 @@ export class CacheWarmer {
 					run.context,
 					getCacheWarmingRequestOptions(run.options, run.controller.signal),
 					(model, options) => {
-						if (!this.validateRun(run) || this.refreshDeadlineMissed(run)) return;
+						if (!this.validateRun(run) || this.refreshDeadlineMissed(run, refreshDeadlineAt)) return;
 						const timing = getCacheWarmingTiming(model, options, run.ttlMs);
 						if (!timing) this.stop("cache lifetime unavailable");
 						else Object.assign(run, timing);
@@ -358,7 +368,7 @@ export class CacheWarmer {
 		if (next) run.cycle = next;
 	}
 
-	private refreshDeadlineMissed(run: ActiveRun): boolean {
+	private refreshDeadlineMissed(run: ActiveRun, refreshDeadlineAt: number): boolean {
 		if (run.phase === "idle" && usesGoogleImplicitCache(run.model.api)) {
 			const { deadline, reason } = getSafetyLimit(run);
 			if (Date.now() >= deadline) {
@@ -366,7 +376,7 @@ export class CacheWarmer {
 				return true;
 			}
 		}
-		if (Date.now() <= run.cycle.refreshDeadlineAt) return false;
+		if (Date.now() <= refreshDeadlineAt) return false;
 		this.stop("cache refresh deadline missed");
 		return true;
 	}

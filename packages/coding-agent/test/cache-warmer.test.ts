@@ -678,9 +678,14 @@ describe("cache warming", () => {
 		]).toEqual([false, true, true, true]);
 	});
 
-	it.each([0, 58_000])(
-		"warms from Gemini response completion and stops with %i cache-read tokens",
-		async (cacheRead) => {
+	it.each([
+		{ stopReason: "stop", cacheRead: 0 },
+		{ stopReason: "stop", cacheRead: 58_000 },
+		{ stopReason: "error", cacheRead: 0 },
+		{ stopReason: "aborted", cacheRead: 0 },
+	])(
+		"waits for a 90-second Gemini stream ($stopReason, $cacheRead replay cache-read tokens)",
+		async ({ stopReason, cacheRead }) => {
 			const model = { ...getBuiltinModel("google", "gemini-4-neon"), promptCache: { short: 75 } };
 			const credentials = AuthStorage.inMemory();
 			await credentials.modify(model.provider, async () => ({ type: "api_key", key: "offline-key" }));
@@ -689,8 +694,9 @@ describe("cache warming", () => {
 				cacheWarming: "idle",
 				httpIdleTimeoutMs: 0,
 				compaction: { enabled: false },
+				retry: { enabled: false },
 			});
-			const firstRequested = Promise.withResolvers<void>();
+			const firstDelta = Promise.withResolvers<void>();
 			const firstResponse = Promise.withResolvers<void>();
 			const reachedSettle = Promise.withResolvers<void>();
 			const beforeSettle = Promise.withResolvers<void>();
@@ -717,10 +723,6 @@ describe("cache warming", () => {
 			const fetch = vi.fn<FetchFunction>();
 			fetch.mockImplementation(async () => {
 				const isFirst = fetch.mock.calls.length === 1;
-				if (isFirst) {
-					firstRequested.resolve();
-					await firstResponse.promise;
-				}
 				const frame = {
 					candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }],
 					usageMetadata: {
@@ -730,9 +732,23 @@ describe("cache warming", () => {
 						totalTokenCount: 60_001,
 					},
 				};
-				return new Response(`data: ${JSON.stringify(frame)}\n\n`, {
-					headers: { "content-type": "text/event-stream" },
-				});
+				const headers = { "content-type": "text/event-stream" };
+				if (!isFirst) return new Response(`data: ${JSON.stringify(frame)}\n\n`, { headers });
+				const encode = new TextEncoder();
+				return new Response(
+					new ReadableStream({
+						async start(controller) {
+							const partial = { candidates: [{ content: { parts: [{ text: "Starting" }] } }] };
+							controller.enqueue(encode.encode(`data: ${JSON.stringify(partial)}\n\n`));
+							await firstResponse.promise;
+							if (stopReason === "stop") {
+								controller.enqueue(encode.encode(`data: ${JSON.stringify(frame)}\n\n`));
+							}
+							controller.close();
+						},
+					}),
+					{ headers },
+				);
 			});
 			vi.stubGlobal("fetch", fetch);
 			vi.useFakeTimers();
@@ -744,11 +760,31 @@ describe("cache warming", () => {
 				resourceLoader,
 			});
 			await session.bindExtensions({});
+			session.subscribe((event) => {
+				if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+					firstDelta.resolve();
+				}
+			});
 			const prompt = session.prompt("Keep this Gemini prompt warm.");
 			try {
-				await firstRequested.promise;
-				await vi.advanceTimersByTimeAsync(45_000);
+				await firstDelta.promise;
+				await vi.advanceTimersByTimeAsync(90_000);
 				expect(fetch).toHaveBeenCalledTimes(1);
+				expect(session.cacheWarmingStatus).toEqual({ state: "inactive", reason: "waiting for response" });
+
+				if (stopReason !== "stop") {
+					beforeSettle.resolve();
+					const abort = stopReason === "aborted" ? session.abort() : undefined;
+					firstResponse.resolve();
+					await abort;
+					await prompt;
+					expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason });
+					expect(session.cacheWarmingStatus).toEqual({ state: "inactive", reason: "request did not complete" });
+					await vi.advanceTimersByTimeAsync(65_000);
+					expect(fetch).toHaveBeenCalledTimes(1);
+					return;
+				}
+
 				const completedAt = Date.now();
 				firstResponse.resolve();
 				await reachedSettle.promise;
@@ -1115,35 +1151,38 @@ describe("cache warming", () => {
 		);
 	});
 
-	it("maps Google long retention to short and accounts for the 2,048-token implicit-cache tail", () => {
-		const gemini4Neon = getBuiltinModel("google", "gemini-4-neon");
-		expect(gemini4Neon.promptCache).toEqual({ short: 75 });
-		expect(getEffectiveCacheRetention(gemini4Neon, { cacheRetention: "long" })).toBe("short");
-		expect(getEffectiveCacheRetention(gemini4Neon, { cacheRetention: "none" })).toBe("none");
-		expect(getPromptCacheTtlMs(gemini4Neon, { cacheRetention: "long" })).toBe(75_000);
-		expect(getCacheWarmingDelayMs(75_000)).toBe(65_000);
-		expect(isCacheWarmingReplayable(gemini4Neon, { reasoning: "xhigh" })).toBe(true);
+	it.each(["google-generative-ai", "google-vertex", "google-interactions"] as const)(
+		"maps %s long retention to short and accounts for the 2,048-token implicit-cache tail",
+		(api) => {
+			const gemini4Neon: Model<Api> = { ...getBuiltinModel("google", "gemini-4-neon"), api };
+			expect(gemini4Neon.promptCache).toEqual({ short: 75 });
+			expect(getEffectiveCacheRetention(gemini4Neon, { cacheRetention: "long" })).toBe("short");
+			expect(getEffectiveCacheRetention(gemini4Neon, { cacheRetention: "none" })).toBe("none");
+			expect(getPromptCacheTtlMs(gemini4Neon, { cacheRetention: "long" })).toBe(75_000);
+			expect(getCacheWarmingDelayMs(75_000)).toBe(65_000);
+			expect(isCacheWarmingReplayable(gemini4Neon, { reasoning: "xhigh" })).toBe(true);
 
-		const atTailThreshold = evaluateCacheWarming(
-			gemini4Neon,
-			GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS,
-			"streaming",
-		);
-		expect(atTailThreshold.missCost).toBe(0);
-		expect(atTailThreshold.action).toBe("stop");
+			const atTailThreshold = evaluateCacheWarming(
+				gemini4Neon,
+				GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS,
+				"streaming",
+			);
+			expect(atTailThreshold.missCost).toBe(0);
+			expect(atTailThreshold.action).toBe("stop");
 
-		const mediumStreaming = evaluateCacheWarming(gemini4Neon, 100_000, "streaming");
-		// 97,952 cached @ $0.15/M + 2,048 tail @ $3/M + 1 output @ $15/M
-		expect(mediumStreaming.warmCost).toBeCloseTo((97_952 * 0.15 + 2_048 * 3 + 15) / 1_000_000, 9);
-		expect(mediumStreaming.missCost).toBeCloseTo((97_952 * (3 - 0.15)) / 1_000_000, 9);
-		expect(mediumStreaming.action).toBe("warm");
+			const mediumStreaming = evaluateCacheWarming(gemini4Neon, 100_000, "streaming");
+			// 97,952 cached @ $0.15/M + 2,048 tail @ $3/M + 1 output @ $15/M
+			expect(mediumStreaming.warmCost).toBeCloseTo((97_952 * 0.15 + 2_048 * 3 + 15) / 1_000_000, 9);
+			expect(mediumStreaming.missCost).toBeCloseTo((97_952 * (3 - 0.15)) / 1_000_000, 9);
+			expect(mediumStreaming.action).toBe("warm");
 
-		expect(evaluateCacheWarming(gemini4Neon, 46_000, "idle")).toMatchObject({
-			continuationProbability: 0.5,
-			action: "stop",
-		});
-		expect(evaluateCacheWarming(gemini4Neon, 47_000, "idle").action).toBe("warm");
-	});
+			expect(evaluateCacheWarming(gemini4Neon, 46_000, "idle")).toMatchObject({
+				continuationProbability: 0.5,
+				action: "stop",
+			});
+			expect(evaluateCacheWarming(gemini4Neon, 47_000, "idle").action).toBe("warm");
+		},
+	);
 
 	it("uses OpenAI 30m/12h promptCache lifetimes and 2.5x 12h write pricing for GPT-6.2 warming", () => {
 		const gpt62Sol = getBuiltinModel("openai", "gpt-6.2-sol");
