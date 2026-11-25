@@ -200,7 +200,7 @@ These are deterministic counts from the first comparison, not latency claims.
 
 ### Removed results
 
-On 2026-11-10 these results were removed from this page and from `performance-results.json`. The fork no longer carries the code they measured, or production never calls it.
+These results were removed from this page and from `performance-results.json` (initially on 2026-11-10, with subsequent retirements noted below). The fork no longer carries the code they measured, or production never calls it.
 
 | Removed result | Reason |
 | --- | --- |
@@ -213,8 +213,8 @@ On 2026-11-10 these results were removed from this page and from `performance-re
 | Durable retained contexts | The scheduler's retention code is upstream's |
 | Telemetry reference adapter | Upstream's rewritten adapter replaced the fork's change |
 | SQLite document-delta SQL calls and string-binding bytes | Upstream's batched commit replaced the fork's record reuse; both trees make 150 calls ([2026-11-05 record](upstream-sync-2026-11-05.md#performance)) |
-| Model overlay read, 10,000 models | Upstream adopted publish-time `createProvider` model catalog merging (`#12366`, [2026-11-21 record](upstream-sync-2026-11-21.md)) |
-| Codex, 50,000 heartbeats per request | Custom `CodexWebSocketSession` queue replaced by OpenAI SDK `ResponsesWSBase.stream()` in `#564` |
+| Model overlay read, 10,000 models | Removed 2026-11-25 after upstream adopted publish-time `createProvider` model catalog merging (`#12366`, [2026-11-21 record](upstream-sync-2026-11-21.md)) |
+| Codex, 50,000 heartbeats per request | Removed 2026-11-25 after the custom `CodexWebSocketSession` queue was replaced by OpenAI SDK `ResponsesWSBase.stream()` in `#564` |
 
 The runner lost the cases whose code is deleted or retired to upstream: `frames`, `queued-frames`, and `parse` in `ai.mjs`; `codex-burst-50000` in `run.mjs`; `frame`, `publish`, and `stdio` in `bridges.mjs`; `tui-highlight` in `tui.ts`; and the retired fixtures `catalog.mjs`, `durable-context.ts`, and `telemetry.mjs`. Text reads, grep, `codex-burst-1000`, and the HTTP error remain as controls.
 

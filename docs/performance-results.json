@@ -1,5 +1,5 @@
 {
-	"description": "Sanitized samples behind docs/performance.md. rows: the first comparison (values rounded to 6 significant digits; medians/ranges from unrounded values; negative medianTimeChangePercent means less time). qualification: the matched rerun. On 2026-11-10 the rows for code the fork no longer carries, or that production never calls, were removed (docs/performance.md, Removed results); every remaining value is unchanged.",
+	"description": "Sanitized samples behind docs/performance.md. rows: the first comparison (values rounded to 6 significant digits; medians/ranges from unrounded values; negative medianTimeChangePercent means less time). qualification: the matched rerun. Rows for code the fork no longer carries, or that production never calls, were removed (docs/performance.md, Removed results); every remaining value is unchanged.",
 	"sampleKinds": {
 		"operation-row": "One logged operation interval per value.",
 		"logged-batch-average": "Each value is one logged average over the fixture's internal repetitions.",
