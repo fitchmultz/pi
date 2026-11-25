@@ -249,11 +249,21 @@ describe("Google Interactions request projection", () => {
 		);
 	});
 
-	it("replays unsigned calls from another API with matching result IDs", async () => {
+	it.each([
+		{ id: model.id, needsSkip: true },
+		{ id: "vendor-gemini-4-neon", needsSkip: true },
+		{ id: "gemini-4-neon-preview", needsSkip: true },
+		{ id: "gemini-3-pro", needsSkip: true },
+		{ id: "gemini-2.5-flash", needsSkip: false },
+	])("$id replays unsigned calls with matching result IDs", async ({ id, needsSkip }) => {
 		const { fetch, bodies } = stub(toolAnswer("foreign"), answer("reply"));
 		const original = await send(fetch, [initial]).result();
 		const foreign: AssistantMessage = { ...original, api: "openai-responses", provider: "openai", model: "other" };
-		const result = await send(fetch, [initial, foreign, toolResult()]).result();
+		const result = await stream(
+			{ ...model, id },
+			normalizeContext({ tools: [tool], messages: [initial, foreign, toolResult()] }),
+			{ apiKey: "offline-key", fetch, maxRetries: 0 },
+		).result();
 		expect(result.stopReason).toBe("stop");
 		expect(bodies[1].input?.slice(1)).toEqual([
 			{
@@ -261,7 +271,7 @@ describe("Google Interactions request projection", () => {
 				name: "lookup",
 				id: "call-1",
 				arguments: { region: "west" },
-				signature: "skip_thought_signature_validator",
+				...(needsSkip ? { signature: "skip_thought_signature_validator" } : {}),
 			},
 			{
 				type: "function_result",

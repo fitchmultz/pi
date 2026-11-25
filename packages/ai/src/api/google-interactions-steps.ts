@@ -6,8 +6,11 @@ import { parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { renderSystemMessageUpdate } from "../utils/text.ts";
 import { withoutInitialSystemMessage } from "../utils/transcript.ts";
-import { sendsToGeminiApi } from "./google-client.ts";
-import { isValidThoughtSignature, SKIP_THOUGHT_SIGNATURE_VALIDATOR } from "./google-shared.ts";
+import {
+	isValidThoughtSignature,
+	needsGoogleThoughtSignatureSkip,
+	SKIP_THOUGHT_SIGNATURE_VALIDATOR,
+} from "./google-shared.ts";
 import { canReplayGoogleThoughtSignature, transformMessages } from "./transform-messages.ts";
 
 type ModelStep = Exclude<Interactions.Step, { type: "user_input" | "function_result" }>;
@@ -57,7 +60,7 @@ export function projectSteps(model: Model<"google-interactions">, context: Trans
 	const messages = transformMessages(conversation, model, (id) =>
 		/^[a-zA-Z0-9_-]{1,64}$/.test(id) ? id : `call_${shortHash(id)}`,
 	);
-	const needsSkipSignature = sendsToGeminiApi(model) && model.id.split("/").at(-1) === "gemini-4-neon";
+	const needsSkipSignature = needsGoogleThoughtSignatureSkip(model);
 	for (const message of messages) {
 		switch (message.role) {
 			case "system": {

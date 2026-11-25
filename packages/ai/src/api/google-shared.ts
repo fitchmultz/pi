@@ -845,6 +845,11 @@ function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: str
 // See: https://aistudio.google.com/docs/thought-signatures?generate-content=true#faqs
 export const SKIP_THOUGHT_SIGNATURE_VALIDATOR = "skip_thought_signature_validator";
 
+export function needsGoogleThoughtSignatureSkip(model: Model<GoogleChatApi>): boolean {
+	const major = getGeminiVersion(model.id)?.major;
+	return sendsToGeminiApi(model) && (major === undefined || major >= 3) && !model.id.startsWith("deep-research-");
+}
+
 /**
  * Put the skip value on the first function call of a model message whose function calls carry no
  * thought signature.
@@ -926,14 +931,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 
 	const transformedMessages = transformMessages(conversation, model, normalizeToolCallId);
 
-	// Only the Gemini API gets the skip value (provider `google` or its host), not Gemini before 3 or Deep Research.
-	// Real calls proved this through a gateway route of `google`; no call went to the host itself.
-	// Without a base URL the client sends to the SDK default, which is that host.
-	const geminiMajorVersion = getGeminiVersion(model.id)?.major;
-	const sendsSkipValue =
-		sendsToGeminiApi(model) &&
-		(geminiMajorVersion === undefined || geminiMajorVersion >= 3) &&
-		!model.id.startsWith("deep-research-");
+	const sendsSkipValue = needsGoogleThoughtSignatureSkip(model);
 
 	let lastContentWasSystemUpdate = false;
 
