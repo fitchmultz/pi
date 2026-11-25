@@ -4,10 +4,7 @@ import { isModelType } from "../utils/model-operations.ts";
 const CANONICAL_GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const LEGACY_GOOGLE_MAX_REQUEST_BYTES = 20 * 1024 * 1024;
 
-/** Select the canonical Developer API for a Google chat catalog entry. */
-export function googleChatApi(modelId: string): "google-generative-ai" | "google-interactions" {
-	return modelId === "gemini-4-neon" ? "google-interactions" : "google-generative-ai";
-}
+export const GEMINI_4_NEON_ID = "gemini-4-neon";
 
 /**
  * Gemini Developer API inline request payload limit (100 MiB).
@@ -46,10 +43,11 @@ export const GOOGLE_STREAMING_MAX_OUTPUT_OVERRIDES: Readonly<Record<string, numb
 };
 
 /**
- * Apply canonical Gemini Developer API catalog corrections during pinned hydration
- * and pi.dev catalog overlay merges without overwriting custom endpoints or limits.
+ * Apply canonical Gemini Developer API catalog corrections without overwriting
+ * custom endpoints or limits. API selection is a runtime default; catalog
+ * hydration preserves the published API for older consumers.
  */
-export function normalizeGoogleModel(model: AnyModel): AnyModel {
+export function normalizeGoogleModel(model: AnyModel, options?: { preserveApi?: boolean }): AnyModel {
 	if (
 		model.provider !== "google" ||
 		!isModelType(model, "chat") ||
@@ -71,7 +69,7 @@ export function normalizeGoogleModel(model: AnyModel): AnyModel {
 		isGemini4OrLaterModelId(model.id) && model.promptCache === undefined
 			? { ...GEMINI_4_PROMPT_CACHE }
 			: model.promptCache;
-	const api = model.api === "google-generative-ai" ? googleChatApi(model.id) : model.api;
+	const api = !options?.preserveApi && model.id === GEMINI_4_NEON_ID ? "google-interactions" : model.api;
 
 	if (
 		api === model.api &&

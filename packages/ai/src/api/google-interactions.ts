@@ -500,7 +500,7 @@ interface ThreadEntry {
 	prefixHash: string;
 }
 
-// Same process-wide bound as Anthropic message threads; cleanup normally removes finished sessions.
+// ~2 MB process-wide fallback (~220 B/entry), matching Anthropic's thread cap; session cleanup normally frees entries.
 const MAX_THREAD_STATE_ENTRIES = 10_000;
 const threadState = new Map<string, ThreadEntry>();
 
@@ -546,12 +546,5 @@ async function hashJson(value: unknown): Promise<string> {
 }
 
 function isRejectedPreviousId(error: unknown): boolean {
-	const failure = normalizeProviderError(error);
-	return (
-		failure.status === 404 ||
-		(failure.status === 400 &&
-			/previous[_ ]interaction[_ ]id|(?:expired|stale|unknown|invalid|missing) interaction|interaction[^\n]+not found/i.test(
-				failure.message,
-			))
-	);
+	return normalizeProviderError(error).status === 404;
 }

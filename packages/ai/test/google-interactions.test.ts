@@ -2,6 +2,7 @@ import type { Interactions } from "@google/genai";
 import { afterEach, describe, expect, it } from "vitest";
 import { fetchDeferred, type GoogleInteractionsOptions, stream, streamSimple } from "../src/api/google-interactions.ts";
 import { getEffectiveCacheRetention } from "../src/cache-warming.ts";
+import { getModel } from "../src/compat.ts";
 import { createModels, getMidConvoToolSupport } from "../src/models.ts";
 import { googleProvider } from "../src/providers/google.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
@@ -111,10 +112,7 @@ function toolAnswer(id: string): Response {
 }
 
 function rejection(status: number, message: string): Response {
-	return Response.json(
-		{ error: { code: status, message, status: status === 404 ? "NOT_FOUND" : "INVALID_ARGUMENT" } },
-		{ status },
-	);
+	return Response.json({ error: { code: status, message } }, { status });
 }
 
 function stub(...responses: Response[]) {
@@ -419,10 +417,10 @@ describe("Google Interactions stored history", () => {
 			});
 	});
 
-	it.each([400, 404])("restarts a rejected stored interaction exactly once on HTTP %s", async (status) => {
+	it("restarts a missing stored interaction exactly once on HTTP 404", async () => {
 		const { fetch, bodies } = stub(
 			answer("expired"),
-			rejection(status, "previous_interaction_id not found"),
+			Response.json({ error: { message: "Requested entity was not found.", code: "not_found" } }, { status: 404 }),
 			answer("replacement"),
 			answer("continued"),
 		);
@@ -437,6 +435,23 @@ describe("Google Interactions stored history", () => {
 			"replacement",
 		]);
 		expect(bodies[2].input?.map((step) => step.type)).toEqual(["user_input", "model_output", "user_input"]);
+	});
+
+	it("reports a generic HTTP 400 from a stored interaction without replaying the transcript", async () => {
+		const { fetch, bodies } = stub(
+			answer("stored"),
+			Response.json(
+				{ error: { message: "Request contains an invalid argument.", code: "invalid_argument" } },
+				{ status: 400 },
+			),
+		);
+		const first = await send(fetch, [initial]).result();
+		const second = await send(fetch, [initial, first, next]).result();
+		expect(second).toMatchObject({
+			stopReason: "error",
+			errorMessage: expect.stringContaining("Request contains an invalid argument."),
+		});
+		expect(bodies.map((body) => body.previous_interaction_id)).toEqual([undefined, "stored"]);
 	});
 
 	it.each([
@@ -742,7 +757,10 @@ describe("Google Interactions provider registration", () => {
 
 	it("dispatches background submission, deferred fetch and cancel through the mixed Google provider", async () => {
 		const models = createModels();
-		models.setProvider(googleProvider());
+		const provider = googleProvider();
+		expect(getModel("google", "gemini-4-neon").api).toBe("google-interactions");
+		expect(provider.getModels().find((model) => model.id === "gemini-4-neon")?.api).toBe("google-interactions");
+		models.setProvider(provider);
 		const neon = models.getModel("google", "gemini-4-neon");
 		expect(neon).toMatchObject({ api: "google-interactions", promptCache: { short: 75 } });
 		expect(models.getModel("google", "gemini-4-carbon")?.api).toBe("google-generative-ai");

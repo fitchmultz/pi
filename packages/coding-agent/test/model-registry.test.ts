@@ -636,6 +636,16 @@ describe("ModelRegistry", () => {
 			expect(glm5?.baseUrl).toBe("https://opencode.ai/zen/go/v1");
 		});
 
+		test("an explicit models.json API can roll Neon back to GenerateContent", async () => {
+			const registry = await createModelRegistry(authStorage, modelsJsonPath);
+			expect(registry.find("google", "gemini-4-neon")?.api).toBe("google-interactions");
+			writeRawModelsJson({
+				google: { models: [{ id: "gemini-4-neon", api: "google-generative-ai" }] },
+			});
+			await registry.refresh();
+			expect(registry.find("google", "gemini-4-neon")?.api).toBe("google-generative-ai");
+		});
+
 		test("modelOverrides still apply when provider also defines models", async () => {
 			writeRawModelsJson({
 				openrouter: {

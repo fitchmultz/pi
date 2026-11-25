@@ -887,6 +887,7 @@ it.each([
 
 it("keeps Gemini 4 Interactions system instruction and steps stable across mid-session system updates", async () => {
 	const model = getBuiltinModel("google", "gemini-4-neon");
+	if (!hasApi(model, "google-interactions")) throw new Error("Expected the built-in Neon model to use Interactions");
 	interface GoogleCapture {
 		input?: unknown[];
 		system_instruction?: string;
@@ -954,6 +955,7 @@ it("keeps Gemini 4 Interactions system instruction and steps stable across mid-s
 
 it("keeps Gemini 4 tools and prefix stable across tool_search when codemode is active", async () => {
 	const model = getBuiltinModel("google", "gemini-4-neon");
+	if (!hasApi(model, "google-interactions")) throw new Error("Expected the built-in Neon model to use Interactions");
 	interface GoogleCapture {
 		input?: unknown[];
 		system_instruction?: string;

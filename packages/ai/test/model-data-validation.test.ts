@@ -549,7 +549,7 @@ describe("generated model data validation", () => {
 		expect(Object.keys(hydratedUpstream["google-images"] ?? {})).toEqual(["image:gemini-nano-banana-3"]);
 	});
 
-	it("normalizes canonical Google limits and routes only Neon to Interactions during hydration", () => {
+	it("normalizes canonical Google limits without changing the published API during hydration", () => {
 		const { dataDir, packageRoot, values } = createFixture("google");
 		const catalogPath = join(packageRoot, "models.all.json");
 		const baseGoogle = {
@@ -588,9 +588,9 @@ describe("generated model data validation", () => {
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
 			promptCache: { short: 75 },
 		});
-		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-neon"]).toBeUndefined();
-		expect(hydrated["google-interactions"]?.["chat:gemini-4-neon"]).toMatchObject({
-			api: "google-interactions",
+		expect(hydrated["google-interactions"]).toBeUndefined();
+		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-neon"]).toMatchObject({
+			api: "google-generative-ai",
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
 			promptCache: { short: 75 },

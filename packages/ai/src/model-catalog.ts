@@ -1,3 +1,4 @@
+import { type GEMINI_4_NEON_ID, normalizeGoogleModel } from "./api/google-catalog.ts";
 import type {
 	Api,
 	ClassifierApi,
@@ -27,8 +28,17 @@ type ApiForKey<TGroups extends ModelGroups, TKey extends ModelKey<TGroups>> = {
 	[TApi in keyof TGroups]: TKey extends keyof TGroups[TApi] ? TApi : never;
 }[keyof TGroups];
 
+// Runtime normalization may select Interactions for canonical Google Neon.
+type ChatCatalogApi<
+	TApi extends Api,
+	TProvider extends ProviderId,
+	TId extends string,
+> = `${TProvider}/${TId}` extends `google/${typeof GEMINI_4_NEON_ID}` ? TApi | "google-interactions" : TApi;
+
 export type ChatModelCatalog<TGroups extends ModelGroups, TProvider extends ProviderId> = {
-	[TKey in KeyForType<TGroups, "chat"> as ModelId<TKey>]: Model<ApiForKey<TGroups, TKey> & Api> & {
+	[TKey in KeyForType<TGroups, "chat"> as ModelId<TKey>]: Model<
+		ChatCatalogApi<ApiForKey<TGroups, TKey> & Api, TProvider, ModelId<TKey>>
+	> & {
 		id: ModelId<TKey>;
 		provider: TProvider;
 	};
@@ -60,10 +70,14 @@ function flattenModelCatalog(groups: ModelGroups, type: ModelType): Record<strin
 }
 
 export function flattenChatModelCatalog<const TProvider extends ProviderId, const TGroups extends ModelGroups>(
-	_provider: TProvider,
+	provider: TProvider,
 	groups: TGroups,
 ): ChatModelCatalog<TGroups, TProvider> {
-	return flattenModelCatalog(groups, "chat") as ChatModelCatalog<TGroups, TProvider>;
+	const models = flattenModelCatalog(groups, "chat") as Record<string, Model<Api>>;
+	if (provider === "google") {
+		for (const [id, model] of Object.entries(models)) models[id] = normalizeGoogleModel(model) as Model<Api>;
+	}
+	return models as ChatModelCatalog<TGroups, TProvider>;
 }
 
 export function flattenImageModelCatalog<const TProvider extends ProviderId, const TGroups extends ModelGroups>(
