@@ -1916,6 +1916,40 @@ export function createStorageConformance(options: StorageConformanceOptions): re
 				),
 			).rejects.toThrow(`ID ${explicitEntryId} already belongs to entry`);
 
+			const taskId = await storage.mintId<TaskId<JsonValue>>();
+			const conflictingSubmissionId = idFromNumber<SubmissionId>(taskId);
+			const task = pendingTask(taskId, rootId);
+			await expect(
+				commitWrites(
+					storage,
+					[
+						{ type: "task", value: task },
+						{
+							type: "submission",
+							value: {
+								id: conflictingSubmissionId,
+								conversationId: rootId,
+								type: "input",
+								status: "queued",
+							},
+						},
+					],
+					context,
+				),
+			).rejects.toThrow(`ID ${taskId} is written as two record types`);
+			expect(await storage.task(taskId, context)).toBeUndefined();
+			expect(await storage.submission(conflictingSubmissionId, context)).toBeUndefined();
+			const replacement = pendingTask(taskId, rootId, "replacement");
+			await commitWrites(
+				storage,
+				[
+					{ type: "task", value: task },
+					{ type: "task", value: replacement },
+				],
+				context,
+			);
+			expect(await storage.task(taskId, context)).toEqual(replacement);
+
 			await commitWrites(
 				storage,
 				[{ type: "entry", value: entry(idFromNumber<EntryId>(Number.MAX_SAFE_INTEGER), rootId, "last-id") }],

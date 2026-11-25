@@ -150,6 +150,23 @@ function writable<T>(initial: T) {
 	return { source, watches };
 }
 
+/** Loads a `Store` whose routine calls `fn` with a derive of its document that fails while `n < 0`; `set` writes `n`. */
+async function onFailingDerive(fn: (value: number) => Promise<void>) {
+	let set: ((n: number) => Promise<unknown>) | undefined;
+	const loadedStore = await store((doc, self) => {
+		const failing = self.derive([doc], ([d]) => {
+			if (d.n < 0) throw new Error("compute");
+			return d.n;
+		});
+		set = (n) =>
+			doc.change((d) => {
+				d.n = n;
+			}, context);
+		self.on(failing, ({ value }) => fn(value));
+	});
+	return { ...loadedStore, set: set! };
+}
+
 describe("on", () => {
 	it("calls first with the current value as [['r', value]], then once per change with its ops", async () => {
 		const calls: [unknown, readonly Op[]][] = [];
@@ -341,29 +358,43 @@ describe("on", () => {
 
 		it("waits for the next good value when its source fails during the backoff: the retry is dropped", async () => {
 			const calls: unknown[] = [];
-			let set: ((n: number) => Promise<unknown>) | undefined;
-			const { errors } = await store((doc, self) => {
-				const failing = self.derive([doc], ([d]) => {
-					if (d.n < 0) throw new Error("compute");
-					return d.n;
-				});
-				set = (n) =>
-					doc.change((d) => {
-						d.n = n;
-					}, context);
-				self.on(failing, async ({ value }) => {
-					calls.push(value);
-					if (value === 1) throw new Error("handler threw");
-				});
+			const { set, errors } = await onFailingDerive(async (value) => {
+				calls.push(value);
+				if (value === 1) throw new Error("handler threw");
 			});
 			await vi.advanceTimersByTimeAsync(0);
-			await set!(1);
+			await set(1);
 			await vi.advanceTimersByTimeAsync(0);
-			await set!(-1);
+			await set(-1);
 			await vi.advanceTimersByTimeAsync(2_000);
 			expect(calls).toEqual([0, 1]);
 			expect(vi.getTimerCount()).toBe(0);
-			await set!(3);
+			await set(3);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(calls).toEqual([0, 1, 3]);
+			expect(reports(errors)).toEqual(["on #1: handler threw"]);
+		});
+
+		it("waits for the next good value when its source fails during the call that then throws: no stale retry", async () => {
+			const calls: unknown[] = [];
+			const gate = Promise.withResolvers<void>();
+			const { set, errors } = await onFailingDerive(async (value) => {
+				calls.push(value);
+				if (value !== 1) return;
+				await gate.promise;
+				throw new Error("handler threw");
+			});
+			await vi.advanceTimersByTimeAsync(0);
+			await set(1);
+			await vi.advanceTimersByTimeAsync(0);
+			// The source fails while the call with 1 runs; that call then throws.
+			await set(-1);
+			await vi.advanceTimersByTimeAsync(0);
+			gate.resolve();
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(calls).toEqual([0, 1]);
+			expect(vi.getTimerCount()).toBe(0);
+			await set(3);
 			await vi.advanceTimersByTimeAsync(0);
 			expect(calls).toEqual([0, 1, 3]);
 			expect(reports(errors)).toEqual(["on #1: handler threw"]);
@@ -621,34 +652,23 @@ describe("on", () => {
 		const calls: unknown[] = [];
 		const gate = Promise.withResolvers<void>();
 		const entered = Promise.withResolvers<void>();
-		let set: ((n: number) => Promise<unknown>) | undefined;
-		const { errors } = await store((doc, self) => {
-			const failing = self.derive([doc], ([d]) => {
-				if (d.n < 0) throw new Error("compute");
-				return d.n;
-			});
-			set = (n) =>
-				doc.change((d) => {
-					d.n = n;
-				}, context);
-			self.on(failing, async ({ value }) => {
-				calls.push(value);
-				if (value === 1) {
-					entered.resolve();
-					await gate.promise;
-				}
-			});
+		const { set, errors } = await onFailingDerive(async (value) => {
+			calls.push(value);
+			if (value === 1) {
+				entered.resolve();
+				await gate.promise;
+			}
 		});
 		await flushed();
-		await set!(1);
+		await set(1);
 		await entered.promise;
 		// Queued behind the busy call, then replaced by the failure.
-		await set!(2);
-		await set!(-1);
+		await set(2);
+		await set(-1);
 		gate.resolve();
 		await settled();
 		expect(calls).toEqual([0, 1]);
-		await set!(3);
+		await set(3);
 		await settled();
 		expect(calls).toEqual([0, 1, 3]);
 		expect(reports(errors)).toEqual([]);

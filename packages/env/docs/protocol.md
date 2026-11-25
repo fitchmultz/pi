@@ -57,7 +57,8 @@ File operations run on a fixed pool of worker threads; `exec`, `pty`, `process` 
 thread that reads frames, so keystrokes and protocol messages never swap. Chunk writes to one handle run in arrival order. Results, errors, pings and `watch` events are sent before queued
 command output, and results with payloads above 64 KiB queue behind output too, so a slow link delays bulk data, not
 replies. Output of a command without an output window waits while more than 4 MiB of output is unsent, which slows the
-command as a full pipe would.
+command as a full pipe would. For `exec`, `pty` and `process`, time spent waiting for this output to drain does not
+count toward the post-exit silence grace period.
 
 ## Liveness
 
