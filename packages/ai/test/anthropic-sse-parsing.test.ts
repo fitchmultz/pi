@@ -5,6 +5,7 @@ import { stream as streamAnthropic } from "../src/api/anthropic-messages.ts";
 import { transformMessages } from "../src/api/transform-messages.ts";
 import { getModel, normalizeContext } from "../src/compat.ts";
 import type { Api, Model, ToolCall } from "../src/types.ts";
+import { isRetryableAssistantError } from "../src/utils/retry.ts";
 
 function createSseResponse(events: Array<{ event: string; data: string }>): Response {
 	const body = events.map(({ event, data }) => `event: ${event}\ndata: ${data}\n`).join("\n");
@@ -945,5 +946,39 @@ describe("Anthropic raw SSE parsing", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(result.errorMessage).toBeUndefined();
 		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+	});
+
+	it.each([
+		{
+			name: "missing data line at EOF",
+			trailingFrame: "event: content_block_delta\n",
+		},
+		{
+			name: "truncated JSON object at EOF",
+			trailingFrame: 'event: content_block_delta\ndata: {"type":"content_block_delta","delta":',
+		},
+		{
+			name: "truncated JSON string at EOF",
+			trailingFrame:
+				'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hel',
+		},
+	])("classifies mid-stream truncated SSE frames as retryable ($name)", async ({ trailingFrame }) => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const context = normalizeContext({
+			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+		});
+		const prefix = minimalAnthropicEvents
+			.slice(0, 2)
+			.map(({ event, data }) => `event: ${event}\ndata: ${data}\n\n`)
+			.join("");
+		const response = new Response(`${prefix}${trailingFrame}`, {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const result = await streamAnthropic(model, context, { client: createFakeAnthropicClient(response) }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/^Could not parse Anthropic SSE event content_block_delta:/);
+		expect(isRetryableAssistantError(result)).toBe(true);
 	});
 });

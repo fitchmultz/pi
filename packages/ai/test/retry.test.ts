@@ -335,6 +335,31 @@ describe("provider retry classification", () => {
 	});
 
 	it.each([
+		"Could not parse Anthropic SSE event content_block_delta: Unexpected end of JSON input; data=; raw=event: content_block_delta",
+		'Could not parse Anthropic SSE event content_block_delta: Unterminated string in JSON at position 52 (line 1 column 53); data={"type":"content_block_delta","delta":{"text":"hel; raw=event: content_block_delta\\ndata: {"type":"content_block_delta","delta":{"text":"hel',
+		"Could not parse Anthropic SSE event content_block_delta: JSON Parse error: Unexpected EOF; data=; raw=event: content_block_delta",
+		"Could not parse Anthropic SSE event content_block_delta: JSON Parse error: Unterminated string; data={; raw=event: content_block_delta\\ndata: {",
+		"Invalid Codex SSE JSON: Unexpected end of JSON input",
+		"Invalid Codex SSE JSON: Unterminated string in JSON at position 42",
+		"Invalid Codex SSE JSON: JSON Parse error: Unexpected EOF",
+	])("retries mid-stream truncated SSE JSON parse errors: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
+	});
+
+	it.each([
+		// Client/request errors carrying JSON parse failures must not be retried.
+		"400 Bad Request: Unexpected end of JSON input",
+		'{"type":"error","error":{"type":"invalid_request_error","message":"Unexpected end of JSON input"}}',
+		// Non-truncation malformed payloads (e.g. HTML error page or invalid syntax) must not be retried as truncated SSE.
+		"Could not parse Anthropic SSE event content_block_delta: Unexpected token '<', \"<html>\" is not valid JSON; data=<html>; raw=event: content_block_delta\\ndata: <html>",
+		"Invalid Codex SSE JSON: Unexpected token '<'",
+		// Quota/billing exclusions still win even if embedded in a truncated SSE parse error.
+		'Could not parse Anthropic SSE event content_block_delta: Unexpected end of JSON input; data={"error":"insufficient_quota"}',
+	])("does not retry non-truncation or client JSON parse errors: %s", (errorMessage) => {
+		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(false);
+	});
+
+	it.each([
 		// A cancellation, usually the user's.
 		"The operation was aborted",
 		// Only Anthropic's internal error is retried, not other error types.
