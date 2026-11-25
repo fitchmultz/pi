@@ -160,12 +160,13 @@ function captureSettlement<T>(
 	);
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
-	const deadline = Date.now() + timeoutMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error(`Timed out after ${timeoutMs}ms`);
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	}
+function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+	return vi.waitFor(
+		() => {
+			if (!predicate()) throw new Error(`Timed out after ${timeoutMs}ms`);
+		},
+		{ timeout: timeoutMs, interval: 10 },
+	);
 }
 
 function isProcessAlive(pid: number): boolean {

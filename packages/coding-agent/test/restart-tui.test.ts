@@ -16,13 +16,17 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { requestRestart } from "../src/cli/restart-protocol.ts";
 import type { TuiMode } from "../src/core/settings-manager.ts";
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = process.env.PI_TEST_CLI ?? join(packageDir, "dist", "bundle", "cli.js");
 const hasTmux = process.platform !== "win32" && spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+// Uncached Pi startup on Termux can consume most of the usual tmux test deadline.
+const timeoutScale = process.platform === "android" ? 2 : 1;
+const testTimeout = 60_000 * timeoutScale;
+const extendedTestTimeout = 90_000 * timeoutScale;
 const resources: Array<{ root: string; socket: string }> = [];
 
 function quote(text: string): string {
@@ -292,12 +296,21 @@ child.on('exit', code => {process.exitCode = code ?? 1;});
 			execFileSync("tmux", ["-L", socket, "send-keys", "-t", "test", ...keys]);
 		},
 		async wait(predicate: (receipts: Receipt[]) => boolean, timeoutMs = 30_000) {
-			const deadline = Date.now() + timeoutMs;
-			while (Date.now() < deadline) {
-				if (predicate(this.read())) return;
-				if (existsSync(status)) break;
-				await new Promise((r) => setTimeout(r, 100));
-			}
+			const pending = new Error("Terminal has not reached expected state");
+			const reachedState = await vi
+				.waitFor(
+					() => {
+						if (predicate(this.read())) return true;
+						if (existsSync(status)) return false;
+						throw pending;
+					},
+					{ timeout: timeoutMs * timeoutScale, interval: 100 },
+				)
+				.catch((error: unknown) => {
+					if (error !== pending) throw error;
+					return false;
+				});
+			if (reachedState) return;
 			throw new Error(
 				`Terminal did not reach expected state:\n${this.screen()}\n${existsSync(log) ? readFileSync(log, "utf8") : "No receipts"}`,
 			);
@@ -315,15 +328,22 @@ afterEach(async () => {
 					.map((line) => JSON.parse(line) as Receipt)
 					.findLast((r) => r.event === "start")?.pid
 			: undefined;
-		if (pid && !existsSync(join(root, "exit-code"))) {
+		const status = join(root, "exit-code");
+		if (pid && !existsSync(status)) {
 			try {
 				process.kill(pid, "SIGTERM");
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
 			}
-			const deadline = Date.now() + 3000;
-			while (!existsSync(join(root, "exit-code")) && Date.now() < deadline)
-				await new Promise((r) => setTimeout(r, 25));
+			// Continue with tmux cleanup if the worker does not exit after SIGTERM.
+			await vi
+				.waitFor(
+					() => {
+						if (!existsSync(status)) throw new Error("Pi has not exited");
+					},
+					{ timeout: 3000, interval: 25 },
+				)
+				.catch(() => undefined);
 		}
 		spawnSync("tmux", ["-L", socket, "kill-server"], { stdio: "ignore" });
 		rmSync(root, { recursive: true, force: true });
@@ -331,8 +351,14 @@ afterEach(async () => {
 });
 
 // Real terminal, private tmux socket, isolated HOME and faux provider: no network or paid requests.
-describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_CLI)", () => {
-	it("preserves fullscreen and primary working-session ownership across restart and completed exit", async () => {
+describe.skipIf(!hasTmux)("managed restart in a real TUI (also supports PI_TEST_CLI)", { timeout: testTimeout }, () => {
+	it(
+		"preserves fullscreen and primary working-session ownership across restart and completed exit",
+		checkFullscreenRestart,
+		extendedTestTimeout,
+	);
+
+	async function checkFullscreenRestart() {
 		// #297: exercise a long TMPDIR with Node outside Termux's prefix.
 		const shortTmp =
 			process.platform === "android"
@@ -496,7 +522,7 @@ export default function(pi) {
 			(entry) => entry.message?.role === "user" && JSON.stringify(entry).includes("Continue after nested workers"),
 		);
 		expect(entries.indexOf(records[1]!)).toBe(continuation - 1);
-	}, 90_000);
+	}
 
 	it.each([false, true])(
 		"starts a replacement on the same session, continuation once, completed work never replayed; rollback=%s",
@@ -562,7 +588,6 @@ export default function(pi) {
 			expect(readFileSync(f.status, "utf8").trim()).toBe("0");
 			expect(f.read().filter((r) => r.event === "start")).toHaveLength(2);
 		},
-		60_000,
 	);
 
 	it("/restart works and refuses an unsent draft through the control socket", async () => {
@@ -584,7 +609,7 @@ export default function(pi) {
 				.at(-1)?.text,
 		).toBe("[Restart continuation]\nSlash continuation");
 		expect(f.read().filter((r) => r.event === "work")).toHaveLength(2);
-	}, 60_000);
+	});
 
 	it("tells extensions whether a managed worker hands off, retires unready, or releases on exit", async () => {
 		const f = fixture();
@@ -622,7 +647,7 @@ export default function(pi) {
 			expect.objectContaining({ accepted: false }),
 		]);
 		expect(receipts.filter((r) => r.event === "prompt").map((r) => r.text)).toEqual(["Seed prompt"]);
-	}, 60_000);
+	});
 
 	it("rolls a replacement that misses its startup deadline back once, as a provisional retirement", async () => {
 		const f = fixture();
@@ -654,7 +679,7 @@ export default function(pi) {
 			expect.stringContaining("did not become ready within 8 seconds"),
 		]);
 		expect(continuations[0].text).toContain("Continue after rollback");
-	}, 60_000);
+	});
 
 	it("exposes no managed host or disposition under a launcher without readiness acknowledgment", async () => {
 		const f = fixture();
@@ -666,7 +691,7 @@ export default function(pi) {
 		expect(receipts.find((r) => r.event === "start")?.owner).toBeNull();
 		expect(receipts.filter((r) => r.event === "host-ready")).toHaveLength(0);
 		expect(receipts.find((r) => r.event === "shutdown")?.disposition).toBeNull();
-	}, 60_000);
+	});
 
 	it("reports a failed restart capture with a resume command instead of crashing", async () => {
 		const f = fixture();
@@ -681,7 +706,7 @@ export default function(pi) {
 		expect(screen).toContain("To resume this session:");
 		expect(screen).not.toContain("    at ");
 		expect(f.read().filter((r) => r.event === "start")).toHaveLength(1);
-	}, 60_000);
+	});
 
 	it("keeps the idle worker alive until an admitted native command completes, then restarts once", async () => {
 		const f = fixture();
@@ -727,33 +752,29 @@ export default function(pi) {
 			expect.objectContaining({ data: { completed: true } }),
 		]);
 		expect(f.screen()).not.toContain("Restart failed:");
-	}, 60_000);
+	});
 
-	it.each(["interrupt", "draft"])(
-		"waits for running work and cancels a queued restart on %s",
-		async (action) => {
-			const f = fixture();
-			f.start(f.extension("v1", { holdWork: true }));
-			await f.wait((r) => r.some((x) => x.event === "work"));
-			const endpoint = f.read().find((r) => r.event === "prompt")!.endpoint;
-			expect(await requestRestart(endpoint, { message: "Must not run" })).toContain("Restart queued");
-			await new Promise((r) => setTimeout(r, 200));
-			expect(f.read().filter((r) => r.event === "start")).toHaveLength(1);
-			expect(f.read().filter((r) => r.event === "shutdown")).toHaveLength(0);
-			if (action === "interrupt") f.keys("Escape");
-			else {
-				f.keys("preserve this draft");
-				writeFileSync(join(f.root, "release-work"), "");
-			}
-			await f.wait((r) => r.some((x) => x.event === "settled"));
-			await new Promise((r) => setTimeout(r, 200));
-			expect(f.screen()).toContain("Restart cancelled");
-			if (action === "draft") expect(f.screen()).toContain("preserve this draft");
-			expect(f.read().filter((r) => r.event === "start")).toHaveLength(1);
-			expect(f.read().filter((r) => r.event === "prompt")).toHaveLength(1);
-		},
-		60_000,
-	);
+	it.each(["interrupt", "draft"])("waits for running work and cancels a queued restart on %s", async (action) => {
+		const f = fixture();
+		f.start(f.extension("v1", { holdWork: true }));
+		await f.wait((r) => r.some((x) => x.event === "work"));
+		const endpoint = f.read().find((r) => r.event === "prompt")!.endpoint;
+		expect(await requestRestart(endpoint, { message: "Must not run" })).toContain("Restart queued");
+		await new Promise((r) => setTimeout(r, 200));
+		expect(f.read().filter((r) => r.event === "start")).toHaveLength(1);
+		expect(f.read().filter((r) => r.event === "shutdown")).toHaveLength(0);
+		if (action === "interrupt") f.keys("Escape");
+		else {
+			f.keys("preserve this draft");
+			writeFileSync(join(f.root, "release-work"), "");
+		}
+		await f.wait((r) => r.some((x) => x.event === "settled"));
+		await new Promise((r) => setTimeout(r, 200));
+		expect(f.screen()).toContain("Restart cancelled");
+		if (action === "draft") expect(f.screen()).toContain("preserve this draft");
+		expect(f.read().filter((r) => r.event === "start")).toHaveLength(1);
+		expect(f.read().filter((r) => r.event === "prompt")).toHaveLength(1);
+	});
 
 	it("waits for settled handlers and their deferred user messages before restarting", async () => {
 		const f = fixture();
@@ -788,25 +809,21 @@ export default function(pi) {
 		expect(receipts.findIndex((r) => r.event === "shutdown")).toBeGreaterThan(
 			receipts.findLastIndex((r) => r.event === "settled" && r.pid === originalPid),
 		);
-	}, 60_000);
+	});
 
 	it.each([
 		{ sessionId: "saved-session", sessionFile: "/saved/session" },
 		{ sessionId: "saved-session", sessionFile: 7, workingSession: "/private/state.json" },
 		{ sessionId: 7, sessionFile: "/saved/session", workingSession: "/private/state.json" },
 		{ sessionId: "saved-session", sessionFile: "/saved/session", workingSession: "relative.json" },
-	])(
-		"rejects incomplete or malformed handoff before session_start: %j",
-		async (invalidHandoff) => {
-			const f = fixture();
-			f.start(f.extension("v1"), { invalidHandoff });
-			await f.wait(() => existsSync(f.status));
-			expect(readFileSync(f.status, "utf8").trim()).toBe("1");
-			expect(f.screen()).toContain("Invalid restart handoff");
-			expect(f.read()).toHaveLength(0);
-		},
-		60_000,
-	);
+	])("rejects incomplete or malformed handoff before session_start: %j", async (invalidHandoff) => {
+		const f = fixture();
+		f.start(f.extension("v1"), { invalidHandoff });
+		await f.wait(() => existsSync(f.status));
+		expect(readFileSync(f.status, "utf8").trim()).toBe("1");
+		expect(f.screen()).toContain("Invalid restart handoff");
+		expect(f.read()).toHaveLength(0);
+	});
 
 	it("keeps a fresh Pi usable when its control socket cannot initialize", async () => {
 		const f = fixture();
@@ -822,10 +839,16 @@ export default function(pi) {
 		await f.wait(() => existsSync(f.status));
 		expect(readFileSync(f.status, "utf8").trim()).toBe("0");
 		expect(f.read().filter((r) => r.event === "start")).toHaveLength(1);
-	}, 60_000);
+	});
 
 	// PIF-222: live managed restart reloads disk settings (including deleted httpIdleTimeoutMs) and survives broken JSON.
-	it("reloads disk settings on managed restart and falls back cleanly on invalid disk JSON", async () => {
+	it(
+		"reloads disk settings on managed restart and falls back cleanly on invalid disk JSON",
+		checkDiskSettingsReload,
+		extendedTestTimeout,
+	);
+
+	async function checkDiskSettingsReload() {
 		const server = http.createServer((_request, response) => {
 			const timer = setTimeout(() => response.end("ok"), 2500);
 			response.on("close", () => clearTimeout(timer));
@@ -938,5 +961,5 @@ export default function(pi) {
 			server.closeAllConnections();
 			await new Promise<void>((done) => server.close(() => done()));
 		}
-	}, 90_000);
+	}
 });
