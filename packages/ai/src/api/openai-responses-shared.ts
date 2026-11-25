@@ -4,7 +4,6 @@ import type {
 	Response,
 	ResponseConfigurationUpdateItemParam,
 	ResponseCreateParamsStreaming,
-	ResponseCustomToolCall,
 	ResponseFailedEvent,
 	ResponseInput,
 	ResponseInputContent,
@@ -470,16 +469,13 @@ function renderResponsesTranscript<TApi extends Api>(
 						...(isSameModel && toolCall.namespace !== undefined ? { namespace: toolCall.namespace } : {}),
 					};
 					if (customInputProperty !== undefined) {
-						// OpenAI persists status: "completed" on custom_tool_call items (matching openai/codex),
-						// though ResponseCustomToolCall in the OpenAI SDK .d.ts omits the field.
-						const customCall: ResponseCustomToolCall & { status: "completed" } = {
+						output.push({
 							type: "custom_tool_call",
 							...replayedCall,
 							input: sanitizeSurrogates(
 								getGrammarToolInput(toolCall.name, toolCall.arguments, customInputProperty),
 							),
-						};
-						output.push(customCall);
+						});
 					} else {
 						output.push({
 							type: "function_call",

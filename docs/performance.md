@@ -1,10 +1,10 @@
 # Performance results and reproduction
 
-The fork removes repeated work from native edits, image resizing, TUI rendering, model metadata, provider stream handling, MCP SSE transport, sessions, Durable, Env, background jobs, evals and packaging. The recorded fixtures show large reductions on those paths. A matched rerun confirmed the branch-preparation, current-directory listing and long-token wrap/preview gains. AI tool validation (+33%), transform (+5.4%) and prose preview (+6.1%) were slower in all four matched pairs, with overlapping ranges and no isolated source attribution. One deliberate trade-off is slower: the native Bash tool and executor bound the spill-file write queue instead of letting it grow to 6.9-10.1 MiB. Writing 64 MiB of command output took about 28% longer with the first bound of 64 KiB; with the current 1 MiB bound it took 1-3% longer than without a bound ([Bash output spill](#bash-output-spill-2026-11-10)). Startup and Biome showed no clear change.
+The fork removes repeated work from native edits, image resizing, TUI rendering, MCP SSE transport, sessions, Durable, Env, background jobs, evals and packaging. The recorded fixtures show large reductions on those paths. A matched rerun confirmed the branch-preparation, current-directory listing and long-token wrap/preview gains. AI tool validation (+33%), transform (+5.4%) and prose preview (+6.1%) were slower in all four matched pairs, with overlapping ranges and no isolated source attribution. One deliberate trade-off is slower: the native Bash tool and executor bound the spill-file write queue instead of letting it grow to 6.9-10.1 MiB. Writing 64 MiB of command output took about 28% longer with the first bound of 64 KiB; with the current 1 MiB bound it took 1-3% longer than without a bound ([Bash output spill](#bash-output-spill-2026-11-10)). Startup and Biome showed no clear change.
 
 These are source-owner measurements of two measured source trees on one workstation, not of the final runtime: later prompt-cache, model-catalog and upstream v1.2.0 integration changes were not timed. They do not show that every CLI invocation, provider, device or downstream adapter becomes faster. Functional tests remain the authority for behavior, safety, cancellation and mutation isolation.
 
-This page lists gains only for code the fork still carries and production still calls. On 2026-11-10 the results for code that is now upstream's, deleted or uncalled were removed here and from [`performance-results.json`](performance-results.json); [Removed results](#removed-results) names them. The remaining numbers are the recorded ones. None was re-timed.
+This page lists gains only for code the fork still carries and production still calls. Results for code that is now upstream's, deleted or uncalled were removed here and from [`performance-results.json`](performance-results.json); [Removed results](#removed-results) names them and records when they were retired. The remaining numbers are the recorded ones. None was re-timed.
 
 ## Turn-end context reads (2026-10-14)
 
@@ -85,8 +85,6 @@ First comparison. Values are median (minimum-maximum) milliseconds unless noted;
 | | Edit with display diff and unified patch | 7/7 | 1,317 (1,253-1,508) | 191 (187-221) | -86% | Isolated |
 | | Fuzzy edit, 32 targets | 7/7 | 4,168 (4,052-4,873) | 715 (297-1,242) | -83% | Isolated |
 | Images | PNG resize, 1600x1000 to 800x500 | 7/7 | 125 (112-156) | 81.8 (66.6-99.5) | -35% | Isolated |
-| AI | Model overlay read, 10,000 models | 7/7 | 212 (198-222) | 1.80 (1.61-2.53) | -99.2% | High load |
-| | Codex, 50,000 heartbeats per request, two cached requests | 7/7 | 1,874 (1,799-2,262) | 266 (123-364) | -86% | High load |
 | TUI (ms/op) | 16 KB editor re-render, unchanged | 5/5 | 1.26 (1.25-1.32) | 0.0222 (0.0205-0.0246) | -98% | Isolated, alternating trials |
 | | 50 KB plain wrap | 5/5 | 3.45 (3.33-3.52) | 1.03 (0.994-1.04) | -70% | Isolated, alternating trials |
 | | Hidden tree filter, 1,000 x 1,000 | 5/5 | 43.7 (38.1-48.7) | 2.45 (2.19-5.99) | -94% | High load |
@@ -202,7 +200,7 @@ These are deterministic counts from the first comparison, not latency claims.
 
 ### Removed results
 
-On 2026-11-10 these results were removed from this page and from `performance-results.json`. The fork no longer carries the code they measured, or production never calls it.
+These results were removed from this page and from `performance-results.json` (initially on 2026-11-10, with subsequent retirements noted below). The fork no longer carries the code they measured, or production never calls it.
 
 | Removed result | Reason |
 | --- | --- |
@@ -215,8 +213,10 @@ On 2026-11-10 these results were removed from this page and from `performance-re
 | Durable retained contexts | The scheduler's retention code is upstream's |
 | Telemetry reference adapter | Upstream's rewritten adapter replaced the fork's change |
 | SQLite document-delta SQL calls and string-binding bytes | Upstream's batched commit replaced the fork's record reuse; both trees make 150 calls ([2026-11-05 record](upstream-sync-2026-11-05.md#performance)) |
+| Model overlay read, 10,000 models | Removed 2026-11-25 after upstream adopted publish-time `createProvider` model catalog merging (`#12366`, [2026-11-21 record](upstream-sync-2026-11-21.md)) |
+| Codex, 50,000 heartbeats per request | Removed 2026-11-25 after the custom `CodexWebSocketSession` queue was replaced by OpenAI SDK `ResponsesWSBase.stream()` in `#564` |
 
-The runner lost the cases whose code is deleted: `frames` and `queued-frames` in `ai.mjs`, and the `frame`, `publish` and `stdio` modes of `bridges.mjs`. The `parse` case in `ai.mjs`, which timed `parseStreamingJson`, is removed too. Cases for code that upstream now owns still run as controls: text reads, grep, the HTTP error, context retention and telemetry.
+The runner lost the cases whose code is deleted or retired to upstream: `frames`, `queued-frames`, and `parse` in `ai.mjs`; `codex-burst-50000` in `run.mjs`; `frame`, `publish`, and `stdio` in `bridges.mjs`; `tui-highlight` in `tui.ts`; and the retired fixtures `catalog.mjs`, `durable-context.ts`, and `telemetry.mjs`. Text reads, grep, `codex-burst-1000`, and the HTTP error remain as controls.
 
 ## Setup and commands
 
@@ -231,11 +231,11 @@ node packages/ai/scripts/hydrate-model-catalog.ts "$CATALOG"
 
 # From the checkout containing these retained fixtures. --list does not import/run product code.
 node scripts/performance/run.mjs --list
-node scripts/performance/run.mjs --repo "$AFTER" --groups tools,images,ai,tui,bridges,sessions,durable,env-client,evals,telemetry,background --smoke --out "$RESULTS/smoke"
-node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --groups tools,images,ai,tui,bridges,sessions,durable,env-client,evals,telemetry,background --repeat 3 --out "$RESULTS/paired"
+node scripts/performance/run.mjs --repo "$AFTER" --groups tools,images,ai,tui,bridges,sessions,durable,env-client,evals,background --smoke --out "$RESULTS/smoke"
+node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --groups tools,images,ai,tui,bridges,sessions,durable,env-client,evals,background --repeat 3 --out "$RESULTS/paired"
 # TUI's original paired probe used five alternating trials.
 node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --groups tui --repeat 5 --out "$RESULTS/tui"
-# A case name can replace a group: e.g. edit-fuzzy, codex-burst-50000, background-monitor.
+# A case name can replace a group: e.g. edit-fuzzy, codex-cached, background-monitor.
 ```
 
 `BEFORE`, `AFTER` and `RESULTS` are caller-selected absolute directories, not configuration/account/session paths. The output directory must not already exist. Before spawning, the runner saves the attempt's command, load, exclusive log and `running` status. Sanitized complete stdout/stderr lines are appended as they arrive. Completed verification is `passed`; spawn/exit/verification errors are `failed`. An interrupted `running` or `verifying` attempt is unverified, distinct from unattempted cases absent from results. After an error, inspect the saved manifest/log and rerun only the failed/unverified/unattempted case names into a new directory; do not overwrite or silently reuse changed inputs.
@@ -253,11 +253,11 @@ The native source resolver from **the selected root** resolves workspace imports
 | `tools` / `tools.mjs`, `cpu.mjs` | 32 MiB LF text; head/middle/10-line page; 8 MiB JSON selection; one grep hit/context. Edits: generated ~7.16 MB text, 32 targets, exact/fuzzy/diff. 7 samples | No explicit operation warmup. Excludes fixture/import/GC; includes native operation plus original checksum/assertion overhead. Diff checks content, display, unified patch and first changed line |
 | `images` / `cpu.mjs` | Deterministic 1600×1000 RGBA palette encoded as PNG, resize to 800×500; base64 budgets 4,718,592 and 50,000; 7 samples | Photon/fixture loading excluded; original operation includes output digest. In-process WASM owner; not worker/terminal/provider latency |
 | `ai` / `ai.mjs` | 65,536-character content; 128 tools × 8 fields, 3,000 messages; 100,000-event queue control. 7 samples × 3 operations (queue ×1) | One operation warmup per selected case; GC/setup excluded; assertions included. Fixed synthetic timestamps make witnesses reproducible |
-| `ai` / `catalog.mjs`, `codex.mjs` | Catalog overlays 30/3,000/10,000 models; 100/10/10 reads, 7 samples. Codex: 3,000×1,024-byte messages or 20×128 bytes with 1,000/50,000 heartbeat events/request; 2 cached requests/pair, 7 samples | Catalog offline refresh excluded, no separate read warmup. Codex one pair warmup; real conversion/continuation/queue with mock sockets. Retained-payload mutation and full/delta envelopes checked |
+| `ai` / `codex.mjs` | Codex: 3,000×1,024-byte messages or 20×128 bytes with 1,000 heartbeat events/request; 2 cached requests/pair, 7 samples | Codex one pair warmup; real conversion/continuation with mock sockets. Retained-payload mutation and full/delta envelopes checked |
 | `tui` / `tui.ts` | 16 KB stream/editor/input/prose, 64 KB Mermaid control; hidden tree depth 1,000 × 1,000 visible leaves. Mostly 40 operations, tree 5 | Components prepared before measurement; unchanged-prefix highlights counted separately. Exact final render witnesses exclude timing/highlight counters. Null terminal: no emulator/write throughput claim |
 | `tui` primitives | 40-char draft 10,000 unchanged/cursor operations; 16 KB draft 40 unchanged/cursor/ASCII-typing operations; 14,000 UTF-16-unit Unicode draft 40 typing operations; 50 KB plain/ANSI wraps ×40; 10 KB Input movement ×100 | Initial render plus up to 40 warm operations per phase. Retains original paired probe's inputs and controls without copied source. Growth from warm typing is part of the fixture |
 | `sessions` / `sessions.mts` | 10,000/100,000 archived entries, 128-byte payload; projection/name/branch/boundary/context ×15 runs. 10,000-entry controls: fork, list (30 files) and split ×5 runs, working-state copies ×7 runs | Three warm operations per phase. Each logged value is the median of its phase's runs. Setup outside timing. Complete-working-state copying stays validated; split uses two delayed faux summaries, not model parallelism |
-| `durable` / context/history/lines | 0/100/1,000/10,000 completed context-reading conversations, retention 0/600,000 ms; 120 root samples. History 1,024/8,192/65,536 revisions, base each 32, ancient/recent/current ×1,000 reads. 1/4/16 MiB terminated/partial lines ×7 | Scheduler fixed clock; one root warm task, seed time separate. Historical warm read; line warm read/open/validation/close excluded. Fixed 256 KiB short-line control includes per-line assertions |
+| `durable` / history/lines | History 1,024/8,192/65,536 revisions, base each 32, ancient/recent/current ×1,000 reads. 1/4/16 MiB terminated/partial lines ×7 | Historical warm read; line warm read/open/validation/close excluded. Fixed 256 KiB short-line control includes per-line assertions |
 | `durable` / storage | 1 KiB/1 MiB document payload, 30 scalar changes/no-ops and task replacements | Public SQLite facade instrumented: SQL calls, UTF-8 binding bytes, WAL growth. Not a wall-time benchmark. No-ops must remain zero SQL/WAL |
 | `env-client` / `env-client.mjs` | 3-byte reads ×1,000; 524,289-byte full-tail reads ×50; unsorted 50,000 Unicode names ×7; 1/4/16 MiB partial lines ×7 | In-memory Connection-shaped fixture only; no warmup. Counts requests and Buffer conversions; assertions/hash outside elapsed intervals. Excludes protocol/daemon/filesystem/SSH |
 | `env-daemon` / `env-daemon.mjs` | Release daemon over local pipes: 1/4/16 MiB, 1,000/1,000/10,000 files; 5 samples/operation | One warm operation; startup separate. Text/binary/write/long-line/scan/list checks. Client CPU is not daemon CPU |
@@ -266,7 +266,6 @@ The native source resolver from **the selected root** resolves workspace imports
 | `bash` / `bash.mjs` | Actual Bash tool/executor with deterministic drain-respecting Node producer: 64 MiB, 64 KiB tiles; normal sink and 20 ms delayed fs `_write`/`_writev` sink. Smoke uses 128 KiB | One operation/process, no warmup. `publicReturnMs` runs from just before the native call to its public return; `persistedCompletionMs` ends at the spill stream's `close` event. Both exclude payload generation, hashing, import and process startup, and include the real producer plus per-write queue/memory instrumentation. Compare throughput by persisted completion: the baseline executor can return before its spill file is complete. Stream close is not an `fsync` or crash-durability guarantee. Checks final spill bytes/hash and displayed/structured output; also reports bytes and stream state at public return. The 20 ms sink is a backpressure control, not a throughput comparison. Default private file creation/high-water mark are untouched |
 | `qualification` / existing fixtures | `ai-common-controls`: transform/estimate/validate only. `history-current-65536`: `--current-only`, 1,000 current reads at 65,536 revisions. `ls-10000` (500-entry limit), `resources-250` (skill reload) and `background-1000` (listing completed jobs) ×7 runs; `spill-64mib` ×3. `startup-bundled`: `dist/bundle/cli.js`. `env-daemon-controls-16777216`: 16 MiB text/binary reads and write, 10,000-file listings, without the long-line and scan operations | Same clocks as the parent fixtures; `ls`/resource/listing/spill runs time one operation each with GC, setup and witness outside. The full `history` and `env-daemon-*` defaults are unchanged |
 | `evals` / report/persistence | 100/1,000/10,000 pairs and 0/1/10 MiB sessions ×7. Persistence: 100/1,000 paired arms, 3 fresh CLI samples +1 warmup | Report setup/hash/validation excluded. CLI includes process startup and actual persistence; local missing-report arms and expected blocked-pair exit 1. No Docker/model calls |
-| `telemetry` / `telemetry.mjs` | 10,000 spans; 10 snapshots; one retained 10,000-element array with 20/1,000 scalar updates | No explicit warmup; original callback/assertion overhead included. Opt-in in-memory reference adapter, not normal CLI instrumentation |
 
 ## Build, pack, Rust, startup and matched qualification
 

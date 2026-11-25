@@ -334,7 +334,7 @@ or invalid, updates fail closed; repair or delete that receipt file, then run
 
 `--fork` explicitly selects the fork updater for
 [immutable fork installations](quickstart.md#fork-installation), including when
-a custom updater is configured. The fork updater requires macOS/Linux/Termux arm64/x64,
+a custom updater is configured. The fork updater requires Apple Silicon macOS (arm64), Linux (arm64/x64), or Termux,
 patched Node.js 22.23.5+ (22.x), 24.22.3+ (24.x), or >=26.13.1 (not Bun) with
 adjacent npm, Git, bash, tar, gzip, tmux, and network access. Update Node.js before
 running the fork updater; it does not update Node itself. macOS/Linux use the

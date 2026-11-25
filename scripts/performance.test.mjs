@@ -13,7 +13,7 @@ const root = fileURLToPath(new URL("../", import.meta.url));
 test("the smoke command in docs/performance.md runs every selected case", async (t) => {
 	const temporary = await mkdtemp(join(tmpdir(), "pi-performance-smoke-"));
 	t.after(() => rm(temporary, { recursive: true, force: true }));
-	const groups = "tools,images,ai,tui,bridges,sessions,durable,env-client,evals,telemetry,background";
+	const groups = "tools,images,ai,tui,bridges,sessions,durable,env-client,evals,background";
 	const result = spawnSync(
 		process.execPath,
 		["scripts/performance/run.mjs", "--repo", root, "--groups", groups, "--smoke", "--out", join(temporary, "out")],

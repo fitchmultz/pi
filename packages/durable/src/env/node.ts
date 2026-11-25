@@ -321,8 +321,10 @@ function killProcessTree(pid: number): void {
 	}
 
 	try {
-		// Stop waiting shells before killing their children so they cannot resume and run side effects.
-		process.kill(-pid, "SIGSTOP");
+		if (process.platform === "darwin") {
+			// Stop waiting shells before killing their children so they cannot resume and run side effects.
+			process.kill(-pid, "SIGSTOP");
+		}
 		process.kill(-pid, "SIGKILL");
 	} catch {
 		try {

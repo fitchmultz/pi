@@ -610,8 +610,8 @@ test("a forced dev restart ends a hung close at its deadline and resumes workers
 	let serverSource = await readFile(serverEntry, "utf8");
 	for (const [anchor, replacement] of [
 		[
-			'import { mkdirSync, readFileSync } from "node:fs";',
-			'import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";',
+			'import { chmodSync, mkdirSync } from "node:fs";',
+			'import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";',
 		],
 		[
 			"\t\t\t\tawait workers.close(BACKGROUND_CONTEXT);",

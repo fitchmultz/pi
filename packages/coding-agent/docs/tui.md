@@ -31,8 +31,6 @@ After changing component state, invalidate the affected component and call the i
 
 Fullscreen rendering and `Loader` animations continue at their normal rate when the terminal loses focus. Pi cancels active mouse gestures and clears hover state, but keeps completed text selections.
 
-To track terminal focus, use `tui.isTerminalFocused?.()` and `tui.onTerminalFocusChange?.(listener)`. The subscription returns a function that removes the listener.
-
 ## Compose built-in components
 
 The package includes components for common layouts and controls:

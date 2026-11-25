@@ -74,16 +74,9 @@ add("ai", "ai-queue-control", "ai.mjs", [
 	`--samples=${samples}`,
 	"--cases=queue",
 ]);
-for (const count of smoke ? [4] : [30, 3000, 10000])
-	add("ai", `catalog-${count}`, "catalog.mjs", [
-		`--models=${count}`,
-		`--samples=${samples}`,
-		`--iterations=${smoke ? 1 : count === 30 ? 100 : 10}`,
-	]);
 for (const [name, messages, bytes, burst] of [
 	["cached", 3000, 1024, 1],
 	["burst-1000", 20, 128, 1000],
-	["burst-50000", 20, 128, 50000],
 ])
 	add("ai", `codex-${name}`, "codex.mjs", [
 		`--messages=${smoke ? 4 : messages}`,
@@ -100,11 +93,6 @@ for (const scenario of ["stream", "wrap", "preview", "editor", "input", "tree", 
 		LEAVES: smoke ? "3" : "1000",
 	});
 }
-add("tui", "tui-highlight", "tui.ts", ["stream"], {
-	N: smoke ? "2" : "40",
-	SIZE: smoke ? "80" : "16000",
-	REAL_HIGHLIGHT: "1",
-});
 add("tui", "mermaid-65536", "tui.ts", ["mermaid"], { N: smoke ? "2" : "40", SIZE: smoke ? "80" : "65536" });
 for (const size of smoke ? [4096] : [1048576, 8388608])
 	add("bridges", `sse-${size}`, "bridges.mjs", [
@@ -132,7 +120,6 @@ for (const mode of ["fork", "list", "working", "split"])
 		SESSION_ENTRIES: smoke ? "20" : "10000",
 		SESSION_ITERATIONS: smoke ? "1" : "7",
 	});
-add("durable", "context-retention", "durable-context.ts", [smoke ? "0,3" : "0,100,1000,10000", smoke ? "1" : "120"]);
 add("durable", "history", "durable-history.ts", [smoke ? "32" : "1024,8192,65536", smoke ? "2" : "1000"]);
 add("durable", "node-longline", "durable-lines.ts", [smoke ? "1" : "1024,4096,16384", samples]);
 for (const size of smoke ? [1] : [1, 1024])
@@ -166,15 +153,6 @@ add("evals", "eval-persistence", "eval-persistence.mjs", [
 	"--pairs",
 	smoke ? "2" : "100,1000",
 ]);
-for (const updates of [20, 1000])
-	add("telemetry", `telemetry-${updates}`, "telemetry.mjs", [
-		"--spans",
-		smoke ? "4" : "10000",
-		"--updates",
-		smoke ? "2" : String(updates),
-		"--snapshots",
-		smoke ? "1" : "10",
-	]);
 add("background", "background-monitor", "background.mjs", [smoke ? "3" : "1000", smoke ? "1" : "9", smoke ? "0" : "2"]);
 for (const owner of ["tool", "executor"])
 	for (const sink of ["normal", "slow"]) {
