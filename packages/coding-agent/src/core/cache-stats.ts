@@ -1,11 +1,13 @@
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { isGemini4ModelId } from "@earendil-works/pi-ai/api/google-catalog";
+import {
+	type AssistantMessage,
+	GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS,
+	usesGoogleImplicitCache,
+} from "@earendil-works/pi-ai";
+import { isGemini4OrLaterModelId } from "@earendil-works/pi-ai/api/google-catalog";
 import type { SessionEntry } from "./session-manager.ts";
 
 /** Per-turn overlap estimates at or below this are cache breakpoint granularity noise. */
 const NOISE_FLOOR_TOKENS = 1024;
-/** Reprocessed on small follow-ups: https://aistudio.google.com/docs/caching?generate-content=true#implicit-caching */
-const GEMINI_4_CACHE_TAIL_TOKENS = 2_050;
 
 type ReadPriceSource = "usage" | "ancestor" | "catalog" | "unknown";
 
@@ -78,11 +80,11 @@ function detectMiss(
 	if (
 		usage.cacheRead > 0 &&
 		growth >= 0 &&
-		growth < GEMINI_4_CACHE_TAIL_TOKENS &&
-		(message.api === "google-generative-ai" || message.api === "google-vertex") &&
-		isGemini4ModelId(modelId)
+		growth < GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS &&
+		usesGoogleImplicitCache(message.api) &&
+		isGemini4OrLaterModelId(modelId)
 	) {
-		missedTokens -= GEMINI_4_CACHE_TAIL_TOKENS;
+		missedTokens -= GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS;
 	}
 	if (missedTokens <= NOISE_FLOOR_TOKENS) return undefined;
 

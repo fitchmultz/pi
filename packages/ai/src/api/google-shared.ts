@@ -47,6 +47,7 @@ import {
 	withoutInitialSystemMessage,
 } from "../utils/transcript.ts";
 import { resolveStrictJsonSchema } from "./constrained-sampling.ts";
+import { getGeminiVersion, isGemini4OrLaterModelId } from "./google-catalog.ts";
 import {
 	createGoogleFetch,
 	isCloudflareGoogleAiStudioUrl,
@@ -708,7 +709,7 @@ export function usesGoogleThinkingLevel<T extends GoogleApiType>(model: Model<T>
 		// gemini-3-flash-preview, gemini-3.1-pro-preview, and gemini-3.8-flash.
 		/gemini-3(?:\.\d+)?-(?:pro|flash)/.test(id) ||
 		// Match Gemini 4 and later, such as gemini-4-argon (#10890).
-		(getGeminiMajorVersion(id) ?? 0) >= 4 ||
+		isGemini4OrLaterModelId(id) ||
 		id === "gemini-flash-latest" ||
 		id === "gemini-flash-lite-latest" ||
 		// Match both hosted Gemma 4 naming forms: gemma-4-* and gemma4-*.
@@ -872,16 +873,6 @@ export function requiresToolCallId(modelId: string): boolean {
 	);
 }
 
-function getGeminiVersion(modelId: string): { major: number; minor: number } | undefined {
-	// Unanchored like usesGoogleThinkingLevel: some hosts prefix the ID, e.g. randomprefix-gemini-4-argon (#12321).
-	const match = modelId.toLowerCase().match(/gemini(?:-live)?-(\d+)(?:\.(\d+))?/);
-	if (!match) return undefined;
-	return {
-		major: Number.parseInt(match[1], 10),
-		minor: match[2] ? Number.parseInt(match[2], 10) : 0,
-	};
-}
-
 function getGeminiMajorVersion(modelId: string): number | undefined {
 	return getGeminiVersion(modelId)?.major;
 }
@@ -910,8 +901,7 @@ export function supportsGoogleMidConvoSystemMessages<T extends GoogleApiType>(mo
 	if (model.compat?.supportsMidConvoSystemMessages !== undefined) {
 		return model.compat.supportsMidConvoSystemMessages;
 	}
-	const majorVersion = getGeminiMajorVersion(model.id);
-	return majorVersion !== undefined && majorVersion >= 4;
+	return isGemini4OrLaterModelId(model.id);
 }
 
 function supportsMultimodalFunctionResponse(modelId: string): boolean {

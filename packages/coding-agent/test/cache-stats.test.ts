@@ -150,10 +150,13 @@ describe("Gemini 4 cache overlap", () => {
 		model: "gemini-4-neon",
 	} satisfies Partial<AssistantMessage>;
 
-	it("ignores the 2,049-token tail after a 21-token follow-up on a routed Gemini 4 model", () => {
-		const routed = { ...route, model: "auto", responseModel: "gemini-4-neon" };
-		const manager = session(assistant({ ...routed, input: 5_000, cacheRead: 95_000 }));
-		const followUp = assistant({ ...routed, input: 2_070, cacheRead: 97_951 });
+	it.each([
+		{ ...route, model: "auto", responseModel: "gemini-4-neon" },
+		{ ...route, model: "vendor-gemini-4-argon", provider: "custom" },
+		{ api: "google-vertex", model: "gemini-4.1-flash", provider: "google-vertex" },
+	] satisfies Partial<AssistantMessage>[])("ignores the 2,049-token tail on $api for $model", (model) => {
+		const manager = session(assistant({ ...model, input: 5_000, cacheRead: 95_000 }));
+		const followUp = assistant({ ...model, input: 2_070, cacheRead: 97_951 });
 
 		expect(detectCacheMiss(manager.getBranch(), followUp, models)).toBeUndefined();
 		manager.appendMessage(followUp);
