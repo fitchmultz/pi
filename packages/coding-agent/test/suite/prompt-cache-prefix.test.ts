@@ -14,7 +14,7 @@ import {
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { streamSimple as anthropicStream } from "@earendil-works/pi-ai/api/anthropic-messages";
-import { streamSimple as googleStream } from "@earendil-works/pi-ai/api/google-generative-ai";
+import { streamSimple as googleStream } from "@earendil-works/pi-ai/api/google-interactions";
 import { streamSimple as codexStream } from "@earendil-works/pi-ai/api/openai-codex-responses";
 import { streamSimple as completionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as responsesStream } from "@earendil-works/pi-ai/api/openai-responses";
@@ -885,11 +885,13 @@ it.each([
 	},
 );
 
-it("keeps Gemini 4 systemInstruction and contents prefix stable across mid-session system updates", async () => {
+it("keeps Gemini 4 Interactions system instruction and steps stable across mid-session system updates", async () => {
 	const model = getBuiltinModel("google", "gemini-4-neon");
+	if (!hasApi(model, "google-interactions")) throw new Error("Expected the built-in Neon model to use Interactions");
 	interface GoogleCapture {
-		contents?: unknown[];
-		config?: { systemInstruction?: string; tools?: unknown[] };
+		input?: unknown[];
+		system_instruction?: string;
+		tools?: unknown[];
 	}
 	const captures: GoogleCapture[] = [];
 	const capture = async (context: TranscriptContext) => {
@@ -938,18 +940,14 @@ it("keeps Gemini 4 systemInstruction and contents prefix stable across mid-sessi
 
 		expect(captures).toHaveLength(3);
 		const [first, second, third] = captures;
-		expect(second.config?.systemInstruction).toBe(first.config?.systemInstruction);
-		expect(third.config?.systemInstruction).toBe(first.config?.systemInstruction);
-		expect(JSON.stringify(second.config?.tools)).toBe(JSON.stringify(first.config?.tools));
-		expect(JSON.stringify(third.config?.tools)).toBe(JSON.stringify(first.config?.tools));
-		expect(JSON.stringify(second.contents?.slice(0, first.contents?.length ?? 0))).toBe(
-			JSON.stringify(first.contents),
-		);
-		expect(JSON.stringify(third.contents?.slice(0, second.contents?.length ?? 0))).toBe(
-			JSON.stringify(second.contents),
-		);
-		expect(JSON.stringify(second.contents?.at(-1))).toContain("<system_update>");
-		expect(JSON.stringify(second.contents?.at(-1))).toContain("/tmp/updated-cwd");
+		expect(second.system_instruction).toBe(first.system_instruction);
+		expect(third.system_instruction).toBe(first.system_instruction);
+		expect(JSON.stringify(second.tools)).toBe(JSON.stringify(first.tools));
+		expect(JSON.stringify(third.tools)).toBe(JSON.stringify(first.tools));
+		expect(JSON.stringify(second.input?.slice(0, first.input?.length ?? 0))).toBe(JSON.stringify(first.input));
+		expect(JSON.stringify(third.input?.slice(0, second.input?.length ?? 0))).toBe(JSON.stringify(second.input));
+		expect(JSON.stringify(second.input?.at(-2))).toContain("<system_update>");
+		expect(JSON.stringify(second.input?.at(-2))).toContain("/tmp/updated-cwd");
 	} finally {
 		h.cleanup();
 	}
@@ -957,9 +955,11 @@ it("keeps Gemini 4 systemInstruction and contents prefix stable across mid-sessi
 
 it("keeps Gemini 4 tools and prefix stable across tool_search when codemode is active", async () => {
 	const model = getBuiltinModel("google", "gemini-4-neon");
+	if (!hasApi(model, "google-interactions")) throw new Error("Expected the built-in Neon model to use Interactions");
 	interface GoogleCapture {
-		contents?: unknown[];
-		config?: { systemInstruction?: string; tools?: unknown[] };
+		input?: unknown[];
+		system_instruction?: string;
+		tools?: unknown[];
 	}
 	const captures: GoogleCapture[] = [];
 	const capture = async (context: TranscriptContext) => {
@@ -1014,19 +1014,15 @@ it("keeps Gemini 4 tools and prefix stable across tool_search when codemode is a
 
 		expect(captures).toHaveLength(3);
 		const [first, second, third] = captures;
-		expect(second.config?.systemInstruction).toBe(first.config?.systemInstruction);
-		expect(third.config?.systemInstruction).toBe(first.config?.systemInstruction);
-		expect(JSON.stringify(second.config?.tools)).toBe(JSON.stringify(first.config?.tools));
-		expect(JSON.stringify(third.config?.tools)).toBe(JSON.stringify(first.config?.tools));
-		expect(JSON.stringify(first.config?.tools)).not.toContain('"linear_get_issue"');
-		expect(JSON.stringify(second.contents?.slice(0, first.contents?.length ?? 0))).toBe(
-			JSON.stringify(first.contents),
-		);
-		expect(JSON.stringify(third.contents?.slice(0, second.contents?.length ?? 0))).toBe(
-			JSON.stringify(second.contents),
-		);
-		expect(JSON.stringify(second.contents?.at(-1))).toContain("declare const tools: { linear_get_issue(");
-		expect(JSON.stringify(third.contents?.at(-1))).toContain("issue:LIN-1");
+		expect(second.system_instruction).toBe(first.system_instruction);
+		expect(third.system_instruction).toBe(first.system_instruction);
+		expect(JSON.stringify(second.tools)).toBe(JSON.stringify(first.tools));
+		expect(JSON.stringify(third.tools)).toBe(JSON.stringify(first.tools));
+		expect(JSON.stringify(first.tools)).not.toContain('"linear_get_issue"');
+		expect(JSON.stringify(second.input?.slice(0, first.input?.length ?? 0))).toBe(JSON.stringify(first.input));
+		expect(JSON.stringify(third.input?.slice(0, second.input?.length ?? 0))).toBe(JSON.stringify(second.input));
+		expect(JSON.stringify(second.input?.at(-1))).toContain("declare const tools: { linear_get_issue(");
+		expect(JSON.stringify(third.input?.at(-1))).toContain("issue:LIN-1");
 		expect(h.session.getActiveToolNames()).toEqual(["codemode", "tool_search"]);
 	} finally {
 		h.cleanup();

@@ -3,7 +3,8 @@ import { isModelType } from "../utils/model-operations.ts";
 
 const CANONICAL_GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const LEGACY_GOOGLE_MAX_REQUEST_BYTES = 20 * 1024 * 1024;
-const GEMINI_4_MODEL_ID_PATTERN = /^gemini-4(?:-|$)/i;
+
+export const GEMINI_4_NEON_ID = "gemini-4-neon";
 
 /**
  * Gemini Developer API inline request payload limit (100 MiB).
@@ -16,11 +17,6 @@ export const GOOGLE_MAX_REQUEST_BYTES = 100 * 1024 * 1024;
  * On Cloudflare AI Gateway, Neon hit on four 60s replays but missed on the first 90s replay.
  */
 export const GEMINI_4_PROMPT_CACHE: Readonly<ModelPromptCache> = { short: 75 };
-
-/** Whether `modelId` identifies a Gemini 4 model (e.g. `gemini-4-neon`, `gemini-4-carbon`). */
-export function isGemini4ModelId(modelId: string): boolean {
-	return GEMINI_4_MODEL_ID_PATTERN.test(modelId);
-}
 
 /** Read the Gemini version from an ID, including IDs with a host or vendor prefix (#12321). */
 export function getGeminiVersion(modelId: string): { major: number; minor: number } | undefined {
@@ -47,14 +43,15 @@ export const GOOGLE_STREAMING_MAX_OUTPUT_OVERRIDES: Readonly<Record<string, numb
 };
 
 /**
- * Apply canonical Gemini Developer API catalog corrections during pinned hydration
- * and pi.dev catalog overlay merges without overwriting custom endpoints or limits.
+ * Apply canonical Gemini Developer API catalog corrections without overwriting
+ * custom endpoints or limits. API selection is a runtime default; catalog
+ * hydration preserves the published API for older consumers.
  */
-export function normalizeGoogleModel(model: AnyModel): AnyModel {
+export function normalizeGoogleModel(model: AnyModel, options?: { preserveApi?: boolean }): AnyModel {
 	if (
 		model.provider !== "google" ||
 		!isModelType(model, "chat") ||
-		model.api !== "google-generative-ai" ||
+		(model.api !== "google-generative-ai" && model.api !== "google-interactions") ||
 		model.baseUrl !== CANONICAL_GOOGLE_BASE_URL
 	) {
 		return model;
@@ -69,9 +66,13 @@ export function normalizeGoogleModel(model: AnyModel): AnyModel {
 			? { ...model.inputLimits, maxRequestBytes: GOOGLE_MAX_REQUEST_BYTES }
 			: model.inputLimits;
 	const nextPromptCache =
-		isGemini4ModelId(model.id) && model.promptCache === undefined ? { ...GEMINI_4_PROMPT_CACHE } : model.promptCache;
+		isGemini4OrLaterModelId(model.id) && model.promptCache === undefined
+			? { ...GEMINI_4_PROMPT_CACHE }
+			: model.promptCache;
+	const api = !options?.preserveApi && model.id === GEMINI_4_NEON_ID ? "google-interactions" : model.api;
 
 	if (
+		api === model.api &&
 		nextMaxTokens === model.maxTokens &&
 		nextInputLimits === model.inputLimits &&
 		nextPromptCache === model.promptCache
@@ -80,6 +81,7 @@ export function normalizeGoogleModel(model: AnyModel): AnyModel {
 	}
 	return {
 		...model,
+		api,
 		maxTokens: nextMaxTokens,
 		...(nextInputLimits ? { inputLimits: nextInputLimits } : {}),
 		...(nextPromptCache !== undefined ? { promptCache: nextPromptCache } : {}),

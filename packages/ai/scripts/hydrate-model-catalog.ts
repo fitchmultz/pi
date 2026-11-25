@@ -91,6 +91,7 @@ export function hydrateModelCatalog(
 				normalizeOpenAIModel(
 					normalizeGoogleModel(
 						restoreKimiK3CacheWriteCost(normalizeCloudflareModel(model as CatalogEntry & AnyModel)),
+						{ preserveApi: true },
 					),
 				),
 			);

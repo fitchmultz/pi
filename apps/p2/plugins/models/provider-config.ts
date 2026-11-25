@@ -14,6 +14,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { anthropicMessagesApi } from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import { googleGenerativeAIApi } from "@earendil-works/pi-ai/api/google-generative-ai.lazy";
+import { googleInteractionsApi } from "@earendil-works/pi-ai/api/google-interactions.lazy";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import type { MutableModels } from "@earendil-works/pi-ai/models";
@@ -212,6 +213,7 @@ const apis = new Map<string, () => ProviderStreams>([
 	["openai-responses", openAIResponsesApi],
 	["anthropic-messages", anthropicMessagesApi],
 	["google-generative-ai", googleGenerativeAIApi],
+	["google-interactions", googleInteractionsApi],
 ]);
 
 function composeProvider(id: string, base: Provider | undefined, config: ModelsJsonProvider): Provider {

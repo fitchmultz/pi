@@ -3,6 +3,7 @@ import type { AnthropicOptions } from "./api/anthropic-messages.ts";
 import type { AzureOpenAIResponsesOptions } from "./api/azure-openai-responses.ts";
 import type { BedrockOptions } from "./api/bedrock-converse-stream.ts";
 import type { GoogleOptions } from "./api/google-generative-ai.ts";
+import type { GoogleInteractionsOptions, GoogleInteractionsReplay } from "./api/google-interactions.ts";
 import type { GoogleVertexOptions } from "./api/google-vertex.ts";
 import type { MistralOptions } from "./api/mistral-conversations.ts";
 import type { OpenAICodexResponsesOptions } from "./api/openai-codex-responses.ts";
@@ -72,6 +73,7 @@ export type KnownApi =
 	| "anthropic-messages"
 	| "bedrock-converse-stream"
 	| "google-generative-ai"
+	| "google-interactions"
 	| "google-vertex"
 	| "pi-messages";
 
@@ -265,9 +267,8 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	sessionId?: string;
 	/**
 	 * Disable continuation for this request: skips server-side continuation state (such as
-	 * Anthropic message threads) and suppresses multi-hop Google (`google-generative-ai` and
-	 * `google-vertex`) long-decode `CONTINUATION` resumption (stopping after one hop with
-	 * `stopReason: "length"` and `rawStopReason: "CONTINUATION"`). Set this for replays such as
+	 * Anthropic message threads or Google Interactions) and suppresses multi-hop Google long-decode
+	 * resumption (stopping after one hop with `stopReason: "length"`). Set this for replays such as
 	 * cache warming or provider summaries that must not replace conversation state or run
 	 * multi-hop generation. Providers without continuation support ignore it.
 	 */
@@ -323,6 +324,7 @@ export interface ApiOptionsMap {
 	"openai-codex-responses": OpenAICodexResponsesOptions;
 	"azure-openai-responses": AzureOpenAIResponsesOptions;
 	"google-generative-ai": GoogleOptions;
+	"google-interactions": GoogleInteractionsOptions;
 	"google-vertex": GoogleVertexOptions;
 	"mistral-conversations": MistralOptions;
 	"bedrock-converse-stream": BedrockOptions;
@@ -695,6 +697,8 @@ export interface AssistantMessage {
 	rawStopReason?: string;
 	/** The block a provider wrote in answer to a `providerSummary` request. Such a response has no other content. */
 	providerSummary?: ProviderSummary;
+	/** Opaque Google Interactions steps for stateless replay. Other adapters use `content` instead. */
+	googleInteractionsReplay?: GoogleInteractionsReplay;
 	/**
 	 * Provider indication of whether the model explicitly ended its turn.
 	 * Preserved for debugging and does not currently affect agent control flow.
@@ -985,7 +989,7 @@ export interface Model<TApi extends Api> extends BaseModel<TApi> {
 					? BedrockCompat
 					: TApi extends "mistral-conversations"
 						? MistralConversationsCompat
-						: TApi extends "google-generative-ai" | "google-vertex"
+						: TApi extends "google-generative-ai" | "google-interactions" | "google-vertex"
 							? GoogleCompat
 							: never;
 }

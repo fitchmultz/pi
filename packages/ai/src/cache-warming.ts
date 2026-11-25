@@ -59,7 +59,7 @@ export const GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS = 2_050;
 
 /** Whether the API uses Google's short sliding implicit-cache policy. */
 export function usesGoogleImplicitCache(api: Api): boolean {
-	return api === "google-generative-ai" || api === "google-vertex";
+	return api === "google-generative-ai" || api === "google-vertex" || api === "google-interactions";
 }
 
 /** Maximum time to keep a prompt cache warm once no agent run is active. */

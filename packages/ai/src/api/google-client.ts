@@ -20,7 +20,7 @@ export function isCloudflareGoogleAiStudioUrl(baseUrl: string | undefined): bool
  */
 export function sendsToGeminiApi(model: Pick<BaseModel<string>, "api" | "provider" | "baseUrl">): boolean {
 	return (
-		(model.api === "google-generative-ai" || model.api === "google-images") &&
+		(model.api === "google-generative-ai" || model.api === "google-interactions" || model.api === "google-images") &&
 		(model.provider === "google" ||
 			!model.baseUrl ||
 			(URL.canParse(model.baseUrl) && new URL(model.baseUrl).hostname === "generativelanguage.googleapis.com") ||

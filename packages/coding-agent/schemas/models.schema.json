@@ -34,7 +34,7 @@
             "api": {
               "type": "string",
               "minLength": 1,
-              "description": "API for the provider's models, such as \"openai-completions\", \"openai-responses\", \"anthropic-messages\", or \"google-generative-ai\"."
+              "description": "API for the provider's models, such as \"openai-completions\", \"openai-responses\", \"anthropic-messages\", or \"google-interactions\"."
             },
             "oauth": {
               "type": "string",

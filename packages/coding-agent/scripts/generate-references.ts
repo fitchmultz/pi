@@ -95,6 +95,13 @@ const referenceArtifacts: readonly ReferenceArtifact[] = [
 				schema: ModelInputLimitsSchema,
 			},
 			{
+				heading: "Google Interactions",
+				intro: [
+					"The built-in `google/gemini-4-neon` model uses `google-interactions`. Other Google chat models keep `google-generative-ai`. The Interactions API always sends mid-conversation system updates inline.",
+					"For Cloudflare AI Gateway, set `baseUrl` to the `google-ai-studio/v1beta` path and provide the gateway credentials in `headers`. Pi appends `/interactions` to that path.",
+				].join("\n\n"),
+			},
+			{
 				heading: "Compatibility",
 				intro: "`compat` describes verified differences from an API's standard request and response behavior. Model values override provider values per field. The fields that apply depend on the model's `api`.",
 			},

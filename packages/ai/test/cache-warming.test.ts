@@ -13,7 +13,7 @@ import type { Api, Model } from "../src/types.ts";
 const neon = getBuiltinModel("google", "gemini-4-neon");
 
 describe("Google implicit cache warming policy", () => {
-	it.each(["google-generative-ai", "google-vertex"] as const)(
+	it.each(["google-generative-ai", "google-vertex", "google-interactions"] as const)(
 		"uses the short cache and applies the idle and miss limits for %s",
 		(api) => {
 			const model: Model<Api> = { ...neon, api };

@@ -1,13 +1,16 @@
 import { googleDecisionsApi } from "../api/google-decisions.lazy.ts";
 import { googleGenerativeAIApi } from "../api/google-generative-ai.lazy.ts";
 import { googleImagesApi } from "../api/google-images.lazy.ts";
+import { googleInteractionsApi } from "../api/google-interactions.lazy.ts";
 import { envApiKeyAuth } from "../auth/helpers.ts";
 import { createProvider, type Provider } from "../models.ts";
 import type { ClassifierModel, ImageModel } from "../types.ts";
 import { GOOGLE_CLASSIFIER_MODELS, GOOGLE_IMAGE_MODELS, GOOGLE_MODELS } from "./google.models.ts";
 
-export function googleProvider(): Provider<"google-generative-ai"> {
-	return createProvider<"google-generative-ai">({
+type GoogleChatApi = "google-generative-ai" | "google-interactions";
+
+export function googleProvider(): Provider<GoogleChatApi> {
+	return createProvider<GoogleChatApi>({
 		id: "google",
 		name: "Google",
 		baseUrl: "https://generativelanguage.googleapis.com/v1beta",
@@ -17,7 +20,10 @@ export function googleProvider(): Provider<"google-generative-ai"> {
 			...Object.values<ImageModel<"google-images">>(GOOGLE_IMAGE_MODELS),
 			...Object.values<ClassifierModel<"google-decisions">>(GOOGLE_CLASSIFIER_MODELS),
 		],
-		api: googleGenerativeAIApi(),
+		api: {
+			"google-generative-ai": googleGenerativeAIApi(),
+			"google-interactions": googleInteractionsApi(),
+		},
 		images: {
 			"google-images": googleImagesApi(),
 		},
