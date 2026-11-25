@@ -52,14 +52,28 @@ export const CACHE_WARMING_IDLE_CONTINUATION_PROBABILITY = 0.15;
 const GOOGLE_IDLE_CONTINUATION_PROBABILITY = 0.5;
 
 /**
- * Gemini implicit prefix caching leaves an uncached tail of ~2,048 tokens billed at full input rate
- * on cache hits and warm replays, and does not cache prompts at or below this threshold.
+ * Gemini 4 re-processes this many tokens from the previous request when the next request adds fewer tokens.
+ * https://aistudio.google.com/docs/caching?generate-content=true#implicit-caching
  */
-export const GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS = 2048;
+export const GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS = 2_050;
 
 /** Whether the API uses Google's short sliding implicit-cache policy. */
 export function usesGoogleImplicitCache(api: Api): boolean {
 	return api === "google-generative-ai" || api === "google-vertex" || api === "google-interactions";
+}
+
+/** Maximum time to keep a prompt cache warm once no agent run is active. */
+export function getCacheWarmingMaxIdleAgeMs(model: Model<Api>): number {
+	return usesGoogleImplicitCache(model.api) ? CACHE_WARMING_MAX_GOOGLE_IDLE_AGE_MS : CACHE_WARMING_MAX_IDLE_AGE_MS;
+}
+
+/** Stop after a Google replay misses on a prompt large enough for Gemini 4 implicit caching (4,096 tokens). */
+export function shouldStopAfterColdCacheWarm(
+	model: Model<Api>,
+	promptTokens: number,
+	usage: Pick<Usage, "cacheRead">,
+): boolean {
+	return usesGoogleImplicitCache(model.api) && promptTokens >= 4_096 && usage.cacheRead === 0;
 }
 
 /** Refresh at 90% of the TTL while preserving at least ten seconds of margin. */

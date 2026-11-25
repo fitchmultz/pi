@@ -20,6 +20,7 @@ import {
 	type StopReason,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { ConversationId, ConversationView, LiveState, UsageState } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT } from "@p2/app/v1";
@@ -42,6 +43,7 @@ const MODEL: Model<"pi-messages"> = {
 	maxTokens: 128_000,
 	promptCache: { short: 300, long: 3600 },
 };
+const GEMINI = getBuiltinModel("google", "gemini-4-neon");
 const CONVERSATION = 1 as ConversationId;
 const REQUEST = {
 	model: MODEL,
@@ -59,6 +61,7 @@ function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idl
 		alive: 0,
 		sent: [] as ModelsSimpleStreamOptions[],
 		recorded: 0,
+		cacheRead: 0,
 		retention: "short" as CacheRetention,
 		authReady: Promise.resolve(),
 		failed: false,
@@ -68,8 +71,10 @@ function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idl
 		assert.deepEqual(context.messages, REQUEST.messages);
 		assert.ok(options);
 		state.sent.push(options);
+		const answer = fauxAssistantMessage([]);
 		const message = {
-			...fauxAssistantMessage([]),
+			...answer,
+			usage: { ...answer.usage, cacheRead: state.cacheRead },
 			stopReason: state.failed ? ("error" as const) : ("length" as const),
 		};
 		const stream = createAssistantMessageEventStream();
@@ -189,6 +194,45 @@ test("schedules from the prepared dispatch rather than the response or replay op
 	await advance(69_000);
 	assert.equal(state.sent.length, 0);
 	await advance(1_000);
+	assert.equal(state.sent.length, 1);
+});
+
+test("arms the first Gemini replay 65 s after a response that took 90 s", async (t) => {
+	const { state, start, advance } = setup(t, "idle", GEMINI);
+	state.phase = "idle";
+	state.cacheRead = 57_950;
+	await advance(90_000);
+	start(60_000, "stop", REQUEST.options, 0);
+	await advance(64_999);
+	assert.equal(state.sent.length, 0);
+	await advance(1);
+	assert.equal(state.sent.length, 1);
+	assert.equal(state.recorded, 1);
+});
+
+test("stops Gemini replays at the ten-minute idle limit", async (t) => {
+	const { state, start, advance } = setup(t, "idle", GEMINI);
+	state.phase = "idle";
+	state.cacheRead = 57_950;
+	start(60_000);
+	for (let refresh = 0; refresh < 9; refresh++) await advance(65_000);
+	assert.equal(state.sent.length, 9);
+	assert.equal(state.recorded, 9);
+	await advance(15_000);
+	assert.equal(state.alive, 0);
+	await advance(65_000);
+	assert.equal(state.sent.length, 9);
+});
+
+test("records a cold Gemini replay and cancels the next one", async (t) => {
+	const { state, start, advance } = setup(t, "idle", GEMINI);
+	state.phase = "idle";
+	start(60_000);
+	await advance(65_000);
+	assert.equal(state.sent.length, 1);
+	assert.equal(state.recorded, 1);
+	assert.equal(state.alive, 0);
+	await advance(65_000);
 	assert.equal(state.sent.length, 1);
 });
 

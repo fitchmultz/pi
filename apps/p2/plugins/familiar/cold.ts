@@ -15,7 +15,7 @@ export function coldThreshold(contextWindow: number, reserveTokens: number): num
 
 /**
  * When the prompt cache of an answer given at `answeredAt` is expected to be gone: the cache lifetime after it, and
- * after the at most 30 minutes the cache warmer keeps refreshing it while idle (`warmingMs`, 0 without warming).
+ * after the model's idle warming window (`warmingMs`, 0 without warming).
  */
 export function coldAt(answeredAt: number, ttlMs: number, warmingMs: number): number {
 	return answeredAt + warmingMs + ttlMs;

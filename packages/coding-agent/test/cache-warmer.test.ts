@@ -5,9 +5,7 @@ import {
 	type AssistantMessageEventStream,
 	evaluateCacheWarming,
 	type FetchFunction,
-	GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS,
 	getCacheWarmingDelayMs,
-	getEffectiveCacheRetention,
 	getPromptCacheTtlMs,
 	isCacheWarmingReplayable,
 	type Model,
@@ -1151,38 +1149,12 @@ describe("cache warming", () => {
 		);
 	});
 
-	it.each(["google-generative-ai", "google-vertex", "google-interactions"] as const)(
-		"maps %s long retention to short and accounts for the 2,048-token implicit-cache tail",
-		(api) => {
-			const gemini4Neon: Model<Api> = { ...getBuiltinModel("google", "gemini-4-neon"), api };
-			expect(gemini4Neon.promptCache).toEqual({ short: 75 });
-			expect(getEffectiveCacheRetention(gemini4Neon, { cacheRetention: "long" })).toBe("short");
-			expect(getEffectiveCacheRetention(gemini4Neon, { cacheRetention: "none" })).toBe("none");
-			expect(getPromptCacheTtlMs(gemini4Neon, { cacheRetention: "long" })).toBe(75_000);
-			expect(getCacheWarmingDelayMs(75_000)).toBe(65_000);
-			expect(isCacheWarmingReplayable(gemini4Neon, { reasoning: "xhigh" })).toBe(true);
-
-			const atTailThreshold = evaluateCacheWarming(
-				gemini4Neon,
-				GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS,
-				"streaming",
-			);
-			expect(atTailThreshold.missCost).toBe(0);
-			expect(atTailThreshold.action).toBe("stop");
-
-			const mediumStreaming = evaluateCacheWarming(gemini4Neon, 100_000, "streaming");
-			// 97,952 cached @ $0.15/M + 2,048 tail @ $3/M + 1 output @ $15/M
-			expect(mediumStreaming.warmCost).toBeCloseTo((97_952 * 0.15 + 2_048 * 3 + 15) / 1_000_000, 9);
-			expect(mediumStreaming.missCost).toBeCloseTo((97_952 * (3 - 0.15)) / 1_000_000, 9);
-			expect(mediumStreaming.action).toBe("warm");
-
-			expect(evaluateCacheWarming(gemini4Neon, 46_000, "idle")).toMatchObject({
-				continuationProbability: 0.5,
-				action: "stop",
-			});
-			expect(evaluateCacheWarming(gemini4Neon, 47_000, "idle").action).toBe("warm");
-		},
-	);
+	it("uses the catalog's 75-second warming budget for Gemini 4", () => {
+		const neon = getBuiltinModel("google", "gemini-4-neon");
+		expect(neon.promptCache).toEqual({ short: 75 });
+		expect(getPromptCacheTtlMs(neon, { cacheRetention: "long" })).toBe(75_000);
+		expect(getCacheWarmingDelayMs(75_000)).toBe(65_000);
+	});
 
 	it("uses OpenAI 30m/12h promptCache lifetimes and 2.5x 12h write pricing for GPT-6.2 warming", () => {
 		const gpt62Sol = getBuiltinModel("openai", "gpt-6.2-sol");

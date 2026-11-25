@@ -5,7 +5,7 @@
 import {
 	type Api,
 	type AssistantMessage,
-	CACHE_WARMING_MAX_IDLE_AGE_MS,
+	getCacheWarmingMaxIdleAgeMs,
 	getPromptCacheTtlMs,
 	type Model,
 } from "@earendil-works/pi-ai";
@@ -82,7 +82,7 @@ export default defineFacet((host) => {
 			const ttl = getPromptCacheTtlMs(model, { cacheRetention: stream?.cacheRetention });
 			if (ttl === undefined) return answeredAt;
 			const warming =
-				(settings.settings.value.cacheWarming ?? "idle") === "idle" ? CACHE_WARMING_MAX_IDLE_AGE_MS : 0;
+				(settings.settings.value.cacheWarming ?? "idle") === "idle" ? getCacheWarmingMaxIdleAgeMs(model) : 0;
 			return coldAt(answeredAt, ttl, warming);
 		};
 

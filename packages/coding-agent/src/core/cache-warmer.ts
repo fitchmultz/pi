@@ -1,8 +1,6 @@
 import {
 	type Api,
 	CACHE_WARMING_MAX_AGE_MS,
-	CACHE_WARMING_MAX_GOOGLE_IDLE_AGE_MS,
-	CACHE_WARMING_MAX_IDLE_AGE_MS,
 	CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS,
 	type CacheRetention,
 	type CacheWarmingAction,
@@ -10,6 +8,7 @@ import {
 	type Context,
 	evaluateCacheWarming,
 	getCacheWarmingDelayMs,
+	getCacheWarmingMaxIdleAgeMs,
 	getCacheWarmingRequestOptions,
 	getEffectiveCacheRetention,
 	getPromptCacheTtlMs,
@@ -17,6 +16,7 @@ import {
 	type Model,
 	type ModelsSimpleStreamOptions,
 	type SimpleStreamOptions,
+	shouldStopAfterColdCacheWarm,
 	usesGoogleImplicitCache,
 } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "./model-runtime.ts";
@@ -112,13 +112,11 @@ function getSafetyLimit(run: Pick<ActiveRun, "model" | "phase" | "startedAt" | "
 	if (run.phase === "streaming") {
 		return { deadline: run.startedAt + CACHE_WARMING_MAX_AGE_MS, reason: "one-hour safety limit reached" };
 	}
-	if (usesGoogleImplicitCache(run.model.api)) {
-		return {
-			deadline: (run.completedAt ?? run.startedAt) + CACHE_WARMING_MAX_GOOGLE_IDLE_AGE_MS,
-			reason: "10-minute idle safety limit reached",
-		};
-	}
-	return { deadline: run.startedAt + CACHE_WARMING_MAX_IDLE_AGE_MS, reason: "30-minute idle safety limit reached" };
+	const maxIdleAgeMs = getCacheWarmingMaxIdleAgeMs(run.model);
+	return {
+		deadline: (run.completedAt ?? run.startedAt) + maxIdleAgeMs,
+		reason: `${maxIdleAgeMs / 60_000}-minute idle safety limit reached`,
+	};
 }
 
 /**
@@ -355,7 +353,7 @@ export class CacheWarmer {
 						providerThinkingLevel: message.providerThinkingLevel,
 					},
 				);
-				if (usesGoogleImplicitCache(run.model.api) && promptTokens >= 4096 && message.usage.cacheRead === 0) {
+				if (shouldStopAfterColdCacheWarm(run.model, promptTokens, message.usage)) {
 					this.stop("cache warm missed");
 				}
 				this.onWarmed?.(entry);
