@@ -478,9 +478,12 @@ pub fn run(
             break;
         }
         if idle_until.is_some_and(|idle| now >= idle) {
-            // Silence while the link holds a reader up is not the end of the output: the pipe may hold more.
-            if gate.as_ref().is_some_and(Gate::held) {
-                idle_until = Some(now + EXIT_STDIO_GRACE);
+            // Silence while the link held a reader up is not the end of the output: allow a full grace after release.
+            if let Some(until) = gate
+                .as_ref()
+                .and_then(|gate| gate.extend_grace(now, EXIT_STDIO_GRACE))
+            {
+                idle_until = Some(until);
             } else {
                 // A descendant may hold the pipes open after the process exited; stop waiting for it.
                 break;

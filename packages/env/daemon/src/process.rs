@@ -206,10 +206,10 @@ pub fn run(
                 let now = Instant::now();
                 if now < idle {
                     idle - now
-                } else if gate.held() {
-                    // Silence while the link holds a reader up is not the end of the output: the pipe may hold more.
-                    idle_until = Some(now + EXIT_STDIO_GRACE);
-                    EXIT_STDIO_GRACE
+                } else if let Some(until) = gate.extend_grace(now, EXIT_STDIO_GRACE) {
+                    // Silence while the link held a reader up is not the end of the output: allow a full grace after release.
+                    idle_until = Some(until);
+                    until.saturating_duration_since(now)
                 } else {
                     // A descendant may hold the pipes open after the program exited; stop waiting for it.
                     break;
