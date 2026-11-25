@@ -14,6 +14,7 @@ import {
 	type GoogleGenAI,
 	ThinkingLevel as GoogleSdkThinkingLevel,
 	type Part,
+	ServiceTier,
 	type ThinkingConfig,
 } from "@google/genai";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
@@ -152,6 +153,9 @@ export function streamGoogle(
 				const nextParams = await options?.onPayload?.(baseParams, model);
 				if (nextParams !== undefined) {
 					baseParams = nextParams as GenerateContentParameters;
+				}
+				if (options?.cacheWarm && baseParams.config?.serviceTier === ServiceTier.PRIORITY) {
+					baseParams.config.serviceTier = ServiceTier.STANDARD;
 				}
 				try {
 					googleStream = await retryGoogleRequest(

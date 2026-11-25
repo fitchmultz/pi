@@ -189,6 +189,7 @@
 - The MCP sign-in tests that need a configured callback port ("uses the configured callback URL and scope", "adds the listening port to a callback URL without one") hold the port until just before the sign-in. They released it before starting their OAuth test server, and Linux gives a released port to the next server that asks for any port about once in 7,000 times; the sign-in then failed with `listen EADDRINUSE`.
 - Fixed `tools.tool_search({ query })` failing inside codemode. It now returns the same ranked matches as `searchTools(query)` without changing which tools are declared to the model.
 - Fixed the working spinner freezing and streamed output updating in bursts when a fullscreen terminal loses focus.
+- Gemini 4 cache warming schedules its next replay 65 seconds after the response finishes with the default catalog settings. Google implicit-cache warming stops after ten minutes of idle time or when a replay of a prompt with at least 4,096 tokens reports no cache hit.
 
 ### Removed
 

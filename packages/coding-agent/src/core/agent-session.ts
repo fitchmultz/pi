@@ -311,7 +311,10 @@ export interface AgentSessionConfig {
 	/** Canonical model/auth runtime used by coding-agent internals. */
 	modelRuntime: ModelRuntime;
 	/** Keeps the prompt cache entry of the last session request warm. */
-	cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
+	cacheWarmer?: Pick<
+		CacheWarmer,
+		"cancel" | "status" | "onResponseCompleted" | "onAgentSettled" | "onModeChanged" | "onWarmed"
+	>;
 	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
 	initialActiveToolNames?: string[];
 	/**
@@ -624,7 +627,7 @@ export class AgentSession {
 	private _extensionsBound = false;
 
 	private _modelRuntime: ModelRuntime;
-	private _cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
+	private _cacheWarmer: AgentSessionConfig["cacheWarmer"];
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -1858,6 +1861,15 @@ export class AgentSession {
 				this._queuedMessagesWithImages.delete(event.message);
 				await this._normalizeQueuedMessageImages(event.message);
 			}
+		}
+
+		if (
+			event.type === "message_end" &&
+			event.message.role === "assistant" &&
+			event.message.stopReason !== "error" &&
+			event.message.stopReason !== "aborted"
+		) {
+			this._cacheWarmer?.onResponseCompleted();
 		}
 
 		// Emit to extensions first, then notify public listeners.

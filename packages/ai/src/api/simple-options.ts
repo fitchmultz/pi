@@ -65,6 +65,7 @@ export function buildBaseOptions(
 		cacheRetention: options?.cacheRetention,
 		sessionId: options?.sessionId,
 		disableContinuation: options?.disableContinuation,
+		cacheWarm: options?.cacheWarm,
 		providerSummary: options?.providerSummary,
 		headers: options?.headers,
 		identity: options?.identity,

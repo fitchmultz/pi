@@ -1,6 +1,7 @@
 import {
 	type Api,
 	CACHE_WARMING_MAX_AGE_MS,
+	CACHE_WARMING_MAX_GOOGLE_IDLE_AGE_MS,
 	CACHE_WARMING_MAX_IDLE_AGE_MS,
 	CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS,
 	type CacheRetention,
@@ -16,6 +17,7 @@ import {
 	type Model,
 	type ModelsSimpleStreamOptions,
 	type SimpleStreamOptions,
+	usesGoogleImplicitCache,
 } from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "./model-runtime.ts";
 import type { SessionEntry, SessionManager, UsageEntry } from "./session-manager.ts";
@@ -97,9 +99,23 @@ interface ActiveRun extends CacheWarmRequest {
 	ttlMs: number;
 	delayMs: number;
 	startedAt: number;
+	completedAt?: number;
 	controller: AbortController;
 	phase: "streaming" | "idle";
 	cycle: RefreshCycle;
+}
+
+function getSafetyLimit(run: Pick<ActiveRun, "model" | "phase" | "startedAt" | "completedAt">) {
+	if (run.phase === "streaming") {
+		return { deadline: run.startedAt + CACHE_WARMING_MAX_AGE_MS, reason: "one-hour safety limit reached" };
+	}
+	if (usesGoogleImplicitCache(run.model.api)) {
+		return {
+			deadline: (run.completedAt ?? run.startedAt) + CACHE_WARMING_MAX_GOOGLE_IDLE_AGE_MS,
+			reason: "10-minute idle safety limit reached",
+		};
+	}
+	return { deadline: run.startedAt + CACHE_WARMING_MAX_IDLE_AGE_MS, reason: "30-minute idle safety limit reached" };
 }
 
 /**
@@ -115,7 +131,7 @@ export class CacheWarmer {
 	private readonly getMode: () => CacheWarmingMode;
 	/** Lets extensions override `event.action`; failures fall back to pi's decision. */
 	private readonly decide: (event: CacheWarmingDecisionEvent) => Promise<CacheWarmingAction>;
-	/** Called with the persisted usage entry after each successful refresh. */
+	/** Called with the persisted usage entry after each completed refresh. */
 	onWarmed?: (entry: UsageEntry) => void;
 
 	constructor(
@@ -190,6 +206,18 @@ export class CacheWarmer {
 		if (cycle) this.run = { ...run, cycle };
 	}
 
+	/** Anchor Google's next warm and idle window to the real response, before any tool work. */
+	onResponseCompleted(): void {
+		const run = this.run;
+		if (!run || !usesGoogleImplicitCache(run.model.api)) return;
+		run.completedAt = Date.now();
+		// A refresh already in progress accounts for its usage and schedules its own successor.
+		if (run.cycle.kind !== "scheduled") return;
+		clearTimeout(run.cycle.timer);
+		const next = this.schedule(run);
+		if (next) run.cycle = next;
+	}
+
 	onAgentSettled(): void {
 		const run = this.run;
 		if (!run) return;
@@ -198,9 +226,9 @@ export class CacheWarmer {
 			return;
 		}
 		run.phase = "idle";
-		const deadline = run.startedAt + CACHE_WARMING_MAX_IDLE_AGE_MS;
+		const { deadline, reason } = getSafetyLimit(run);
 		if (run.cycle.nextWarmAt > deadline || Date.now() >= deadline) {
-			this.stop("30-minute idle safety limit reached");
+			this.stop(reason);
 		}
 	}
 
@@ -229,12 +257,11 @@ export class CacheWarmer {
 		this.inactive = { state: "inactive", reason, ...stopped };
 	}
 
-	private schedule(run: Pick<ActiveRun, "startedAt" | "phase" | "ttlMs" | "delayMs">): RefreshCycle | undefined {
+	private schedule(run: Omit<ActiveRun, "cycle">): RefreshCycle | undefined {
 		const nextWarmAt = Date.now() + run.delayMs;
-		const deadline =
-			run.startedAt + (run.phase === "idle" ? CACHE_WARMING_MAX_IDLE_AGE_MS : CACHE_WARMING_MAX_AGE_MS);
+		const { deadline, reason } = getSafetyLimit(run);
 		if (nextWarmAt > deadline || Date.now() >= deadline) {
-			this.stop(run.phase === "idle" ? "30-minute idle safety limit reached" : "one-hour safety limit reached");
+			this.stop(reason);
 			return undefined;
 		}
 		const timer = setTimeout(
@@ -262,7 +289,8 @@ export class CacheWarmer {
 		run.cycle = { kind: "deciding", nextWarmAt, refreshDeadlineAt };
 		if (!this.validateRun(run)) return;
 		if (this.refreshDeadlineMissed(run)) return;
-		const decision = this.evaluate(run);
+		const promptTokens = lastPromptTokens(this.sessionManager.getBranch());
+		const decision = this.evaluate(run, promptTokens);
 		const { warmCost, missCost, continuationProbability } = decision;
 		let action = decision.action;
 		try {
@@ -317,6 +345,9 @@ export class CacheWarmer {
 						providerThinkingLevel: message.providerThinkingLevel,
 					},
 				);
+				if (usesGoogleImplicitCache(run.model.api) && promptTokens >= 4096 && message.usage.cacheRead === 0) {
+					this.stop("cache warm missed");
+				}
 				this.onWarmed?.(entry);
 			}
 		} catch {
@@ -328,6 +359,13 @@ export class CacheWarmer {
 	}
 
 	private refreshDeadlineMissed(run: ActiveRun): boolean {
+		if (run.phase === "idle" && usesGoogleImplicitCache(run.model.api)) {
+			const { deadline, reason } = getSafetyLimit(run);
+			if (Date.now() >= deadline) {
+				this.stop(reason);
+				return true;
+			}
+		}
 		if (Date.now() <= run.cycle.refreshDeadlineAt) return false;
 		this.stop("cache refresh deadline missed");
 		return true;
@@ -348,13 +386,11 @@ export class CacheWarmer {
 		return undefined;
 	}
 
-	private evaluate(run: ActiveRun): CacheWarmingDecision {
-		return evaluateCacheWarming(
-			run.model,
-			lastPromptTokens(this.sessionManager.getBranch()),
-			run.phase,
-			run.retention,
-		);
+	private evaluate(
+		run: ActiveRun,
+		promptTokens = lastPromptTokens(this.sessionManager.getBranch()),
+	): CacheWarmingDecision {
+		return evaluateCacheWarming(run.model, promptTokens, run.phase, run.retention);
 	}
 }
 

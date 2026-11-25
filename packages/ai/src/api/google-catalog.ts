@@ -12,10 +12,10 @@ const GEMINI_4_MODEL_ID_PATTERN = /^gemini-4(?:-|$)/i;
 export const GOOGLE_MAX_REQUEST_BYTES = 100 * 1024 * 1024;
 
 /**
- * Conservative floor (seconds) for Gemini 4's implicit prefix cache sliding TTL (~3–5 min).
- * Verified live on gemini-4-neon: a 1-token warm replay at 160s kept 100% of the cached prefix alive past 320s.
+ * Warming budget in seconds for Gemini 4's implicit prefix cache, not a provider guarantee.
+ * On Cloudflare AI Gateway, Neon hit on four 60s replays but missed on the first 90s replay.
  */
-export const GEMINI_4_PROMPT_CACHE: Readonly<ModelPromptCache> = { short: 180 };
+export const GEMINI_4_PROMPT_CACHE: Readonly<ModelPromptCache> = { short: 75 };
 
 /** Whether `modelId` identifies a Gemini 4 model (e.g. `gemini-4-neon`, `gemini-4-carbon`). */
 export function isGemini4ModelId(modelId: string): boolean {
