@@ -3765,4 +3765,92 @@ describe("openai-codex streaming", () => {
 			{ role: "user", content: [{ type: "input_text", text: "Hello" }] },
 		]);
 	});
+
+	it.each([
+		{
+			name: "dropped final closing brace at EOF",
+			trailingFrame: 'data: {"type":"response.output_text.delta","delta":"hello"',
+		},
+		{
+			name: "truncated JSON object at EOF",
+			trailingFrame: 'data: {"type":"response.output_text.delta","delta":',
+		},
+	])(
+		"discards incomplete trailing Codex SSE frames at EOF and surfaces retryable missing-terminal-event error ($name)",
+		async ({ trailingFrame }) => {
+			const model: Model<"openai-codex-responses"> = {
+				id: "test",
+				name: "test",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				baseUrl: "https://example.test",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 10000,
+				maxTokens: 1000,
+			};
+			const prefix = `data: ${JSON.stringify({ type: "response.created", response: { id: "resp_1" } })}\n\n`;
+			const result = await streamOpenAICodexResponses(model, normalizeContext({ messages: [] }), {
+				apiKey: mockToken(),
+				transport: "sse",
+				fetch: async () => new Response(`${prefix}${trailingFrame}`),
+			}).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("OpenAI Responses stream ended before a terminal response event");
+		},
+	);
+
+	it("still processes a valid complete terminal Codex SSE frame missing its trailing blank line (#9047)", async () => {
+		const model: Model<"openai-codex-responses"> = {
+			id: "test",
+			name: "test",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10000,
+			maxTokens: 1000,
+		};
+		const terminal = {
+			type: "response.completed",
+			response: {
+				id: "resp_ok",
+				status: "completed",
+				output: [],
+				usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+			},
+		};
+		const result = await streamOpenAICodexResponses(model, normalizeContext({ messages: [] }), {
+			apiKey: mockToken(),
+			transport: "sse",
+			fetch: async () => new Response(`data: ${JSON.stringify(terminal)}`),
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+	});
+
+	it("keeps blank-line-terminated malformed Codex SSE JSON as a non-retryable protocol error", async () => {
+		const model: Model<"openai-codex-responses"> = {
+			id: "test",
+			name: "test",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://example.test",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 10000,
+			maxTokens: 1000,
+		};
+		const result = await streamOpenAICodexResponses(model, normalizeContext({ messages: [] }), {
+			apiKey: mockToken(),
+			transport: "sse",
+			fetch: async () => new Response("data: <html>\n\n"),
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/^Invalid Codex SSE JSON:/);
+	});
 });

@@ -893,6 +893,16 @@ function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined 
 // SSE Parsing
 // ============================================================================
 
+function extractCodexSseData(chunk: string): string | null {
+	const dataLines = chunk
+		.split("\n")
+		.filter((l) => l.startsWith("data:"))
+		.map((l) => l.slice(5).trim());
+	if (dataLines.length === 0) return null;
+	const data = dataLines.join("\n").trim();
+	return data && data !== "[DONE]" ? data : null;
+}
+
 async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerator<Record<string, unknown>> {
 	if (!response.body) return;
 
@@ -914,35 +924,40 @@ async function* parseSSE(response: Response, signal?: AbortSignal): AsyncGenerat
 				throw new Error("Request was aborted");
 			}
 			buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-			// Treat EOF as terminating the residual SSE frame.
-			if (done && buffer.trim()) buffer += "\n\n";
 
 			let idx = buffer.indexOf("\n\n");
 			while (idx !== -1) {
 				const chunk = buffer.slice(0, idx);
 				buffer = buffer.slice(idx + 2);
 
-				const dataLines = chunk
-					.split("\n")
-					.filter((l) => l.startsWith("data:"))
-					.map((l) => l.slice(5).trim());
-				if (dataLines.length > 0) {
-					const data = dataLines.join("\n").trim();
-					if (data && data !== "[DONE]") {
-						try {
-							yield JSON.parse(data) as Record<string, unknown>;
-						} catch (cause) {
-							throw new CodexProtocolError(`Invalid Codex SSE JSON: ${formatThrownValue(cause)}`, {
-								cause,
-								payload: data,
-							});
-						}
+				const data = extractCodexSseData(chunk);
+				if (data !== null) {
+					try {
+						yield JSON.parse(data) as Record<string, unknown>;
+					} catch (cause) {
+						throw new CodexProtocolError(`Invalid Codex SSE JSON: ${formatThrownValue(cause)}`, {
+							cause,
+							payload: data,
+						});
 					}
 				}
 				idx = buffer.indexOf("\n\n");
 			}
 
-			if (done) break;
+			if (done) {
+				// Preserve valid unterminated terminal frames at EOF (#9047), while discarding
+				// unparseable incomplete trailing frames per the WHATWG SSE spec so the caller
+				// reports the existing retryable missing-terminal-event error.
+				const trailing = buffer.trim() ? extractCodexSseData(buffer) : null;
+				if (trailing !== null) {
+					try {
+						yield JSON.parse(trailing) as Record<string, unknown>;
+					} catch {
+						// Incomplete trailing frame at EOF; caller checks for a terminal event.
+					}
+				}
+				break;
+			}
 		}
 	} finally {
 		signal?.removeEventListener("abort", onAbort);
