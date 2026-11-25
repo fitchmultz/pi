@@ -4,7 +4,7 @@ The fork removes repeated work from native edits, image resizing, TUI rendering,
 
 These are source-owner measurements of two measured source trees on one workstation, not of the final runtime: later prompt-cache, model-catalog and upstream v1.2.0 integration changes were not timed. They do not show that every CLI invocation, provider, device or downstream adapter becomes faster. Functional tests remain the authority for behavior, safety, cancellation and mutation isolation.
 
-This page lists gains only for code the fork still carries and production still calls. On 2026-11-10 the results for code that is now upstream's, deleted or uncalled were removed here and from [`performance-results.json`](performance-results.json); [Removed results](#removed-results) names them. The remaining numbers are the recorded ones. None was re-timed.
+This page lists gains only for code the fork still carries and production still calls. Results for code that is now upstream's, deleted or uncalled were removed here and from [`performance-results.json`](performance-results.json); [Removed results](#removed-results) names them and records when they were retired. The remaining numbers are the recorded ones. None was re-timed.
 
 ## Turn-end context reads (2026-10-14)
 
