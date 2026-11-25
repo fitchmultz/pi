@@ -65,6 +65,15 @@ export function createBackgroundCommandTool(
 				: ["Print-mode runs can exit before a job finishes; use bash when that run needs the result."]),
 		],
 		parameters: schema,
+		prepareArguments(input) {
+			// Normalize just this placeholder before schema validation; all other arguments are unchanged.
+			const args = input as BackgroundCommandInput;
+			if (args?.action === "status" && args.id === "null") {
+				const { id: _id, ...rest } = args;
+				return rest;
+			}
+			return args;
+		},
 		async execute(_id, params, signal, _update, ctx) {
 			signal?.throwIfAborted();
 			if ((params.offset ?? 0) < 0) throw new Error("offset must be >= 0");
@@ -118,7 +127,17 @@ export function createBackgroundCommandTool(
 					}
 					if (!params.command?.trim()) throw new Error("start requires command");
 					const cwd = resolvePath(params.cwd ?? ".", baseCwd);
-					if (!statSync(cwd).isDirectory()) throw new Error(`Not a directory: ${cwd}`);
+					try {
+						if (!statSync(cwd).isDirectory()) throw new Error(`Not a directory: ${cwd}`);
+					} catch (error) {
+						if (params.cwd === "null" && error instanceof Error && "code" in error && error.code === "ENOENT") {
+							throw new Error(
+								`${error.message}\n"null" was treated as a literal directory name. To use the current working directory, omit cwd or pass JSON null.`,
+								{ cause: error },
+							);
+						}
+						throw error;
+					}
 					const settings = pi.getSettings();
 					const env = {
 						...getShellEnv(),

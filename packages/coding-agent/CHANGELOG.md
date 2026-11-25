@@ -9,6 +9,7 @@
 - Boundary `event.context` is now readonly. Empty-proposal previews are computed from the live session on first read; read them during the handler rather than retaining an unread event.
 - Complete native working-session capture and restore require a persistence-capable `ResourceLoader`; `getWorkingSessionResources()` is optional for ordinary SDK sessions. Directly constructed sessions must supply an explicit launch owner. Snapshot values must be plain finite JSON; lossy values are rejected.
 - `BashOperations.exec` now types `onData` as `(data: Buffer) => void | Promise<void>`. When pi writes the chunk to its spill file, the promise settles with that write, and the local shell uses it to limit unwritten output. Custom operations may ignore it. A typed caller that passes its own `onData` returning another value, such as `(data) => chunks.push(data)`, needs a block body.
+- Direct `bash` and `powershell` SDK calls now return `isError: true` on timeout instead of throwing, preserving truncation details and the full-output path. Codemode calls still reject on timeout, and completed commands keep their numeric `exit_code`.
 
 ### Added
 
@@ -82,6 +83,8 @@
 - `tool_search` loads only good matches: a tool the query names, or one whose name, description and parameters hold every word of the query, or more than half of them with one in the tool or server name. Otherwise it lists the closest tools without loading them, and a search for one of the names loads it. It used to load every tool that shared one word with the query, so a search for a tool that did not exist declared unrelated tools for the rest of the session. A `+word` now requires the word in the tool or server name, also in codemode's `searchTools()`. The result says when a tool it found or the query names is already active, cannot be loaded in this session, or is not registered. See [Tool search](docs/cli.md#tool-search).
 - The `pi.runtime` record now names the package version, git commit and extension file hash of the code that was imported. A record written by `/new`, `/resume` or `/fork` in a long-lived process used to name what was on disk at that moment, although the process still ran the older code.
 - The description of the `tool_search` `query` parameter now tells the model that a `+` before a server or tool name searches only there. Claude and Gemini models rarely wrote `+word` unprompted, so a query for one of two servers that offer the same tools, such as two Slack workspaces, could load the tools of both. A session resumed from an earlier build declares `tool_search` again once. See [Tool search](docs/cli.md#tool-search).
+- Default shell timeout messages recommend `background_command` for long builds, tests, and watches, or an explicit `timeout` when the result is needed in the current turn.
+- Clarified that `read` in codemode returns up to 1 MiB of untruncated text when `limit` is omitted and returns a page when `limit` is set.
 
 ### Fixed
 
@@ -190,6 +193,9 @@
 - Fixed `tools.tool_search({ query })` failing inside codemode. It now returns the same ranked matches as `searchTools(query)` without changing which tools are declared to the model.
 - Fixed the working spinner freezing and streamed output updating in bursts when a fullscreen terminal loses focus.
 - Gemini 4 cache warming schedules its next replay 65 seconds after the response finishes with the default catalog settings. Google implicit-cache warming stops after ten minutes of idle time or when a replay of a prompt with at least 4,096 tokens reports no cache hit.
+- Kept trailing diagnoses, such as shell timeouts and exit codes, in long codemode tool-error previews.
+- `background_command` now treats `id: "null"` as omitted for `status` only and explains how to use the current directory when a start with `cwd: "null"` cannot find that directory.
+- `find` now reports missing paths as missing and still suggests nearby names. `grep` explains empty searches with `glob: "null"` and suggests supported alternatives when ripgrep rejects a regex.
 
 ### Removed
 

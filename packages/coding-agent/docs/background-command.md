@@ -19,9 +19,9 @@ Use it for long tests, builds and watches; do not add `&` or repeatedly poll for
 | --- | --- |
 | `action` | Required: `start`, `status` or `cancel` |
 | `command` | Required nonempty shell command for `start` |
-| `cwd` | Start directory: absolute, `~` or relative to the effective shell directory |
+| `cwd` | Start directory: absolute, `~` or relative to the effective shell directory. Omit it or pass JSON `null` to use that directory. |
 | `timeout` | Start timeout in seconds; no default. Must be finite and positive, at most 2147483.647 |
-| `id` | Job ID from this session; required for `cancel`, optional for `status` |
+| `id` | Job ID from this session; required for `cancel`, optional for `status`. `status` also treats the string `"null"` as omitted. |
 | `activeOnly` | Status lists only: include starting/running jobs; default `false` |
 | `offset` | Nonnegative integer offset after filtering; default `0` |
 

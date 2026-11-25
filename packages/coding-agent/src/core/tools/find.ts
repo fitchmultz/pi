@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { spawn } from "child_process";
 import { Minimatch } from "minimatch";
@@ -305,17 +306,29 @@ export function createFindToolDefinition(
 							settle(() => reject(new Error(`Failed to run fd: ${error.message}`)));
 						});
 
-						child.on("close", (code) => {
+						child.on("close", async (code) => {
 							cleanup();
 							if (signal?.aborted) {
 								settle(() => reject(new Error("Operation aborted")));
 								return;
 							}
 							if (code !== 0 && resultCount === 0) {
-								const errorMsg = stderr.trim() || `fd exited with code ${code}`;
-								void withMissingPathHint(errorMsg, searchPath, localMissingPathLookup).then((message) =>
-									settle(() => reject(new Error(message))),
+								let errorMsg = stderr.trim();
+								try {
+									if (!(await stat(searchPath)).isDirectory()) {
+										errorMsg ||= `Search path "${searchPath}" is not a directory.`;
+									}
+								} catch (error) {
+									if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+										errorMsg = `Path not found: ${searchPath}`;
+									}
+								}
+								const message = await withMissingPathHint(
+									errorMsg || `fd exited with code ${code}`,
+									searchPath,
+									localMissingPathLookup,
 								);
+								settle(() => reject(new Error(message)));
 								return;
 							}
 							if (resultCount === 0) {

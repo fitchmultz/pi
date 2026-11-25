@@ -74,14 +74,16 @@ describe("missing path errors", () => {
 		expect(await errorOf(grep.execute("call", { pattern: "x", path }))).toBe(
 			`Path not found: ${path}\n${closestOfMany}`,
 		);
-		const findError = await errorOf(find.execute("call", { pattern: "*.txt", path }));
-		expect(findError).toContain("[fd error]");
-		expect(findError.endsWith(`\n${closestOfMany}`)).toBe(true);
+		expect(await errorOf(find.execute("call", { pattern: "*.txt", path }))).toBe(
+			`Path not found: ${path}\n${closestOfMany}`,
+		);
 	});
 
 	it("leaves the error of an existing path alone", async () => {
 		const file = join(few, "notes.md");
-		expect(await errorOf(find.execute("call", { pattern: "*.txt", path: file }))).not.toContain("Nearest existing");
+		const findError = await errorOf(find.execute("call", { pattern: "*.txt", path: file }));
+		expect(findError).toContain("is not a directory");
+		expect(findError).not.toContain("Nearest existing");
 		expect(await errorOf(read.execute("call", { path: few }))).not.toContain("Nearest existing");
 	});
 

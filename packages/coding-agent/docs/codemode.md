@@ -74,7 +74,7 @@ What other calls resolve to depends on the tool:
 - `read` resolves to the file's text, or to an image block for an image. See [Read files](#read-files).
 - Other tools, such as `edit` and `write`, resolve to their text output.
 
-A call that fails, is blocked, or gets invalid arguments rejects with an `Error` that carries the tool's error text. An uncaught rejection ends the script: the calls after it do not run. Use `show()` or `Promise.allSettled()` to keep the results of the calls that succeed.
+A call that fails without a structured value, is blocked, or gets invalid arguments rejects with an `Error` that carries the tool's error text. A `bash` timeout rejects rather than returning an `exit_code`. An uncaught rejection ends the script: the calls after it do not run. Use `show()` or `Promise.allSettled()` to keep the results of the calls that succeed.
 
 ### Show several results
 

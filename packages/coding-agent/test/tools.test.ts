@@ -162,6 +162,10 @@ describe("Coding Agent Tools", () => {
 			expect(output).toMatch(
 				/\[Showing lines 1-\d+ of 500 \(.* limit\)\. \d+ lines remain: to read them all, call read at offsets \d+ and \d+ in one response\. For a part, use offset=\d+ and a limit\.\]/,
 			);
+			expect(result.structuredContent).toBe(lines.join("\n"));
+
+			const paged = await readTool.execute("read-byte-limit-explicit", { path: testFile, limit: 2000 });
+			expect(paged.structuredContent).toMatch(/\[Showing lines 1-\d+ of 500 \(50\.0KB limit\)/);
 		});
 
 		it("should handle offset parameter", async () => {
@@ -755,44 +759,52 @@ describe("Coding Agent Tools", () => {
 			);
 		});
 
-		it("should respect timeout", async () => {
+		it("should return an error result when an explicit timeout expires", async () => {
 			const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify("setInterval(() => {}, 1000)")}`;
-			await expect(bashTool.execute("test-call-10", { command, timeout: 0.05 })).rejects.toThrow(/timed out/i);
+			const result = await bashTool.execute("test-call-10", { command, timeout: 0.05 });
+			expect(result.isError).toBe(true);
+			expect(result.structuredContent).toBeUndefined();
+			expect(getTextOutput(result)).toBe("Command timed out after 0.05 seconds");
 		});
 
-		it("should include full output path for truncated timeout and abort errors", async () => {
-			for (const testCase of [
-				{ error: "timeout:5", expected: "Command timed out after 5 seconds" },
-				{ error: "aborted", expected: "Command aborted" },
-			]) {
-				const operations: BashOperations = {
-					exec: async (_command, _cwd, { onData }) => {
-						for (let i = 1; i <= 3000; i++) {
-							onData(Buffer.from(`${i}\n`, "utf-8"));
-						}
-						throw new Error(testCase.error);
-					},
-				};
-				const bash = createBashTool(testDir, { operations });
-
-				let error: unknown;
-				try {
-					await bash.execute(`test-call-${testCase.error}`, { command: "chatty-fail", timeout: 5 });
-				} catch (err) {
-					error = err;
-				}
-
-				expect(error).toBeInstanceOf(Error);
-				const message = (error as Error).message;
-				expect(message).toContain(testCase.expected);
-				expect(message).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
-				expect(message).not.toContain("Full output: undefined");
-				const fullOutputPath = message.match(/Full output: ([^\]\n]+)/)?.[1];
-				expect(fullOutputPath).toBeDefined();
-				expect(existsSync(fullOutputPath!)).toBe(true);
-				const fullOutput = readFileSync(fullOutputPath!, "utf-8");
+		it.each([
+			{ error: "timeout:5", expected: "Command timed out after 5 seconds" },
+			{ error: "aborted", expected: "Command aborted" },
+		])("should include the full output path after $error", async ({ error, expected }) => {
+			const operations: BashOperations = {
+				exec: async (_command, _cwd, { onData }) => {
+					for (let i = 1; i <= 3000; i++) {
+						onData(Buffer.from(`${i}\n`, "utf-8"));
+					}
+					throw new Error(error);
+				},
+			};
+			const bash = createBashTool(testDir, { operations });
+			const call = bash.execute(`test-call-${error}`, { command: "chatty-fail", timeout: 5 });
+			let message: string;
+			if (error === "aborted") {
+				const thrown: unknown = await call.catch((error: unknown) => error);
+				if (!(thrown instanceof Error)) throw new Error("Expected bash to reject on abort");
+				message = thrown.message;
+			} else {
+				const result = await call;
+				expect(result.isError).toBe(true);
+				expect(result.structuredContent).toBeUndefined();
+				expect(result.details?.truncation).toMatchObject({ truncated: true, totalLines: 3000 });
+				message = getTextOutput(result);
+				expect(message).toContain(`Full output: ${result.details?.fullOutputPath}]`);
+			}
+			expect(message).toContain(expected);
+			expect(message).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
+			expect(message).not.toContain("Full output: undefined");
+			const fullOutputPath = message.match(/Full output: ([^\]\n]+)/)?.[1];
+			if (!fullOutputPath) throw new Error("Expected a full output file");
+			try {
+				const fullOutput = readFileSync(fullOutputPath, "utf-8");
 				expect(fullOutput).toContain("1\n2\n3");
 				expect(fullOutput).toContain("2998\n2999\n3000");
+			} finally {
+				rmSync(fullOutputPath, { force: true });
 			}
 		});
 
@@ -812,7 +824,7 @@ describe("Coding Agent Tools", () => {
 			expect(seen).toEqual([300, 12]);
 		});
 
-		it("should name the default limit when a timeout the caller never set expires", async () => {
+		it("should suggest a background job or explicit foreground timeout when the default timeout expires", async () => {
 			const operations: BashOperations = {
 				exec: async () => {
 					throw new Error("timeout:300");
@@ -820,9 +832,12 @@ describe("Coding Agent Tools", () => {
 			};
 			const bash = createBashTool(testDir, { operations });
 
-			await expect(bash.execute("test-call-default-timeout-expired", { command: "hang" })).rejects.toThrow(
-				"Command timed out after 300 seconds (the default limit; pass an explicit timeout for longer commands)",
-			);
+			const result = await bash.execute("test-call-default-timeout-expired", { command: "hang" });
+			expect(result.isError).toBe(true);
+			const message = getTextOutput(result);
+			expect(message).toContain("Command timed out after 300 seconds (the default limit)");
+			expect(message).toContain("Use background_command for long builds, tests, and watches.");
+			expect(message).toContain("Pass an explicit timeout if you need the foreground result in this turn.");
 		});
 
 		it("should throw error when cwd does not exist", async () => {
@@ -1127,6 +1142,31 @@ describe("Coding Agent Tools", () => {
 
 			const output = getTextOutput(result);
 			expect(output).toContain("example.txt:2: match line");
+		});
+
+		it('should explain why glob: "null" did not match files in a directory', async () => {
+			writeFileSync(join(testDir, "fixture.txt"), "needle\n");
+			const args = { pattern: "needle", path: testDir };
+			const filtered = await grepTool.execute("grep-null-glob", { ...args, glob: "null" });
+			expect(getTextOutput(filtered)).toContain(
+				'glob: "null" searched for the literal name "null"; omit glob to search all files',
+			);
+			expect(getTextOutput(await grepTool.execute("grep-no-glob", args))).toBe("fixture.txt:1: needle");
+
+			writeFileSync(join(testDir, "null"), "needle\n");
+			const literalMatch = await grepTool.execute("grep-null-filename", { ...args, glob: "null" });
+			expect(getTextOutput(literalMatch)).toBe("null:1: needle");
+		});
+
+		it.each([
+			{ pattern: "(?<=foo)bar", diagnosis: "regex parse error" },
+			{ pattern: "foo\\nbar", diagnosis: "is not allowed in a regex" },
+		])("should explain which regex syntax grep supports after rejecting $pattern", async ({ pattern, diagnosis }) => {
+			const file = join(testDir, "fixture.txt");
+			writeFileSync(file, `${pattern}\n`);
+			await expect(grepTool.execute("grep-regex-error", { pattern, path: file })).rejects.toThrow(
+				new RegExp(`${diagnosis}[\\s\\S]*default regex engine.*literal: true`),
+			);
 		});
 
 		it("should respect global limit and include context lines", async () => {

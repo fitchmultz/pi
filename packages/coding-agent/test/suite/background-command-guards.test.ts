@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type JsonObject } from "@earendil-works/pi-ai";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import permissionGate from "../../examples/extensions/permission-gate.ts";
 import planMode from "../../examples/extensions/plan-mode/index.ts";
@@ -54,5 +54,35 @@ describe("background shell permission guards", () => {
 		expect(definition).toBeDefined();
 		expect(definition?.constrainedSampling).toBeUndefined();
 		expect((definition?.parameters as { required?: string[] } | undefined)?.required).toEqual(["action"]);
+	});
+
+	it.each<{ args: JsonObject; isError: boolean; expected: RegExp }>([
+		{
+			args: { action: "status", id: "null" },
+			isError: false,
+			expected: /"jobs": \[\]/,
+		},
+		{
+			args: { action: "cancel", id: "null" },
+			isError: true,
+			expected: /Validation failed.*background_command/,
+		},
+		{
+			args: { action: "start", command: "echo started", cwd: "null" },
+			isError: true,
+			expected: /literal directory name.*omit cwd.*JSON null/,
+		},
+	])("handles a literal null argument for $args.action", async ({ args, isError, expected }) => {
+		h = await createHarness({ extensionFactories: [backgroundCommand] });
+		await h.session.bindExtensions({ mode: "print" });
+		h.session.setActiveToolsByName([...h.session.getActiveToolNames(), "background_command"]);
+		h.setResponses([
+			fauxAssistantMessage(fauxToolCall("background_command", args), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Done"),
+		]);
+		await h.session.prompt("Try the background command");
+		const result = getToolResult(h, "background_command");
+		expect(result.isError).toBe(isError);
+		expect(getMessageText(result)).toMatch(expected);
 	});
 });
