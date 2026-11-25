@@ -1007,7 +1007,7 @@ batch, including document revisions, before committing. A confirmed capacity ref
 The callback runs once and is not replayed; use this only before external effects. Omitted options and backends
 without the capability commit directly. Thrown check errors and actual commit errors remain fatal.
 The check covers the commit's own writes, not held changes of earlier deferred commits that it stores.
-`submit(tx, draft)` still checks entries before staging them, but a submission it queues in `pi.inbox` is checked
+`admit(tx, draft)` still checks entries before staging them, but a submission it queues in `pi.inbox` is checked
 only when the enclosing commit passes `{ admission: true }`.
 
 A commit whose changes are cheap to lose, such as your own streamed progress, can be shown at once and stored later:

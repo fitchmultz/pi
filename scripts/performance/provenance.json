@@ -9,12 +9,6 @@
 			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
 		},
 		{
-			"retained": "fixtures/catalog.mjs",
-			"original": "pi-performance-ai/catalog.mjs",
-			"originalSha256": "c62cdedce5933beb54b1c22b88f5edfb561e2c658b94e14107937f7259b88ba5",
-			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
-		},
-		{
 			"retained": "fixtures/codex.mjs",
 			"original": "pi-performance-ai/codex.mjs",
 			"originalSha256": "037af362a8d5defe0dc9c29d5c64bd222ae16fff21bffb42d04982c40cd5c60f",
@@ -51,12 +45,6 @@
 			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
 		},
 		{
-			"retained": "fixtures/durable-context.ts",
-			"original": "pi-performance-durable/context-retention-probe.ts",
-			"originalSha256": "89fa1fd1d727b1c7bc43cf030efccaa167ff88d41af35ce549e28b74c98804bd",
-			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
-		},
-		{
 			"retained": "fixtures/durable-history.ts",
 			"original": "pi-performance-durable/history-probe.ts",
 			"originalSha256": "1ecd2c4d861d68ca444566429b4d316f953b8acd635d5b013433657821d3b197",
@@ -90,12 +78,6 @@
 			"retained": "fixtures/eval-report.mjs",
 			"original": "pi-performance-tooling/eval-report-bench.mjs",
 			"originalSha256": "6481f159e1b9a90f7ebf57d7db03b964ddcacb65ec4a3c8b2a0bf344634c42fe",
-			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
-		},
-		{
-			"retained": "fixtures/telemetry.mjs",
-			"original": "pi-performance-tooling/telemetry-bench.mjs",
-			"originalSha256": "077ac63623a4b4d9d8c1143d0da2ba04325d9a36136b12ad0197915e630753b8",
 			"adaptation": "Configurable source imports/temp roots, isolated runner and semantic output witnesses; see docs/performance.md"
 		},
 		{
@@ -162,7 +144,7 @@
 			"retained": "fixtures/nix-pack.mjs",
 			"original": "pi-performance-build-pack/nix-pack-bench.mjs",
 			"originalSha256": "c6911f9a416e35e07082a01e2ff0bd819d60fcc45a68dc21c49930babd3c989f",
-			"adaptation": "Exact eight-package legacy Nix npm recipe or actual selected final driver, with fixed after-root payload and SHA-512 output equality."
+			"adaptation": "Ten-package Nix pack via scripts/pack-nix-packages.mjs (or legacy eight-package recipe on older baselines), with fixed after-root payload and SHA-512 output equality."
 		},
 		{
 			"retained": "fixtures/bash.mjs",

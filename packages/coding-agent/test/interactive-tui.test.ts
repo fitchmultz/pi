@@ -227,8 +227,6 @@ describe("createInteractiveTui", () => {
 			extensionTerminalInputSubscriptions: new Set<never>(),
 		}) as SwitchContext;
 		context.ui = createInteractiveTuiReference(() => context.renderer);
-		const onFocusChange = vi.fn<(focused: boolean) => void>();
-		const unsubscribe = context.ui.onTerminalFocusChange?.(onFocusChange);
 		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 		const indicator = new WorkingStatusIndicator(
 			context.ui,
@@ -250,8 +248,6 @@ describe("createInteractiveTui", () => {
 
 			expect(indicator.renderInBorder(30)).toBe("1 Working");
 			terminal.sendInput("\x1b[O");
-			expect(onFocusChange.mock.calls).toEqual([[false]]);
-			expect(context.ui.isTerminalFocused?.()).toBe(false);
 
 			vi.advanceTimersByTime(25);
 			expect(indicator.renderInBorder(30)).toBe("2 Working");
@@ -259,14 +255,10 @@ describe("createInteractiveTui", () => {
 			expect(indicator.renderInBorder(30)).toBe("3 Working");
 
 			terminal.sendInput("\x1b[I");
-			expect(onFocusChange.mock.calls).toEqual([[false], [true]]);
-			expect(context.ui.isTerminalFocused?.()).toBe(true);
-			unsubscribe?.();
 			terminal.sendInput("\x1b[O");
-			expect(context.ui.isTerminalFocused?.()).toBe(false);
-			expect(onFocusChange).toHaveBeenCalledTimes(2);
+			vi.advanceTimersByTime(25);
+			expect(indicator.renderInBorder(30)).toBe("4 Working");
 		} finally {
-			unsubscribe?.();
 			indicator.dispose();
 			vi.useRealTimers();
 			context.renderer.stop();

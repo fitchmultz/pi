@@ -190,7 +190,7 @@ The archive includes release model data and native prebuilds. `--offline-model-d
 We treat npm dependency changes as reviewed code changes.
 
 - Direct registry dependencies, including internal workspace packages, are pinned to exact versions.
-- `.npmrc` sets `save-exact=true`. The fork does not set a minimum release age.
+- `.npmrc` sets `save-exact=true`, `min-release-age=2`, and `min-release-age-exclude[]=@earendil-works/*`.
 - `package-lock.json` is the dependency ground truth. Pre-commit blocks accidental lockfile commits unless `PI_ALLOW_LOCKFILE_CHANGE=1` is set.
 - `npm run check` verifies pinned direct deps, native TypeScript import compatibility, and the generated coding-agent install lock.
 - The pi.dev installer installs from `packages/coding-agent/install-lock/`, generated from the root lockfile, to pin transitive deps. The npm package does not pin transitive deps.

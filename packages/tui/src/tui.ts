@@ -569,8 +569,6 @@ export interface TUI extends Component {
 	dispatchInput(data: string): void;
 	addInputListener(listener: TuiInputListener): () => void;
 	removeInputListener(listener: TuiInputListener): void;
-	isTerminalFocused?(): boolean;
-	onTerminalFocusChange?(listener: (focused: boolean) => void): () => void;
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void;
 	setTerminalColorSchemeNotifications(enabled: boolean): void;
 	/**
@@ -624,8 +622,6 @@ export abstract class TuiBase extends Container implements TUI {
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
-	private terminalFocused = true;
-	private terminalFocusListeners = new Set<(focused: boolean) => void>();
 	private showHardwareCursor = false;
 	private clearOnShrink = false;
 	protected fullRedrawCount = 0;
@@ -1061,7 +1057,6 @@ export abstract class TuiBase extends Container implements TUI {
 
 	start(): void {
 		this.stopped = false;
-		this.setTerminalFocused(true);
 		process.off("exit", this.exitRestoreHandler);
 		process.on("exit", this.exitRestoreHandler);
 		this.ownsTerminal = true;
@@ -1089,27 +1084,6 @@ export abstract class TuiBase extends Container implements TUI {
 
 	removeInputListener(listener: TuiInputListener): void {
 		this.inputListeners.delete(listener);
-	}
-
-	isTerminalFocused(): boolean {
-		return this.terminalFocused;
-	}
-
-	onTerminalFocusChange(listener: (focused: boolean) => void): () => void {
-		this.terminalFocusListeners.add(listener);
-		return () => {
-			this.terminalFocusListeners.delete(listener);
-		};
-	}
-
-	protected setTerminalFocused(focused: boolean): void {
-		if (this.terminalFocused === focused) {
-			return;
-		}
-		this.terminalFocused = focused;
-		for (const listener of this.terminalFocusListeners) {
-			listener(focused);
-		}
 	}
 
 	onTerminalColorSchemeChange(listener: (scheme: TerminalColorScheme) => void): () => void {
@@ -1184,12 +1158,12 @@ export abstract class TuiBase extends Container implements TUI {
 	}
 
 	requestRender(force = false): void {
-		this.contentChanged = true;
 		if (force) {
 			this.resetRenderState();
 			this.requestImmediateRender();
 			return;
 		}
+		this.contentChanged = true;
 		this.requestViewRender();
 	}
 
@@ -1200,10 +1174,10 @@ export abstract class TuiBase extends Container implements TUI {
 		process.nextTick(() => this.scheduleRender());
 	}
 
-	/** Draw on the next tick, ahead of any throttled frame. Callers mark `contentChanged` when output may differ. */
 	private requestImmediateRender(): void {
 		// start() draws what changed while stopped. A forced request has already reset the render state.
 		if (this.stopped) return;
+		this.contentChanged = true;
 		this.cancelRenderTimer();
 		this.renderRequested = true;
 		if (this.immediateRenderScheduled) return;
@@ -1319,8 +1293,6 @@ export abstract class TuiBase extends Container implements TUI {
 				return;
 			}
 			this.focusedComponent.handleInput(data);
-			// Input may change the focused component's output, so this frame must not reuse earlier output.
-			this.contentChanged = true;
 			// Keyboard input is latency-sensitive. Avoid the throttled timer path,
 			// where even setTimeout(0) can take a full 16 ms tick on Windows.
 			this.requestImmediateRender();

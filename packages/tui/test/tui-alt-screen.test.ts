@@ -2627,7 +2627,6 @@ describe("TuiAltScreen", () => {
 		try {
 			await terminal.waitForRender();
 			terminal.sendInput("\x1b[O");
-			assert.strictEqual(tui.isTerminalFocused(), false);
 
 			for (const frame of ["frame-1", "frame-2", "frame-3"]) {
 				status.setText(frame);

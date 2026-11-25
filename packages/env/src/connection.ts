@@ -178,7 +178,7 @@ function withStderr(message: string, stderr: string): string {
 	return `${message}\nremote stderr:\n${lines.slice(-STDERR_TAIL_LINES).join("\n")}`;
 }
 
-/** One started daemon; it is live while it is its connection's current session. */
+/** One running daemon. */
 class Session {
 	readonly id: number;
 	readonly child: ChildProcessWithoutNullStreams;
@@ -190,6 +190,7 @@ class Session {
 	synced = false;
 	lastSeen = Date.now();
 	timer: ReturnType<typeof setInterval> | undefined;
+	live = true;
 	stderrTail = "";
 
 	constructor(id: number, child: ChildProcessWithoutNullStreams, token: string) {
@@ -227,7 +228,6 @@ class Session {
  */
 export class Connection {
 	readonly #options: ConnectionOptions;
-	/** The daemon from its spawn until it is lost or closed: the only live session. */
 	#session: Session | undefined;
 	#ready: Promise<{ info: RemoteInfo; session: Session }> | undefined;
 	#sessions = 0;
@@ -254,7 +254,7 @@ export class Connection {
 	async request(op: string, json: Json, options: RequestOptions = {}): Promise<Reply> {
 		if (options.session !== undefined) {
 			const current = this.#session;
-			if (current === undefined || current.id !== options.session) {
+			if (current === undefined || current.id !== options.session || !current.live) {
 				throw lost("pi-env connection lost");
 			}
 			return this.#send(current, op, json, options);
@@ -272,7 +272,7 @@ export class Connection {
 	/** Kill one `exec` without aborting it. */
 	kill(id: number, session: number): void {
 		const current = this.#session;
-		if (current?.id === session) this.#write(current, frame(CANCEL, id, { mode: "kill" }));
+		if (current?.id === session && current.live) this.#write(current, frame(CANCEL, id, { mode: "kill" }));
 	}
 
 	#connect(): Promise<{ info: RemoteInfo; session: Session }> {
@@ -289,7 +289,7 @@ export class Connection {
 	}
 
 	#send(session: Session, op: string, json: Json, options: RequestOptions): Promise<Reply> {
-		if (session !== this.#session) return Promise.reject(lost("pi-env connection lost"));
+		if (!session.live) return Promise.reject(lost("pi-env connection lost"));
 		const id = this.#nextId++;
 		return new Promise((resolve, reject) => {
 			let grace: ReturnType<typeof setTimeout> | undefined;
@@ -326,7 +326,7 @@ export class Connection {
 	}
 
 	#write(session: Session, data: Buffer): void {
-		if (session === this.#session) session.child.stdin.write(data);
+		if (session.live) session.child.stdin.write(data);
 	}
 
 	async #start(): Promise<{ info: RemoteInfo; session: Session }> {
@@ -399,10 +399,13 @@ export class Connection {
 	}
 
 	#teardown(session: Session, error: Error): void {
-		if (session !== this.#session) return;
-		this.#session = undefined;
-		this.#ready = undefined;
+		if (!session.live) return;
+		session.live = false;
 		clearInterval(session.timer);
+		if (this.#session === session) {
+			this.#session = undefined;
+			this.#ready = undefined;
+		}
 		session.child.stdin.end();
 		session.child.kill();
 		const pending = [...session.pending.values()];
@@ -411,7 +414,7 @@ export class Connection {
 	}
 
 	#onData(session: Session, chunk: Buffer): void {
-		if (session !== this.#session) return;
+		if (!session.live) return;
 		session.lastSeen = Date.now();
 		session.chunks.push(chunk);
 		session.buffered += chunk.length;
@@ -431,7 +434,7 @@ export class Connection {
 			session.consume(index + marker.length);
 			session.synced = true;
 		}
-		while (session === this.#session && session.buffered >= 4) {
+		while (session.live && session.buffered >= 4) {
 			const length = session.peek(4).readUInt32BE(0);
 			if (length < 9 || length > MAX_FRAME) {
 				this.#teardown(session, lost("Corrupt frame from pi-env"));
