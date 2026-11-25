@@ -372,19 +372,26 @@ describe.each(PATHS)("$name tool-call argument streaming", (path) => {
 	});
 
 	it("releases the stream, its partial messages and argument snapshots once the caller drops them", async () => {
-		const references: WeakRef<object>[] = [];
+		const references: { kind: "stream" | "argument snapshot"; ref: WeakRef<object> }[] = [];
 		await (async () => {
 			const { args, text } = writeCall(2_000);
 			const events = path.stream(deltasOf(text, 16), args, text);
-			references.push(new WeakRef(events));
+			references.push({ kind: "stream", ref: new WeakRef(events) });
 			await consume(events, (event) => {
 				if (event.type !== "toolcall_delta") return;
 				const call = event.partial.content[event.contentIndex];
-				if (call?.type === "toolCall") references.push(new WeakRef(call.arguments));
+				if (call?.type === "toolCall") {
+					references.push({ kind: "argument snapshot", ref: new WeakRef(call.arguments) });
+				}
 			});
 		})();
-		await collectGarbage();
-		expect(references.filter((reference) => reference.deref() !== undefined)).toHaveLength(0);
+		await expect
+			.poll(async () => {
+				// deref() keeps live targets alive for the current job; collectGarbage() yields before each GC.
+				await collectGarbage();
+				return references.flatMap(({ kind, ref }) => (ref.deref() === undefined ? [] : [kind]));
+			})
+			.toEqual([]);
 	});
 });
 
