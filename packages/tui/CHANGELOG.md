@@ -9,6 +9,7 @@
 
 ### Changed
 
+- Automatically open slash-command argument completions when accepting a slash command name via Tab or click, or when typing a space in slash-command context, if the command provides `getArgumentCompletions()`.
 - Added scroll-up and scroll-to-start hydration hooks on `ScrollView` and `TuiAltScreen` (`prependScrollViewContent`, `onHydrateOlderContent`, `onEnsureFullContent`), preserving scroll anchoring, text-selection row indices, prompt navigation, and search across lazily prepended scrollback chunks.
 - Decode only header prefixes when reading PNG, GIF, WebP, and common JPEG dimensions, and bound the shared Kitty `pngCache` to 16M characters in addition to its 32-entry limit so multi-megabyte screenshots do not allocate full temporary buffers on dimension checks or stay pinned globally.
 - Fullscreen selection copies source fragments from Markdown and Text without display padding or artificial wraps. Complete Markdown spans retain their syntax; partial spans copy only the selected content. Lines rendered for a `TuiAltScreen` frame carry private zero-width OSC annotations, which it removes before terminal output.
