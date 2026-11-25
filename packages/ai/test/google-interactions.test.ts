@@ -1,6 +1,6 @@
 import type { Interactions } from "@google/genai";
 import { afterEach, describe, expect, it } from "vitest";
-import { type GoogleInteractionsOptions, stream, streamSimple } from "../src/api/google-interactions.ts";
+import { fetchDeferred, type GoogleInteractionsOptions, stream, streamSimple } from "../src/api/google-interactions.ts";
 import { getEffectiveCacheRetention } from "../src/cache-warming.ts";
 import { createModels, getMidConvoToolSupport } from "../src/models.ts";
 import { googleProvider } from "../src/providers/google.ts";
@@ -82,6 +82,16 @@ const delta = (index: number, update: Interactions.StepDelta["delta"]): Interact
 });
 const end = (index: number): Interactions.StepStop => ({ event_type: "step.stop", index });
 
+const billedUsage: Interactions.Usage = {
+	total_input_tokens: 269,
+	total_output_tokens: 44,
+	total_thought_tokens: 73,
+	total_tool_use_tokens: 409,
+	total_tokens: 795,
+};
+const billedInputCost = ((269 + 409) * model.cost.input) / 1e6;
+const billedOutputCost = ((44 + 73) * model.cost.output) / 1e6;
+
 function sse(...events: Interactions.InteractionSSEEvent[]): Response {
 	return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""), {
 		headers: { "content-type": "text/event-stream" },
@@ -139,6 +149,24 @@ function send(
 afterEach(() => cleanupSessionResources());
 
 describe("Google Interactions request projection", () => {
+	it("omits function tools and tool choice when there are no declarations", async () => {
+		const { fetch, bodies } = stub(answer("no-tools"));
+		expect((await send(fetch, [initial], { toolChoice: "auto" }, []).result()).stopReason).toBe("stop");
+		expect(bodies[0]).not.toHaveProperty("tools");
+		expect(bodies[0].generation_config).not.toHaveProperty("tool_choice");
+	});
+
+	it("applies the Neon stop sequence to vendor-prefixed model IDs", async () => {
+		const { fetch, bodies } = stub(answer("vendor-neon"));
+		const vendorModel = { ...model, id: "vendor-gemini-4-neon" };
+		const result = await streamSimple(vendorModel, normalizeContext({ messages: [initial] }), {
+			apiKey: "offline-key",
+			fetch,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(bodies[0].generation_config?.stop_sequences).toEqual(["\nuser\n"]);
+	});
+
 	it("keeps leading instructions, images, failed tool results, and inline updates in their wire positions", async () => {
 		const { fetch, bodies } = stub(toolAnswer("first"), answer("second"));
 		const user = prompt([
@@ -461,7 +489,7 @@ describe("Google Interactions response stream", () => {
 				delta(3, { type: "arguments_delta", arguments: '"west"}' }),
 				end(3),
 				{ event_type: "interaction.status_update", interaction_id: "tool", status: "requires_action" },
-				completed("tool", "requires_action"),
+				completed("tool", "requires_action", { usage: billedUsage }),
 			),
 			answer("replayed"),
 			answer("edited"),
@@ -471,6 +499,11 @@ describe("Google Interactions response stream", () => {
 		for await (const event of events) eventTypes.push(event.type);
 		const first = await events.result();
 		expect(first.stopReason).toBe("toolUse");
+		expect(first.usage).toMatchObject({
+			totalTokens: 795,
+			cost: { input: expect.closeTo(billedInputCost, 13), output: expect.closeTo(billedOutputCost, 13) },
+		});
+		expect(first.usage.cost.total).toBeCloseTo(billedInputCost + billedOutputCost, 13);
 		expect(first.content).toEqual([
 			{ type: "thinking", thinking: "Looking up", thinkingSignature },
 			{
@@ -522,11 +555,14 @@ describe("Google Interactions response stream", () => {
 	});
 
 	it.each([true, false])(
-		"continues foreground hops with store=%s and prices each hop without inflating context",
+		"retries a rate-limited continuation with store=%s and prices each hop without inflating context",
 		async (store) => {
 			const first = sse(
 				begin(0, { type: "model_output" }),
-				delta(0, { type: "text", text: "Part 1" }),
+				{
+					...delta(0, { type: "text", text: "Part 1" }),
+					metadata: { total_usage: { total_input_tokens: 1200, total_output_tokens: 40 } },
+				},
 				end(0),
 				completed("hop-1", "requires_continuation", {
 					continuation_token: "token-1",
@@ -543,7 +579,10 @@ describe("Google Interactions response stream", () => {
 			);
 			const second = sse(
 				begin(0, { type: "model_output" }),
-				delta(0, { type: "text", text: " part 2" }),
+				{
+					...delta(0, { type: "text", text: " part 2" }),
+					metadata: { total_usage: { total_input_tokens: 1100, total_output_tokens: 30 } },
+				},
 				end(0),
 				completed("hop-2", "completed", {
 					usage: {
@@ -551,12 +590,16 @@ describe("Google Interactions response stream", () => {
 						total_cached_tokens: 1000,
 						total_output_tokens: 30,
 						total_thought_tokens: 20,
+						total_tool_use_tokens: 25,
+						total_tokens: 1175,
 					},
 				}),
 			);
 			second.headers.set("x-gemini-service-tier", "priority");
-			const { fetch, bodies } = stub(first, second, answer("later"));
-			const result = await send(fetch, [initial], { store }).result();
+			const rateLimit = rejection(429, "Rate limited");
+			rateLimit.headers.set("retry-after", "0");
+			const { fetch, bodies } = stub(first, rateLimit, second, answer("later"));
+			const result = await send(fetch, [initial], { store, maxRetries: 1 }).result();
 			expect(result.stopReason).toBe("stop");
 			expect(result.responseId).toBe("hop-2");
 			expect(result.content).toEqual([
@@ -568,18 +611,80 @@ describe("Google Interactions response stream", () => {
 				cacheRead: 900,
 				output: 100,
 				reasoning: 30,
-				totalTokens: 1100,
+				totalTokens: 1225,
 			});
-			expect(result.usage.cost.input).toBeCloseTo((400 * 3 * 0.5 + 100 * 3 * 1.8) / 1e6, 13);
+			expect(result.usage.cost.input).toBeCloseTo((400 * 3 * 0.5 + 125 * 3 * 1.8) / 1e6, 13);
 			expect(result.usage.cost.output).toBeCloseTo((50 * 15 * 0.5 + 50 * 15 * 1.8) / 1e6, 13);
 			expect(result.usage.cost.cacheRead).toBeCloseTo((900 * 0.15 * 0.5 + 1000 * 0.15 * 1.8) / 1e6, 13);
 			expect(bodies[1].continuation_token).toBe("token-1");
 			expect(bodies[1].previous_interaction_id).toBe(store ? "hop-1" : undefined);
 			expect(bodies[1].input).toEqual(store ? undefined : bodies[0].input);
+			expect(bodies[2]).toEqual(bodies[1]);
 			await send(fetch, [initial, result, next], { store }).result();
-			expect(bodies[2].previous_interaction_id).toBe(store ? "hop-2" : undefined);
+			expect(bodies[3].previous_interaction_id).toBe(store ? "hop-2" : undefined);
 		},
 	);
+
+	it("stops at Google's 16-segment foreground budget even if the provider keeps issuing new tokens", async () => {
+		const { fetch, requests } = stub(
+			...Array.from({ length: 17 }, (_, index) =>
+				sse(
+					completed(`hop-${index + 1}`, "requires_continuation", {
+						continuation_token: `token-${index + 1}`,
+					}),
+				),
+			),
+		);
+		expect(await send(fetch, [initial]).result()).toMatchObject({
+			stopReason: "length",
+			rawStopReason: "requires_continuation",
+			responseId: "hop-16",
+		});
+		expect(requests).toHaveLength(16);
+	});
+
+	it("preserves billed tokens and cost when aborted as the completion snapshot arrives", async () => {
+		const controller = new AbortController();
+		const { fetch } = stub(sse(completed("aborted", "completed", { usage: billedUsage })));
+		const result = await send(fetch, [initial], {
+			signal: controller.signal,
+			onProviderStreamEvent: (event) => {
+				if ((event as Interactions.InteractionSSEEvent).event_type === "interaction.completed") controller.abort();
+			},
+		}).result();
+		expect(result).toMatchObject({
+			stopReason: "aborted",
+			usage: {
+				totalTokens: 795,
+				cost: { input: expect.closeTo(billedInputCost, 13), output: expect.closeTo(billedOutputCost, 13) },
+			},
+		});
+		expect(result.usage.cost.total).toBeCloseTo(billedInputCost + billedOutputCost, 13);
+	});
+
+	it.each(["failed", "cancelled"])("preserves billed tokens and cost on terminal %s", async (status) => {
+		const { fetch } = stub(
+			sse(completed("stream", status, { usage: billedUsage })),
+			Response.json({ id: "job", model: model.id, status, usage: billedUsage }),
+		);
+		const streamed = await send(fetch, [initial]).result();
+		const deferred = await fetchDeferred(
+			model,
+			{ id: "job", provider: model.provider, api: model.api, modelId: model.id },
+			{ apiKey: "offline-key", fetch, maxRetries: 0 },
+		).result();
+		for (const result of [streamed, deferred]) {
+			expect(result).toMatchObject({
+				stopReason: "error",
+				rawStopReason: status,
+				usage: {
+					totalTokens: 795,
+					cost: { input: expect.closeTo(billedInputCost, 13), output: expect.closeTo(billedOutputCost, 13) },
+				},
+			});
+			expect(result.usage.cost.total).toBeCloseTo(billedInputCost + billedOutputCost, 13);
+		}
+	});
 
 	it("honors disableContinuation and reports incomplete, terminal failures, and SSE errors", async () => {
 		const { fetch } = stub(
@@ -611,6 +716,20 @@ describe("Google Interactions response stream", () => {
 });
 
 describe("Google Interactions provider registration", () => {
+	it.each([
+		{ background: true, store: false },
+		{ background: true, onPayload: () => ({ background: true, store: false }) },
+	] satisfies GoogleInteractionsOptions[])(
+		"rejects background execution with storage disabled (%#)",
+		async (options) => {
+			const { fetch, requests } = stub(Response.json({ id: "job", status: "queued" }));
+			const result = await send(fetch, [initial], options).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("Google Interactions background execution requires store: true");
+			expect(requests).toHaveLength(0);
+		},
+	);
+
 	it("dispatches background submission, deferred fetch and cancel through the mixed Google provider", async () => {
 		const models = createModels();
 		models.setProvider(googleProvider());

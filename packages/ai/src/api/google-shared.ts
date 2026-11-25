@@ -601,7 +601,7 @@ function buildParams(
 		...(sendsToGeminiApi(model) && { store: false }),
 		// gemini-4-neon intermittently omits its end-of-turn stop token and emits a raw "\nuser\n"
 		// turn header followed by a fabricated user turn and tool calls.
-		...(/(?:^|[-/])gemini-4-neon(?:$|-)/.test(model.id.toLowerCase()) && { stopSequences: ["\nuser\n"] }),
+		...(needsGoogleNeonStopSequence(model) && { stopSequences: ["\nuser\n"] }),
 		...(options.temperature !== undefined &&
 			supportsGoogleTemperature(model) && { temperature: options.temperature }),
 		...(options.maxTokens !== undefined && { maxOutputTokens: options.maxTokens }),
@@ -866,16 +866,13 @@ function markUnsignedFunctionCalls(parts: Part[]): void {
  * Models via Google APIs that require explicit tool call IDs in function calls/responses.
  */
 export function requiresToolCallId(modelId: string): boolean {
-	const geminiMajorVersion = getGeminiMajorVersion(modelId);
 	return (
-		modelId.startsWith("claude-") ||
-		modelId.startsWith("gpt-oss-") ||
-		(geminiMajorVersion !== undefined && geminiMajorVersion >= 3)
+		modelId.startsWith("claude-") || modelId.startsWith("gpt-oss-") || (getGeminiVersion(modelId)?.major ?? 0) >= 3
 	);
 }
 
-function getGeminiMajorVersion(modelId: string): number | undefined {
-	return getGeminiVersion(modelId)?.major;
+export function needsGoogleNeonStopSequence(model: Pick<Model<GoogleChatApi>, "id">): boolean {
+	return /(?:^|[-/])gemini-4-neon(?:$|-)/.test(model.id.toLowerCase());
 }
 
 /**
@@ -906,7 +903,7 @@ export function supportsGoogleMidConvoSystemMessages<T extends GoogleApiType>(mo
 }
 
 function supportsMultimodalFunctionResponse(modelId: string): boolean {
-	const geminiMajorVersion = getGeminiMajorVersion(modelId);
+	const geminiMajorVersion = getGeminiVersion(modelId)?.major;
 	if (geminiMajorVersion !== undefined) {
 		return geminiMajorVersion >= 3;
 	}
@@ -932,7 +929,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 	// Only the Gemini API gets the skip value (provider `google` or its host), not Gemini before 3 or Deep Research.
 	// Real calls proved this through a gateway route of `google`; no call went to the host itself.
 	// Without a base URL the client sends to the SDK default, which is that host.
-	const geminiMajorVersion = getGeminiMajorVersion(model.id);
+	const geminiMajorVersion = getGeminiVersion(model.id)?.major;
 	const sendsSkipValue =
 		sendsToGeminiApi(model) &&
 		(geminiMajorVersion === undefined || geminiMajorVersion >= 3) &&
@@ -1228,8 +1225,7 @@ export function convertTools(
  * `compat.supportsStrictMode` overrides the model ID detection, e.g. for Gemini models served under IDs without the version.
  */
 export function supportsGoogleStrictToolSampling<T extends GoogleChatApi>(model: Model<T>): boolean {
-	const majorVersion = getGeminiMajorVersion(model.id);
-	return model.compat?.supportsStrictMode ?? (majorVersion !== undefined && majorVersion >= 3);
+	return model.compat?.supportsStrictMode ?? (getGeminiVersion(model.id)?.major ?? 0) >= 3;
 }
 
 /** Map tool choice string to Gemini FunctionCallingConfigMode. */

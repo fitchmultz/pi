@@ -31,6 +31,7 @@ import {
 import {
 	applyGoogleServiceTierPricing,
 	isGoogleStrictToolRejectionError,
+	needsGoogleNeonStopSequence,
 	resolveGoogleThinkingLevel,
 	rewriteConstAsEnum,
 	supportsGoogleStrictToolSampling,
@@ -44,6 +45,10 @@ export type { GoogleInteractionsReplay } from "./google-interactions-steps.ts";
 type InteractionModel = Model<"google-interactions">;
 type Request = Interactions.InteractionCreateParams.CreateModelInteractionParams;
 type Lifecycle = Interactions.InteractionCompletedEvent["interaction"];
+
+// Each foreground segment reaches 65,536 tokens before it can request continuation.
+// https://aistudio.google.com/docs/long-decode bounds the whole decode at 1,048,576 tokens minus input.
+const MAX_FOREGROUND_HOPS = 1_048_576 / 65_536;
 
 /** Google Interactions options. Use `store: false` to opt out of Google-side history. */
 export interface GoogleInteractionsOptions extends StreamOptions {
@@ -74,10 +79,10 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 				thinking_level: options?.thinkingLevel,
 				thinking_summaries: options?.thinkingSummaries,
 				tool_choice: strict.choice,
-				...(model.id.split("/").at(-1) === "gemini-4-neon" ? { stop_sequences: ["\nuser\n"] } : {}),
+				...(needsGoogleNeonStopSequence(model) ? { stop_sequences: ["\nuser\n"] } : {}),
 			},
 			service_tier: options?.serviceTier ?? "standard",
-			store: options?.store ?? true,
+			store: options?.store,
 			background: options?.background ?? false,
 			stream: !options?.background,
 		};
@@ -92,7 +97,11 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 			payload.generation_config = { ...payload.generation_config, max_output_tokens: 1 };
 			if (payload.service_tier === "priority") payload.service_tier = "standard";
 		}
-		if (payload.background) payload.store = true;
+		if (payload.background && payload.store === false) {
+			throw new Error(
+				"Google Interactions background execution requires store: true; remove store: false or disable background execution.",
+			);
+		}
 		payload.store ??= true;
 
 		// If an extension rewrote the input in a different format we cannot prove it is the
@@ -144,6 +153,9 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 			output.responseModel = interaction.model;
 			output.rawStopReason = interaction.status;
 			if (!isBackgroundPending(interaction.status) && stopReason(interaction.status) === "error") {
+				if (interaction.usage) {
+					output.usage = buildUsage(model, interaction.usage, interaction.service_tier ?? request.serviceTier());
+				}
 				throw new Error(interaction.errors?.[0]?.message ?? `Google Interactions: ${interaction.status}`);
 			}
 			output.stopReason = "deferred";
@@ -151,6 +163,8 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 			return;
 		}
 
+		// SDK continuation opens later hops from inside its SSE iterator, outside
+		// Pi's shared rate-limit retry policy. Open each hop through request.send.
 		const sendHop = (params: Request) =>
 			request.send((client, opts) =>
 				client.interactions.create({ ...params, stream: true, automatic_continuation: false }, opts),
@@ -158,7 +172,8 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 		let source = await open(sendHop);
 		const nativeSteps: GoogleInteractionsReplay["steps"] = [];
 		const seenTokens = new Set<string>();
-		for (let first = true; ; first = false) {
+		let hopBaseUsage: Usage | undefined;
+		for (let hop = 1; ; hop++) {
 			const hopSteps = new InteractionSteps(events, output);
 			let interaction: Lifecycle | undefined;
 			let usage: Interactions.Usage | undefined;
@@ -167,6 +182,8 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 			let id: string | undefined;
 			let tier: string | undefined;
 			for await (const event of source) {
+				const previousUsage = usage;
+				const previousTier = tier;
 				await options?.onProviderStreamEvent?.(event, model);
 				switch (event.event_type) {
 					case "interaction.created":
@@ -201,6 +218,10 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 						output.rawStopReason = event.error?.code;
 						throw new Error(event.error?.message ?? "Google Interactions stream returned an error");
 				}
+				if (usage && (usage !== previousUsage || tier !== previousTier)) {
+					output.usage = buildUsage(model, usage, tier ?? request.serviceTier(), hopBaseUsage);
+				}
+				options?.signal?.throwIfAborted();
 			}
 			options?.signal?.throwIfAborted();
 			const reason = stopReason(status);
@@ -208,12 +229,12 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 			if (reason === "error")
 				throw new Error(`Google Interactions stream ended with status: ${status ?? "missing"}`);
 			nativeSteps.push(...hopSteps.finish(interaction?.steps));
-			if (usage) addHopUsage(output, model, usage, tier ?? request.serviceTier(), first);
 			if (
 				status !== "requires_continuation" ||
 				!id ||
 				!token ||
 				seenTokens.has(token) ||
+				hop >= MAX_FOREGROUND_HOPS ||
 				options?.disableContinuation ||
 				options?.cacheWarm
 			) {
@@ -234,6 +255,7 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 				return;
 			}
 			seenTokens.add(token);
+			if (usage) hopBaseUsage = output.usage;
 			const { input, ...settings } = payload;
 			source = await sendHop(
 				payload.store
@@ -272,11 +294,12 @@ export function fetchDeferred(
 			output.deferred = handle;
 			return;
 		}
+		if (interaction.usage) {
+			output.usage = buildUsage(model, interaction.usage, interaction.service_tier ?? request.serviceTier());
+		}
 		const reason = stopReason(interaction.status);
 		if (reason === "error")
 			throw new Error(interaction.errors?.[0]?.message ?? `Google Interactions: ${interaction.status}`);
-		if (interaction.usage)
-			addHopUsage(output, model, interaction.usage, interaction.service_tier ?? request.serviceTier(), true);
 		const steps = new InteractionSteps(events, output);
 		output.googleInteractionsReplay = replayMetadata(output, steps.finish(interaction.steps));
 		output.stopReason = reason;
@@ -407,8 +430,8 @@ function prepareTools(model: InteractionModel, tools: Tool[], options?: GoogleIn
 		};
 	});
 	return {
-		tools: declarations,
-		choice: usesStrict && choice !== "any" ? "validated" : (choice ?? "auto"),
+		tools: declarations.length > 0 ? declarations : undefined,
+		choice: declarations.length > 0 ? (usesStrict && choice !== "any" ? "validated" : (choice ?? "auto")) : undefined,
 		hasPreferred: plan.hasPreferredStrictTools,
 	};
 }
@@ -431,40 +454,43 @@ function stopReason(status: string | undefined) {
 	}
 }
 
-function addHopUsage(
-	output: AssistantMessage,
+function buildUsage(
 	model: InteractionModel,
 	usage: Interactions.Usage,
 	tier: string | undefined,
-	first: boolean,
-): void {
-	const previous = output.usage;
+	hopBaseUsage?: Usage,
+): Usage {
 	const cacheRead = usage.total_cached_tokens ?? 0;
 	const prompt = usage.initial_input_tokens ?? usage.total_input_tokens ?? 0;
 	const toolInput = usage.total_tool_use_tokens ?? 0;
 	const reasoning = usage.total_thought_tokens ?? 0;
+	const completion = (usage.total_output_tokens ?? 0) + reasoning;
 	const hop: Usage = {
 		input: Math.max(0, prompt - cacheRead),
-		output: (usage.total_output_tokens ?? 0) + reasoning,
+		output: completion,
 		cacheRead,
 		cacheWrite: 0,
 		reasoning,
-		totalTokens: prompt + (usage.total_output_tokens ?? 0) + reasoning,
+		totalTokens: usage.total_tokens ?? prompt + toolInput + completion,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, { ...hop, input: Math.max(0, (usage.total_input_tokens ?? prompt) - cacheRead) + toolInput });
 	applyGoogleServiceTierPricing(model, hop, tier?.toLowerCase());
-	if (first) {
-		output.usage = hop;
-		return;
-	}
-	previous.output += hop.output;
-	previous.reasoning = (previous.reasoning ?? 0) + reasoning;
-	previous.totalTokens += hop.output;
-	previous.cost.input += hop.cost.input;
-	previous.cost.output += hop.cost.output;
-	previous.cost.cacheRead += hop.cost.cacheRead;
-	previous.cost.total += hop.cost.total;
+	if (!hopBaseUsage) return hop;
+	// Continuation bills for prefilling history again, but does not add it to context again.
+	return {
+		...hopBaseUsage,
+		output: hopBaseUsage.output + completion,
+		reasoning: (hopBaseUsage.reasoning ?? 0) + reasoning,
+		totalTokens: hopBaseUsage.totalTokens + toolInput + completion,
+		cost: {
+			input: hopBaseUsage.cost.input + hop.cost.input,
+			output: hopBaseUsage.cost.output + hop.cost.output,
+			cacheRead: hopBaseUsage.cost.cacheRead + hop.cost.cacheRead,
+			cacheWrite: hopBaseUsage.cost.cacheWrite + hop.cost.cacheWrite,
+			total: hopBaseUsage.cost.total + hop.cost.total,
+		},
+	};
 }
 
 interface ThreadEntry {
