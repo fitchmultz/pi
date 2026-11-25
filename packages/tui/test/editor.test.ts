@@ -3310,17 +3310,22 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
-		it("opens argument completions immediately when Tab completes a slash command name", async () => {
+		it("opens arguments on Tab but submits on Enter from the same slash command menu", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			const submitted: string[] = [];
+			editor.onSubmit = (text) => submitted.push(text);
+			const argumentPrefixes: string[] = [];
 			const provider = new CombinedAutocompleteProvider(
 				[
 					{
 						name: "google-tier",
 						description: "Select Google API tier",
-						getArgumentCompletions: (prefix) =>
-							["free", "pro", "enterprise"]
+						getArgumentCompletions: (prefix) => {
+							argumentPrefixes.push(prefix);
+							return ["free", "pro", "enterprise"]
 								.filter((tier) => tier.startsWith(prefix))
-								.map((tier) => ({ value: tier, label: tier })),
+								.map((tier) => ({ value: tier, label: tier }));
+						},
 					},
 				],
 				process.cwd(),
@@ -3330,11 +3335,22 @@ describe("Editor component", () => {
 			for (const ch of "/goog") editor.handleInput(ch);
 			await flushAutocomplete();
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			editor.handleInput("\r");
+			assert.deepStrictEqual(submitted, ["/google-tier"]);
+			assert.strictEqual(editor.getText(), "");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+			assert.deepStrictEqual(argumentPrefixes, []);
+
+			for (const ch of "/goog") editor.handleInput(ch);
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
 
 			// Tab completes the command name and opens argument completions immediately.
 			editor.handleInput("\t");
 			assert.strictEqual(editor.getText(), "/google-tier ");
 			await flushAutocomplete();
+			assert.deepStrictEqual(argumentPrefixes, [""]);
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 			const argMenu = editor
 				.render(80)
@@ -3345,6 +3361,7 @@ describe("Editor component", () => {
 
 			// Escape dismisses the auto-opened argument menu cleanly.
 			editor.handleInput("\x1b");
+			await flushAutocomplete();
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 			assert.strictEqual(editor.getText(), "/google-tier ");
 
@@ -3473,8 +3490,12 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 			assert.ok(editor.render(80).map(stripVTControlCharacters).join("\n").includes("pro"));
 
-			// 2. Autocomplete closed (after Escape or setText): typing space after command name opens argument completions.
-			editor.setText("/google-tier");
+			// 2. Typing space opens argument completions even after Escape closes the command-name picker.
+			editor.setText("");
+			for (const ch of "/google-tier") editor.handleInput(ch);
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			editor.handleInput("\x1b");
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 			editor.handleInput(" ");
 			await flushAutocomplete();
@@ -3512,60 +3533,39 @@ describe("Editor component", () => {
 		});
 
 		it("keeps autocomplete closed when command returns empty or null argument completions", async () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			const provider = new CombinedAutocompleteProvider(
-				[
-					{ name: "empty-args", getArgumentCompletions: () => [] },
-					{ name: "null-args", getArgumentCompletions: () => null },
-				],
-				process.cwd(),
-			);
-			editor.setAutocompleteProvider(provider);
-
-			for (const cmd of ["empty-args", "null-args"]) {
-				editor.setText("");
-				for (const ch of `/${cmd}`) editor.handleInput(ch);
+			for (const result of [[], null]) {
+				const editor = new Editor(createTestTUI(), defaultEditorTheme);
+				const argumentPrefixes: string[] = [];
+				editor.setAutocompleteProvider(
+					new CombinedAutocompleteProvider(
+						[
+							{
+								name: "no-matches",
+								getArgumentCompletions: (prefix) => {
+									argumentPrefixes.push(prefix);
+									return result;
+								},
+							},
+						],
+						process.cwd(),
+					),
+				);
+				for (const ch of "/no-matches") editor.handleInput(ch);
 				await flushAutocomplete();
 				assert.strictEqual(editor.isShowingAutocomplete(), true);
 
 				editor.handleInput("\t");
 				await flushAutocomplete();
-				assert.strictEqual(editor.getText(), `/${cmd} `);
+				assert.strictEqual(editor.getText(), "/no-matches ");
+				assert.deepStrictEqual(argumentPrefixes, [""]);
 				assert.strictEqual(editor.isShowingAutocomplete(), false);
 
-				editor.setText(`/${cmd}`);
+				editor.setText("/no-matches");
 				editor.handleInput(" ");
 				await flushAutocomplete();
+				assert.deepStrictEqual(argumentPrefixes, ["", ""]);
 				assert.strictEqual(editor.isShowingAutocomplete(), false);
 			}
-		});
-
-		it("Enter on a slash command name with argument completions still submits without opening arguments", async () => {
-			const editor = new Editor(createTestTUI(), defaultEditorTheme);
-			const submitted: string[] = [];
-			editor.onSubmit = (text) => submitted.push(text);
-			editor.setAutocompleteProvider(
-				new CombinedAutocompleteProvider(
-					[
-						{
-							name: "google-tier",
-							description: "Select Google API tier",
-							getArgumentCompletions: () => [{ value: "pro", label: "pro" }],
-						},
-					],
-					process.cwd(),
-				),
-			);
-
-			for (const ch of "/goog") editor.handleInput(ch);
-			await flushAutocomplete();
-			assert.strictEqual(editor.isShowingAutocomplete(), true);
-
-			editor.handleInput("\r");
-			await flushAutocomplete();
-			assert.deepStrictEqual(submitted, ["/google-tier"]);
-			assert.strictEqual(editor.getText(), "");
-			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 	});
 
