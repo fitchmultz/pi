@@ -22,6 +22,21 @@ export function isGemini4ModelId(modelId: string): boolean {
 	return GEMINI_4_MODEL_ID_PATTERN.test(modelId);
 }
 
+/** Read the Gemini version from an ID, including IDs with a host or vendor prefix (#12321). */
+export function getGeminiVersion(modelId: string): { major: number; minor: number } | undefined {
+	const match = modelId.toLowerCase().match(/gemini(?:-live)?-(\d+)(?:\.(\d+))?/);
+	if (!match) return undefined;
+	return {
+		major: Number.parseInt(match[1], 10),
+		minor: match[2] ? Number.parseInt(match[2], 10) : 0,
+	};
+}
+
+/** Whether the model ID identifies Gemini 4 or later, including prefixed and minor-version IDs. */
+export function isGemini4OrLaterModelId(modelId: string): boolean {
+	return (getGeminiVersion(modelId)?.major ?? 0) >= 4;
+}
+
 /**
  * Gemini 4 Carbon and Argon support 65,536 output tokens on streaming requests,
  * matching Google Vertex; models.dev lists the 32,768 non-streaming REST cap.

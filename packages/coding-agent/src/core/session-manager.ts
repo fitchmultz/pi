@@ -5,7 +5,6 @@ import {
 	getCurrentTools,
 	getInitialSystemMessage,
 	getNetToolChanges,
-	getToolStateChanges,
 	type ImageContent,
 	type JsonObject,
 	type Message,
@@ -650,7 +649,7 @@ function getSummaryBlockSystemState(
 		throw new Error("A provider summary block needs a leading system message and a kept message");
 	// The context before the compaction may itself start with an earlier block.
 	const { providerSummary: _earlierBlock, ...systemMessage } = lead;
-	const { toolsAdded, toolsRemoved } = getToolStateChanges(lead.toolsAdded ?? [], getCurrentTools(summarized));
+	const { toolsAdded, toolsRemoved } = getNetToolChanges(lead.toolsAdded ?? [], getCurrentTools(summarized));
 	const prunedRemovals = prunedToolNames?.size
 		? getCurrentTools(projection.messages)
 				.filter((tool) => prunedToolNames.has(tool.name))

@@ -242,11 +242,7 @@ describe("Agent", () => {
 			);
 		}
 		const updates = agent.state.messages.filter((message) => message.role === "system");
-		expect(updates.map((message) => message.toolsRemoved ?? [])).toEqual([
-			[],
-			[{ name: "mutable" }],
-			[{ name: "mutable" }],
-		]);
+		expect(updates.map((message) => message.toolsRemoved)).toEqual([undefined, undefined, undefined]);
 	});
 
 	it("merges tool changes into a pending system message", async () => {

@@ -8,6 +8,7 @@ import {
 	declarationsEqual,
 	getCurrentSystemMessage,
 	getCurrentSystemPrompt,
+	getCurrentTools,
 	getToolStateChanges,
 	hasNonAdditiveToolChanges,
 	hasToolRedefinitions,
@@ -115,11 +116,21 @@ describe("system message replay", () => {
 		expect(declarationsEqual(tool("a"), { ...tool("a"), constrainedSampling: false })).toBe(false);
 	});
 
-	test("tool state changes treat changed definitions as removal plus addition", () => {
-		const changes = getToolStateChanges([tool("a"), tool("b")], [tool("b", "changed"), tool("c")]);
+	test("replays a same-name definition update in place while removing and appending other tools", () => {
+		const previous = [tool("a"), tool("b"), tool("c")];
+		const current = [tool("b", "changed"), tool("c"), tool("d")];
+		const changes = getToolStateChanges(previous, current);
+		const replay = normalizeContext({
+			tools: previous,
+			messages: [
+				{ role: "user", content: "before the update", timestamp: 1 },
+				{ role: "system", content: "", ...changes, timestamp: 2 },
+			],
+		});
+		expect(getCurrentTools(replay.messages)).toEqual(current);
 		expect(changes).toEqual({
-			toolsAdded: [tool("b", "changed"), tool("c")],
-			toolsRemoved: [{ name: "a" }, { name: "b" }],
+			toolsAdded: [tool("b", "changed"), tool("d")],
+			toolsRemoved: [{ name: "a" }],
 		});
 		expect(getToolStateChanges([tool("a")], [tool("a")])).toEqual({ toolsAdded: [], toolsRemoved: [] });
 	});
@@ -131,7 +142,7 @@ describe("system message replay", () => {
 		);
 		expect(changes).toEqual({
 			toolsAdded: [tool("c"), tool("a", "old")],
-			toolsRemoved: [{ name: "b" }, { name: "a" }],
+			toolsRemoved: [{ name: "b" }],
 		});
 	});
 
