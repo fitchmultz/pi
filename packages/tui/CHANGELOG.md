@@ -17,7 +17,6 @@
 
 ### Fixed
 
-- Fixed `Editor.addToHistory()` storing a prompt again when it was already in history; it now moves the existing entry to the most recent position ([#12279](https://github.com/earendil-works/pi/issues/12279))
 - Fixed fullscreen source-aware Markdown selection falling back to raw terminal cells when a `Markdown` `transform` (such as display-only styling, icons, or status pills) modifies the rendered text.
 - Fixed `Text` and `Markdown` returning private selection annotations from `render()` to callers outside a fullscreen frame, such as tests, HTML export and `TuiMainScreen`. They now add annotations only while `TuiAltScreen` renders a frame, so other callers get plain lines without calling `stripSelectionMetadata()`.
 - Fixed inline math stripping dollar signs, braces and shell operators from quoted shell arguments.
@@ -30,10 +29,17 @@
 - Fixed `wrapTextWithAnsi()` adding a blank row after a line that fills the width when a space follows it and then a word longer than the width, or nothing else on that line. This affected text with an active style or hyperlink and, in a fullscreen frame, all `Text` and `Markdown` text.
 - Fixed fullscreen rendering and `Loader` animation slowing or stopping when the terminal loses focus.
 - Fixed Markdown OSC 8 linkification swallowing trailing CJK punctuation, inline codespans calling `theme.code()` multiple times (duplicating theme delimiters), fullscreen selection copies miscomputing block offsets after HTML comments containing matching text, and `sliceWithWidth()`'s ASCII fast path dropping or leaking selection source markers across sliced overlay rows.
+
+## [1.6.1] - 2026-11-25
+
+### Fixed
+
+- Fixed `Editor.addToHistory()` storing a prompt again when it was already in history; it now moves the existing entry to the most recent position ([#12279](https://github.com/earendil-works/pi/issues/12279))
 - Fixed a failed crash-log write replacing the rendered-line-width error and leaving the terminal in raw mode ([#10585](https://github.com/earendil-works/pi/issues/10585))
 - Fixed Markdown after an unclosed `$` before a number, such as `+$50`, rendering as raw text for the rest of the paragraph ([#12389](https://github.com/earendil-works/pi/issues/12389) by [@wuhaoyujerry](https://github.com/wuhaoyujerry))
 - Fixed right-click paste inserting the clipboard twice in Tabby on Windows, which pastes on right-click itself ([#12406](https://github.com/earendil-works/pi/issues/12406))
 - Fixed rendering a bare URL that runs into a multi-megabyte line exhausting the heap in terminals with OSC 8 hyperlinks: `hyperlink()` no longer links URLs longer than 8192 characters ([#12416](https://github.com/earendil-works/pi/issues/12416))
+- Fixed `StdinBuffer` rescanning the whole bracketed paste for its end marker on every chunk, which made large pastes take time quadratic in their size ([#12224](https://github.com/earendil-works/pi/issues/12224))
 
 ## [1.6.0] - 2026-11-20
 

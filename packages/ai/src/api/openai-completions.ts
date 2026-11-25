@@ -47,6 +47,7 @@ import {
 } from "../utils/openrouter-cost.ts";
 import {
 	applyOpenRouterNativeFinishReason,
+	flagOpenRouterEmptyStop,
 	readOpenRouterNativeFinishReason,
 } from "../utils/openrouter-finish-reason.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
@@ -386,6 +387,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 					maxRetries: options?.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					signal: options?.signal,
+					onErrorResponse: (errorResponse) => options?.onResponse?.(errorResponse, model),
 				},
 			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
@@ -422,7 +424,9 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 			let openThinking: OpenThinking | undefined;
 			let hasFinishReason = false;
 			const isOpenRouter = isOpenRouterModel(model);
-			// Kept across chunks so a trailing chunk that repeats finish_reason without it does not drop it.
+			// OpenRouter's native_finish_reason, only ever set for OpenRouter models, so the checks on it below
+			// are OpenRouter-only. Kept across chunks so a trailing chunk that repeats finish_reason without it
+			// does not drop it.
 			let nativeFinishReason: string | undefined;
 			// Finish blocks in content order, not by correlation key.
 			const openBlocks: OpenBlock[] = [];
@@ -704,6 +708,9 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 			}
 			if (!hasFinishReason && !compat.supportsFinishReason) {
 				output.stopReason = output.content.some((block) => block.type === "toolCall") ? "toolUse" : "stop";
+			}
+			if (nativeFinishReason) {
+				flagOpenRouterEmptyStop(output, nativeFinishReason);
 			}
 			if (output.stopReason === "error") {
 				throw new Error(output.errorMessage || "Provider returned an error stop reason");

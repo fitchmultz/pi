@@ -42,8 +42,10 @@ export interface ConsumeSseOptions {
 export async function consumeSseStream(stream: ReadableStream<Uint8Array>, options: ConsumeSseOptions): Promise<void> {
 	const reader = stream.getReader();
 	const decoder = new TextDecoder();
-	let lineFragments: string[] = [];
-	let lineBytes = 0;
+	// The incomplete last line. Only new text is scanned and the line is read once when it ends, so a large
+	// line arriving in many chunks costs time linear in its size.
+	let pendingLine = "";
+	let pendingLineBytes = 0;
 	let eventName: string | undefined;
 	let eventId: string | undefined;
 	let dataLines: string[] = [];
@@ -89,20 +91,14 @@ export async function consumeSseStream(stream: ReadableStream<Uint8Array>, optio
 
 	// SSE lines end with CRLF, LF, or a lone CR, including CRLF split across chunks.
 	let skipLeadingLf = false;
-	const append = (text: string) => {
+	const consumeLines = (text: string) => {
 		let start = 0;
-		if (skipLeadingLf && text.length > 0) {
-			if (text.startsWith("\n")) start = 1;
-			skipLeadingLf = false;
-		}
-		for (let i = start; i < text.length; i++) {
+		for (let i = 0; i < text.length; i++) {
 			const char = text[i];
 			if (char !== "\r" && char !== "\n") continue;
-			lineFragments.push(text.slice(start, i));
-			const line = lineFragments.join("");
-			lineFragments = [];
-			lineBytes = 0;
-			processLine(line);
+			processLine(pendingLine + text.slice(start, i));
+			pendingLine = "";
+			pendingLineBytes = 0;
 			if (char === "\r") {
 				if (i + 1 < text.length) {
 					if (text[i + 1] === "\n") i++;
@@ -112,20 +108,28 @@ export async function consumeSseStream(stream: ReadableStream<Uint8Array>, optio
 			}
 			start = i + 1;
 		}
-		const fragment = text.slice(start);
-		if (fragment) lineFragments.push(fragment);
-		lineBytes += Buffer.byteLength(fragment);
+		const rest = text.slice(start);
+		pendingLine += rest;
+		pendingLineBytes += Buffer.byteLength(rest);
 	};
 
 	try {
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
-			append(decoder.decode(value, { stream: true }));
-			if (lineBytes > maxEventBytes) throw new Error(`MCP SSE event exceeds ${maxEventBytes} bytes`);
+			let text = decoder.decode(value, { stream: true });
+			// A CRLF split across chunks: the CR already ended the line, so drop the LF.
+			if (skipLeadingLf && text.length > 0) {
+				if (text.startsWith("\n")) text = text.slice(1);
+				skipLeadingLf = false;
+			}
+			consumeLines(text);
+			if (pendingLineBytes > maxEventBytes) throw new Error(`MCP SSE event exceeds ${maxEventBytes} bytes`);
 		}
-		append(decoder.decode());
-		if (lineFragments.length > 0) processLine(lineFragments.join(""));
+		let tail = decoder.decode();
+		if (skipLeadingLf && tail.startsWith("\n")) tail = tail.slice(1);
+		consumeLines(tail);
+		if (pendingLine) processLine(pendingLine);
 		dispatch();
 	} catch (error) {
 		// Releasing the lock alone leaves the response open; the original error wins over a failed cancel.

@@ -52,7 +52,7 @@ const message: AssistantMessage = {
 
 type NoticeContext = {
 	chatContainer: Container;
-	settingsManager: { getShowCacheMissNotices(): boolean };
+	settingsManager: { getNotices(): { reasoningDrops: boolean } };
 	sessionManager: Pick<SessionManager, "getBranch">;
 };
 
@@ -97,7 +97,7 @@ function thinkingDropNotice(sessionManager: SessionManager, current: AssistantMe
 	initTheme("dark");
 	const context = {
 		chatContainer: new Container(),
-		settingsManager: { getShowCacheMissNotices: () => true },
+		settingsManager: { getNotices: () => ({ reasoningDrops: true }) },
 		sessionManager,
 	};
 	maybeShowThinkingDropNotice.call(context, current);
@@ -105,11 +105,11 @@ function thinkingDropNotice(sessionManager: SessionManager, current: AssistantMe
 }
 
 describe("InteractiveMode assistant diagnostics", () => {
-	test("shows Anthropic thinking drops when cache miss notices are enabled", () => {
+	test("shows Anthropic thinking drops when reasoning drop notices are enabled", () => {
 		initTheme("dark");
 		const enabled = {
 			chatContainer: new Container(),
-			settingsManager: { getShowCacheMissNotices: () => true },
+			settingsManager: { getNotices: () => ({ reasoningDrops: true }) },
 			sessionManager: { getBranch: () => [] },
 		};
 		maybeShowThinkingDropNotice.call(enabled, message);
@@ -120,7 +120,7 @@ describe("InteractiveMode assistant diagnostics", () => {
 
 		const disabled = {
 			chatContainer: new Container(),
-			settingsManager: { getShowCacheMissNotices: () => false },
+			settingsManager: { getNotices: () => ({ reasoningDrops: false }) },
 			sessionManager: { getBranch: () => [] },
 		};
 		maybeShowThinkingDropNotice.call(disabled, message);
@@ -274,7 +274,7 @@ describe("InteractiveMode cache estimates", () => {
 		};
 		type CacheContext = {
 			chatContainer: Container;
-			settingsManager: { getShowCacheMissNotices(): boolean };
+			settingsManager: { getNotices(): { cacheMisses: boolean } };
 			sessionManager: SessionManager;
 			session: { modelRuntime: ModelPriceSource };
 			addCacheMissNotice(miss: CacheMiss): void;
@@ -290,7 +290,7 @@ describe("InteractiveMode cache estimates", () => {
 		let enabled = true;
 		const context: CacheContext = {
 			chatContainer: new Container(),
-			settingsManager: { getShowCacheMissNotices: () => enabled },
+			settingsManager: { getNotices: () => ({ cacheMisses: enabled }) },
 			sessionManager: manager,
 			session: { modelRuntime: { getModel: () => ({ cost: { cacheRead: 0.2 } }) } },
 			addCacheMissNotice(miss) {
@@ -362,7 +362,7 @@ describe("InteractiveMode cache estimates", () => {
 		manager.appendMessage(reply(2));
 		const context: NoticeContext = {
 			chatContainer: new Container(),
-			settingsManager: { getShowCacheMissNotices: () => true },
+			settingsManager: { getNotices: () => ({ reasoningDrops: true }) },
 			sessionManager: manager,
 		};
 		const firstOpenAi = openAiReply(["prefix_mismatch"]);

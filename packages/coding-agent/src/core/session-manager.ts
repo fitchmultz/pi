@@ -928,7 +928,7 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 	if (!existsSync(resolvedFilePath)) return [];
 
 	const entries: FileEntry[] = [];
-	const pending: string[] = [];
+	let pending = "";
 	const fd = openSync(resolvedFilePath, "r");
 	try {
 		const decoder = new StringDecoder("utf8");
@@ -938,24 +938,22 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
 			if (bytesRead === 0) break;
 
-			const chunk = decoder.write(buffer.subarray(0, bytesRead));
+			const text = decoder.write(buffer.subarray(0, bytesRead));
+			// Only the new text is scanned, so a line longer than the read buffer is not rescanned per read.
 			let lineStart = 0;
-			let newlineIndex = chunk.indexOf("\n", lineStart);
+			let newlineIndex = text.indexOf("\n", lineStart);
 			while (newlineIndex !== -1) {
-				pending.push(chunk.slice(lineStart, newlineIndex));
-				const entry = parseSessionEntryLine(pending.join(""));
-				pending.length = 0;
+				const entry = parseSessionEntryLine(pending + text.slice(lineStart, newlineIndex));
 				if (entry) entries.push(entry);
+				pending = "";
 				lineStart = newlineIndex + 1;
-				newlineIndex = chunk.indexOf("\n", lineStart);
+				newlineIndex = text.indexOf("\n", lineStart);
 			}
-			// Keep fragments separate so a giant line is not flattened and rescanned on every read.
-			if (lineStart < chunk.length) pending.push(chunk.slice(lineStart));
+			pending += text.slice(lineStart);
 		}
 
-		const tail = decoder.end();
-		if (tail) pending.push(tail);
-		const finalEntry = parseSessionEntryLine(pending.join(""));
+		pending += decoder.end();
+		const finalEntry = parseSessionEntryLine(pending);
 		if (finalEntry) entries.push(finalEntry);
 	} finally {
 		closeSync(fd);

@@ -143,11 +143,14 @@ export function createGoogleFetch<TModel extends AnyModel>(
  * Run a Google GenAI SDK request with the shared provider retry policy
  * (408/409/429/5xx with backoff, honoring retry-after). The SDK's ApiError has a `status`
  * property without `headers`, and `retryProviderRequest` only retries errors carrying both,
- * so attach captured failure headers before rethrowing.
+ * so attach captured failure headers before rethrowing. Failed attempts reach `options.onResponse`
+ * when supplied; callers using `createGoogleFetch` omit `onResponse` here because `createGoogleFetch`
+ * already reports every HTTP response with its real headers.
  */
-export function retryGoogleRequest<T>(
+export function retryGoogleRequest<T, TModel extends AnyModel = AnyModel>(
 	request: () => Promise<T>,
-	options?: Pick<ProviderRequestOptions<AnyModel>, "maxRetries" | "maxRetryDelayMs" | "signal">,
+	model: TModel,
+	options?: Pick<ProviderRequestOptions<TModel>, "maxRetries" | "maxRetryDelayMs" | "signal" | "onResponse">,
 	getFailureHeaders?: () => Headers | undefined,
 ): Promise<T> {
 	return retryProviderRequest(
@@ -165,6 +168,9 @@ export function retryGoogleRequest<T>(
 			maxRetries: options?.maxRetries,
 			maxRetryDelayMs: options?.maxRetryDelayMs,
 			signal: options?.signal,
+			onErrorResponse: options?.onResponse
+				? (errorResponse) => options.onResponse?.(errorResponse, model)
+				: undefined,
 		},
 	);
 }

@@ -56,8 +56,9 @@ const BUDGETS = {
 				// validator ran by default). TypeBox, an external package, was not counted before.
 				"./utils/validation": { maxFiles: 42, forbid: ["providers/", "api/", "packages/ai/src/index.ts"] },
 				// Request retries stop on the provider-limit errors that assistant-turn retries stop on (retry.ts with its
-				// abort and sleep helpers), matched in the error text callers report (error-body.ts with its text helper).
-				"./utils/provider-retry": { maxFiles: 6, forbid: ["providers/", "api/", "index.ts"] },
+				// abort and sleep helpers), matched in the error text callers report (error-body.ts with its text helper),
+				// and report failed HTTP responses' headers (headers.ts).
+				"./utils/provider-retry": { maxFiles: 7, forbid: ["providers/", "api/", "index.ts"] },
 			},
 		},
 	},
