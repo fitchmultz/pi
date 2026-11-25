@@ -2,6 +2,7 @@ import {
 	GEMINI_4_PROMPT_CACHE,
 	GOOGLE_MAX_REQUEST_BYTES,
 	GOOGLE_STREAMING_MAX_OUTPUT_OVERRIDES,
+	googleChatApi,
 	isGemini4ModelId,
 } from "../../src/api/google-catalog.ts";
 import { GEMINI_DECISION_1_MODEL } from "../../src/api/google-decisions-catalog.ts";
@@ -30,6 +31,7 @@ export default defineProvider({
 				const thinkingLevelMap = googleThinkingLevels(model.id, source.reasoningOptions);
 				return {
 					...model,
+					api: googleChatApi(model.id),
 					reasoning: source.reasoning,
 					...(thinkingLevelMap ? { thinkingLevelMap } : {}),
 					...(isGemini4ModelId(model.id) ? { promptCache: { ...GEMINI_4_PROMPT_CACHE } } : {}),

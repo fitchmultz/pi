@@ -721,26 +721,33 @@ describe("cache warming", () => {
 			const fetch = vi.fn<FetchFunction>();
 			fetch.mockImplementation(async () => {
 				const isFirst = fetch.mock.calls.length === 1;
-				const frame = {
-					candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }],
-					usageMetadata: {
-						promptTokenCount: 60_000,
-						cachedContentTokenCount: isFirst ? 58_000 : cacheRead,
-						candidatesTokenCount: 1,
-						totalTokenCount: 60_001,
+				const frame = (event: object) => `data: ${JSON.stringify(event)}\n\n`;
+				const start = frame({ event_type: "step.start", index: 0, step: { type: "model_output" } });
+				const delta = frame({ event_type: "step.delta", index: 0, delta: { type: "text", text: "OK" } });
+				const complete = {
+					event_type: "interaction.completed",
+					interaction: {
+						id: isFirst ? "first" : "warm",
+						status: "completed",
+						usage: {
+							total_input_tokens: 60_000,
+							total_cached_tokens: isFirst ? 58_000 : cacheRead,
+							total_output_tokens: 1,
+							total_tokens: 60_001,
+						},
 					},
 				};
+				const finish = frame({ event_type: "step.stop", index: 0 }) + frame(complete);
 				const headers = { "content-type": "text/event-stream" };
-				if (!isFirst) return new Response(`data: ${JSON.stringify(frame)}\n\n`, { headers });
+				if (!isFirst) return new Response(start + delta + finish, { headers });
 				const encode = new TextEncoder();
 				return new Response(
 					new ReadableStream({
 						async start(controller) {
-							const partial = { candidates: [{ content: { parts: [{ text: "Starting" }] } }] };
-							controller.enqueue(encode.encode(`data: ${JSON.stringify(partial)}\n\n`));
+							controller.enqueue(encode.encode(start + delta));
 							await firstResponse.promise;
 							if (stopReason === "stop") {
-								controller.enqueue(encode.encode(`data: ${JSON.stringify(frame)}\n\n`));
+								controller.enqueue(encode.encode(finish));
 							}
 							controller.close();
 						},

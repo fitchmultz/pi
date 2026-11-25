@@ -187,6 +187,7 @@ export function isRecoverableLength(message: AssistantMessage, desiredMaxOutput:
 	return (
 		message.stopReason === "length" &&
 		message.rawStopReason !== "CONTINUATION" &&
+		message.rawStopReason !== "requires_continuation" &&
 		desiredMaxOutput > 0 &&
 		message.usage.output < desiredMaxOutput
 	);

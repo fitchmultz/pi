@@ -5,6 +5,11 @@ const CANONICAL_GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1b
 const LEGACY_GOOGLE_MAX_REQUEST_BYTES = 20 * 1024 * 1024;
 const GEMINI_4_MODEL_ID_PATTERN = /^gemini-4(?:-|$)/i;
 
+/** Select the canonical Developer API for a Google chat catalog entry. */
+export function googleChatApi(modelId: string): "google-generative-ai" | "google-interactions" {
+	return modelId === "gemini-4-neon" ? "google-interactions" : "google-generative-ai";
+}
+
 /**
  * Gemini Developer API inline request payload limit (100 MiB).
  * Raised from 20 MB on 2026-01-08: https://aistudio.google.com/docs/changelog
@@ -54,7 +59,7 @@ export function normalizeGoogleModel(model: AnyModel): AnyModel {
 	if (
 		model.provider !== "google" ||
 		!isModelType(model, "chat") ||
-		model.api !== "google-generative-ai" ||
+		(model.api !== "google-generative-ai" && model.api !== "google-interactions") ||
 		model.baseUrl !== CANONICAL_GOOGLE_BASE_URL
 	) {
 		return model;
@@ -70,8 +75,10 @@ export function normalizeGoogleModel(model: AnyModel): AnyModel {
 			: model.inputLimits;
 	const nextPromptCache =
 		isGemini4ModelId(model.id) && model.promptCache === undefined ? { ...GEMINI_4_PROMPT_CACHE } : model.promptCache;
+	const api = model.api === "google-generative-ai" ? googleChatApi(model.id) : model.api;
 
 	if (
+		api === model.api &&
 		nextMaxTokens === model.maxTokens &&
 		nextInputLimits === model.inputLimits &&
 		nextPromptCache === model.promptCache
@@ -80,6 +87,7 @@ export function normalizeGoogleModel(model: AnyModel): AnyModel {
 	}
 	return {
 		...model,
+		api,
 		maxTokens: nextMaxTokens,
 		...(nextInputLimits ? { inputLimits: nextInputLimits } : {}),
 		...(nextPromptCache !== undefined ? { promptCache: nextPromptCache } : {}),

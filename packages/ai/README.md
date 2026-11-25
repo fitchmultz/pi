@@ -245,6 +245,8 @@ For the Gemini API (`google-generative-ai`), token cost estimates follow the ret
 
 This adjustment applies to the `google` provider, direct Gemini API endpoints (`generativelanguage.googleapis.com`), and Cloudflare AI Gateway `/google-ai-studio` passthrough endpoints (regardless of provider ID). Google Vertex and other custom endpoints retain their catalog estimates.
 
+Gemini 4 Neon defaults to `google-interactions`. This API uses the tier reported by the interaction or the `x-gemini-service-tier` response header. It stores interaction history by default and only continues a stored interaction when the current transcript contains its exact prefix. Use `GoogleInteractionsOptions.store: false` with the full `stream()` API to send the transcript without storing the interaction. Use `streamSimple()` with `deferred: true` to start a background interaction, then use `Models.fetchDeferred()` or `Models.cancelDeferred()` with its handle.
+
 ## Providers and Models
 
 A **provider** is the runtime unit: it owns its model catalog, its auth (API key resolution, OAuth flows), and its stream behavior. A `Models` collection holds providers and routes every request to the provider that owns the model.
@@ -1457,6 +1459,7 @@ Built-in API implementations live under `./api/<api-id>`:
 | `openai-codex-responses` | `OpenAICodexResponsesOptions` |
 | `azure-openai-responses` | `AzureOpenAIResponsesOptions` |
 | `google-generative-ai` | `GoogleOptions` |
+| `google-interactions` | `GoogleInteractionsOptions` |
 | `google-vertex` | `GoogleVertexOptions` |
 | `mistral-conversations` | `MistralOptions` |
 | `bedrock-converse-stream` | `BedrockOptions` |

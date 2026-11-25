@@ -4,6 +4,7 @@
 import * as piAi from "@earendil-works/pi-ai";
 import * as anthropicMessages from "@earendil-works/pi-ai/api/anthropic-messages.lazy";
 import * as googleGenerativeAi from "@earendil-works/pi-ai/api/google-generative-ai.lazy";
+import * as googleInteractions from "@earendil-works/pi-ai/api/google-interactions.lazy";
 import * as openaiCompletions from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import * as openaiResponses from "@earendil-works/pi-ai/api/openai-responses.lazy";
 import * as piAiModels from "@earendil-works/pi-ai/models";
@@ -36,6 +37,7 @@ export const SHARED_PACKAGES = {
 	"@earendil-works/pi-ai": piAi,
 	"@earendil-works/pi-ai/api/anthropic-messages.lazy": anthropicMessages,
 	"@earendil-works/pi-ai/api/google-generative-ai.lazy": googleGenerativeAi,
+	"@earendil-works/pi-ai/api/google-interactions.lazy": googleInteractions,
 	"@earendil-works/pi-ai/api/openai-completions.lazy": openaiCompletions,
 	"@earendil-works/pi-ai/api/openai-responses.lazy": openaiResponses,
 	"@earendil-works/pi-ai/models": piAiModels,

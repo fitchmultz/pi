@@ -60,6 +60,7 @@ import { canReplayGoogleThoughtSignature, transformMessages } from "./transform-
 export { isCloudflareGoogleAiStudioUrl, retryGoogleRequest };
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
+type GoogleChatApi = GoogleApiType | "google-interactions";
 
 /** Request options both Google adapters accept. */
 export interface GoogleOptions extends StreamOptions {
@@ -92,7 +93,7 @@ const GOOGLE_STRICT_TOOL_NON_SCHEMA_EXCLUSIONS = [
 
 const googleStrictToolLimitSessions = createStrictToolLimitSessionTracker();
 
-function isGoogleStrictToolRejectionError(error: unknown): boolean {
+export function isGoogleStrictToolRejectionError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	const status = "status" in error ? (error as { status?: unknown }).status : undefined;
 	if (status !== 400) return false;
@@ -519,7 +520,7 @@ const GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS = new Map<string, { flex: number; pr
 	["gemini-2.5-flash-lite", { flex: 1, priority: 1.8 }],
 ]);
 
-function applyGoogleServiceTierPricing(model: Model<GoogleApiType>, usage: Usage, serviceTier: unknown): void {
+export function applyGoogleServiceTierPricing(model: Model<GoogleChatApi>, usage: Usage, serviceTier: unknown): void {
 	const normalizedModelId = model.id.replace(/^.*\//, "").toLowerCase();
 	const cacheMultipliers = GOOGLE_SERVICE_TIER_CACHE_MULTIPLIERS.get(normalizedModelId);
 	if (!sendsToGeminiApi(model) || !cacheMultipliers) return;
@@ -677,7 +678,7 @@ export function resolveGoogleSimpleThinking(
 }
 
 /** Resolve a supported pi level or model-specific Google mapping to a standard Google level. */
-export function resolveGoogleThinkingLevel<T extends GoogleApiType>(
+export function resolveGoogleThinkingLevel<T extends GoogleChatApi>(
 	model: Model<T>,
 	level: ThinkingLevel,
 ): ResolvedGoogleThinkingLevel {
@@ -842,7 +843,7 @@ function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: str
 // Google's documented `thoughtSignature` value for function calls the API did not generate, such
 // as a trace from another model. The Gemini API skips thought-signature validation for it.
 // See: https://aistudio.google.com/docs/thought-signatures?generate-content=true#faqs
-const SKIP_THOUGHT_SIGNATURE_VALIDATOR = "skip_thought_signature_validator";
+export const SKIP_THOUGHT_SIGNATURE_VALIDATOR = "skip_thought_signature_validator";
 
 /**
  * Put the skip value on the first function call of a model message whose function calls carry no
@@ -881,7 +882,7 @@ function getGeminiMajorVersion(modelId: string): number | undefined {
  * Gemini 4 and Gemini 3.6+ deprecate custom sampling parameters (`temperature`, `top_p`, `top_k`).
  * `compat.supportsTemperature` overrides the model ID detection.
  */
-export function supportsGoogleTemperature<T extends GoogleApiType>(model: Model<T>): boolean {
+export function supportsGoogleTemperature<T extends GoogleChatApi>(model: Model<T>): boolean {
 	if (model.compat?.supportsTemperature !== undefined) {
 		return model.compat.supportsTemperature;
 	}
@@ -1166,7 +1167,7 @@ const JSON_SCHEMA_SUBSCHEMAS = new Set([
  * Rewrite string and number `const` values to single-value `enum`s.
  * Gemini ignores `const` in `parametersJsonSchema` but honors `enum`.
  */
-function rewriteConstAsEnum(schema: unknown, isNameMap = false): unknown {
+export function rewriteConstAsEnum(schema: unknown, isNameMap = false): unknown {
 	if (Array.isArray(schema)) return schema.map((item) => rewriteConstAsEnum(item));
 	if (typeof schema !== "object" || schema === null) return schema;
 
@@ -1226,7 +1227,7 @@ export function convertTools(
  * Gemini 3+ enforces required function parameters in validated tool-calling modes.
  * `compat.supportsStrictMode` overrides the model ID detection, e.g. for Gemini models served under IDs without the version.
  */
-export function supportsGoogleStrictToolSampling<T extends GoogleApiType>(model: Model<T>): boolean {
+export function supportsGoogleStrictToolSampling<T extends GoogleChatApi>(model: Model<T>): boolean {
 	const majorVersion = getGeminiMajorVersion(model.id);
 	return model.compat?.supportsStrictMode ?? (majorVersion !== undefined && majorVersion >= 3);
 }

@@ -15,7 +15,7 @@ Each key under `providers` is a provider ID. A built-in provider ID changes that
 | `name` | string |  | Display name. |
 | `baseUrl` | string |  | API base URL. Also applies to the provider's built-in models. |
 | `apiKey` | string |  | Literal key, "$NAME" environment interpolation, or "!command" output. |
-| `api` | string |  | API for the provider's models, such as "openai-completions", "openai-responses", "anthropic-messages", or "google-generative-ai". |
+| `api` | string |  | API for the provider's models, such as "openai-completions", "openai-responses", "anthropic-messages", or "google-interactions". |
 | `oauth` | `"radius"` |  | OAuth login flow. Requires baseUrl. |
 | `headers` | object |  | Request headers. Values resolve like apiKey. |
 | `inputLimits` | object |  |  |
@@ -123,6 +123,12 @@ See [Describe model input and caching](models.md#describe-model-input-and-cachin
 | `images.maxPerMessage` | integer |  | Maximum images accepted in one provider message. |
 | `images.maxPerRequest` | integer |  | Maximum images accepted across one provider request. |
 
+## Google Interactions
+
+The built-in `google/gemini-4-neon` model uses `google-interactions`. Other Google chat models keep `google-generative-ai`. The Interactions API always sends mid-conversation system updates inline.
+
+For Cloudflare AI Gateway, set `baseUrl` to the `google-ai-studio/v1beta` path and provide the gateway credentials in `headers`. Pi appends `/interactions` to that path.
+
 ## Compatibility
 
 `compat` describes verified differences from an API's standard request and response behavior. Model values override provider values per field. The fields that apply depend on the model's `api`.
@@ -218,7 +224,7 @@ Also applies to `azure-openai-responses` and `openai-codex-responses`.
 
 ### `google-generative-ai`
 
-Also applies to `google-vertex`.
+Also applies to `google-interactions` and `google-vertex`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|

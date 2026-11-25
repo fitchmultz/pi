@@ -714,6 +714,7 @@ export const CompatSchemasByApi = {
 	"bedrock-converse-stream": BedrockCompatSchema,
 	"mistral-conversations": MistralConversationsCompatSchema,
 	"google-generative-ai": GoogleCompatSchema,
+	"google-interactions": GoogleCompatSchema,
 	"google-vertex": GoogleCompatSchema,
 	"typesafe-system-one": SystemOneCompatSchema,
 	"cloudflare-workers-ai-system-one": SystemOneCompatSchema,

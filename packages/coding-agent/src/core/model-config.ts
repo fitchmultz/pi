@@ -111,7 +111,7 @@ const ProviderConfigSchema = Type.Object({
 		Type.String({
 			minLength: 1,
 			description:
-				'API for the provider\'s models, such as "openai-completions", "openai-responses", "anthropic-messages", or "google-generative-ai".',
+				'API for the provider\'s models, such as "openai-completions", "openai-responses", "anthropic-messages", or "google-interactions".',
 		}),
 	),
 	oauth: Type.Optional(Type.Literal("radius", { description: "OAuth login flow. Requires baseUrl." })),
