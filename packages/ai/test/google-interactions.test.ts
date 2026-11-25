@@ -176,6 +176,51 @@ describe("Google Interactions request projection", () => {
 		expect(bodies[1].tools?.[0]?.parameters).not.toHaveProperty("properties.region.const");
 	});
 
+	it.each([
+		{ api: "google-generative-ai", provider: "google", id: model.id, replay: true },
+		{ api: "google-vertex", provider: "google", id: model.id, replay: true },
+		{ api: "google-interactions", provider: "google", id: model.id, replay: true },
+		{ api: "google-generative-ai", provider: "google", id: "gemini-4-carbon", replay: false },
+		{ api: "google-vertex", provider: "google-vertex", id: model.id, replay: false },
+	] as const)("replays signatures from $provider/$id using $api: $replay", async ({ api, provider, id, replay }) => {
+		const { fetch, bodies } = stub(toolAnswer("old"), answer("resumed"));
+		const original = await send(fetch, [initial]).result();
+		const prior: AssistantMessage = {
+			...original,
+			api,
+			provider,
+			model: id,
+			googleInteractionsReplay: undefined,
+			content: [
+				{ type: "thinking", thinking: "Look up the status.", thinkingSignature: "dGhvdWdodA==" },
+				{
+					type: "toolCall",
+					id: "call-1",
+					name: "lookup",
+					arguments: { region: "west" },
+					thoughtSignature: "Y2FsbA==",
+				},
+				{ type: "text", text: "" },
+			],
+		};
+		const result = await send(fetch, [initial, prior, toolResult()]).result();
+		expect(result.stopReason).toBe("stop");
+		const call = { type: "function_call", id: "call-1", name: "lookup", arguments: { region: "west" } };
+		expect(bodies[1].input?.slice(1, -1)).toEqual(
+			replay
+				? [
+						{
+							type: "thought",
+							signature: "dGhvdWdodA==",
+							summary: [{ type: "text", text: "Look up the status." }],
+						},
+						{ type: "thought", signature: "Y2FsbA==" },
+						call,
+					]
+				: [{ ...call, signature: "skip_thought_signature_validator" }],
+		);
+	});
+
 	it("replays unsigned calls from another API with matching result IDs", async () => {
 		const { fetch, bodies } = stub(toolAnswer("foreign"), answer("reply"));
 		const original = await send(fetch, [initial]).result();
@@ -385,12 +430,13 @@ describe("Google Interactions stored history", () => {
 
 describe("Google Interactions response stream", () => {
 	it("assembles signed thought, tool search, and fragmented function steps losslessly across journal replay", async () => {
+		const thinkingSignature = "dGhvdWdodA==";
 		const signedCall = {
 			type: "function_call",
 			name: "lookup",
 			id: "call-1",
 			arguments: {},
-			signature: "call-signature",
+			signature: "Y2FsbA==",
 		} as const;
 		const { fetch, bodies } = stub(
 			sse(
@@ -398,7 +444,7 @@ describe("Google Interactions response stream", () => {
 				begin(0, { type: "thought" }),
 				delta(0, { type: "thought_summary", content: { type: "text", text: "Looking " } }),
 				delta(0, { type: "thought_summary", content: { type: "text", text: "up" } }),
-				delta(0, { type: "thought_signature", signature: "thought-signature" }),
+				delta(0, { type: "thought_signature", signature: thinkingSignature }),
 				end(0),
 				begin(1, { type: "tool_search_call", id: "search-1", arguments: {} }),
 				delta(1, {
@@ -418,6 +464,7 @@ describe("Google Interactions response stream", () => {
 				completed("tool", "requires_action"),
 			),
 			answer("replayed"),
+			answer("edited"),
 		);
 		const events = send(fetch, [initial], { store: false });
 		const eventTypes: string[] = [];
@@ -425,13 +472,13 @@ describe("Google Interactions response stream", () => {
 		const first = await events.result();
 		expect(first.stopReason).toBe("toolUse");
 		expect(first.content).toEqual([
-			{ type: "thinking", thinking: "Looking up", thinkingSignature: "thought-signature" },
+			{ type: "thinking", thinking: "Looking up", thinkingSignature },
 			{
 				type: "toolCall",
 				name: "lookup",
 				id: "call-1",
 				arguments: { region: "west" },
-				thoughtSignature: "call-signature",
+				thoughtSignature: signedCall.signature,
 			},
 		]);
 		expect(eventTypes).toEqual([
@@ -451,7 +498,7 @@ describe("Google Interactions response stream", () => {
 		}).result();
 		expect(result.stopReason).toBe("stop");
 		expect(bodies[1].input?.slice(1, -1)).toEqual([
-			{ type: "thought", summary: [{ type: "text", text: "Looking up" }], signature: "thought-signature" },
+			{ type: "thought", summary: [{ type: "text", text: "Looking up" }], signature: thinkingSignature },
 			{
 				type: "tool_search_call",
 				id: "search-1",
@@ -460,6 +507,17 @@ describe("Google Interactions response stream", () => {
 			},
 			{ type: "tool_search_result", call_id: "search-1", result: [{ type: "function", name: "lookup" }] },
 			{ ...signedCall, arguments: { region: "west" } },
+		]);
+
+		const edited: AssistantMessage = {
+			...first,
+			content: first.content.map((block) =>
+				block.type === "toolCall" ? { ...block, arguments: { region: "east" } } : block,
+			),
+		};
+		expect((await send(fetch, [initial, edited, toolResult()], { store: false }).result()).stopReason).toBe("stop");
+		expect(bodies[2].input?.slice(1, -1)).toEqual([
+			{ ...signedCall, arguments: { region: "east" }, signature: "skip_thought_signature_validator" },
 		]);
 	});
 

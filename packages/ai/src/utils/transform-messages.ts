@@ -96,20 +96,26 @@ function isGemini4TextModelId(modelId: string): boolean {
 
 /**
  * Whether thought signatures and thinking blocks from `source` can be replayed to `target`.
- * Gemini 4 text/coding models share a compatible thought-signature format across models on
- * the same provider/API, allowing multi-model sessions without stripping signatures.
+ * Interactions can resume the same Gemini model's Google API history. The legacy Google APIs
+ * also share signatures across Gemini 4 text models on the same provider and API.
  */
 export function canReplayGoogleThoughtSignature(
 	source: Pick<AssistantMessage, "api" | "provider" | "model">,
 	target: Pick<Model<Api>, "api" | "provider" | "id">,
 ): boolean {
 	if (source.provider !== target.provider) return false;
-	if (source.model === target.id) return true;
+	if (target.api === "google-interactions") {
+		return (
+			source.model === target.id &&
+			(source.api === "google-interactions" ||
+				source.api === "google-generative-ai" ||
+				source.api === "google-vertex")
+		);
+	}
 	return (
 		source.api === target.api &&
 		(target.api === "google-generative-ai" || target.api === "google-vertex") &&
-		isGemini4TextModelId(source.model) &&
-		isGemini4TextModelId(target.id)
+		(source.model === target.id || (isGemini4TextModelId(source.model) && isGemini4TextModelId(target.id)))
 	);
 }
 
@@ -153,8 +159,7 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.provider === model.provider &&
 				assistantMsg.api === model.api &&
 				assistantMsg.model === model.id;
-			const keepReasoning =
-				isSameModel || (assistantMsg.api === model.api && canReplayGoogleThoughtSignature(assistantMsg, model));
+			const keepReasoning = isSameModel || canReplayGoogleThoughtSignature(assistantMsg, model);
 
 			const transformedContent = assistantMsg.content.flatMap((block) => {
 				if (block.type === "thinking") {

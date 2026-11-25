@@ -7,8 +7,8 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { renderSystemMessageUpdate } from "../utils/text.ts";
 import { withoutInitialSystemMessage } from "../utils/transcript.ts";
 import { sendsToGeminiApi } from "./google-client.ts";
-import { SKIP_THOUGHT_SIGNATURE_VALIDATOR } from "./google-shared.ts";
-import { transformMessages } from "./transform-messages.ts";
+import { isValidThoughtSignature, SKIP_THOUGHT_SIGNATURE_VALIDATOR } from "./google-shared.ts";
+import { canReplayGoogleThoughtSignature, transformMessages } from "./transform-messages.ts";
 
 type ModelStep = Exclude<Interactions.Step, { type: "user_input" | "function_result" }>;
 
@@ -34,12 +34,25 @@ export function projectSteps(model: Model<"google-interactions">, context: Trans
 		if (message.role !== "assistant" || !message.googleInteractionsReplay) return message;
 		const { googleInteractionsReplay, ...portable } = message;
 		// Compare before transformMessages normalizes portable blocks for the destination API.
-		return message.api === model.api &&
+		if (
+			message.api === model.api &&
 			message.provider === model.provider &&
 			message.model === model.id &&
 			googleInteractionsReplay.contentHash === shortHash(JSON.stringify(message.content))
-			? message
-			: portable;
+		) {
+			return message;
+		}
+		// Signatures from native steps also appear on the portable blocks. Once the native
+		// replay fails its provenance or edit check, do not replay those copies either.
+		return {
+			...portable,
+			content: portable.content.flatMap<AssistantMessage["content"][number]>((block) => {
+				if (block.type === "thinking") return [];
+				if (block.type === "text") return [{ type: "text", text: block.text }];
+				const { thoughtSignature: _signature, ...call } = block;
+				return [call];
+			}),
+		};
 	});
 	const messages = transformMessages(conversation, model, (id) =>
 		/^[a-zA-Z0-9_-]{1,64}$/.test(id) ? id : `call_${shortHash(id)}`,
@@ -81,19 +94,41 @@ export function projectSteps(model: Model<"google-interactions">, context: Trans
 					steps.push(...replay.steps);
 					break;
 				}
-				// A portable (or edited) tool call has no trusted native signature. Never reuse
-				// a signature from another API or from an edited call's portable content.
+				const canReplaySignature = canReplayGoogleThoughtSignature(message, model);
 				let firstCall = true;
 				for (const block of message.content) {
 					if (block.type === "text") {
-						steps.push({ type: "model_output", content: [toContent(block)] });
+						// GenerateContent can end a tool call with an empty text part. Interactions rejects it.
+						if (block.text) steps.push({ type: "model_output", content: [toContent(block)] });
+					} else if (block.type === "thinking" && canReplaySignature) {
+						const signature = isValidThoughtSignature(block.thinkingSignature)
+							? block.thinkingSignature
+							: undefined;
+						if (signature || block.thinking) {
+							steps.push({
+								type: "thought",
+								signature,
+								summary: block.thinking
+									? [{ type: "text", text: sanitizeSurrogates(block.thinking) }]
+									: undefined,
+							});
+						}
 					} else if (block.type === "toolCall") {
+						// Interactions accepts a GenerateContent tool-call signature in the
+						// documented thought step immediately before the corresponding call.
+						const signature =
+							canReplaySignature && isValidThoughtSignature(block.thoughtSignature)
+								? block.thoughtSignature
+								: undefined;
+						if (signature) steps.push({ type: "thought", signature });
 						const call = {
 							type: "function_call" as const,
 							id: block.id,
 							name: block.name,
 							arguments: block.arguments,
-							...(firstCall && needsSkipSignature ? { signature: SKIP_THOUGHT_SIGNATURE_VALIDATOR } : {}),
+							...(!signature && firstCall && needsSkipSignature
+								? { signature: SKIP_THOUGHT_SIGNATURE_VALIDATOR }
+								: {}),
 						};
 						steps.push(call);
 						firstCall = false;
