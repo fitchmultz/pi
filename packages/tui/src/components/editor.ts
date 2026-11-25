@@ -473,6 +473,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	private navigateHistory(direction: 1 | -1): void {
+		this.cancelAutocomplete();
 		this.lastAction = null;
 		if (this.history.length === 0) return;
 
@@ -873,12 +874,10 @@ export class Editor implements Component, Focusable {
 
 		// Dedicated history actions always browse entries instead of moving the cursor.
 		if (kb.matches(data, "tui.editor.historyPrevious")) {
-			this.cancelAutocomplete();
 			this.navigateHistory(-1);
 			return;
 		}
 		if (kb.matches(data, "tui.editor.historyNext")) {
-			this.cancelAutocomplete();
 			this.navigateHistory(1);
 			return;
 		}
@@ -2171,6 +2170,7 @@ export class Editor implements Component, Focusable {
 		this.exitHistoryBrowsing();
 		const snapshot = this.undoStack.pop();
 		if (!snapshot) return;
+		this.cancelAutocomplete();
 		Object.assign(this.state, snapshot.state);
 		this.pastes = snapshot.pastes;
 		this.pasteCounter = snapshot.pasteCounter;

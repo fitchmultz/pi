@@ -3359,6 +3359,18 @@ describe("Editor component", () => {
 			assert.ok(argMenu.includes("free"));
 			assert.ok(argMenu.includes("pro"));
 
+			editor.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
+			assert.strictEqual(editor.getText(), "/goog");
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.strictEqual(editor.getText(), "/goog");
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.strictEqual(editor.getText(), "/google-tier ");
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
 			// Escape dismisses the auto-opened argument menu cleanly.
 			editor.handleInput("\x1b");
 			await flushAutocomplete();
@@ -3501,6 +3513,13 @@ describe("Editor component", () => {
 			await flushAutocomplete();
 			assert.strictEqual(editor.isShowingAutocomplete(), true);
 			assert.ok(editor.render(80).map(stripVTControlCharacters).join("\n").includes("free"));
+
+			editor.handleInput("\x1b[45;5u"); // Ctrl+- (undo)
+			assert.strictEqual(editor.getText(), "/google-tier");
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+			editor.handleInput("\t");
+			await flushAutocomplete();
+			assert.strictEqual(editor.getText(), "/google-tier");
 
 			// 2b. Rapid typing without waiting for intermediate lookups to settle still opens argument completions.
 			editor.setText("");
