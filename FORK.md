@@ -460,7 +460,7 @@ The fork carries refreshed runtime, build and test dependencies on top of upstre
 `stream-chain` 4.4.2 and `stream-json` 3.9.0; build/test updates `vitest` 5.1.1 (with
 `--no-staticParse` in `packages/evals`), `vitest-evals`/`@vitest-evals/core` 0.18.1,
 `@cloudflare/vitest-plugin` 1.8.5, `fake-indexeddb` 6.2.8, `@xterm/headless` 6.0.0, `pnpm` 12.21.0,
-`typescript` 6.0.3 in `apps/p2` (with TypeScript 6 typing shims in `apps/p2/src/web/css.d.ts`, `apps/p2/plugins/{terminals/ghostty,voice/barge-in}.ts`, and the updated server import anchor in `apps/p2/test/p2/dev.test.ts`), `@types/node` 22.20.5, Rust 1.100.0 and refreshed crates in
+`typescript` 6.0.3 in `apps/p2` (with TypeScript 6 typing shims in `apps/p2/src/web/css.d.ts`, `apps/p2/plugins/{terminals/ghostty,voice/barge-in}.ts`, the updated server import anchor in `apps/p2/test/p2/dev.test.ts`, and accurate async `SessionArchived` archive-job comments/docs in `apps/p2/{plugins/sessions/contract.ts,docs/plugin-hooks.md,docs/p2-notes.md}` matching `plugins/sessions/server.ts`), `@types/node` 22.20.5, Rust 1.100.0 and refreshed crates in
 `packages/env/daemon/`, and Node engine floors `^22.23.5 || ^24.22.3 || >=26.13.1` (`>=26.13.1` for the
 Chord/p2 TUI sandbox). `packages/tui/package.json` narrows packaged native prebuilds to `darwin-arm64/*.node`.
 Root and generated installer locks stay together.
