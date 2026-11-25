@@ -962,7 +962,55 @@ describe("Anthropic raw SSE parsing", () => {
 			trailingFrame:
 				'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hel',
 		},
-	])("classifies mid-stream truncated SSE frames as retryable ($name)", async ({ trailingFrame }) => {
+		{
+			name: "dropped final closing brace at EOF",
+			trailingFrame:
+				'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello world"}',
+		},
+		{
+			name: "truncated after property name at EOF",
+			trailingFrame: 'event: content_block_delta\ndata: {"type":"content_block_delta","index"',
+		},
+	])(
+		"discards incomplete trailing SSE frames at EOF and surfaces retryable stream-end error ($name)",
+		async ({ trailingFrame }) => {
+			const model = getModel("anthropic", "claude-haiku-4-5");
+			const context = normalizeContext({
+				messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+			});
+			const prefix = minimalAnthropicEvents
+				.slice(0, 2)
+				.map(({ event, data }) => `event: ${event}\ndata: ${data}\n\n`)
+				.join("");
+			const response = new Response(`${prefix}${trailingFrame}`, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+
+			const result = await streamAnthropic(model, context, { client: createFakeAnthropicClient(response) }).result();
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toBe("Anthropic stream ended before message_stop");
+			expect(isRetryableAssistantError(result)).toBe(true);
+		},
+	);
+
+	it("surfaces retryable stream-end error when the very first frame is truncated at EOF", async () => {
+		const model = getModel("anthropic", "claude-haiku-4-5");
+		const context = normalizeContext({
+			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
+		});
+		const response = new Response('event: message_start\ndata: {"type":"message_start"', {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+
+		const result = await streamAnthropic(model, context, { client: createFakeAnthropicClient(response) }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Anthropic stream ended before message_stop");
+		expect(isRetryableAssistantError(result)).toBe(true);
+	});
+
+	it("keeps blank-line-terminated malformed SSE JSON as a non-retryable parse error", async () => {
 		const model = getModel("anthropic", "claude-haiku-4-5");
 		const context = normalizeContext({
 			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
@@ -971,7 +1019,7 @@ describe("Anthropic raw SSE parsing", () => {
 			.slice(0, 2)
 			.map(({ event, data }) => `event: ${event}\ndata: ${data}\n\n`)
 			.join("");
-		const response = new Response(`${prefix}${trailingFrame}`, {
+		const response = new Response(`${prefix}event: content_block_delta\ndata: <html>\n\n`, {
 			status: 200,
 			headers: { "content-type": "text/event-stream" },
 		});
@@ -979,6 +1027,6 @@ describe("Anthropic raw SSE parsing", () => {
 		const result = await streamAnthropic(model, context, { client: createFakeAnthropicClient(response) }).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toMatch(/^Could not parse Anthropic SSE event content_block_delta:/);
-		expect(isRetryableAssistantError(result)).toBe(true);
+		expect(isRetryableAssistantError(result)).toBe(false);
 	});
 });

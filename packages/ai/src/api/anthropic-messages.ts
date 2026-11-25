@@ -642,6 +642,7 @@ interface ServerSentEvent {
 	event: string | null;
 	data: string;
 	raw: string[];
+	trailingAtEof?: boolean;
 }
 
 interface SseDecoderState {
@@ -782,7 +783,7 @@ async function* iterateSseMessages(
 
 		const trailingEvent = flushSseEvent(state);
 		if (trailingEvent) {
-			yield trailingEvent;
+			yield { ...trailingEvent, trailingAtEof: true };
 		}
 	} finally {
 		reader.releaseLock();
@@ -799,6 +800,7 @@ async function* iterateAnthropicEvents(
 
 	let sawMessageStart = false;
 	let sawMessageEnd = false;
+	let sawTruncatedTrailingFrame = false;
 
 	for await (const sse of iterateSseMessages(response.body, signal)) {
 		if (sse.event === "error") {
@@ -818,6 +820,14 @@ async function* iterateAnthropicEvents(
 			}
 			yield event;
 		} catch (error) {
+			if (sse.trailingAtEof) {
+				// Per the WHATWG SSE spec, discard an unparseable incomplete trailing event at EOF
+				// so premature stream truncation surfaces the existing retryable stream-end error
+				// instead of engine-specific JSON.parse wording. Complete unterminated terminal
+				// events still parse cleanly above.
+				sawTruncatedTrailingFrame = true;
+				continue;
+			}
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(
 				`Could not parse Anthropic SSE event ${sse.event}: ${message}; data=${sse.data}; raw=${sse.raw.join("\\n")}`,
@@ -825,7 +835,7 @@ async function* iterateAnthropicEvents(
 		}
 	}
 
-	if (sawMessageStart && !sawMessageEnd) {
+	if ((sawMessageStart || sawTruncatedTrailingFrame) && !sawMessageEnd) {
 		throw new Error("Anthropic stream ended before message_stop");
 	}
 }

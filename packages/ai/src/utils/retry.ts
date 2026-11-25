@@ -146,11 +146,6 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"ended without",
 	"stream ended before message_stop",
 	"stream ended before a terminal response event",
-	// Mid-stream SSE truncation where an upstream gateway drops the connection before
-	// finishing an SSE frame's JSON payload (e.g. Anthropic `event: content_block_delta`
-	// with empty or cut-off `data:`). Scoped to SSE parser errors so client-side 4xx
-	// malformed-JSON request errors and non-truncation syntax errors stay non-retryable.
-	"(?:Could not parse Anthropic SSE event [^:]+|Invalid Codex SSE JSON):\\s*(?:JSON Parse error:\\s*)?(?:Unexpected end of JSON input|Unexpected EOF|Unterminated string)",
 	"http2 request did not get a response",
 	// An OpenAI-compatible stream that ended with `finish_reason: "error"`, which OpenRouter
 	// sends when its provider fails mid-stream; see `mapStopReason` in openai-completions.ts.
