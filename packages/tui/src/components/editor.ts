@@ -1,4 +1,4 @@
-import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
+import type { AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
@@ -792,20 +792,7 @@ export class Editor implements Component, Focusable {
 			if (kb.matches(data, "tui.input.tab")) {
 				const selected = this.autocompleteList.getSelectedItem();
 				if (selected && this.autocompleteProvider) {
-					this.pushUndoSnapshot();
-					this.lastAction = null;
-					const result = this.autocompleteProvider.applyCompletion(
-						this.state.lines,
-						this.state.cursorLine,
-						this.state.cursorCol,
-						selected,
-						this.autocompletePrefix,
-					);
-					this.state.lines = result.lines;
-					this.state.cursorLine = result.cursorLine;
-					this.setCursorCol(result.cursorCol);
-					this.cancelAutocomplete();
-					if (this.onChange) this.onChange(this.getText());
+					this.acceptAutocompleteItem(selected);
 				}
 				return;
 			}
@@ -816,9 +803,7 @@ export class Editor implements Component, Focusable {
 					// Enter runs a slash command only from the command-name menu. Path and argument menus can also have a
 					// "/" prefix ("look at /tmp/fi", "/open /tm"), so the prefix alone does not identify the menu. Read the
 					// context before applying the completion: the completed "/model " already contains a space.
-					const beforeCursor = (this.state.lines[this.state.cursorLine] || "").slice(0, this.state.cursorCol);
-					const submitsCommand =
-						this.autocompletePrefix.startsWith("/") && this.isInSlashCommandNameContext(beforeCursor);
+					const submitsCommand = this.isCompletingSlashCommandName();
 					this.pushUndoSnapshot();
 					this.lastAction = null;
 					const result = this.autocompleteProvider.applyCompletion(
@@ -1295,6 +1280,14 @@ export class Editor implements Component, Focusable {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 				if (this.autocompleteTriggerPattern.test(textBeforeCursor)) {
+					this.tryTriggerAutocomplete();
+				}
+			}
+			// Auto-trigger for space in a slash command context (argument completions)
+			else if (char === " ") {
+				const currentLine = this.state.lines[this.state.cursorLine] || "";
+				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
+				if (this.isInSlashCommandContext(textBeforeCursor)) {
 					this.tryTriggerAutocomplete();
 				}
 			}
@@ -2265,6 +2258,36 @@ export class Editor implements Component, Focusable {
 		return this.isInSlashCommandContext(textBeforeCursor) && !textBeforeCursor.trimStart().includes(" ");
 	}
 
+	private isCompletingSlashCommandName(): boolean {
+		const beforeCursor = (this.state.lines[this.state.cursorLine] || "").slice(0, this.state.cursorCol);
+		return this.autocompletePrefix.startsWith("/") && this.isInSlashCommandNameContext(beforeCursor);
+	}
+
+	private acceptAutocompleteItem(selected: AutocompleteItem): void {
+		if (!this.autocompleteProvider) return;
+		const wasSlashCommandName = this.isCompletingSlashCommandName();
+		this.pushUndoSnapshot();
+		this.lastAction = null;
+		const result = this.autocompleteProvider.applyCompletion(
+			this.state.lines,
+			this.state.cursorLine,
+			this.state.cursorCol,
+			selected,
+			this.autocompletePrefix,
+		);
+		this.state.lines = result.lines;
+		this.state.cursorLine = result.cursorLine;
+		this.setCursorCol(result.cursorCol);
+		this.cancelAutocomplete();
+		this.onChange?.(this.getText());
+		if (wasSlashCommandName) {
+			const afterCursor = (this.state.lines[this.state.cursorLine] || "").slice(0, this.state.cursorCol);
+			if (this.isInSlashCommandContext(afterCursor) && !this.isInSlashCommandNameContext(afterCursor)) {
+				this.tryTriggerAutocomplete();
+			}
+		}
+	}
+
 	// Autocomplete methods
 	/**
 	 * Find the best autocomplete item index for the given prefix.
@@ -2302,21 +2325,7 @@ export class Editor implements Component, Focusable {
 		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
 		const list = new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
 		list.onSelect = (selected) => {
-			if (!this.autocompleteProvider) return;
-			this.pushUndoSnapshot();
-			this.lastAction = null;
-			const result = this.autocompleteProvider.applyCompletion(
-				this.state.lines,
-				this.state.cursorLine,
-				this.state.cursorCol,
-				selected,
-				this.autocompletePrefix,
-			);
-			this.state.lines = result.lines;
-			this.state.cursorLine = result.cursorLine;
-			this.setCursorCol(result.cursorCol);
-			this.cancelAutocomplete();
-			this.onChange?.(this.getText());
+			this.acceptAutocompleteItem(selected);
 		};
 		return list;
 	}
