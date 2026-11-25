@@ -12,6 +12,7 @@ const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 const models: ModelPriceSource = { getModel: () => ({ cost: { cacheRead: 0.3 } }) };
 
 function assistant(options: {
+	api?: AssistantMessage["api"];
 	input?: number;
 	cacheRead?: number;
 	cacheWrite?: number;
@@ -29,7 +30,7 @@ function assistant(options: {
 	return {
 		role: "assistant",
 		content: [],
-		api: "anthropic-messages",
+		api: options.api ?? "anthropic-messages",
 		provider: options.provider ?? "test",
 		model: options.model ?? "test-model",
 		responseModel: options.responseModel,
@@ -140,6 +141,66 @@ describe("collectCacheMisses", () => {
 		expect(misses.size).toBe(1);
 		expect(misses.get(missTurn)?.missedTokens).toBe(105_000);
 	});
+});
+
+describe("Gemini 4 cache overlap", () => {
+	const route = {
+		api: "google-generative-ai",
+		provider: "cloudflare-ai-gateway",
+		model: "gemini-4-neon",
+	} satisfies Partial<AssistantMessage>;
+
+	it("ignores the 2,049-token tail after a 21-token follow-up on a routed Gemini 4 model", () => {
+		const routed = { ...route, model: "auto", responseModel: "gemini-4-neon" };
+		const manager = session(assistant({ ...routed, input: 5_000, cacheRead: 95_000 }));
+		const followUp = assistant({ ...routed, input: 2_070, cacheRead: 97_951 });
+
+		expect(detectCacheMiss(manager.getBranch(), followUp, models)).toBeUndefined();
+		manager.appendMessage(followUp);
+		expect(computeCacheWaste(manager.getEntries(), models)).toMatchObject({ missedTokens: 0, missCount: 0 });
+	});
+
+	it("subtracts only the expected tail from a real partial miss", () => {
+		const previous = assistant({ ...route, input: 5_000, cacheRead: 95_000 });
+		const followUp = assistant({
+			...route,
+			input: 22_071,
+			cacheRead: 77_950,
+			cost: { input: 0.0551775, cacheRead: 0.0194875 },
+		});
+
+		const miss = detectCacheMiss(session(previous).getBranch(), followUp, models);
+		expect(miss?.missedTokens).toBe(20_000);
+		// 20k * ($2.50 - $0.25)/M.
+		expect(miss?.missedCost).toBeCloseTo(0.045, 8);
+	});
+
+	it("counts the full overlap on a cold miss and labels a high-to-xhigh thinking change", () => {
+		const previous = { ...assistant({ ...route, input: 5_000, cacheRead: 95_000 }), thinkingLevel: "high" as const };
+		const followUp = { ...assistant({ ...route, input: 100_021 }), thinkingLevel: "xhigh" as const };
+		const manager = session(previous);
+
+		expect(detectCacheMiss(manager.getBranch(), followUp, models)).toMatchObject({
+			missedTokens: 100_000,
+			thinkingChanged: true,
+			modelChanged: false,
+		});
+		manager.appendMessage(followUp);
+		expect(computeCacheWaste(manager.getEntries(), models).thinkingSwitchCount).toBe(1);
+	});
+
+	it.each([
+		{ name: "Gemini 4 at the growth threshold", route, input: 4_099 },
+		{ name: "older Gemini", route: { ...route, model: "gemini-3-pro" }, input: 2_070 },
+		{ name: "Anthropic", route: { api: "anthropic-messages", model: "claude-sonnet-4-6" }, input: 2_070 },
+	] satisfies { name: string; route: Partial<AssistantMessage>; input: number }[])(
+		"counts the full shortfall for $name",
+		({ route, input }) => {
+			const previous = assistant({ ...route, input: 5_000, cacheRead: 95_000 });
+			const followUp = assistant({ ...route, input, cacheRead: 97_951 });
+			expect(detectCacheMiss(session(previous).getBranch(), followUp, models)?.missedTokens).toBe(2_049);
+		},
+	);
 });
 
 describe("detectCacheMiss", () => {

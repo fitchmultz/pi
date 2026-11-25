@@ -1,15 +1,18 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { isGemini4ModelId } from "@earendil-works/pi-ai/api/google-catalog";
 import type { SessionEntry } from "./session-manager.ts";
 
 /** Per-turn overlap estimates at or below this are cache breakpoint granularity noise. */
 const NOISE_FLOOR_TOKENS = 1024;
+/** Reprocessed on small follow-ups: https://aistudio.google.com/docs/caching?generate-content=true#implicit-caching */
+const GEMINI_4_CACHE_TAIL_TOKENS = 2_050;
 
 type ReadPriceSource = "usage" | "ancestor" | "catalog" | "unknown";
 
 // ponytail: token counts do not establish prefix identity.
 /** A token-count overlap estimate, not proof of a changed cache key or avoidable billing. */
 export interface CacheMiss {
-	/** min(previous prompt, current prompt) - current cache reads; prefixes are not compared. */
+	/** Estimated overlap minus current cache reads and any expected Gemini 4 tail reprocessing. */
 	missedTokens: number;
 	/** Estimated cost above a full cache hit; 0 when the read price is unknown. */
 	missedCost: number;
@@ -69,10 +72,21 @@ function detectMiss(
 		return undefined;
 	}
 
-	const missedTokens = Math.min(prev.promptTokens, promptTokens) - usage.cacheRead;
+	const modelId = message.responseModel ?? message.model;
+	const growth = promptTokens - prev.promptTokens;
+	let missedTokens = Math.min(prev.promptTokens, promptTokens) - usage.cacheRead;
+	if (
+		usage.cacheRead > 0 &&
+		growth >= 0 &&
+		growth < GEMINI_4_CACHE_TAIL_TOKENS &&
+		(message.api === "google-generative-ai" || message.api === "google-vertex") &&
+		isGemini4ModelId(modelId)
+	) {
+		missedTokens -= GEMINI_4_CACHE_TAIL_TOKENS;
+	}
 	if (missedTokens <= NOISE_FLOOR_TOKENS) return undefined;
 
-	const modelChanged = `${message.provider}/${message.responseModel ?? message.model}` !== prev.modelKey;
+	const modelChanged = `${message.provider}/${modelId}` !== prev.modelKey;
 	const thinkingChanged =
 		!modelChanged &&
 		(prev.providerThinkingLevel !== undefined && message.providerThinkingLevel !== undefined
@@ -101,7 +115,7 @@ function detectMiss(
 	if (readPerToken === undefined) {
 		// Today's catalog is not a historical tariff. Keep the fallback explicitly
 		// identifiable, and never substitute a zero read price for missing metadata.
-		const catalogRate = models.getModel(message.provider, message.responseModel ?? message.model)?.cost.cacheRead;
+		const catalogRate = models.getModel(message.provider, modelId)?.cost.cacheRead;
 		if (catalogRate !== undefined && Number.isFinite(catalogRate) && catalogRate >= 0) {
 			readPerToken = catalogRate / 1_000_000;
 			readPriceSource = "catalog";

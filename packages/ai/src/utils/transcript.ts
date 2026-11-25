@@ -182,37 +182,21 @@ export interface ToolStateChanges {
 	toolsRemoved: ToolReference[];
 }
 
-/** Compare two complete tool states. A changed definition is a removal followed by an addition. */
+/** Compare two complete tool states. A same-name addition replaces its definition in place. */
 export function getToolStateChanges(previous: readonly Tool[], current: readonly Tool[]): ToolStateChanges {
-	const previousNames = new Set(previous.map((tool) => tool.name));
 	const currentNames = new Set(current.map((tool) => tool.name));
-	const previousDeclarations = previous.map((tool) => ({
-		name: tool.name,
-		serialized: currentNames.has(tool.name) ? JSON.stringify(toToolDeclaration(tool)) : undefined,
-	}));
-	const currentDeclarations = current.map((tool) => {
-		const declaration = toToolDeclaration(tool);
-		return {
-			declaration,
-			serialized: previousNames.has(tool.name) ? JSON.stringify(declaration) : undefined,
-		};
-	});
-	// Maps select the last definition, while filtering retains original order and duplicates.
-	const previousTools = new Map(previousDeclarations.map((entry) => [entry.name, entry]));
-	const currentTools = new Map(currentDeclarations.map((entry) => [entry.declaration.name, entry]));
+	// The map selects the last previous definition; filtering keeps each array's order and duplicates.
+	const previousTools = new Map(
+		previous
+			.filter((tool) => currentNames.has(tool.name))
+			.map((tool) => [tool.name, JSON.stringify(toToolDeclaration(tool))]),
+	);
 	return {
-		toolsAdded: currentDeclarations
-			.filter((entry) => {
-				const previousTool = previousTools.get(entry.declaration.name);
-				return previousTool === undefined || previousTool.serialized !== entry.serialized;
-			})
-			.map((entry) => entry.declaration),
-		toolsRemoved: previousDeclarations
-			.filter((entry) => {
-				const currentTool = currentTools.get(entry.name);
-				return currentTool === undefined || entry.serialized !== currentTool.serialized;
-			})
-			.map((entry) => ({ name: entry.name })),
+		toolsAdded: current.map(toToolDeclaration).filter((tool) => {
+			const previousTool = previousTools.get(tool.name);
+			return previousTool === undefined || previousTool !== JSON.stringify(tool);
+		}),
+		toolsRemoved: previous.filter((tool) => !currentNames.has(tool.name)).map((tool) => ({ name: tool.name })),
 	};
 }
 
