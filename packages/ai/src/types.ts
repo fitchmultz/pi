@@ -272,6 +272,8 @@ export interface StreamOptions extends ProviderRequestOptions<Model<Api>> {
 	 * multi-hop generation. Providers without continuation support ignore it.
 	 */
 	disableContinuation?: boolean;
+	/** Replay for prompt-cache warming. Google sends Priority warm requests at Standard tier instead. */
+	cacheWarm?: boolean;
 	/**
 	 * Ask the provider to answer with a summary block of `context.messages` instead of a reply.
 	 * The block arrives as `AssistantMessage.providerSummary`. Only send this to an API that

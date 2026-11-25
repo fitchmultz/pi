@@ -176,14 +176,14 @@ describe("remote catalog provider", () => {
 		expect(provider.getModels()[0]).toMatchObject({
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
-			promptCache: { short: 180 },
+			promptCache: { short: 75 },
 		});
 		const restored = makeProvider();
 		await refreshProvider(restored, store, { allowNetwork: false });
 		expect(restored.getModels()[0]).toMatchObject({
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
-			promptCache: { short: 180 },
+			promptCache: { short: 75 },
 		});
 	});
 

@@ -3,8 +3,9 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stream as streamGoogle, streamSimple as streamGoogleSimple } from "../src/api/google-generative-ai.ts";
 import { stream as streamVertex } from "../src/api/google-vertex.ts";
+import { getCacheWarmingRequestOptions } from "../src/cache-warming.ts";
 import { cleanupSessionResources } from "../src/session-resources.ts";
-import type { AssistantMessageEvent, FetchFunction, Model, Tool } from "../src/types.ts";
+import type { AssistantMessageEvent, FetchFunction, Model, SimpleStreamOptions, Tool } from "../src/types.ts";
 import { isRetryableAssistantError } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
@@ -179,6 +180,32 @@ describe("Google SDK streaming protocol", () => {
 			{ role: "user" }, // Missing tool results are synthesized by transcript normalization.
 		]);
 		expect(fetch).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		{ requested: "priority", sent: "standard" },
+		{ requested: "flex", sent: "flex" },
+		{ requested: "standard", sent: "standard" },
+	])("sends a Google cache warm as $sent when onPayload requests $requested", async ({ requested, sent }) => {
+		const fetch = respond([{ candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }] }]);
+		const options: SimpleStreamOptions = {
+			apiKey: "test-key",
+			onPayload: (payload) => {
+				const params = payload as GenerateContentParameters;
+				return { ...params, config: { ...params.config, serviceTier: requested } };
+			},
+		};
+		const result = await streamGoogleSimple(
+			model("google-generative-ai"),
+			context,
+			getCacheWarmingRequestOptions(options, new AbortController().signal),
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toMatchObject({
+			serviceTier: sent,
+			generationConfig: { maxOutputTokens: 1 },
+		});
 	});
 
 	it.each([

@@ -1716,10 +1716,11 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   **Compaction by cost** (`cold.ts`): while its prompt cache is warm a turn reads the context at about a tenth of the
   input price and a summary (never cached) costs it all at full price, so only the regular cutoff applies; once cold
   the next turn rewrites the cache at full price anyway, so it compacts first. Cold: the last answer's time plus the
-  model's cache lifetime (`getPromptCacheTtlMs`, `cacheRetention`) plus the 30 minutes the cache warmer refreshes while
-  idle (`cacheWarming: "idle"`, the default); at once for a model without a prompt cache. It compacts when the last
-  answer after the context's head reported at least 150k tokens, or the regular cutoff (window − `reserveTokens`) when
-  lower, compaction is enabled, and the conversation is idle: from a timer set after each answer (only while the
+  model's cache lifetime (`getPromptCacheTtlMs`, `cacheRetention`) plus its idle warming window (10 minutes for
+  Google implicit caches and 30 minutes otherwise, with `cacheWarming: "idle"`); at once for a model without a
+  prompt cache. It compacts when the last answer after the context's head reported at least 150k tokens, or the
+  regular cutoff (window − `reserveTokens`) when lower, compaction is enabled, and the conversation is idle:
+  from a timer set after each answer (only while the
   worker runs; an idle worker stops after 5 minutes without viewers or warming) and at each start, else in an
   `InputGate` before the next input is admitted, which waits for the summary. Web: home (the `home` slot: `/` replaces
   itself with its session, made on first use; while the owner has it archived, with the new-session screen) and the

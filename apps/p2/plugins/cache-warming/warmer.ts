@@ -4,15 +4,18 @@
 import {
 	type AssistantMessage,
 	CACHE_WARMING_MAX_AGE_MS,
-	CACHE_WARMING_MAX_IDLE_AGE_MS,
+	type CacheRetention,
 	type CacheWarmingPhase,
 	evaluateCacheWarming,
 	getCacheWarmingDelayMs,
+	getCacheWarmingMaxIdleAgeMs,
 	getCacheWarmingRequestOptions,
 	getEffectiveCacheRetention,
 	getPromptCacheTtlMs,
 	isCacheWarmingReplayable,
 	type Models,
+	shouldStopAfterColdCacheWarm,
+	usesGoogleImplicitCache,
 } from "@earendil-works/pi-ai";
 import type { ConversationId } from "@earendil-works/pi-durable";
 import type { ModelRequest } from "@p2/app/v1/worker";
@@ -45,15 +48,16 @@ type Run = {
 	timer?: ReturnType<typeof setTimeout>;
 };
 
-type CacheTiming = NonNullable<ModelRequest["cache"]> & {
+type CacheTiming = {
+	readonly retention: CacheRetention;
+	readonly anchorAt: number;
 	readonly ttlMs: number;
 	readonly delayMs: number;
 };
 
 /**
  * One warming run per conversation, started by each response and replaced by the next one. Each refresh asks the host
- * for the conversation's phase and refreshes while the request is at most an hour old (30 minutes once idle) and the
- * refresh pays off by pi-ai's `evaluateCacheWarming()`.
+ * for the conversation's phase and follows pi-ai's age limits and cost estimate.
  */
 export class ConversationWarmers {
 	readonly #host: WarmerHost;
@@ -73,20 +77,25 @@ export class ConversationWarmers {
 		if (message.stopReason === "error" || message.stopReason === "aborted") return;
 		// Mode "off" uninstalls the hook; a run already armed stops at its next refresh.
 		if (!isCacheWarmingReplayable(request.model, request.options)) return;
-		const timing = cacheTiming(request.cache);
-		if (timing === undefined || Date.now() >= timing.dispatchedAt + timing.ttlMs) return;
+		const startedAt = Date.now();
+		const timing = cacheTiming(
+			request.cache,
+			undefined,
+			usesGoogleImplicitCache(request.model.api) ? startedAt : undefined,
+		);
+		if (timing === undefined || startedAt >= timing.anchorAt + timing.ttlMs) return;
 		const { input, cacheRead, cacheWrite } = message.usage;
 		const run: Run = {
 			request,
 			models,
 			promptTokens: input + cacheRead + cacheWrite,
 			timing,
-			startedAt: Date.now(),
+			startedAt,
 			controller: new AbortController(),
 		};
 		this.#runs.set(conversationId, run);
 		this.#host.keepAlive(1);
-		this.#arm(conversationId, run, timing.dispatchedAt + timing.delayMs);
+		this.#arm(conversationId, run, timing.anchorAt + timing.delayMs);
 	}
 
 	/** Stop warming the conversation; a refresh in flight is aborted. */
@@ -104,8 +113,8 @@ export class ConversationWarmers {
 		for (const conversationId of [...this.#runs.keys()]) this.stop(conversationId);
 	}
 
-	#arm(conversationId: ConversationId, run: Run, dueAt: number): void {
-		if (dueAt >= run.timing.dispatchedAt + run.timing.ttlMs) {
+	#arm(conversationId: ConversationId, run: Run, dueAt: number, warmUntil = Infinity): void {
+		if (dueAt >= Math.min(run.timing.anchorAt + run.timing.ttlMs, warmUntil)) {
 			this.stop(conversationId);
 			return;
 		}
@@ -113,12 +122,16 @@ export class ConversationWarmers {
 	}
 
 	async #refresh(conversationId: ConversationId, run: Run): Promise<void> {
-		let refreshed: { timing: CacheTiming | undefined } | undefined;
+		let refreshed: { timing: CacheTiming | undefined; cold: boolean } | undefined;
+		let warmUntil = Infinity;
 		try {
-			if (!(await this.#wanted(conversationId, run)) || Date.now() >= run.timing.dispatchedAt + run.timing.ttlMs) {
+			const limit = await this.#warmUntil(conversationId, run);
+			const expiresAt = Math.min(run.timing.anchorAt + run.timing.ttlMs, limit ?? Infinity);
+			if (limit === undefined || Date.now() >= expiresAt) {
 				if (this.#runs.get(conversationId) === run) this.stop(conversationId);
 				return;
 			}
+			warmUntil = limit;
 			const { model, messages, options } = run.request;
 			let timing: CacheTiming | undefined;
 			const message = await run.models
@@ -128,8 +141,8 @@ export class ConversationWarmers {
 					getCacheWarmingRequestOptions(options, run.controller.signal),
 					(preparedModel, preparedOptions) => {
 						if (this.#runs.get(conversationId) !== run) return;
-						// Auth preparation can itself wait past the old entry's lifetime.
-						if (Date.now() >= run.timing.dispatchedAt + run.timing.ttlMs) {
+						// Auth preparation can outlast the entry or Google's idle window.
+						if (Date.now() >= expiresAt) {
 							this.stop(conversationId);
 							return;
 						}
@@ -146,7 +159,10 @@ export class ConversationWarmers {
 				.result();
 			if (this.#runs.get(conversationId) !== run) return;
 			if (message.stopReason !== "error" && message.stopReason !== "aborted") {
-				refreshed = { timing };
+				refreshed = {
+					timing: timing && usesGoogleImplicitCache(model.api) ? { ...timing, anchorAt: Date.now() } : timing,
+					cold: shouldStopAfterColdCacheWarm(model, run.promptTokens, message.usage),
+				};
 				await this.#host.record(conversationId, message);
 			}
 		} catch (error) {
@@ -155,32 +171,41 @@ export class ConversationWarmers {
 		}
 		if (this.#runs.get(conversationId) !== run) return;
 		if (refreshed !== undefined) {
-			if (refreshed.timing === undefined) {
+			if (refreshed.cold || refreshed.timing === undefined) {
 				this.stop(conversationId);
 				return;
 			}
 			run.timing = refreshed.timing;
-			this.#arm(conversationId, run, run.timing.dispatchedAt + run.timing.delayMs);
-		} else this.#arm(conversationId, run, Date.now() + run.timing.delayMs);
+			this.#arm(conversationId, run, run.timing.anchorAt + run.timing.delayMs, warmUntil);
+		} else this.#arm(conversationId, run, Date.now() + run.timing.delayMs, warmUntil);
 	}
 
-	/** Whether this refresh is still wanted: the run current, in its phase's window, and paying off. */
-	async #wanted(conversationId: ConversationId, run: Run): Promise<boolean> {
+	/** Dispatch cutoff for an eligible replay, or undefined if warming should stop now. */
+	async #warmUntil(conversationId: ConversationId, run: Run): Promise<number | undefined> {
 		const mode = this.#host.mode();
-		if (mode === "off") return false;
+		if (mode === "off") return undefined;
 		const phase = await this.#host.phase(conversationId, run.request);
-		if (phase === undefined || (phase === "idle" && mode === "streaming")) return false;
-		const maxAge = phase === "idle" ? CACHE_WARMING_MAX_IDLE_AGE_MS : CACHE_WARMING_MAX_AGE_MS;
-		if (Date.now() > run.startedAt + maxAge) return false;
-		const { action } = evaluateCacheWarming(run.request.model, run.promptTokens, phase, run.timing.retention);
-		return action === "warm" && this.#runs.get(conversationId) === run;
+		if (phase === undefined || (phase === "idle" && mode === "streaming")) return undefined;
+		const { model } = run.request;
+		const maxAge = phase === "idle" ? getCacheWarmingMaxIdleAgeMs(model) : CACHE_WARMING_MAX_AGE_MS;
+		const deadline = run.startedAt + maxAge;
+		if (Date.now() > deadline || this.#runs.get(conversationId) !== run) return undefined;
+		if (evaluateCacheWarming(model, run.promptTokens, phase, run.timing.retention).action === "stop")
+			return undefined;
+		return phase === "idle" && usesGoogleImplicitCache(model.api) ? deadline : Infinity;
 	}
 }
 
 /** Timing for the entry a request refreshed; a cache hit cannot be assumed to upgrade its existing lifetime. */
-function cacheTiming(cache: ModelRequest["cache"], previousTtlMs?: number): CacheTiming | undefined {
+function cacheTiming(
+	cache: ModelRequest["cache"],
+	previousTtlMs?: number,
+	completedAt?: number,
+): CacheTiming | undefined {
 	if (cache?.ttlMs === undefined) return undefined;
 	const ttlMs = Math.min(cache.ttlMs, previousTtlMs ?? cache.ttlMs);
 	const delayMs = getCacheWarmingDelayMs(ttlMs);
-	return delayMs === undefined ? undefined : { ...cache, ttlMs, delayMs };
+	return delayMs === undefined
+		? undefined
+		: { retention: cache.retention, anchorAt: completedAt ?? cache.dispatchedAt, ttlMs, delayMs };
 }

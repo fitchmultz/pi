@@ -581,17 +581,17 @@ describe("generated model data validation", () => {
 		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-carbon"]).toMatchObject({
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
-			promptCache: { short: 180 },
+			promptCache: { short: 75 },
 		});
 		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-argon"]).toMatchObject({
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
-			promptCache: { short: 180 },
+			promptCache: { short: 75 },
 		});
 		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-neon"]).toMatchObject({
 			maxTokens: 65536,
 			inputLimits: { maxRequestBytes: 100 * 1024 * 1024 },
-			promptCache: { short: 180 },
+			promptCache: { short: 75 },
 		});
 		expect(hydrated["google-generative-ai"]?.["chat:gemini-4-hydrogen"]).toMatchObject({
 			promptCache: {},

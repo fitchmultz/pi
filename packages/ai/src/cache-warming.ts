@@ -36,6 +36,9 @@ export const CACHE_WARMING_MAX_AGE_MS = 60 * 60_000;
 /** Idle warming uses a shorter horizon because continuation estimates become less reliable with age. */
 export const CACHE_WARMING_MAX_IDLE_AGE_MS = 30 * 60_000;
 
+/** Stop refreshing Google's short-lived implicit cache after ten minutes without a new response. */
+export const CACHE_WARMING_MAX_GOOGLE_IDLE_AGE_MS = 10 * 60_000;
+
 /** A refresh is sent only when it is expected to save at least this many dollars. */
 export const CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS = 0.05;
 
@@ -45,11 +48,33 @@ export const CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS = 0.05;
  */
 export const CACHE_WARMING_IDLE_CONTINUATION_PROBABILITY = 0.15;
 
+// 67.6% of 1,951 measured Gemini 4 Neon idle stops resumed within five minutes.
+const GOOGLE_IDLE_CONTINUATION_PROBABILITY = 0.5;
+
 /**
- * Gemini implicit prefix caching leaves an uncached tail of ~2,048 tokens billed at full input rate
- * on cache hits and warm replays, and does not cache prompts at or below this threshold.
+ * Gemini 4 re-processes this many tokens from the previous request when the next request adds fewer tokens.
+ * https://aistudio.google.com/docs/caching?generate-content=true#implicit-caching
  */
-export const GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS = 2048;
+export const GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS = 2_050;
+
+/** Whether the API uses Google's short sliding implicit-cache policy. */
+export function usesGoogleImplicitCache(api: Api): boolean {
+	return api === "google-generative-ai" || api === "google-vertex";
+}
+
+/** Maximum time to keep a prompt cache warm once no agent run is active. */
+export function getCacheWarmingMaxIdleAgeMs(model: Model<Api>): number {
+	return usesGoogleImplicitCache(model.api) ? CACHE_WARMING_MAX_GOOGLE_IDLE_AGE_MS : CACHE_WARMING_MAX_IDLE_AGE_MS;
+}
+
+/** Stop after a Google replay misses on a prompt large enough for Gemini 4 implicit caching (4,096 tokens). */
+export function shouldStopAfterColdCacheWarm(
+	model: Model<Api>,
+	promptTokens: number,
+	usage: Pick<Usage, "cacheRead">,
+): boolean {
+	return usesGoogleImplicitCache(model.api) && promptTokens >= 4_096 && usage.cacheRead === 0;
+}
 
 /** Refresh at 90% of the TTL while preserving at least ten seconds of margin. */
 export function getCacheWarmingDelayMs(ttlMs: number): number | undefined {
@@ -74,7 +99,7 @@ export function getEffectiveCacheRetention(
 	) {
 		return "short";
 	}
-	if (hasApi(model, "google-generative-ai") || hasApi(model, "google-vertex")) {
+	if (usesGoogleImplicitCache(model.api)) {
 		// Google implicit caching has only one short sliding TTL and ignores long-retention requests.
 		return "short";
 	}
@@ -107,7 +132,7 @@ export function isCacheWarmingReplayable(model: Model<Api>, options: SimpleStrea
  * conversation's provider thread state (the refresh repeats the last request).
  */
 export function getCacheWarmingRequestOptions<T extends SimpleStreamOptions>(options: T, signal: AbortSignal): T {
-	return { ...options, maxTokens: 1, disableContinuation: true, maxRetries: 0, signal };
+	return { ...options, cacheWarm: true, maxTokens: 1, disableContinuation: true, maxRetries: 0, signal };
 }
 
 /** Decide whether refreshing the cache entry of a `promptTokens`-token request pays for itself in `phase`. */
@@ -117,7 +142,7 @@ export function evaluateCacheWarming(
 	phase: CacheWarmingPhase,
 	retention: CacheRetention = "short",
 ): CacheWarmingDecision {
-	const isGoogleImplicitCache = model.api === "google-generative-ai" || model.api === "google-vertex";
+	const isGoogleImplicitCache = usesGoogleImplicitCache(model.api);
 	const cachedPromptTokens = isGoogleImplicitCache
 		? Math.max(0, promptTokens - GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS)
 		: promptTokens;
@@ -142,7 +167,10 @@ export function evaluateCacheWarming(
 	);
 	const warmCost = price(model, { input: uncachedTailTokens, cacheRead: cachedPromptTokens, output: 1 });
 	const missCost = Math.max(0, cacheMissCost - cacheHitCost);
-	const continuationProbability = phase === "idle" ? CACHE_WARMING_IDLE_CONTINUATION_PROBABILITY : 1;
+	const idleContinuationProbability = isGoogleImplicitCache
+		? GOOGLE_IDLE_CONTINUATION_PROBABILITY
+		: CACHE_WARMING_IDLE_CONTINUATION_PROBABILITY;
+	const continuationProbability = phase === "idle" ? idleContinuationProbability : 1;
 	const economicsAvailable = promptTokens > 0 && (cacheHitCost > 0 || cacheMissCost > 0);
 	const expectedSavings = continuationProbability * missCost - warmCost;
 	return {

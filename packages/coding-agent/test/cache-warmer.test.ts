@@ -4,9 +4,8 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	evaluateCacheWarming,
-	GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS,
+	type FetchFunction,
 	getCacheWarmingDelayMs,
-	getEffectiveCacheRetention,
 	getPromptCacheTtlMs,
 	isCacheWarmingReplayable,
 	type Model,
@@ -678,6 +677,152 @@ describe("cache warming", () => {
 	});
 
 	it.each([
+		{ stopReason: "stop", cacheRead: 0 },
+		{ stopReason: "stop", cacheRead: 58_000 },
+		{ stopReason: "error", cacheRead: 0 },
+		{ stopReason: "aborted", cacheRead: 0 },
+	])(
+		"waits for a 90-second Gemini stream ($stopReason, $cacheRead replay cache-read tokens)",
+		async ({ stopReason, cacheRead }) => {
+			const model = { ...getBuiltinModel("google", "gemini-4-neon"), promptCache: { short: 75 } };
+			const credentials = AuthStorage.inMemory();
+			await credentials.modify(model.provider, async () => ({ type: "api_key", key: "offline-key" }));
+			const modelRuntime = await ModelRuntime.create({ credentials, modelsPath: null, allowModelNetwork: false });
+			const settingsManager = SettingsManager.inMemory({
+				cacheWarming: "idle",
+				httpIdleTimeoutMs: 0,
+				compaction: { enabled: false },
+				retry: { enabled: false },
+			});
+			const firstDelta = Promise.withResolvers<void>();
+			const firstResponse = Promise.withResolvers<void>();
+			const reachedSettle = Promise.withResolvers<void>();
+			const beforeSettle = Promise.withResolvers<void>();
+			const resourceLoader = new DefaultResourceLoader({
+				cwd: process.cwd(),
+				agentDir: tmpdir(),
+				settingsManager,
+				noExtensions: true,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				extensionFactories: [
+					(pi) => {
+						pi.on("agent_before_settle", () => {
+							reachedSettle.resolve();
+							return beforeSettle.promise;
+						});
+					},
+				],
+			});
+			await resourceLoader.reload();
+			const sessionManager = SessionManager.inMemory();
+			const fetch = vi.fn<FetchFunction>();
+			fetch.mockImplementation(async () => {
+				const isFirst = fetch.mock.calls.length === 1;
+				const frame = {
+					candidates: [{ content: { parts: [{ text: "OK" }] }, finishReason: "STOP" }],
+					usageMetadata: {
+						promptTokenCount: 60_000,
+						cachedContentTokenCount: isFirst ? 58_000 : cacheRead,
+						candidatesTokenCount: 1,
+						totalTokenCount: 60_001,
+					},
+				};
+				const headers = { "content-type": "text/event-stream" };
+				if (!isFirst) return new Response(`data: ${JSON.stringify(frame)}\n\n`, { headers });
+				const encode = new TextEncoder();
+				return new Response(
+					new ReadableStream({
+						async start(controller) {
+							const partial = { candidates: [{ content: { parts: [{ text: "Starting" }] } }] };
+							controller.enqueue(encode.encode(`data: ${JSON.stringify(partial)}\n\n`));
+							await firstResponse.promise;
+							if (stopReason === "stop") {
+								controller.enqueue(encode.encode(`data: ${JSON.stringify(frame)}\n\n`));
+							}
+							controller.close();
+						},
+					}),
+					{ headers },
+				);
+			});
+			vi.stubGlobal("fetch", fetch);
+			vi.useFakeTimers();
+			const { session } = await createAgentSession({
+				model,
+				modelRuntime,
+				settingsManager,
+				sessionManager,
+				resourceLoader,
+			});
+			await session.bindExtensions({});
+			session.subscribe((event) => {
+				if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+					firstDelta.resolve();
+				}
+			});
+			const prompt = session.prompt("Keep this Gemini prompt warm.");
+			try {
+				await firstDelta.promise;
+				await vi.advanceTimersByTimeAsync(90_000);
+				expect(fetch).toHaveBeenCalledTimes(1);
+				expect(session.cacheWarmingStatus).toEqual({ state: "inactive", reason: "waiting for response" });
+
+				if (stopReason !== "stop") {
+					beforeSettle.resolve();
+					const abort = stopReason === "aborted" ? session.abort() : undefined;
+					firstResponse.resolve();
+					await abort;
+					await prompt;
+					expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason });
+					expect(session.cacheWarmingStatus).toEqual({ state: "inactive", reason: "request did not complete" });
+					await vi.advanceTimersByTimeAsync(65_000);
+					expect(fetch).toHaveBeenCalledTimes(1);
+					return;
+				}
+
+				const completedAt = Date.now();
+				firstResponse.resolve();
+				await reachedSettle.promise;
+				expect(session.cacheWarmingStatus?.nextWarmAt).toBe(completedAt + 65_000);
+
+				await vi.advanceTimersByTimeAsync(30_000);
+				beforeSettle.resolve();
+				await prompt;
+				expect(session.cacheWarmingStatus).toMatchObject({
+					nextWarmAt: completedAt + 65_000,
+					decision: { phase: "idle", continuationProbability: 0.5, action: "warm" },
+				});
+				await vi.advanceTimersByTimeAsync(34_999);
+				expect(fetch).toHaveBeenCalledTimes(1);
+				await vi.advanceTimersByTimeAsync(1);
+
+				const usageEntries = () => sessionManager.getEntries().filter((entry) => entry.type === "usage");
+				expect(usageEntries()).toMatchObject([
+					{ kind: "cache_warm", usage: { input: 60_000 - cacheRead, cacheRead } },
+				]);
+				if (cacheRead === 0) {
+					expect(session.cacheWarmingStatus?.reason).toBe("cache warm missed");
+				}
+				await vi.advanceTimersByTimeAsync(600_000);
+				const expectedWarms = cacheRead === 0 ? 1 : 9;
+				expect(fetch).toHaveBeenCalledTimes(1 + expectedWarms);
+				expect(usageEntries()).toHaveLength(expectedWarms);
+				expect(session.cacheWarmingStatus?.reason).toBe(
+					cacheRead === 0 ? "cache warm missed" : "10-minute idle safety limit reached",
+				);
+			} finally {
+				firstResponse.resolve();
+				beforeSettle.resolve();
+				await prompt;
+				session.dispose();
+			}
+		},
+	);
+
+	it.each([
 		{ reasoning: "high", thinkingLevel: "high" },
 		{ reasoning: undefined, thinkingLevel: "off" },
 	] as const)("replays with $thinkingLevel thinking", async ({ reasoning, thinkingLevel }) => {
@@ -1004,31 +1149,11 @@ describe("cache warming", () => {
 		);
 	});
 
-	it("maps Google long retention to short and accounts for the 2,048-token implicit-cache tail", () => {
-		const gemini4Neon = getBuiltinModel("google", "gemini-4-neon");
-		expect(gemini4Neon.promptCache).toEqual({ short: 180 });
-		expect(getEffectiveCacheRetention(gemini4Neon, { cacheRetention: "long" })).toBe("short");
-		expect(getEffectiveCacheRetention(gemini4Neon, { cacheRetention: "none" })).toBe("none");
-		expect(getPromptCacheTtlMs(gemini4Neon, { cacheRetention: "long" })).toBe(180_000);
-		expect(getCacheWarmingDelayMs(180_000)).toBe(162_000);
-		expect(isCacheWarmingReplayable(gemini4Neon, { reasoning: "xhigh" })).toBe(true);
-
-		const atTailThreshold = evaluateCacheWarming(
-			gemini4Neon,
-			GOOGLE_IMPLICIT_CACHE_UNCACHED_TAIL_TOKENS,
-			"streaming",
-		);
-		expect(atTailThreshold.missCost).toBe(0);
-		expect(atTailThreshold.action).toBe("stop");
-
-		const mediumStreaming = evaluateCacheWarming(gemini4Neon, 100_000, "streaming");
-		// 97,952 cached @ $0.15/M + 2,048 tail @ $3/M + 1 output @ $15/M
-		expect(mediumStreaming.warmCost).toBeCloseTo((97_952 * 0.15 + 2_048 * 3 + 15) / 1_000_000, 9);
-		expect(mediumStreaming.missCost).toBeCloseTo((97_952 * (3 - 0.15)) / 1_000_000, 9);
-		expect(mediumStreaming.action).toBe("warm");
-
-		expect(evaluateCacheWarming(gemini4Neon, 100_000, "idle").action).toBe("stop");
-		expect(evaluateCacheWarming(gemini4Neon, 250_000, "idle").action).toBe("warm");
+	it("uses the catalog's 75-second warming budget for Gemini 4", () => {
+		const neon = getBuiltinModel("google", "gemini-4-neon");
+		expect(neon.promptCache).toEqual({ short: 75 });
+		expect(getPromptCacheTtlMs(neon, { cacheRetention: "long" })).toBe(75_000);
+		expect(getCacheWarmingDelayMs(75_000)).toBe(65_000);
 	});
 
 	it("uses OpenAI 30m/12h promptCache lifetimes and 2.5x 12h write pricing for GPT-6.2 warming", () => {
