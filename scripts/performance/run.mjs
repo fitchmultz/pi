@@ -77,7 +77,6 @@ add("ai", "ai-queue-control", "ai.mjs", [
 for (const [name, messages, bytes, burst] of [
 	["cached", 3000, 1024, 1],
 	["burst-1000", 20, 128, 1000],
-	["burst-50000", 20, 128, 50000],
 ])
 	add("ai", `codex-${name}`, "codex.mjs", [
 		`--messages=${smoke ? 4 : messages}`,

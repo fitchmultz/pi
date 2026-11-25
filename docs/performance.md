@@ -216,7 +216,7 @@ On 2026-11-10 these results were removed from this page and from `performance-re
 | Model overlay read, 10,000 models | Upstream adopted publish-time `createProvider` model catalog merging (`#12366`, [2026-11-21 record](upstream-sync-2026-11-21.md)) |
 | Codex, 50,000 heartbeats per request | Custom `CodexWebSocketSession` queue replaced by OpenAI SDK `ResponsesWSBase.stream()` in `#564` |
 
-The runner lost the cases whose code is deleted or retired to upstream: `frames`, `queued-frames`, and `parse` in `ai.mjs`; `frame`, `publish`, and `stdio` in `bridges.mjs`; `tui-highlight` in `tui.ts`; and the retired fixtures `catalog.mjs`, `durable-context.ts`, and `telemetry.mjs`. Text reads, grep, and the HTTP error remain as controls.
+The runner lost the cases whose code is deleted or retired to upstream: `frames`, `queued-frames`, and `parse` in `ai.mjs`; `codex-burst-50000` in `run.mjs`; `frame`, `publish`, and `stdio` in `bridges.mjs`; `tui-highlight` in `tui.ts`; and the retired fixtures `catalog.mjs`, `durable-context.ts`, and `telemetry.mjs`. Text reads, grep, `codex-burst-1000`, and the HTTP error remain as controls.
 
 ## Setup and commands
 
@@ -235,7 +235,7 @@ node scripts/performance/run.mjs --repo "$AFTER" --groups tools,images,ai,tui,br
 node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --groups tools,images,ai,tui,bridges,sessions,durable,env-client,evals,background --repeat 3 --out "$RESULTS/paired"
 # TUI's original paired probe used five alternating trials.
 node scripts/performance/run.mjs --before "$BEFORE" --after "$AFTER" --groups tui --repeat 5 --out "$RESULTS/tui"
-# A case name can replace a group: e.g. edit-fuzzy, codex-burst-50000, background-monitor.
+# A case name can replace a group: e.g. edit-fuzzy, codex-cached, background-monitor.
 ```
 
 `BEFORE`, `AFTER` and `RESULTS` are caller-selected absolute directories, not configuration/account/session paths. The output directory must not already exist. Before spawning, the runner saves the attempt's command, load, exclusive log and `running` status. Sanitized complete stdout/stderr lines are appended as they arrive. Completed verification is `passed`; spawn/exit/verification errors are `failed`. An interrupted `running` or `verifying` attempt is unverified, distinct from unattempted cases absent from results. After an error, inspect the saved manifest/log and rerun only the failed/unverified/unattempted case names into a new directory; do not overwrite or silently reuse changed inputs.
@@ -253,7 +253,7 @@ The native source resolver from **the selected root** resolves workspace imports
 | `tools` / `tools.mjs`, `cpu.mjs` | 32 MiB LF text; head/middle/10-line page; 8 MiB JSON selection; one grep hit/context. Edits: generated ~7.16 MB text, 32 targets, exact/fuzzy/diff. 7 samples | No explicit operation warmup. Excludes fixture/import/GC; includes native operation plus original checksum/assertion overhead. Diff checks content, display, unified patch and first changed line |
 | `images` / `cpu.mjs` | Deterministic 1600×1000 RGBA palette encoded as PNG, resize to 800×500; base64 budgets 4,718,592 and 50,000; 7 samples | Photon/fixture loading excluded; original operation includes output digest. In-process WASM owner; not worker/terminal/provider latency |
 | `ai` / `ai.mjs` | 65,536-character content; 128 tools × 8 fields, 3,000 messages; 100,000-event queue control. 7 samples × 3 operations (queue ×1) | One operation warmup per selected case; GC/setup excluded; assertions included. Fixed synthetic timestamps make witnesses reproducible |
-| `ai` / `codex.mjs` | Codex: 3,000×1,024-byte messages or 20×128 bytes with 1,000/50,000 heartbeat events/request; 2 cached requests/pair, 7 samples | Codex one pair warmup; real conversion/continuation with mock sockets. Retained-payload mutation and full/delta envelopes checked |
+| `ai` / `codex.mjs` | Codex: 3,000×1,024-byte messages or 20×128 bytes with 1,000 heartbeat events/request; 2 cached requests/pair, 7 samples | Codex one pair warmup; real conversion/continuation with mock sockets. Retained-payload mutation and full/delta envelopes checked |
 | `tui` / `tui.ts` | 16 KB stream/editor/input/prose, 64 KB Mermaid control; hidden tree depth 1,000 × 1,000 visible leaves. Mostly 40 operations, tree 5 | Components prepared before measurement; unchanged-prefix highlights counted separately. Exact final render witnesses exclude timing/highlight counters. Null terminal: no emulator/write throughput claim |
 | `tui` primitives | 40-char draft 10,000 unchanged/cursor operations; 16 KB draft 40 unchanged/cursor/ASCII-typing operations; 14,000 UTF-16-unit Unicode draft 40 typing operations; 50 KB plain/ANSI wraps ×40; 10 KB Input movement ×100 | Initial render plus up to 40 warm operations per phase. Retains original paired probe's inputs and controls without copied source. Growth from warm typing is part of the fixture |
 | `sessions` / `sessions.mts` | 10,000/100,000 archived entries, 128-byte payload; projection/name/branch/boundary/context ×15 runs. 10,000-entry controls: fork, list (30 files) and split ×5 runs, working-state copies ×7 runs | Three warm operations per phase. Each logged value is the median of its phase's runs. Setup outside timing. Complete-working-state copying stays validated; split uses two delayed faux summaries, not model parallelism |
