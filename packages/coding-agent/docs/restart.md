@@ -48,7 +48,7 @@ These are the values of the [runtime record](session-format.md#runtime-record-pi
 - Any change in a package that has neither a `version` in its `package.json` nor a git checkout of its own. Examples are a single extension file listed in `packages` and a package directory inside a larger repository.
 - An npm package that is installed again at the same version.
 - A changed file that an extension outside a package imports, when its entry file is unchanged.
-- An unpinned runtime update after an explicit `/restart --runtime <dir>` pin (another `--runtime` or a full CLI launch resumes tracking the invocation path).
+- An unpinned runtime update after pinning via `pi restart --runtime <dir>` from a shell tool (another `pi restart --runtime <dir>` updates the pin, and only a full CLI launch resumes tracking the original invocation path).
 
 Print, JSON, RPC and SDK sessions show no status. An SDK host can ask its session; see [Stale extension code](sdk.md#stale-extension-code).
 
