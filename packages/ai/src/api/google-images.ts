@@ -23,6 +23,7 @@ import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import {
 	createGoogleClient,
 	createGoogleFetch,
+	formatGoogleStopError,
 	resolveGoogleApiKey,
 	retryGoogleRequest,
 	sendsToGeminiApi,
@@ -52,9 +53,18 @@ export const generateImages: ImagesFunction<ImagesOptions> = async (
 			throw new Error(`No API key for provider: ${model.provider}`);
 		}
 		let lastFailedHeaders: Headers | undefined;
-		const googleFetch = createGoogleFetch("Google", model, options, (headers) => {
-			lastFailedHeaders = headers;
-		});
+		let candidateFinishMessage: string | undefined;
+		const googleFetch = createGoogleFetch(
+			"Google",
+			model,
+			options,
+			(headers) => {
+				lastFailedHeaders = headers;
+			},
+			(message) => {
+				candidateFinishMessage = message;
+			},
+		);
 		const client = createGoogleClient(model, apiKey, options?.headers, options?.identity, googleFetch);
 
 		let params = buildParams(model, context, options);
@@ -66,6 +76,7 @@ export const generateImages: ImagesFunction<ImagesOptions> = async (
 		const response = await retryGoogleRequest(
 			() => {
 				lastFailedHeaders = undefined;
+				candidateFinishMessage = undefined;
 				return client.models.generateContent(params);
 			},
 			model,
@@ -96,7 +107,7 @@ export const generateImages: ImagesFunction<ImagesOptions> = async (
 		const candidate = response.candidates?.[0];
 		const finishReason = candidate?.finishReason;
 		if (finishReason && finishReason !== FinishReason.STOP && finishReason !== FinishReason.MAX_TOKENS) {
-			throw new Error(`Provider stopped with: ${finishReason}`);
+			throw new Error(formatGoogleStopError(finishReason, candidate.finishMessage ?? candidateFinishMessage));
 		}
 
 		for (const part of candidate?.content?.parts ?? []) {

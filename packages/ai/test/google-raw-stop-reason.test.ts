@@ -1,8 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { isRetryableAssistantError } from "../src/utils/retry.ts";
+
 const googleGenAiMock = vi.hoisted(() => ({
 	constructorCalls: [] as Array<Record<string, unknown>>,
 	finishReason: "MALFORMED_FUNCTION_CALL",
+	finishMessage: undefined as string | undefined,
 	includeFunctionCall: false,
 	streamChunks: undefined as Array<Record<string, unknown>> | undefined,
 }));
@@ -24,6 +27,9 @@ vi.mock("@google/genai", () => {
 					candidates: [
 						{
 							finishReason: googleGenAiMock.finishReason,
+							...(googleGenAiMock.finishMessage !== undefined && {
+								finishMessage: googleGenAiMock.finishMessage,
+							}),
 							...(googleGenAiMock.includeFunctionCall && {
 								content: {
 									parts: [
@@ -107,6 +113,7 @@ import type { Api, Model, StreamOptions } from "../src/types.ts";
 import { formatUserAgent } from "../src/utils/identity.ts";
 
 beforeEach(() => {
+	googleGenAiMock.finishMessage = undefined;
 	googleGenAiMock.streamChunks = undefined;
 });
 
@@ -189,6 +196,36 @@ describe("Google raw stop reasons", () => {
 		expect(message.stopReason).toBe("length");
 		expect(message.rawStopReason).toBe("MAX_TOKENS");
 		expect(message.content.some((block) => block.type === "toolCall")).toBe(true);
+	});
+
+	it.each(adapters)(
+		"includes trimmed candidate finishMessage in error messages for $name",
+		async ({ createStream }) => {
+			googleGenAiMock.finishReason = "MALFORMED_FUNCTION_CALL";
+			googleGenAiMock.finishMessage = "  Malformed function call: missing required arg 'billing'  ";
+			googleGenAiMock.includeFunctionCall = false;
+
+			const message = await createStream().result();
+
+			expect(message.stopReason).toBe("error");
+			expect(message.rawStopReason).toBe("MALFORMED_FUNCTION_CALL");
+			expect(message.errorMessage).toBe(
+				"Provider stopped with: MALFORMED_FUNCTION_CALL (Malformed function call: missing required arg 'billing')",
+			);
+			expect(isRetryableAssistantError(message)).toBe(true);
+		},
+	);
+
+	it.each(adapters)("ignores whitespace-only candidate finishMessage for $name", async ({ createStream }) => {
+		googleGenAiMock.finishReason = "MALFORMED_FUNCTION_CALL";
+		googleGenAiMock.finishMessage = "   ";
+		googleGenAiMock.includeFunctionCall = false;
+
+		const message = await createStream().result();
+
+		expect(message.stopReason).toBe("error");
+		expect(message.rawStopReason).toBe("MALFORMED_FUNCTION_CALL");
+		expect(message.errorMessage).toBe("Provider stopped with: MALFORMED_FUNCTION_CALL");
 	});
 
 	it.each(adapters)("maps STOP with a tool call to toolUse for $name", async ({ createStream }) => {
