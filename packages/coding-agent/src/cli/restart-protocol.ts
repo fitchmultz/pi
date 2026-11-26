@@ -10,6 +10,8 @@ export const WORKING_SESSION_WORKER_ENV = "PI_WORKING_SESSION_WORKER";
 /** Launcher-written, bootstrap-consumed: this launcher acknowledges readiness and honors exit intent. */
 export const MANAGED_PROTOCOL_ENV = "PI_MANAGED_PROTOCOL";
 export const MANAGED_PROTOCOL_VERSION = "1";
+export const MANAGED_INVOCATION_ENV = "PI_MANAGED_INVOCATION";
+export const MANAGED_WORKER_ENV = "PI_MANAGED_WORKER";
 
 /** Headless modes become ready only after their native owner and extensions bind. */
 export async function notifyCliReady(): Promise<void> {

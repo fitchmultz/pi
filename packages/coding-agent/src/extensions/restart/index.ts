@@ -4,11 +4,13 @@ import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
 import chalk from "chalk";
-import { getRestartRuntimeWorker } from "../../cli/launcher.ts";
+import { getCliWorkerPath, getRestartRuntimeWorker } from "../../cli/launcher.ts";
 import {
 	MANAGED_CLI_ENV,
+	MANAGED_INVOCATION_ENV,
 	MANAGED_PROTOCOL_ENV,
 	MANAGED_PROTOCOL_VERSION,
+	MANAGED_WORKER_ENV,
 	MAX_RESTART_BYTES,
 	parseRestartHandoff,
 	parseRestartRequest,
@@ -20,6 +22,7 @@ import {
 	type RestartSession,
 	type RestartWorkerMessage,
 } from "../../cli/restart-protocol.ts";
+import { detectInstallChange } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { ExtensionAPI, ExtensionContext, ManagedHost, ShutdownDisposition } from "../../core/extensions/types.ts";
 import type { StaleSource } from "../../core/loaded-sources.ts";
@@ -116,8 +119,12 @@ export function createManagedRestart(): ManagedRestart | undefined {
 	delete process.env[RESTART_SOCKET_ENV];
 	const managed = process.env[MANAGED_CLI_ENV] === "1";
 	const acknowledged = process.env[MANAGED_PROTOCOL_ENV] === MANAGED_PROTOCOL_VERSION;
+	const managedInvocation = process.env[MANAGED_INVOCATION_ENV];
+	const managedWorker = process.env[MANAGED_WORKER_ENV];
 	delete process.env[MANAGED_CLI_ENV];
+	delete process.env[MANAGED_INVOCATION_ENV];
 	delete process.env[MANAGED_PROTOCOL_ENV];
+	delete process.env[MANAGED_WORKER_ENV];
 	if (!managed || !process.send || !process.connected) return undefined;
 	let handoff: RestartHandoff | undefined;
 	try {
@@ -224,16 +231,52 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		commit(ctx, request, ready.sessionFile, "Restarting Pi; resuming the same saved session.");
 	};
 	/**
-	 * Restart for `stale` code when it has been quiet on disk and nothing of the user's or the agent's
-	 * would be lost. Otherwise do nothing and say nothing; the next look decides again.
+	 * Compare an unpinned launcher invocation and this worker's install receipt against disk.
+	 * Returns undefined when pinned via `--runtime` or when no on-disk runtime change is visible.
+	 */
+	const getStaleRuntimeKey = (): string | undefined => {
+		if (!managedInvocation || !managedWorker) return undefined;
+		try {
+			const resolvedWorker = realpathSync(getCliWorkerPath(realpathSync(managedInvocation)));
+			if (resolvedWorker !== managedWorker) return `runtime:${resolvedWorker}`;
+		} catch {
+			// Fall back to the install check below if the invocation symlink is briefly absent during activation.
+		}
+		const installChange = detectInstallChange();
+		return installChange?.kind === "updated"
+			? `install:${installChange.version}:${installChange.commit ?? ""}`
+			: undefined;
+	};
+	const formatStaleStatus = (hasStaleExtensions: boolean, hasStaleRuntime: boolean): string | undefined => {
+		if (hasStaleExtensions && hasStaleRuntime) return "pi and extensions changed on disk: /restart";
+		if (hasStaleRuntime) return "pi changed on disk: /restart";
+		if (hasStaleExtensions) return "extensions changed on disk: /restart";
+		return undefined;
+	};
+	const formatStaleRestartNotice = (hasStaleExtensions: boolean, hasStaleRuntime: boolean): string => {
+		if (hasStaleExtensions && hasStaleRuntime) {
+			return "Pi and extensions changed on disk; restarting Pi on the same saved session.";
+		}
+		if (hasStaleRuntime) {
+			return "Pi changed on disk; restarting Pi on the same saved session.";
+		}
+		return "Extensions changed on disk; restarting Pi on the same saved session.";
+	};
+	/**
+	 * Restart for stale extensions or runtime code when quiet on disk and nothing of the user's or
+	 * the agent's would be lost. Otherwise do nothing and say nothing; the next look decides again.
 	 * Returns how long to wait before that look.
 	 */
 	const restartWhenQuiet = async (
 		context: ExtensionContext,
 		current: AgentSession,
 		stale: StaleSource[],
+		staleRuntimeKey: string | undefined,
 	): Promise<number> => {
-		const key = JSON.stringify(stale.map((source) => [source.path, source.current]));
+		const key = JSON.stringify({
+			extensions: stale.map((source) => [source.path, source.current]),
+			runtime: staleRuntimeKey ?? null,
+		});
 		if (staleSince?.key !== key) staleSince = { key, at: Date.now() };
 		const quietFor = Date.now() - staleSince.at;
 		if (quietFor < STALE_QUIET_MS) return STALE_QUIET_MS - quietFor;
@@ -244,13 +287,19 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		if ((await current.getBackgroundWork()).some((item) => !item.survivesRestart)) return STALE_QUIET_MS;
 		if (ctx !== context || closing || pending || phase.kind === "committed") return STALE_QUIET_MS;
 		const ready = readiness(context);
-		if (ready.kind === "ready")
-			commit(context, {}, ready.sessionFile, "Extensions changed on disk; restarting Pi on the same saved session.");
+		if (ready.kind === "ready") {
+			commit(
+				context,
+				{},
+				ready.sessionFile,
+				formatStaleRestartNotice(stale.length > 0, staleRuntimeKey !== undefined),
+			);
+		}
 		return STALE_QUIET_MS;
 	};
 	/**
-	 * Show in the footer whether loaded extension code has changed on disk, restart for it when the
-	 * user's `restartWhenStale` setting asks for that, and look again later.
+	 * Show in the footer whether loaded extension code or the installed Pi runtime has changed on disk,
+	 * restart for it when the user's `restartWhenStale` setting asks for that, and look again later.
 	 */
 	const checkStale = async () => {
 		const context = ctx;
@@ -259,14 +308,13 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		const stale = await current.getStaleSources();
 		// The session was replaced or shut down meanwhile; its successor runs its own check.
 		if (ctx !== context) return;
-		context.ui.setStatus(
-			"restart",
-			stale.length > 0 ? context.ui.theme.fg("warning", "extensions changed on disk: /restart") : undefined,
-		);
-		if (stale.length === 0) staleSince = undefined;
+		const staleRuntimeKey = getStaleRuntimeKey();
+		const statusLabel = formatStaleStatus(stale.length > 0, staleRuntimeKey !== undefined);
+		context.ui.setStatus("restart", statusLabel ? context.ui.theme.fg("warning", statusLabel) : undefined);
+		if (stale.length === 0 && staleRuntimeKey === undefined) staleSince = undefined;
 		const wait =
-			stale.length > 0 && current.settingsManager.getRestartWhenStale()
-				? await restartWhenQuiet(context, current, stale)
+			statusLabel !== undefined && current.settingsManager.getRestartWhenStale()
+				? await restartWhenQuiet(context, current, stale, staleRuntimeKey)
 				: STALE_CHECK_INTERVAL_MS;
 		if (ctx !== context) return;
 		clearTimeout(staleTimer);

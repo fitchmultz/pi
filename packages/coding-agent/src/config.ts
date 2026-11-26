@@ -472,6 +472,26 @@ function isForkReleaseReceipt(value: unknown): value is ForkReleaseReceipt {
 	);
 }
 
+function parseForkReleaseReceipt(raw: string): ForkReleaseReceipt | undefined {
+	let receipt: unknown;
+	try {
+		receipt = JSON.parse(raw);
+	} catch {
+		return undefined;
+	}
+	return isForkReleaseReceipt(receipt) ? receipt : undefined;
+}
+
+const startupForkCommit = forkReleasePath
+	? (() => {
+			try {
+				return parseForkReleaseReceipt(readFileSync(forkReleasePath, "utf8"))?.commit;
+			} catch {
+				return undefined;
+			}
+		})()
+	: undefined;
+
 /** Read the installer receipt belonging to this runtime, independently of PI_PACKAGE_DIR. */
 export function getForkRelease(): ForkReleaseReceipt | undefined {
 	if (!forkReleasePath) return undefined;
@@ -485,16 +505,8 @@ export function getForkRelease(): ForkReleaseReceipt | undefined {
 			{ cause: error },
 		);
 	}
-	let receipt: unknown;
-	try {
-		receipt = JSON.parse(raw);
-	} catch (error) {
-		throw new Error(
-			`Invalid fork release receipt: ${forkReleasePath}. Repair or delete it, then run pi update --fork.`,
-			{ cause: error },
-		);
-	}
-	if (!isForkReleaseReceipt(receipt)) {
+	const receipt = parseForkReleaseReceipt(raw);
+	if (!receipt) {
 		throw new Error(
 			`Invalid fork release receipt: ${forkReleasePath}. Repair or delete it, then run pi update --fork.`,
 		);
@@ -651,16 +663,26 @@ export function getCodemodeWorkerSpecifier(): string | URL | undefined {
 	return codemodeWorkerDataUrl;
 }
 
-export type InstallChange = { kind: "updated"; version: string } | { kind: "removed" };
+export type InstallChange = { kind: "updated"; version: string; commit?: string } | { kind: "removed" };
+
+export interface DetectInstallChangeOptions {
+	forkReleasePath?: string;
+	startupCommit?: string;
+}
 
 /**
- * Detect that the package this process runs from changed on disk, for example after `pi update`
- * in another terminal. Code loaded on demand can then be missing or from another version.
+ * Detect that the package this process runs from changed on disk, for example after `pi update`,
+ * `pi update --fork`, or an in-place install in another terminal. Code loaded on demand can then
+ * be missing or from another version.
  *
- * Checks the package.json read at startup. Resolving it again would walk up past a deleted install
- * and could find an unrelated package.json, such as one in the home directory.
+ * Checks the package.json read at startup (and its fork-release.json receipt when present).
+ * Resolving it again would walk up past a deleted install and could find an unrelated
+ * package.json, such as one in the home directory.
  */
-export function detectInstallChange(packageJsonPath = startupPackageJsonPath): InstallChange | undefined {
+export function detectInstallChange(
+	packageJsonPath = startupPackageJsonPath,
+	options?: DetectInstallChangeOptions,
+): InstallChange | undefined {
 	// The Bun binary embeds its code, so replacing the executable does not affect this process.
 	if (isBunBinary || !packageJsonPath) return undefined;
 	let installed: PackageJson;
@@ -669,9 +691,33 @@ export function detectInstallChange(packageJsonPath = startupPackageJsonPath): I
 	} catch (error) {
 		return (error as NodeJS.ErrnoException).code === "ENOENT" ? { kind: "removed" } : undefined;
 	}
-	return installed.version && installed.version !== VERSION
-		? { kind: "updated", version: installed.version }
-		: undefined;
+	const releasePath =
+		options?.forkReleasePath ?? (packageJsonPath === startupPackageJsonPath ? forkReleasePath : undefined);
+	let installedCommit: string | undefined;
+	if (releasePath) {
+		try {
+			installedCommit = parseForkReleaseReceipt(readFileSync(releasePath, "utf8"))?.commit;
+		} catch {
+			// Ignore transient missing or partial fork-release receipts during install checks.
+		}
+	}
+	if (installed.version && installed.version !== VERSION) {
+		return {
+			kind: "updated",
+			version: installed.version,
+			...(installedCommit ? { commit: installedCommit } : {}),
+		};
+	}
+	const startupCommit =
+		options?.startupCommit ?? (packageJsonPath === startupPackageJsonPath ? startupForkCommit : undefined);
+	if (installedCommit && startupCommit && installedCommit !== startupCommit) {
+		return {
+			kind: "updated",
+			version: installed.version || VERSION,
+			commit: installedCommit,
+		};
+	}
+	return undefined;
 }
 
 /** Resolve executable code from this runtime, not the PI_PACKAGE_DIR asset override. */

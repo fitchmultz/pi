@@ -269,7 +269,7 @@ Keys are skill names or patterns where `*` matches any characters. An exact name
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `restartWhenStale` | boolean | `false` | Restart an idle managed interactive session on the same saved session when its loaded extension code has changed on disk. See [Restart automatically](restart.md#restart-automatically). |
+| `restartWhenStale` | boolean | `false` | Restart an idle managed interactive session on the same saved session when loaded extension code or the installed Pi runtime has changed on disk. See [Restart automatically](restart.md#restart-automatically). |
 | `collapseChangelog` | boolean | `false` | Show a condensed changelog after an update. Also condenses extension package changelogs to one line per package. |
 | `enableInstallTelemetry` | boolean | `true` | Enable anonymous install/update reporting and selected provider attribution headers. Does not control update checks. |
 | `enableAnalytics` | boolean | `false` | Opt in to analytics data sharing. Currently used only by the experimental first-run setup. |

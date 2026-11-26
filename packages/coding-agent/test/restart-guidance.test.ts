@@ -1,4 +1,16 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	statSync,
+	symlinkSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -14,7 +26,13 @@ import { streamSimple as completionsStream } from "@earendil-works/pi-ai/api/ope
 import { streamSimple as responsesStream } from "@earendil-works/pi-ai/api/openai-responses";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MANAGED_CLI_ENV, RESTART_SOCKET_ENV } from "../src/cli/restart-protocol.ts";
+import { getRestartRuntimeWorker } from "../src/cli/launcher.ts";
+import {
+	MANAGED_CLI_ENV,
+	MANAGED_INVOCATION_ENV,
+	MANAGED_WORKER_ENV,
+	RESTART_SOCKET_ENV,
+} from "../src/cli/restart-protocol.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { BackgroundWork } from "../src/core/background-work.ts";
 import { clearExtensionCache } from "../src/core/extensions/loader.ts";
@@ -672,5 +690,99 @@ describe("stale extension code in a managed session", () => {
 		await vi.advanceTimersByTimeAsync(30_000);
 		await vi.waitFor(() => expect(f.shutdownRequested()).toBe(true));
 		expect(f.seen.notices).toEqual(["Extensions changed on disk; restarting Pi on the same saved session."]);
+	});
+
+	it("detects runtime symlink changes on disk and restarts when idle if restartWhenStale is enabled", async () => {
+		const runtimeRoot = realpathSync(mkdtempSync(join(tmpdir(), "pi-runtime-stale-")));
+		cleanups.push(async () => rmSync(runtimeRoot, { recursive: true, force: true }));
+		const makeRuntime = (name: string) => {
+			const bundle = join(runtimeRoot, name, "dist", "bundle");
+			mkdirSync(bundle, { recursive: true });
+			writeFileSync(join(bundle, "cli.js"), "");
+			writeFileSync(join(bundle, "cli-worker.js"), "");
+			return join(runtimeRoot, name);
+		};
+		const runtimeA = makeRuntime("A");
+		const runtimeB = makeRuntime("B");
+		const selector = join(runtimeRoot, "pi");
+		symlinkSync(join(runtimeA, "dist", "bundle", "cli.js"), selector);
+
+		vi.stubEnv(MANAGED_INVOCATION_ENV, selector);
+		vi.stubEnv(MANAGED_WORKER_ENV, getRestartRuntimeWorker(runtimeA));
+		const f = await staleFixture({ restartWhenStale: true });
+
+		await f.prompt("Before runtime update");
+		await vi.waitFor(() => expect(f.seen.status).toBeUndefined());
+
+		unlinkSync(selector);
+		symlinkSync(join(runtimeB, "dist", "bundle", "cli.js"), selector);
+		await f.prompt("After runtime update");
+		await vi.waitFor(() => expect(f.seen.status).toContain("pi changed on disk: /restart"));
+
+		await vi.advanceTimersByTimeAsync(30_000);
+		await vi.waitFor(() => expect(f.shutdownRequested()).toBe(true));
+		expect(f.seen.notices).toEqual(["Pi changed on disk; restarting Pi on the same saved session."]);
+	});
+
+	it("combines runtime and extension staleness in status and notice messages", async () => {
+		const runtimeRoot = realpathSync(mkdtempSync(join(tmpdir(), "pi-runtime-ext-stale-")));
+		cleanups.push(async () => rmSync(runtimeRoot, { recursive: true, force: true }));
+		const makeRuntime = (name: string) => {
+			const bundle = join(runtimeRoot, name, "dist", "bundle");
+			mkdirSync(bundle, { recursive: true });
+			writeFileSync(join(bundle, "cli.js"), "");
+			writeFileSync(join(bundle, "cli-worker.js"), "");
+			return join(runtimeRoot, name);
+		};
+		const runtimeA = makeRuntime("A");
+		const runtimeB = makeRuntime("B");
+		const selector = join(runtimeRoot, "pi");
+		symlinkSync(join(runtimeA, "dist", "bundle", "cli.js"), selector);
+
+		vi.stubEnv(MANAGED_INVOCATION_ENV, selector);
+		vi.stubEnv(MANAGED_WORKER_ENV, getRestartRuntimeWorker(runtimeA));
+		const f = await staleFixture({ restartWhenStale: true });
+
+		unlinkSync(selector);
+		symlinkSync(join(runtimeB, "dist", "bundle", "cli.js"), selector);
+		writeFileSync(
+			join(f.packageDir, "package.json"),
+			JSON.stringify({ name: "fixture-package", version: "1.0.2", pi: { extensions: ["./extension.ts"] } }),
+		);
+		await f.prompt("Both changed");
+		await vi.waitFor(() => expect(f.seen.status).toContain("pi and extensions changed on disk: /restart"));
+
+		await vi.advanceTimersByTimeAsync(30_000);
+		await vi.waitFor(() => expect(f.shutdownRequested()).toBe(true));
+		expect(f.seen.notices).toEqual(["Pi and extensions changed on disk; restarting Pi on the same saved session."]);
+	});
+
+	it("skips runtime update checks when pinned without managed invocation env", async () => {
+		const runtimeRoot = realpathSync(mkdtempSync(join(tmpdir(), "pi-runtime-pinned-")));
+		cleanups.push(async () => rmSync(runtimeRoot, { recursive: true, force: true }));
+		const makeRuntime = (name: string) => {
+			const bundle = join(runtimeRoot, name, "dist", "bundle");
+			mkdirSync(bundle, { recursive: true });
+			writeFileSync(join(bundle, "cli.js"), "");
+			writeFileSync(join(bundle, "cli-worker.js"), "");
+			return join(runtimeRoot, name);
+		};
+		const runtimeA = makeRuntime("A");
+		const runtimeB = makeRuntime("B");
+		const selector = join(runtimeRoot, "pi");
+		symlinkSync(join(runtimeA, "dist", "bundle", "cli.js"), selector);
+
+		delete process.env[MANAGED_INVOCATION_ENV];
+		delete process.env[MANAGED_WORKER_ENV];
+		const f = await staleFixture({ restartWhenStale: true });
+
+		unlinkSync(selector);
+		symlinkSync(join(runtimeB, "dist", "bundle", "cli.js"), selector);
+		await f.prompt("Pinned runtime ignores symlink flip");
+		await vi.waitFor(() => expect(f.seen.status).toBeUndefined());
+
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(f.shutdownRequested()).toBe(false);
+		expect(f.seen.notices).toEqual([]);
 	});
 });

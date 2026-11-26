@@ -14,6 +14,7 @@ import {
 	getSelfUpdateUnavailableInstruction,
 	getUpdateInstruction,
 	makeConfiguredSelfUpdateCommand,
+	VERSION,
 } from "../src/config.ts";
 
 const execPathDescriptor = Object.getOwnPropertyDescriptor(process, "execPath");
@@ -492,6 +493,36 @@ describe("detectInstallChange", () => {
 		writeFileSync(join(tempDir, "package.json"), JSON.stringify({ version: "0.0.1" }));
 		rmSync(installDir, { recursive: true, force: true });
 		expect(detectInstallChange(join(installDir, "package.json"))).toEqual({ kind: "removed" });
+	});
+
+	test("reports a changed fork-release.json commit even when package version matches", () => {
+		tempDir = mkdtempSync(join(tmpdir(), "pi-install-change-fork-"));
+		const packageJsonPath = join(tempDir, "package.json");
+		const forkReleasePath = join(tempDir, "fork-release.json");
+		writeFileSync(packageJsonPath, JSON.stringify({ version: VERSION }));
+		const writeReceipt = (commit: string) =>
+			writeFileSync(
+				forkReleasePath,
+				JSON.stringify({
+					commit,
+					catalogSha256: "cat",
+					archiveSha256: "arc",
+					node: "22.23.5",
+					npm: "10.0.0",
+					platform: "darwin",
+					arch: "arm64",
+					validated: true,
+				}),
+			);
+		writeReceipt("commit-a");
+		expect(detectInstallChange(packageJsonPath, { forkReleasePath, startupCommit: "commit-a" })).toBeUndefined();
+
+		writeReceipt("commit-b");
+		expect(detectInstallChange(packageJsonPath, { forkReleasePath, startupCommit: "commit-a" })).toEqual({
+			kind: "updated",
+			version: VERSION,
+			commit: "commit-b",
+		});
 	});
 });
 
