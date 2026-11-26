@@ -83,6 +83,11 @@ describe("extractLocalImagePaths", () => {
 		expect(extractLocalImagePaths("Paste: /Users/test/Desktop/Screenshot 2026-11-26 at 2.00.00 PM.png")).toEqual([
 			"/Users/test/Desktop/Screenshot 2026-11-26 at 2.00.00 PM.png",
 		]);
+		expect(
+			extractLocalImagePaths(
+				"Compare /Users/me/Desktop/Capture d'écran 2026-11-26 à 12.00.00.png with 'relative/quoted.png'.",
+			),
+		).toEqual(["/Users/me/Desktop/Capture d'écran 2026-11-26 à 12.00.00.png", "relative/quoted.png"]);
 		expect(extractLocalImagePaths("Compare /tmp/before.png and /tmp/after.png")).toEqual([
 			"/tmp/before.png",
 			"/tmp/after.png",
