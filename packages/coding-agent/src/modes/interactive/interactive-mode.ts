@@ -1162,6 +1162,7 @@ export class InteractiveMode {
 		if (!startRenderer) return true;
 		this.options.tuiMode = mode;
 		nextUi.start();
+		this.ensureImageEncoders();
 		this.themeController.rebindTui();
 		this.rebindExtensionTerminalInputListeners();
 		if (
