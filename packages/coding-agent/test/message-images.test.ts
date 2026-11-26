@@ -259,4 +259,45 @@ describe("inline images in UserMessageComponent and AssistantMessageComponent", 
 		component.setShowImages(false);
 		expect(component.render(80).some((line) => isImageLine(line))).toBe(false);
 	});
+
+	it("reuses Image instances across AssistantMessageComponent invalidate() so Kitty image IDs stay stable", async () => {
+		const shotPath = join(tempDir, "stable.png");
+		writeFileSync(shotPath, PNG_1X1_BYTES);
+
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		let resolveLoaded!: () => void;
+		const loadedPromise = new Promise<void>((resolve) => {
+			resolveLoaded = resolve;
+		});
+
+		const message = createAssistantMessage(`Preview:\n\n![Stable](${shotPath})`);
+		const component = new AssistantMessageComponent(
+			undefined,
+			false,
+			undefined,
+			"Thinking...",
+			1,
+			[],
+			undefined,
+			undefined,
+			false,
+			{
+				cwd: tempDir,
+				showImages: true,
+				imageWidthCells: 12,
+				onImageLoaded: () => resolveLoaded(),
+			},
+		);
+
+		component.updateContent(message, false);
+		await loadedPromise;
+		const firstImageLine = component.render(80).find((line) => isImageLine(line));
+		expect(firstImageLine).toBeDefined();
+
+		// Routine invalidations (theme preview, output pad, compact view) must keep the exact same Kitty image ID.
+		component.invalidate();
+		component.setHideThinkingBlock(true);
+		const secondImageLine = component.render(80).find((line) => isImageLine(line));
+		expect(secondImageLine).toBe(firstImageLine);
+	});
 });

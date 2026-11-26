@@ -146,8 +146,12 @@ export class MessageImagesContainer extends Container {
 
 	private lastText = "";
 	private lastAttached: readonly ImageContent[] = [];
+	private lastExtractSource?: { text: string; hasAttached: boolean };
+	private cachedCandidatePaths: string[] = [];
 	private lastLoadedPathsKey?: string;
 	private loadedFileImages: LoadedLocalImage[] = [];
+	private imageSources: Array<{ data: string; mimeType: string; widthCells: number; filename?: string }> = [];
+	private imageComponents: Image[] = [];
 	private loadGeneration = 0;
 
 	constructor(fallbackColor: (text: string) => string, options: MessageImageDisplayOptions = {}) {
@@ -170,7 +174,7 @@ export class MessageImagesContainer extends Container {
 			this.loadGeneration += 1;
 			this.lastLoadedPathsKey = undefined;
 			this.loadedFileImages = [];
-			this.clear();
+			this.clearImages();
 			this.invalidate();
 			return;
 		}
@@ -191,7 +195,7 @@ export class MessageImagesContainer extends Container {
 			this.loadGeneration += 1;
 			this.lastLoadedPathsKey = undefined;
 			this.loadedFileImages = [];
-			this.clear();
+			this.clearImages();
 			return;
 		}
 
@@ -205,7 +209,7 @@ export class MessageImagesContainer extends Container {
 			if (attachedImages.length > 0 && !text.trim()) {
 				this.rebuildChildren();
 			} else {
-				this.clear();
+				this.clearImages();
 			}
 			return;
 		}
@@ -213,12 +217,21 @@ export class MessageImagesContainer extends Container {
 		this.rebuildChildren();
 
 		if (!allowFileLoad || !this.cwd) return;
-		// `@file` image attachments emit `<file name="/abs/path">...</file>` alongside an ImageContent block
-		// that may have been resized. Skip those attachment tags when attached images are already present
-		// so resized `@file` images do not reload from disk and render twice.
-		const extractableText =
-			attachedImages.length > 0 ? text.replace(/<file\s+name="[^"]*">[\s\S]*?<\/file>/g, " ") : text;
-		const candidatePaths = extractLocalImagePaths(extractableText);
+		const hasAttached = attachedImages.length > 0;
+		let candidatePaths = this.cachedCandidatePaths;
+		if (
+			!this.lastExtractSource ||
+			this.lastExtractSource.text !== text ||
+			this.lastExtractSource.hasAttached !== hasAttached
+		) {
+			// `@file` image attachments emit `<file name="/abs/path">...</file>` alongside an ImageContent block
+			// that may have been resized. Skip those attachment tags when attached images are already present
+			// so resized `@file` images do not reload from disk and render twice.
+			const extractableText = hasAttached ? text.replace(/<file\s+name="[^"]*">[\s\S]*?<\/file>/g, " ") : text;
+			candidatePaths = extractLocalImagePaths(extractableText);
+			this.lastExtractSource = { text, hasAttached };
+			this.cachedCandidatePaths = candidatePaths;
+		}
 		const pathsKey = `${this.cwd}\0${candidatePaths.join("\0")}`;
 		if (pathsKey === this.lastLoadedPathsKey) return;
 		this.lastLoadedPathsKey = pathsKey;
@@ -251,38 +264,85 @@ export class MessageImagesContainer extends Container {
 		});
 	}
 
-	private rebuildChildren(): void {
+	private clearImages(): void {
+		if (this.children.length === 0 && this.imageComponents.length === 0) return;
 		this.clear();
-		if (!this.showImages) return;
+		this.imageSources = [];
+		this.imageComponents = [];
+	}
+
+	private rebuildChildren(): void {
+		if (!this.showImages) {
+			this.clearImages();
+			return;
+		}
 
 		const seenData = new Set<string>();
-		const items: Array<{ data: string; mimeType: string; filename?: string }> = [];
+		const nextSources: Array<{ data: string; mimeType: string; widthCells: number; filename?: string }> = [];
 
 		for (const img of this.lastAttached) {
 			if (!img.data || !img.mimeType || seenData.has(img.data)) continue;
 			seenData.add(img.data);
-			items.push({ data: img.data, mimeType: img.mimeType });
+			nextSources.push({ data: img.data, mimeType: img.mimeType, widthCells: this.imageWidthCells });
 		}
 		for (const img of this.loadedFileImages) {
 			if (!img.data || !img.mimeType || seenData.has(img.data)) continue;
 			seenData.add(img.data);
-			items.push(img);
+			nextSources.push({
+				data: img.data,
+				mimeType: img.mimeType,
+				widthCells: this.imageWidthCells,
+				filename: img.filename,
+			});
 		}
 
-		for (const item of items) {
-			this.addChild(new Spacer(1));
-			this.addChild(
+		// Reuse existing Image instances when inputs are unchanged so Kitty image IDs and cached PNG/Sixel data stay stable.
+		if (
+			nextSources.length === this.imageSources.length &&
+			this.children.length === nextSources.length * 2 &&
+			nextSources.every((src, idx) => {
+				const prev = this.imageSources[idx];
+				return (
+					prev !== undefined &&
+					prev.data === src.data &&
+					prev.mimeType === src.mimeType &&
+					prev.widthCells === src.widthCells &&
+					prev.filename === src.filename
+				);
+			})
+		) {
+			return;
+		}
+
+		const reusableByKey = new Map<string, Image>();
+		for (let i = 0; i < this.imageSources.length; i++) {
+			const prev = this.imageSources[i];
+			const comp = this.imageComponents[i];
+			if (!prev || !comp) continue;
+			reusableByKey.set(`${prev.data}\0${prev.mimeType}\0${prev.widthCells}\0${prev.filename ?? ""}`, comp);
+		}
+
+		this.clear();
+		const nextComponents: Image[] = [];
+		for (const item of nextSources) {
+			const key = `${item.data}\0${item.mimeType}\0${item.widthCells}\0${item.filename ?? ""}`;
+			const component =
+				reusableByKey.get(key) ??
 				new Image(
 					item.data,
 					item.mimeType,
 					{ fallbackColor: this.fallbackColor },
-					{ maxWidthCells: this.imageWidthCells, filename: item.filename },
-				),
-			);
+					{ maxWidthCells: item.widthCells, filename: item.filename },
+				);
+			this.addChild(new Spacer(1));
+			this.addChild(component);
+			nextComponents.push(component);
 			ensureImageEncoders(() => {
 				this.invalidate();
 				this.onImageLoaded?.();
 			}, item.mimeType);
 		}
+		this.imageSources = nextSources;
+		this.imageComponents = nextComponents;
 	}
 }
