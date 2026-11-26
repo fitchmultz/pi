@@ -1302,7 +1302,7 @@ describe("TuiAltScreen", () => {
 			const firstSixel = firstFrame.indexOf('\x1bP0;1q"1;1;20;30');
 			assert.ok(firstSixel !== -1, "expected Sixel in TuiMainScreen full render");
 			assert.ok(
-				firstFrame.slice(0, firstSixel).includes("\x1b[2A\r"),
+				firstFrame.slice(0, firstSixel).includes("\r\x1b[2A"),
 				"full render must draw padded rows before Sixel",
 			);
 			const afterFirstSixel = firstFrame.slice(firstFrame.indexOf("\x1b\\", firstSixel) + 2);
@@ -1326,7 +1326,7 @@ describe("TuiAltScreen", () => {
 			const diffSixel = diffFrame.indexOf('\x1bP0;1q"1;1;20;30');
 			assert.ok(diffSixel !== -1, "differential update must redraw Sixel when covered Box rows change");
 			assert.ok(
-				diffFrame.slice(0, diffSixel).includes("\x1b[2A\r"),
+				diffFrame.slice(0, diffSixel).includes("\r\x1b[2A"),
 				"differential render must draw padded rows before Sixel",
 			);
 			const afterDiffSixel = diffFrame.slice(diffFrame.indexOf("\x1b\\", diffSixel) + 2);

@@ -302,9 +302,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				const imageReservedRows = isImage ? this.getTopAnchoredImageReservedRows(newLines, i) : 1;
 				if (imageReservedRows > 1 && imageReservedRows <= height) {
 					for (let row = 1; row < imageReservedRows; row++) {
-						output.append(isSixel ? `\r\n${newLines[i + row] ?? ""}` : "\r\n");
+						const rowLine = newLines[i + row] ?? "";
+						output.append(isSixel && visibleWidth(rowLine) > 0 ? `\r\n${rowLine}\r` : "\r\n");
 					}
-					output.append(`\x1b[${imageReservedRows - 1}A\r`);
+					output.append(`\x1b[${imageReservedRows - 1}A`);
 					output.append(isSixel ? `\x1b7${line}\x1b8` : line);
 					output.append(`\x1b[${imageReservedRows - 1}B`);
 					i += imageReservedRows - 1;
@@ -516,9 +517,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 				output.append("\x1b[2K");
 				for (let row = 1; row < imageReservedRows; row++) {
-					output.append(isSixel ? `\r\n\x1b[2K${newLines[i + row] ?? ""}` : "\r\n\x1b[2K");
+					const rowLine = newLines[i + row] ?? "";
+					output.append(isSixel && visibleWidth(rowLine) > 0 ? `\r\n\x1b[2K${rowLine}\r` : "\r\n\x1b[2K");
 				}
-				output.append(`\x1b[${imageReservedRows - 1}A\r`);
+				output.append(`\x1b[${imageReservedRows - 1}A`);
 				output.append(isSixel ? `\x1b7${line}\x1b8` : line);
 				output.append(`\x1b[${imageReservedRows - 1}B`);
 				i += imageReservedRows - 1;
