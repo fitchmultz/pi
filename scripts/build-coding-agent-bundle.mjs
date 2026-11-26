@@ -75,18 +75,6 @@ const httpsProxyAgentNamedExportPlugin = {
 	},
 };
 
-// sixel@0.16.0's bundled upng.js runs sloppy-mode `module.exports = UPNG = {};`, which throws
-// `ReferenceError: UPNG is not defined` inside strict ESM bundles. Scope `var UPNG;` cleanly.
-const sixelUpngStrictModePlugin = {
-	name: "sixel-upng-strict-mode",
-	setup(build) {
-		build.onLoad({ filter: /[\\/]node_modules[\\/]sixel[\\/]upng\.js$/ }, (args) => ({
-			contents: `var UPNG;\n${readFileSync(args.path, "utf8")}`,
-			loader: "js",
-		}));
-	},
-};
-
 function commonBuildOptions() {
 	return {
 		absWorkingDir: repoRoot,
@@ -105,7 +93,7 @@ function commonBuildOptions() {
 		// package replaces it with a synchronous lazy require so jiti loads only
 		// when importing an extension; Babel remains deferred until a cache miss
 		// needs transformation.
-		plugins: [lazyJitiPlugin, httpsProxyAgentNamedExportPlugin, sixelUpngStrictModePlugin],
+		plugins: [lazyJitiPlugin, httpsProxyAgentNamedExportPlugin],
 		sourcemap: false,
 		target: "node22.19",
 		// Do not apply the monorepo's source-oriented path aliases while bundling

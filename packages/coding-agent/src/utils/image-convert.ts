@@ -132,13 +132,18 @@ function encodeRgbaToSixel(rgba: Uint8Array, width: number, height: number, sixe
  * Returns undefined if photon or sixel cannot be loaded.
  */
 export async function loadSixelEncoder(): Promise<SixelImageEncoder | undefined> {
-	// sixel@0.16.0's upng.js executes sloppy-mode `module.exports = UPNG = {};` and references `UPNG`
-	// inside `UPNG.quantize`. Ensure a global binding exists for strict ESM bundlers (such as Bun
-	// `--compile`) that do not run scripts/build-coding-agent-bundle.mjs's strict-mode transform.
+	// Workaround for sixel@0.16.0: upng.js executes sloppy-mode `module.exports = UPNG = {};` and
+	// references `UPNG` inside `UPNG.quantize`, throwing `ReferenceError: UPNG is not defined` in
+	// strict ESM bundles (esbuild and Bun `--compile`). Remove once upstream sixel declares `UPNG`.
 	if (!("UPNG" in globalThis)) {
 		(globalThis as Record<string, unknown>).UPNG = undefined;
 	}
-	const [photon, sixelMod] = await Promise.all([loadPhoton(), import("sixel").catch(() => undefined)]);
+	const [photon, sixelImport] = await Promise.all([loadPhoton(), import("sixel").catch(() => undefined)]);
+	// Split strict-ESM bundles wrap CJS dynamic imports behind `default` (`export default require_lib()`).
+	const sixelMod =
+		sixelImport && "image2sixel" in sixelImport
+			? sixelImport
+			: (sixelImport as { default?: SixelModule } | undefined)?.default;
 	if (!photon || !sixelMod?.image2sixel || !sixelMod?.sixelEncode) return undefined;
 	return ({ base64Data, widthPx, heightPx }) => {
 		try {

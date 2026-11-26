@@ -219,12 +219,12 @@ it("loadSixelEncoder converts synchronously to an oriented Sixel DCS sequence", 
 	expect(transparentSixel).not.toContain("!4?!4N");
 });
 
-it("loadSixelEncoder works in a fresh process when bundled into strict ESM by esbuild", async () => {
+it("loadSixelEncoder works in a fresh process when bundled with splitting into strict ESM by esbuild", async () => {
 	const repoRoot = join(import.meta.dirname, "../../..");
 	const cacheRoot = join(repoRoot, "node_modules/.cache");
 	mkdirSync(cacheRoot, { recursive: true });
 	const outDir = mkdtempSync(join(cacheRoot, "pi-sixel-bundle-"));
-	const outfile = join(outDir, "image-convert.mjs");
+	const entryOutfile = join(outDir, "image-convert.mjs");
 	try {
 		await esbuild({
 			absWorkingDir: repoRoot,
@@ -232,17 +232,20 @@ it("loadSixelEncoder works in a fresh process when bundled into strict ESM by es
 				js: 'import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url);',
 			},
 			bundle: true,
+			chunkNames: "chunks/[name]-[hash]",
 			entryPoints: [join(import.meta.dirname, "../src/utils/image-convert.ts")],
 			external: ["@silvia-odwyer/photon-node"],
 			format: "esm",
 			minifySyntax: true,
 			minifyWhitespace: true,
-			outfile,
+			outdir: outDir,
+			outExtension: { ".js": ".mjs" },
 			platform: "node",
+			splitting: true,
 			target: "node22.19",
 		});
 		const script = [
-			`const mod = await import(${JSON.stringify(pathToFileURL(outfile).href)});`,
+			`const mod = await import(${JSON.stringify(pathToFileURL(entryOutfile).href)});`,
 			"const encoder = await mod.loadSixelEncoder();",
 			'if (!encoder) throw new Error("loadSixelEncoder returned undefined");',
 			`const sixel = encoder({ base64Data: ${JSON.stringify(TINY_PNG)}, mimeType: "image/png", widthPx: 8, heightPx: 8 });`,
