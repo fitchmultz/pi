@@ -1,4 +1,4 @@
-import { getExifOrientation } from "@earendil-works/pi-tui";
+import { getExifOrientation } from "@earendil-works/pi-tui/exif-orientation";
 import type { PhotonImageType } from "./photon.ts";
 
 type Photon = typeof import("@silvia-odwyer/photon-node");
