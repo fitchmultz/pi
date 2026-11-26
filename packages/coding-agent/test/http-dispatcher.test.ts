@@ -8,6 +8,7 @@ import {
 	applyHttpProxySettings,
 	configureHttpDispatcher,
 	formatHttpIdleTimeoutMs,
+	getSessionHttpFetch,
 	HTTP_IDLE_TIMEOUT_CHOICES,
 } from "../src/core/http-dispatcher.ts";
 
@@ -236,5 +237,144 @@ console.log("process survived");
 			30_000, 60_000, 120_000, 300_000, 1_200_000, 0,
 		]);
 		expect(formatHttpIdleTimeoutMs(1_200_000)).toBe("20 min");
+	});
+
+	it("isolates per-session httpIdleTimeoutMs without mutating the global dispatcher or host overrides", async () => {
+		const server = http.createServer((_request, response) => {
+			setTimeout(() => {
+				response.end("delayed-ok");
+			}, 1_250);
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		if (!address || typeof address === "string") {
+			throw new Error("Server did not bind to a TCP port");
+		}
+		const url = `http://127.0.0.1:${address.port}/interactions`;
+		try {
+			// Simulate a shorter process-wide headersTimeout than the session's configured httpIdleTimeoutMs
+			// (Undici checks headersTimeout on 1-second fastTimer ticks).
+			configureHttpDispatcher(100);
+			expect(getSessionHttpFetch({ httpIdleTimeoutMs: 100 })).toBeUndefined();
+
+			// When HTTP_PROXY is set and HTTPS_PROXY is unset, settings.httpProxy must not split HTTPS
+			// onto a separate proxy or break reuse of the matching global CLI dispatcher.
+			const prevHttpProxy = process.env.HTTP_PROXY;
+			const prevHttpsProxy = process.env.HTTPS_PROXY;
+			const prevLowerHttpsProxy = process.env.https_proxy;
+			try {
+				process.env.HTTP_PROXY = "http://127.0.0.1:8111";
+				delete process.env.HTTPS_PROXY;
+				delete process.env.https_proxy;
+				configureHttpDispatcher(100);
+				expect(getSessionHttpFetch({ httpIdleTimeoutMs: 100, httpProxy: "http://127.0.0.1:8222" })).toBeUndefined();
+			} finally {
+				if (prevHttpProxy === undefined) delete process.env.HTTP_PROXY;
+				else process.env.HTTP_PROXY = prevHttpProxy;
+				if (prevHttpsProxy === undefined) delete process.env.HTTPS_PROXY;
+				else process.env.HTTPS_PROXY = prevHttpsProxy;
+				if (prevLowerHttpsProxy === undefined) delete process.env.https_proxy;
+				else process.env.https_proxy = prevLowerHttpsProxy;
+				configureHttpDispatcher(100);
+			}
+			const globalBefore = undici.getGlobalDispatcher();
+
+			const longFetch = getSessionHttpFetch({ httpIdleTimeoutMs: 5_000 });
+			expect(longFetch).toBeDefined();
+			expect(undici.getGlobalDispatcher()).toBe(globalBefore);
+
+			// Long-timeout session succeeds without loosening the process-wide dispatcher.
+			await expect(longFetch!(url).then((response) => response.text())).resolves.toBe("delayed-ok");
+			await expect(undici.fetch(url)).rejects.toThrow();
+			expect(getSessionHttpFetch({ httpIdleTimeoutMs: 5_000 })).toBe(longFetch);
+
+			// A shorter-timeout session cannot narrow a longer-timeout session either.
+			configureHttpDispatcher(5_000);
+			const shortFetch = getSessionHttpFetch({ httpIdleTimeoutMs: 100 });
+			expect(shortFetch).toBeDefined();
+			await expect(shortFetch!(url)).rejects.toThrow();
+			await expect(undici.fetch(url).then((response) => response.text())).resolves.toBe("delayed-ok");
+
+			// Host overrides of globalThis.fetch or the global Undici dispatcher are preserved.
+			const activeBeforeCustom = undici.getGlobalDispatcher();
+			const customAgent = new undici.Agent();
+			try {
+				undici.setGlobalDispatcher(customAgent);
+				expect(getSessionHttpFetch({ httpIdleTimeoutMs: 1_200_000 })).toBeUndefined();
+			} finally {
+				undici.setGlobalDispatcher(activeBeforeCustom);
+				if (typeof customAgent.close === "function") await customAgent.close();
+			}
+			globalThis.fetch = async () => {
+				throw new Error("Host fetch override");
+			};
+			expect(getSessionHttpFetch({ httpIdleTimeoutMs: 1_200_000 })).toBeUndefined();
+		} finally {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	});
+
+	it("does not replace host WebSocket or EventSource globals from getSessionHttpFetch", () => {
+		const moduleUrl = new URL("../src/core/http-dispatcher.ts", import.meta.url).href;
+		const script = `
+			import { getSessionHttpFetch } from ${JSON.stringify(moduleUrl)};
+			const customWebSocket = class CustomWebSocket {};
+			const customEventSource = class CustomEventSource {};
+			globalThis.WebSocket = customWebSocket;
+			globalThis.EventSource = customEventSource;
+			const originalFetch = globalThis.fetch;
+			const sessionFetch = getSessionHttpFetch({ httpIdleTimeoutMs: 1_200_000 });
+			if (typeof sessionFetch !== "function") throw new Error("expected sessionFetch");
+			if (globalThis.WebSocket !== customWebSocket) throw new Error("WebSocket replaced");
+			if (globalThis.EventSource !== customEventSource) throw new Error("EventSource replaced");
+			if (globalThis.fetch !== originalFetch) throw new Error("global fetch replaced");
+		`;
+		const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+			cwd: new URL("..", import.meta.url),
+			encoding: "utf8",
+		});
+		expect(result.status, result.stderr).toBe(0);
+	});
+
+	it("prefers lowercase http_proxy/https_proxy over uppercase env vars, matching Undici EnvHttpProxyAgent", async () => {
+		const origin = http.createServer((_req, res) => {
+			res.writeHead(200, { "content-type": "text/plain" });
+			res.end("origin");
+		});
+		await new Promise<void>((resolve) => origin.listen(0, "127.0.0.1", resolve));
+		const originAddress = origin.address();
+		if (!originAddress || typeof originAddress === "string") throw new Error("Origin missing port");
+
+		const lowercaseRequests: string[] = [];
+		const lowercaseProxy = net.createServer((client) => {
+			client.once("data", (data) => {
+				const [requestLine = ""] = data.toString().split("\r\n");
+				lowercaseRequests.push(requestLine);
+				const upstream = net.connect(originAddress.port, "127.0.0.1", () => {
+					client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+					client.pipe(upstream).pipe(client);
+				});
+				upstream.on("error", () => client.destroy());
+				client.on("error", () => upstream.destroy());
+			});
+		});
+		await new Promise<void>((resolve) => lowercaseProxy.listen(0, "127.0.0.1", resolve));
+		const proxyAddress = lowercaseProxy.address();
+		if (!proxyAddress || typeof proxyAddress === "string") throw new Error("Proxy missing port");
+
+		process.env.http_proxy = `http://127.0.0.1:${proxyAddress.port}`;
+		process.env.HTTP_PROXY = "http://127.0.0.1:1";
+		try {
+			const sessionFetch = getSessionHttpFetch({ httpIdleTimeoutMs: 5_000 });
+			expect(sessionFetch).toBeDefined();
+			const originUrl = `http://127.0.0.1:${originAddress.port}/check`;
+			await expect(sessionFetch!(originUrl).then((response) => response.text())).resolves.toBe("origin");
+			expect(lowercaseRequests).not.toHaveLength(0);
+		} finally {
+			await Promise.all([
+				new Promise<void>((resolve) => lowercaseProxy.close(() => resolve())),
+				new Promise<void>((resolve) => origin.close(() => resolve())),
+			]);
+		}
 	});
 });

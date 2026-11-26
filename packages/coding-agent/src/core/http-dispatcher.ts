@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { isTransportFetch, markTransportFetch } from "@earendil-works/pi-ai";
 import * as undici from "undici";
 
 export const DEFAULT_HTTP_IDLE_TIMEOUT_MS = 300_000;
@@ -16,6 +17,60 @@ export const HTTP_IDLE_TIMEOUT_CHOICES = [
 
 const originalGlobalFetch = globalThis.fetch;
 let installedGlobalFetch: typeof globalThis.fetch | undefined;
+const initialGlobalDispatcher = undici.getGlobalDispatcher();
+let activeDispatcher: undici.Dispatcher | undefined;
+let activeDispatcherSignature: string | undefined;
+const MAX_SESSION_DISPATCHERS = 8;
+const sessionFetches = new Map<string, { dispatcher: undici.Dispatcher; fetch: typeof globalThis.fetch }>();
+
+/** Returns true when `fetchFn` was created by `getSessionHttpFetch` (Pi's own transport wrapper, not a caller fetch). */
+export function isSessionTransportFetch(fetchFn: unknown): boolean {
+	return isTransportFetch(fetchFn);
+}
+
+function resolveEffectiveProxies(httpProxy?: string): {
+	httpProxy: string | undefined;
+	httpsProxy: string | undefined;
+} {
+	const fallback = httpProxy?.trim() || undefined;
+	// Match Undici's EnvHttpProxyAgent and pi-ai's getProxyEnv: lowercase env vars take precedence.
+	const resolvedHttp = process.env.http_proxy ?? process.env.HTTP_PROXY ?? fallback;
+	return {
+		httpProxy: resolvedHttp,
+		httpsProxy: process.env.https_proxy ?? process.env.HTTPS_PROXY ?? resolvedHttp,
+	};
+}
+
+function getDispatcherSignature(timeoutMs: number, httpProxy?: string): string {
+	const proxies = resolveEffectiveProxies(httpProxy);
+	return JSON.stringify([
+		timeoutMs,
+		proxies.httpProxy ?? null,
+		proxies.httpsProxy ?? null,
+		process.env.NO_PROXY ?? null,
+		process.env.no_proxy ?? null,
+	]);
+}
+
+function createHttpDispatcher(timeoutMs: number, httpProxy?: string): undici.EnvHttpProxyAgent {
+	const proxies = resolveEffectiveProxies(httpProxy);
+	return withUndiciErrorListener(
+		new undici.EnvHttpProxyAgent({
+			allowH2: false,
+			// Keep HTTP origins on CONNECT tunnels as they were before Undici 8.7.
+			proxyTunnel: true,
+			bodyTimeout: timeoutMs,
+			connect: {
+				autoSelectFamilyAttemptTimeout: DEFAULT_AUTO_SELECT_FAMILY_ATTEMPT_TIMEOUT_MS,
+			},
+			headersTimeout: timeoutMs,
+			...(proxies.httpProxy ? { httpProxy: proxies.httpProxy } : {}),
+			...(proxies.httpsProxy ? { httpsProxy: proxies.httpsProxy } : {}),
+			clientFactory: createUndiciClient,
+			factory: createUndiciOriginDispatcher,
+		}),
+	);
+}
 
 export function parseHttpIdleTimeoutMs(value: unknown): number | undefined {
 	if (typeof value === "string") {
@@ -100,31 +155,117 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 	if (normalizedTimeoutMs === undefined) {
 		throw new Error(`Invalid HTTP idle timeout: ${String(timeoutMs)}`);
 	}
-	const dispatcher = withUndiciErrorListener(
-		new undici.EnvHttpProxyAgent({
-			allowH2: false,
-			// Keep HTTP origins on CONNECT tunnels as they were before Undici 8.7.
-			proxyTunnel: true,
-			bodyTimeout: normalizedTimeoutMs,
-			connect: {
-				autoSelectFamilyAttemptTimeout: DEFAULT_AUTO_SELECT_FAMILY_ATTEMPT_TIMEOUT_MS,
-			},
-			headersTimeout: normalizedTimeoutMs,
-			clientFactory: createUndiciClient,
-			factory: createUndiciOriginDispatcher,
-		}),
-	);
+	const previousDispatcher = activeDispatcher;
+	const dispatcher = createHttpDispatcher(normalizedTimeoutMs);
 	undici.setGlobalDispatcher(dispatcher);
+	activeDispatcher = dispatcher;
+	activeDispatcherSignature = getDispatcherSignature(normalizedTimeoutMs);
+	if (previousDispatcher && previousDispatcher !== dispatcher && typeof previousDispatcher.close === "function") {
+		void Promise.resolve(previousDispatcher.close()).catch(() => {});
+	}
 	// Keep fetch and the dispatcher on the same undici implementation. Node 26.0's
 	// bundled fetch can otherwise consume compressed responses through npm undici's
 	// dispatcher without decompressing them, causing response.json() failures.
 	// If a caller replaced fetch after module load, preserve that deliberate override.
 	const shouldInstallGlobals =
-		installedGlobalFetch === undefined
-			? globalThis.fetch === originalGlobalFetch
-			: globalThis.fetch === installedGlobalFetch;
+		globalThis.fetch === originalGlobalFetch ||
+		(installedGlobalFetch !== undefined && globalThis.fetch === installedGlobalFetch);
 	if (shouldInstallGlobals) {
 		undici.install?.();
 		installedGlobalFetch = globalThis.fetch;
 	}
+}
+
+export interface HttpTransportSettings {
+	httpIdleTimeoutMs: number;
+	httpProxy?: string;
+}
+
+/**
+ * Return a per-session `fetch` bound to an isolated Undici dispatcher matching the session's
+ * `httpIdleTimeoutMs` and `httpProxy` settings without mutating process-wide globals.
+ *
+ * Returns `undefined` when the host replaced `globalThis.fetch` or the global Undici dispatcher,
+ * when the CLI/RPC global dispatcher already matches, or when neither the process nor the session
+ * overrides Node's default timeout/proxy.
+ */
+export function getSessionHttpFetch(settings: HttpTransportSettings): typeof globalThis.fetch | undefined {
+	const fetchOverridden =
+		globalThis.fetch !== originalGlobalFetch &&
+		(installedGlobalFetch === undefined || globalThis.fetch !== installedGlobalFetch);
+	if (fetchOverridden) {
+		return undefined;
+	}
+
+	const currentGlobalDispatcher = undici.getGlobalDispatcher();
+	const globalDispatcherOverridden =
+		currentGlobalDispatcher !== initialGlobalDispatcher && currentGlobalDispatcher !== activeDispatcher;
+	if (globalDispatcherOverridden) {
+		return undefined;
+	}
+
+	const normalizedTimeoutMs = parseHttpIdleTimeoutMs(settings.httpIdleTimeoutMs);
+	if (normalizedTimeoutMs === undefined) {
+		throw new Error(`Invalid HTTP idle timeout: ${String(settings.httpIdleTimeoutMs)}`);
+	}
+	const proxy = settings.httpProxy?.trim() || undefined;
+	const signature = getDispatcherSignature(normalizedTimeoutMs, proxy);
+
+	if (
+		activeDispatcher !== undefined &&
+		currentGlobalDispatcher === activeDispatcher &&
+		activeDispatcherSignature === signature
+	) {
+		return undefined;
+	}
+	if (activeDispatcher === undefined && normalizedTimeoutMs === DEFAULT_HTTP_IDLE_TIMEOUT_MS && proxy === undefined) {
+		return undefined;
+	}
+
+	const cached = sessionFetches.get(signature);
+	if (cached) {
+		sessionFetches.delete(signature);
+		sessionFetches.set(signature, cached);
+		return cached.fetch;
+	}
+
+	const dispatcher = createHttpDispatcher(normalizedTimeoutMs, proxy);
+	const sessionFetch = ((
+		input: Parameters<typeof globalThis.fetch>[0],
+		init?: Parameters<typeof globalThis.fetch>[1],
+	) => {
+		if (
+			typeof globalThis.Request === "function" &&
+			input instanceof globalThis.Request &&
+			!(input instanceof undici.Request)
+		) {
+			const mergedInit: undici.RequestInit = {
+				method: input.method,
+				headers: Array.from(input.headers.entries()),
+				body: input.body as undici.RequestInit["body"],
+				signal: input.signal,
+				...(input.body ? { duplex: "half" as const } : {}),
+				...(init as undici.RequestInit),
+				dispatcher,
+			};
+			return undici.fetch(input.url, mergedInit);
+		}
+		return undici.fetch(input as undici.RequestInfo, {
+			...(init as undici.RequestInit),
+			dispatcher,
+		});
+	}) as unknown as typeof globalThis.fetch;
+
+	markTransportFetch(sessionFetch);
+	sessionFetches.set(signature, { dispatcher, fetch: sessionFetch });
+	while (sessionFetches.size > MAX_SESSION_DISPATCHERS) {
+		const oldest = sessionFetches.entries().next();
+		if (oldest.done) break;
+		const [oldestKey, oldestEntry] = oldest.value;
+		sessionFetches.delete(oldestKey);
+		if (typeof oldestEntry.dispatcher.close === "function") {
+			void Promise.resolve(oldestEntry.dispatcher.close()).catch(() => {});
+		}
+	}
+	return sessionFetch;
 }

@@ -13,6 +13,7 @@ import { getClientIdentity } from "./client-identity.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { applyProviderRegistrations } from "./extensions/provider-registrations.ts";
+import { getSessionHttpFetch } from "./http-dispatcher.ts";
 import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
 import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
@@ -563,8 +564,17 @@ export async function createAgentSessionWithDiagnostics(
 		const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 		const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
 		const headerRunner = extensionRunnerRef.current;
+		const sessionFetch =
+			options.fetch !== undefined
+				? options.fetch
+				: getSessionHttpFetch({
+						httpIdleTimeoutMs,
+						httpProxy: settingsManager.getGlobalSettings().httpProxy,
+					});
 		return {
 			...options,
+			transport: options.transport ?? settingsManager.getTransport(),
+			...(sessionFetch !== undefined ? { fetch: sessionFetch } : {}),
 			...(options.reasoningSummary !== undefined
 				? {}
 				: settingsManager.getHideThinkingBlock()

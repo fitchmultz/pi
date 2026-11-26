@@ -12,6 +12,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
+import { isSessionTransportFetch } from "../src/core/http-dispatcher.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -37,12 +38,12 @@ describe("createAgentSession stream options", () => {
 		}
 	});
 
-	function createModel(api: Api): Model<Api> {
+	function createModel(api: Api, provider = "capture-provider"): Model<Api> {
 		return {
 			id: "capture-model",
 			name: "Capture Model",
 			api,
-			provider: "capture-provider",
+			provider,
 			baseUrl: "https://capture.invalid/v1",
 			reasoning: false,
 			input: ["text"],
@@ -85,8 +86,9 @@ describe("createAgentSession stream options", () => {
 		requestOptions: SimpleStreamOptions = {},
 		extensionFactory?: ExtensionFactory,
 		providerEvent?: unknown,
+		provider = "capture-provider",
 	): Promise<SimpleStreamOptions | undefined> {
-		const model = createModel(api);
+		const model = createModel(api, provider);
 		const settingsManager = SettingsManager.inMemory(settings);
 		const resourceLoader = new DefaultResourceLoader({
 			cwd,
@@ -320,5 +322,100 @@ describe("createAgentSession stream options", () => {
 			"x-hook": "provider:model:explicit",
 		});
 		expect(options).not.toHaveProperty("transformHeaders");
+	});
+
+	it("passes isolated per-session fetch for non-default httpIdleTimeoutMs while preserving OpenAI WebSocket auto transport", async () => {
+		const googleOptions = await captureStreamOptions("google-interactions", { httpIdleTimeoutMs: 1_200_000 });
+		const shortOptions = await captureStreamOptions("google-interactions", { httpIdleTimeoutMs: 60_000 });
+		expect(typeof googleOptions?.fetch).toBe("function");
+		expect(typeof shortOptions?.fetch).toBe("function");
+		expect(googleOptions?.fetch).not.toBe(shortOptions?.fetch);
+
+		const defaultOptions = await captureStreamOptions("google-interactions", {});
+		expect(defaultOptions?.fetch).toBeUndefined();
+
+		const openaiAutoOptions = await captureStreamOptions(
+			"openai-responses",
+			{ httpIdleTimeoutMs: 1_200_000 },
+			{},
+			undefined,
+			undefined,
+			"openai",
+		);
+		expect(isSessionTransportFetch(openaiAutoOptions?.fetch)).toBe(true);
+
+		const openaiSseOptions = await captureStreamOptions(
+			"openai-responses",
+			{ httpIdleTimeoutMs: 1_200_000, transport: "sse" },
+			{},
+			undefined,
+			undefined,
+			"openai",
+		);
+		expect(typeof openaiSseOptions?.fetch).toBe("function");
+	});
+
+	it("preserves OpenAI WebSocket auto transport when a virtual model routes to openai/openai-responses", async () => {
+		const settingsManager = SettingsManager.inMemory({ httpIdleTimeoutMs: 1_200_000 });
+		const resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
+		await resourceLoader.reload();
+
+		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
+		await authStorage.modify("openai", async () => ({ type: "api_key", key: "test-api-key" }));
+		const modelRegistry = await createModelRegistry(authStorage, join(agentDir, "models.json"));
+		const physicalOpenAI = createModel("openai-responses", "openai");
+		let capturedOptions: SimpleStreamOptions | undefined;
+
+		modelRegistry.registerProvider("openai", {
+			api: "openai-responses",
+			baseUrl: physicalOpenAI.baseUrl,
+			models: [
+				{
+					id: physicalOpenAI.id,
+					name: physicalOpenAI.name,
+					reasoning: physicalOpenAI.reasoning,
+					input: physicalOpenAI.input,
+					cost: physicalOpenAI.cost,
+					contextWindow: physicalOpenAI.contextWindow,
+					maxTokens: physicalOpenAI.maxTokens,
+				},
+			],
+			streamSimple: (_model, _context, providerOptions) => {
+				capturedOptions = providerOptions;
+				return createDoneStream("openai-responses");
+			},
+		});
+		modelRegistry.registerVirtualModel({
+			id: "auto-openai",
+			name: "Auto OpenAI",
+			provider: "virtual-test",
+			route: async () => ({ model: physicalOpenAI, thinkingLevel: "off" }),
+		});
+
+		const virtualModel = modelRegistry.find("virtual-test", "auto-openai")!;
+		const modelRuntime = getModelRuntime(modelRegistry);
+		const sessionManager = SessionManager.inMemory(cwd);
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir,
+			modelRuntime,
+			resourceLoader,
+			sessionManager,
+			settingsManager,
+			model: virtualModel,
+		});
+
+		try {
+			const stream = await session.agent.streamFunction(
+				virtualModel,
+				normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }] }),
+				{},
+			);
+			const result = await stream.result();
+			expect(result.stopReason).toBe("stop");
+			expect(isSessionTransportFetch(capturedOptions?.fetch)).toBe(true);
+		} finally {
+			session.dispose();
+		}
 	});
 });

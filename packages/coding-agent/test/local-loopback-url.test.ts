@@ -5,6 +5,7 @@ import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { getSessionHttpFetch } from "../src/core/http-dispatcher.ts";
 import { clearSameHostLoopbackCache, resolveSameHostLoopbackBaseUrl } from "../src/core/local-loopback-url.ts";
 import { ModelRuntime } from "../src/core/model-runtime.ts";
 
@@ -144,6 +145,21 @@ describe("resolveSameHostLoopbackBaseUrl", () => {
 			});
 			expect(liveRes.stopReason).toBe("stop");
 			expect(observedHosts).toEqual([`${localInterface!.host}:${port}`, `${localInterface!.loopback}:${port}`]);
+
+			// Pi's own per-session transport fetch is NOT a caller custom fetch, so preferLocalLoopback still rewrites:
+			const sessionFetch = getSessionHttpFetch({ httpIdleTimeoutMs: 1_200_000 });
+			expect(sessionFetch).toBeDefined();
+			const sessionRes = await runtime.completeSimple(
+				optInModel,
+				{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
+				{ fetch: sessionFetch },
+			);
+			expect(sessionRes.stopReason).toBe("stop");
+			expect(observedHosts).toEqual([
+				`${localInterface!.host}:${port}`,
+				`${localInterface!.loopback}:${port}`,
+				`${localInterface!.loopback}:${port}`,
+			]);
 
 			// ...and skips rewriting on the exact same opt-in provider when caller supplies custom fetch:
 			let capturedCustomFetchUrl: string | undefined;

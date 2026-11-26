@@ -76,6 +76,7 @@ import {
 import { getAgentDir } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
+import { isSessionTransportFetch } from "./http-dispatcher.ts";
 import { resolveSameHostLoopbackBaseUrl } from "./local-loopback-url.ts";
 import { ModelConfig } from "./model-config.ts";
 import {
@@ -944,7 +945,8 @@ export class ModelRuntime implements Models {
 			this.extensionProviders.get(model.provider)?.preferLocalLoopback ??
 			this.config.getProvider(model.provider)?.preferLocalLoopback ??
 			false;
-		const customFetch = "fetch" in providerOptions && providerOptions.fetch !== undefined;
+		const isPiTransportFetch = "fetch" in providerOptions && isSessionTransportFetch(providerOptions.fetch);
+		const customFetch = "fetch" in providerOptions && providerOptions.fetch !== undefined && !isPiTransportFetch;
 		const effectiveBaseUrl =
 			preferLocalLoopback && !customFetch
 				? await resolveSameHostLoopbackBaseUrl(configuredModel.baseUrl, options?.signal)
