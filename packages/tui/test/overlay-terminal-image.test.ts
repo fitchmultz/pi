@@ -8,6 +8,7 @@ import {
 	registerKittyImageMetadata,
 	resetCapabilitiesCache,
 	setCapabilities,
+	setCellDimensions,
 } from "../src/terminal-image.ts";
 import type { Component, OverlayOptions } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
@@ -244,6 +245,36 @@ describe("overlays over terminal images", () => {
 			assert.ok(!terminal.writes.includes("\x1b_Ga=T"), "the image data is not uploaded again");
 		} finally {
 			tui.stop();
+			resetCapabilitiesCache();
+		}
+	});
+
+	it("hides Sixel images in fullscreen mode while an overlay covers them and redraws after close", async () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 18 });
+		const terminal = new RecordingTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal);
+		try {
+			const sixel = '\x1bP0;1q"1;1;40;54#0;2;100;0;0#0AAA-BBB-CCC\x1b\\';
+			tui.setLayoutRoot(staticComponent(["top", sixel, "", "", "after", ""]));
+			tui.start();
+			await terminal.waitForRender();
+			assert.ok(terminal.writes.includes(sixel));
+
+			terminal.writes = "";
+			const overlay = tui.showOverlay(panel, { row: 2, col: 1, width: 8 });
+			await terminal.waitForRender();
+			assert.ok(terminal.writes.includes("\x1b[2J"), "stale Sixel cells are cleared");
+			assert.ok(!terminal.writes.includes("\x1bP0;1q"), "the covered Sixel image is hidden");
+			assert.strictEqual(terminal.getViewport()[2]?.trimEnd(), " PANEL");
+
+			terminal.writes = "";
+			overlay.hide();
+			await terminal.waitForRender();
+			assert.ok(terminal.writes.includes(sixel), "the Sixel image redraws once uncovered");
+		} finally {
+			tui.stop();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
 			resetCapabilitiesCache();
 		}
 	});

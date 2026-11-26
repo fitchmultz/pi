@@ -25,8 +25,9 @@ import {
 	deleteAllKittyPlacements,
 	deleteKittyImage,
 	getCapabilities,
+	getImagePlacementRows,
 	getKittyImagePlacement,
-	getKittyImagePlacementRows,
+	getSixelImageMetadata,
 	type ImageProtocol,
 	isImageLine,
 	setCapabilities,
@@ -413,8 +414,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.imageProtocol = capabilities.images;
 		this.uploadedKittyImages.clear();
 		if (capabilities.images === "iterm2") {
+			// OSC 1337 iTerm2 placements cannot be cropped on scroll in alternate screen;
+			// iTerm2 natively supports Sixel, which crops cleanly per 6px band.
 			this.savedCapabilities = capabilities;
-			setCapabilities({ ...capabilities, images: null });
+			setCapabilities({ ...capabilities, images: "sixel" });
+			this.imageProtocol = "sixel";
 			this.invalidate();
 		}
 		this.lastDocument = [];
@@ -466,9 +470,38 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				(line) => (isImageLine(line) || visibleWidth(line) <= width ? line : sliceByColumn(line, 0, width, true)),
 			);
 			let buffer = `${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}${DISABLE_AUTOWRAP}`;
+			const maxSpan = Math.max(1, this.terminal.rows);
 			for (let row = 0; row < this.lastDocument.length; row++) {
 				if (row > 0) buffer += "\r\n";
-				buffer += `\r\x1b[2K${this.lastDocument[row] ?? ""}`;
+				const line = this.lastDocument[row] ?? "";
+				const sixelMeta = getSixelImageMetadata(line);
+				if (sixelMeta && sixelMeta.rows > 1) {
+					let totalSpan = 1;
+					const totalLimit = Math.min(sixelMeta.rows, this.lastDocument.length - row);
+					while (totalSpan < totalLimit && !isImageLine(this.lastDocument[row + totalSpan] ?? "")) {
+						totalSpan++;
+					}
+					const predrawSpan = Math.min(totalSpan, maxSpan);
+					// Draw covered reservation rows (including Box padding/backgrounds or side text) before the
+					// Sixel payload so multi-row placements are never erased by later EL2 clears or padding spaces.
+					buffer += "\r\x1b[2K";
+					for (let offset = 1; offset < predrawSpan; offset++) {
+						buffer += `\r\n\r\x1b[2K${this.lastDocument[row + offset] ?? ""}`;
+					}
+					if (predrawSpan > 1) buffer += `\x1b[${predrawSpan - 1}A`;
+					buffer += `\r\x1b7${line}\x1b8`;
+					if (predrawSpan > 1) buffer += `\x1b[${predrawSpan - 1}B`;
+					// For placements taller than the terminal height, advance past remaining covered rows without
+					// emitting EL2 clears or padded spaces that would overwrite the lower Sixel raster bands.
+					for (let offset = predrawSpan; offset < totalSpan; offset++) {
+						buffer += "\r\n";
+					}
+					row += totalSpan - 1;
+				} else if (sixelMeta) {
+					buffer += `\r\x1b[2K\x1b7${line}\x1b8`;
+				} else {
+					buffer += `\r\x1b[2K${line}`;
+				}
 			}
 			buffer += `\x1b[0m${ENABLE_AUTOWRAP}\r\n\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`;
 			this.terminal.write(buffer);
@@ -1840,10 +1873,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		);
 		const imageCellsNeedRedraw =
 			!imageAnchorsNeedRedraw &&
-			this.imageProtocol === "kitty" &&
+			(this.imageProtocol === "kitty" || this.imageProtocol === "sixel") &&
 			changedRows.some(Boolean) &&
 			screen.some((line, row) => {
-				const placementRows = getKittyImagePlacementRows(line);
+				const placementRows = getImagePlacementRows(line);
 				if (placementRows === undefined) return false;
 				for (let coveredRow = row; coveredRow < row + placementRows; coveredRow++) {
 					if (changedRows[coveredRow]) return true;
@@ -1869,17 +1902,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				buffer += `${this.deleteKittyImages()}\x1b[2J`;
 			}
 		} else if (imagesNeedRedraw) {
-			if (this.imageProtocol === "iterm2") buffer += "\x1b[2J";
+			if (this.imageProtocol === "iterm2" || this.imageProtocol === "sixel") buffer += "\x1b[2J";
 			else if (this.imageProtocol === "kitty") buffer += deleteAllKittyPlacements();
 		}
 		buffer += preparedKittyScreen.evictedImageDeletion;
 
-		// Some terminals store Kitty images in the cells they cover (WezTerm, xterm.js's image addon in Orca),
+		// Sixel and some Kitty terminals store images in the cells they cover (tmux, iTerm2, WezTerm, Orca),
 		// so clearing or writing a covered row erases that part of the image. Draw placements after every clear
 		// and text write so nothing later intersects them. Terminals that keep images on a separate layer
 		// (Kitty, Ghostty) render the same result; text-only frames keep the interleaved output.
-		const drawKittyImagesLast = redrawImages && this.imageProtocol === "kitty" && screen.some(isImageLine);
-		if (drawKittyImagesLast) {
+		const drawImagesLast =
+			redrawImages && (this.imageProtocol === "kitty" || this.imageProtocol === "sixel") && screen.some(isImageLine);
+		if (drawImagesLast) {
 			for (let row = 0; row < height; row++) {
 				if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
 				buffer += `\x1b[${row + 1};1H\x1b[2K`;

@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 import type { TerminalColorMode } from "./colors.ts";
 import { visibleWidth } from "./utils.ts";
 
-export type ImageProtocol = "kitty" | "iterm2" | null;
+export type ImageProtocol = "kitty" | "iterm2" | "sixel" | null;
 
 export interface TerminalCapabilities {
 	images: ImageProtocol;
@@ -31,10 +31,35 @@ export interface ImageRenderOptions {
 	imageId?: number;
 	/** Whether Kitty should apply its default cursor movement after placement. */
 	moveCursor?: boolean;
+	/** Source MIME type for protocols that transcode/encode from source bytes (e.g. Sixel). */
+	mimeType?: string;
 }
+
+export interface SixelEncodeRequest {
+	base64Data: string;
+	mimeType: string;
+	widthPx: number;
+	heightPx: number;
+}
+
+/**
+ * Encodes source base64 image data into a DEC Sixel DCS sequence (`\x1bP...q...\x1b\\`)
+ * sized to the requested pixel box, or returns null if it cannot.
+ * Called synchronously during rendering.
+ */
+export type SixelImageEncoder = (request: SixelEncodeRequest) => string | null;
+
+export interface TmuxCapabilities {
+	hyperlinks: boolean;
+	sixel: boolean;
+	cellDimensions?: CellDimensions;
+}
+
+export type TmuxCapabilityProbe = () => boolean | TmuxCapabilities;
 
 let cachedCapabilities: TerminalCapabilities | null = null;
 let capabilityOverrides: Partial<TerminalCapabilities> = {};
+let sixelEncoder: SixelImageEncoder | undefined;
 
 // Default cell dimensions - updated by TUI when terminal responds to query
 let cellDimensions: CellDimensions = { widthPx: 9, heightPx: 18 };
@@ -48,27 +73,49 @@ export function setCellDimensions(dims: CellDimensions): void {
 }
 
 /**
- * Checks whether the attached tmux client forwards OSC 8 hyperlinks to the
- * outer terminal. tmux only re-emits them when its `client_termfeatures` lists
- * `hyperlinks`, and strips them otherwise. On any error fallbacks `false`.
+ * Register the encoder used for DEC Sixel terminals (including tmux 3.4+ with Sixel support).
+ * Without one, Sixel-capable terminals render text fallbacks.
  */
-function probeTmuxHyperlinks(): boolean {
+export function setSixelEncoder(encoder: SixelImageEncoder | undefined): void {
+	sixelEncoder = encoder;
+}
+
+/**
+ * Queries the attached tmux client in a single call for OSC 8 hyperlink forwarding,
+ * native Sixel image support, and current cell pixel dimensions.
+ */
+function probeTmuxCapabilities(): TmuxCapabilities {
 	try {
-		const termfeatures = execSync("tmux display-message -p '#{client_termfeatures}'", {
-			encoding: "utf8",
-			timeout: 250,
-			stdio: ["ignore", "pipe", "ignore"],
-		});
-		return termfeatures
-			.split(",")
-			.map((feature) => feature.trim())
-			.includes("hyperlinks");
+		const output = execSync(
+			"tmux display-message -p '#{sixel_support}\t#{client_termfeatures}\t#{window_cell_width}x#{window_cell_height}'",
+			{
+				encoding: "utf8",
+				timeout: 250,
+				stdio: ["ignore", "pipe", "ignore"],
+			},
+		).trimEnd();
+		const [sixelSupportRaw = "", termfeaturesRaw = "", cellSizeRaw = ""] = output.split("\t");
+		const features = termfeaturesRaw.split(",").map((feature) => feature.trim());
+		const hyperlinks = features.includes("hyperlinks");
+		const sixel = sixelSupportRaw.trim() !== "0" && features.includes("sixel");
+		const cellMatch = /^(\d+)x(\d+)$/.exec(cellSizeRaw.trim());
+		const widthPx = cellMatch ? Number.parseInt(cellMatch[1]!, 10) : 0;
+		const heightPx = cellMatch ? Number.parseInt(cellMatch[2]!, 10) : 0;
+		const dims = widthPx > 0 && heightPx > 0 ? { widthPx, heightPx } : undefined;
+		return { hyperlinks, sixel, ...(dims ? { cellDimensions: dims } : {}) };
 	} catch {
-		return false;
+		return { hyperlinks: false, sixel: false };
 	}
 }
 
-function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean): TerminalCapabilities {
+function normalizeTmuxCapabilities(result: boolean | TmuxCapabilities): TmuxCapabilities {
+	if (typeof result === "boolean") {
+		return { hyperlinks: result, sixel: false };
+	}
+	return result;
+}
+
+function detectCapabilitiesFromEnvironment(tmuxProbe: TmuxCapabilityProbe): TerminalCapabilities {
 	const termProgram = process.env.TERM_PROGRAM?.toLowerCase() || "";
 	const terminalEmulator = process.env.TERMINAL_EMULATOR?.toLowerCase() || "";
 	const term = process.env.TERM?.toLowerCase() || "";
@@ -76,10 +123,17 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 	const hasTrueColorHint = colorTerm === "truecolor" || colorTerm === "24bit" || term.endsWith("-direct");
 	const isWindowsConsole = process.platform === "win32";
 
-	// Emit OSC 8 hyperlinks only when tmux confirms it forwards.
-	// Image protocols are unreliable under tmux, so leave `images: null`.
+	// Query tmux for hyperlink forwarding, native Sixel graphics, and cell pixel size.
 	if (process.env.TMUX || term.startsWith("tmux")) {
-		return { images: null, trueColor: hasTrueColorHint, hyperlinks: tmuxForwardsHyperlink() };
+		const tmux = normalizeTmuxCapabilities(tmuxProbe());
+		if (tmux.cellDimensions) {
+			setCellDimensions(tmux.cellDimensions);
+		}
+		return {
+			images: tmux.sixel ? "sixel" : null,
+			trueColor: hasTrueColorHint,
+			hyperlinks: tmux.hyperlinks,
+		};
 	}
 
 	// screen does not forward OSC 8 hyperlinks, so keep them off there.
@@ -125,6 +179,19 @@ function detectCapabilitiesFromEnvironment(tmuxForwardsHyperlink: () => boolean)
 		return { images: "iterm2", trueColor: true, hyperlinks: true };
 	}
 
+	if (
+		termProgram === "foot" ||
+		term.startsWith("foot") ||
+		termProgram === "contour" ||
+		term.startsWith("contour") ||
+		termProgram === "rio" ||
+		term.startsWith("rio") ||
+		termProgram === "mintty" ||
+		term.startsWith("mlterm")
+	) {
+		return { images: "sixel", trueColor: true, hyperlinks: true };
+	}
+
 	if (process.env.WT_SESSION) {
 		return { images: null, trueColor: true, hyperlinks: true };
 	}
@@ -158,18 +225,19 @@ function parseBooleanCapabilityOverride(value: string | undefined): boolean | un
 	return value === "1" ? true : value === "0" ? false : undefined;
 }
 
-export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeTmuxHyperlinks): TerminalCapabilities {
+export function detectCapabilities(tmuxProbe: TmuxCapabilityProbe = probeTmuxCapabilities): TerminalCapabilities {
 	const hyperlinks = parseBooleanCapabilityOverride(process.env.PI_HYPERLINKS);
-	const detected = detectCapabilitiesFromEnvironment(
-		hyperlinks === undefined ? tmuxForwardsHyperlink : () => hyperlinks,
-	);
 	const imageProtocol = process.env.PI_IMAGE_PROTOCOL?.toLowerCase();
 	const images =
-		imageProtocol === "kitty" || imageProtocol === "iterm2"
+		imageProtocol === "kitty" || imageProtocol === "iterm2" || imageProtocol === "sixel"
 			? imageProtocol
 			: imageProtocol === "none" || imageProtocol === "0"
 				? null
 				: undefined;
+	const skipTmuxProbe = hyperlinks !== undefined && images !== undefined;
+	const detected = detectCapabilitiesFromEnvironment(
+		skipTmuxProbe ? () => ({ hyperlinks, sixel: images === "sixel" }) : tmuxProbe,
+	);
 	const trueColor = parseBooleanCapabilityOverride(process.env.PI_TRUE_COLOR);
 	return {
 		...detected,
@@ -182,8 +250,13 @@ export function detectCapabilities(tmuxForwardsHyperlink: () => boolean = probeT
 export function getCapabilities(): TerminalCapabilities {
 	if (!cachedCapabilities) {
 		const hyperlinks = capabilityOverrides.hyperlinks;
+		const images = capabilityOverrides.images;
+		const probe =
+			hyperlinks !== undefined && images !== undefined
+				? () => ({ hyperlinks, sixel: images === "sixel" })
+				: undefined;
 		cachedCapabilities = {
-			...detectCapabilities(hyperlinks === undefined ? undefined : () => hyperlinks),
+			...detectCapabilities(probe),
 			...capabilityOverrides,
 		};
 	}
@@ -218,14 +291,64 @@ export function setCapabilities(caps: TerminalCapabilities): void {
 
 const KITTY_PREFIX = "\x1b_G";
 const ITERM2_PREFIX = "\x1b]1337;File=";
+const SIXEL_PREFIX = "\x1bP";
+
+interface SixelSequenceSpan {
+	start: number;
+	bodyStart: number;
+	bodyEnd: number;
+	end: number;
+}
+
+function findSixelHeader(line: string, fromIndex = 0): { start: number; bodyStart: number } | undefined {
+	let index = fromIndex;
+	while (index < line.length) {
+		const start = line.indexOf(SIXEL_PREFIX, index);
+		if (start === -1) return undefined;
+		let cursor = start + SIXEL_PREFIX.length;
+		while (cursor < line.length) {
+			const code = line.charCodeAt(cursor);
+			if ((code >= 0x30 && code <= 0x39) || code === 0x3b) {
+				cursor++;
+				continue;
+			}
+			break;
+		}
+		if (cursor < line.length && line.charCodeAt(cursor) === 0x71 /* 'q' */) {
+			return { start, bodyStart: cursor + 1 };
+		}
+		index = start + SIXEL_PREFIX.length;
+	}
+	return undefined;
+}
+
+function findSixelSequence(line: string, fromIndex = 0): SixelSequenceSpan | undefined {
+	const header = findSixelHeader(line, fromIndex);
+	if (!header) return undefined;
+	const bodyEnd = line.indexOf("\x1b\\", header.bodyStart);
+	if (bodyEnd === -1) return undefined;
+	return {
+		start: header.start,
+		bodyStart: header.bodyStart,
+		bodyEnd,
+		end: bodyEnd + 2,
+	};
+}
+
+export function isSixelImageLine(line: string): boolean {
+	return line.includes(SIXEL_PREFIX) && findSixelHeader(line) !== undefined;
+}
 
 export function isImageLine(line: string): boolean {
 	// Fast path: sequence at line start (single-row images)
 	if (line.startsWith(KITTY_PREFIX) || line.startsWith(ITERM2_PREFIX)) {
 		return true;
 	}
+	if (line.startsWith(SIXEL_PREFIX) && findSixelHeader(line, 0)?.start === 0) {
+		return true;
+	}
 	// Slow path: sequence elsewhere (multi-row images have cursor-up prefix)
-	return line.includes(KITTY_PREFIX) || line.includes(ITERM2_PREFIX);
+	return line.includes(KITTY_PREFIX) || line.includes(ITERM2_PREFIX) || isSixelImageLine(line);
 }
 
 /**
@@ -257,24 +380,50 @@ export function getImageLineExtent(line: string): ImageLineExtent | undefined {
 		return { firstRow: 0, lastRow: rows - 1, startCol, endCol: startCol + (columns ?? Infinity) };
 	}
 	const iterm2Start = line.indexOf(ITERM2_PREFIX);
-	if (iterm2Start === -1) return undefined;
-	const before = line.slice(0, iterm2Start);
-	const moveUp = /\x1b\[(\d+)A$/.exec(before);
-	// Only a plain cell count is a known width; `auto`, pixel and percent widths depend on the image.
-	const columnValue = /[;=]width=(\d+)[;:]/.exec(line.slice(iterm2Start))?.[1];
-	// visibleWidth counts the cursor-up sequence as text, so measure only what precedes it.
-	const startCol = visibleWidth(moveUp ? before.slice(0, moveUp.index) : before);
+	if (iterm2Start !== -1) {
+		const before = line.slice(0, iterm2Start);
+		const moveUp = /\x1b\[(\d+)A$/.exec(before);
+		// Only a plain cell count is a known width; `auto`, pixel and percent widths depend on the image.
+		const columnValue = /[;=]width=(\d+)[;:]/.exec(line.slice(iterm2Start))?.[1];
+		// visibleWidth counts the cursor-up sequence as text, so measure only what precedes it.
+		const startCol = visibleWidth(moveUp ? before.slice(0, moveUp.index) : before);
+		return {
+			firstRow: moveUp ? -Number.parseInt(moveUp[1]!, 10) : 0,
+			lastRow: 0,
+			startCol,
+			endCol: startCol + (columnValue === undefined ? Infinity : Number.parseInt(columnValue, 10)),
+		};
+	}
+	const sixelHeader = findSixelHeader(line);
+	if (!sixelHeader) return undefined;
+	const metadata = getSixelImageMetadata(line);
+	const startCol = visibleWidth(line.slice(0, sixelHeader.start));
+	const rows = metadata?.rows ?? 1;
 	return {
-		firstRow: moveUp ? -Number.parseInt(moveUp[1]!, 10) : 0,
-		lastRow: 0,
+		firstRow: 0,
+		lastRow: rows - 1,
 		startCol,
-		endCol: startCol + (columnValue === undefined ? Infinity : Number.parseInt(columnValue, 10)),
+		endCol: startCol + (metadata?.columns ?? Infinity),
 	};
 }
 
-/** Remove Kitty and iTerm2 image sequences, including iTerm2's cursor-up prefix, keeping the text. */
+/** Remove Kitty, iTerm2, and Sixel image sequences, including iTerm2's cursor-up prefix, keeping the text. */
 export function stripImageSequences(line: string): string {
-	return line.replace(/\x1b_G[^\x1b]*\x1b\\/g, "").replace(/(?:\x1b\[\d+A)?\x1b\]1337;File=[^\x07]*\x07/g, "");
+	let stripped = line.replace(/\x1b_G[^\x1b]*\x1b\\/g, "").replace(/(?:\x1b\[\d+A)?\x1b\]1337;File=[^\x07]*\x07/g, "");
+	if (!stripped.includes(SIXEL_PREFIX)) return stripped;
+	let result = "";
+	let cursor = 0;
+	while (cursor < stripped.length) {
+		const span = findSixelSequence(stripped, cursor);
+		if (!span) {
+			result += stripped.slice(cursor);
+			break;
+		}
+		result += stripped.slice(cursor, span.start);
+		cursor = span.end;
+	}
+	stripped = result;
+	return stripped;
 }
 
 /**
@@ -393,6 +542,19 @@ export interface KittyImageMetadata extends ImageCellSize {
 	heightPx: number;
 }
 
+export interface SixelImageMetadata extends ImageCellSize {
+	widthPx: number;
+	heightPx: number;
+}
+
+interface ParsedSixelBands {
+	prefix: string;
+	rasterPrefix: string;
+	paletteHeader: string;
+	bands: string[];
+	bandStartColors: Array<number | undefined>;
+}
+
 interface RegisteredKittyImageMetadata extends KittyImageMetadata {
 	transmissionGeneration: number;
 }
@@ -412,6 +574,7 @@ let kittyTransmissionGeneration = 0;
 // Tallest registered image. Bounds backward searches for image lines above a
 // viewport: no image line further up than this can reach into it.
 let maxKittyImageRows = 0;
+let maxSixelImageRows = 0;
 
 export function registerKittyImageMetadata(metadata: KittyImageMetadata): void {
 	kittyTransmissionGeneration += 1;
@@ -427,6 +590,171 @@ export function registerKittyImageMetadata(metadata: KittyImageMetadata): void {
 /** Return the row height of the tallest Kitty image registered so far. */
 export function getMaxKittyImageRows(): number {
 	return maxKittyImageRows;
+}
+
+/** Return the row height of the tallest top-anchored image (Kitty or Sixel) registered so far. */
+export function getMaxImageRows(): number {
+	return Math.max(maxKittyImageRows, maxSixelImageRows);
+}
+
+function parseSixelRasterDimensions(sequence: string): ImageDimensions | undefined {
+	const span = findSixelSequence(sequence);
+	if (!span) return undefined;
+	const bodyHead = sequence.slice(span.bodyStart, Math.min(span.bodyEnd, span.bodyStart + 64));
+	const match = /^"\d+;\d+;(\d+);(\d+)/.exec(bodyHead);
+	if (!match) return undefined;
+	const widthPx = Number.parseInt(match[1]!, 10);
+	const heightPx = Number.parseInt(match[2]!, 10);
+	return widthPx > 0 && heightPx > 0 ? { widthPx, heightPx } : undefined;
+}
+
+function ensureSixelRasterAttributes(sequence: string, widthPx: number, heightPx: number): string {
+	if (parseSixelRasterDimensions(sequence)) return sequence;
+	const span = findSixelSequence(sequence);
+	if (!span) return sequence;
+	return `${sequence.slice(0, span.bodyStart)}"1;1;${widthPx};${heightPx}${sequence.slice(span.bodyStart)}`;
+}
+
+function measureSixelBandDimensions(sequence: string): { widthPx: number; heightPx: number } | undefined {
+	const parsed = parseSixelBands(sequence, 1);
+	if (!parsed || parsed.bands.length === 0) return undefined;
+	let maxCols = 0;
+	for (const band of parsed.bands) {
+		for (const pass of band.split("$")) {
+			let cols = 0;
+			let i = 0;
+			while (i < pass.length) {
+				const ch = pass.charCodeAt(i);
+				if (ch === 0x23) {
+					// Color selector (#n or #n;...)
+					i++;
+					while (
+						i < pass.length &&
+						((pass.charCodeAt(i) >= 0x30 && pass.charCodeAt(i) <= 0x39) || pass.charCodeAt(i) === 0x3b)
+					) {
+						i++;
+					}
+					continue;
+				}
+				if (ch === 0x21) {
+					// Repeat introducer (!<count><sixel>)
+					i++;
+					let count = 0;
+					while (i < pass.length && pass.charCodeAt(i) >= 0x30 && pass.charCodeAt(i) <= 0x39) {
+						count = count * 10 + (pass.charCodeAt(i) - 0x30);
+						i++;
+					}
+					if (i < pass.length && pass.charCodeAt(i) >= 0x3f && pass.charCodeAt(i) <= 0x7e) {
+						cols += Math.max(1, count);
+						i++;
+					}
+					continue;
+				}
+				if (ch >= 0x3f && ch <= 0x7e) {
+					cols++;
+				}
+				i++;
+			}
+			if (cols > maxCols) maxCols = cols;
+		}
+	}
+	return { widthPx: Math.max(1, maxCols), heightPx: parsed.bands.length * 6 };
+}
+
+export function getSixelImageMetadata(line: string): SixelImageMetadata | undefined {
+	const span = findSixelSequence(line);
+	if (!span) return undefined;
+	const sequence = line.slice(span.start, span.end);
+	const raster = parseSixelRasterDimensions(sequence) ?? measureSixelBandDimensions(sequence);
+	if (!raster) return undefined;
+	const dims = getCellDimensions();
+	const rows = Math.max(1, Math.ceil(raster.heightPx / dims.heightPx));
+	maxSixelImageRows = Math.max(maxSixelImageRows, rows);
+	return {
+		columns: Math.max(1, Math.ceil(raster.widthPx / dims.widthPx)),
+		rows,
+		widthPx: raster.widthPx,
+		heightPx: raster.heightPx,
+	};
+}
+
+function parseSixelBands(sequence: string, fallbackWidthPx: number): ParsedSixelBands | undefined {
+	const span = findSixelSequence(sequence);
+	if (!span) return undefined;
+	const prefix = sequence.slice(span.start, span.bodyStart);
+	const body = sequence.slice(span.bodyStart, span.bodyEnd);
+	let offset = 0;
+	let rasterPrefix = `"1;1;${fallbackWidthPx};`;
+	const rasterMatch = /^"(\d+);(\d+);(\d+);(\d+)/.exec(body);
+	if (rasterMatch) {
+		rasterPrefix = `"${rasterMatch[1]};${rasterMatch[2]};${rasterMatch[3]};`;
+		offset = rasterMatch[0].length;
+	}
+	// Leading palette definitions (#n;1;... or #n;2;...) stay intact across cropped bands.
+	const palettePattern = /#\d+;[12];\d+;\d+;\d+/gy;
+	palettePattern.lastIndex = offset;
+	let paletteEnd = offset;
+	while (palettePattern.exec(body) !== null) {
+		paletteEnd = palettePattern.lastIndex;
+	}
+	const paletteHeader = body.slice(offset, paletteEnd);
+	const bandBody = body.slice(paletteEnd);
+	const bands = bandBody.split("-");
+	const bandStartColors: Array<number | undefined> = new Array(bands.length);
+	let activeColor: number | undefined;
+	const colorSelector = /#(\d+)/g;
+	for (let i = 0; i < bands.length; i++) {
+		bandStartColors[i] = activeColor;
+		colorSelector.lastIndex = 0;
+		let match = colorSelector.exec(bands[i]!);
+		while (match !== null) {
+			activeColor = Number.parseInt(match[1]!, 10);
+			match = colorSelector.exec(bands[i]!);
+		}
+	}
+	return { prefix, rasterPrefix, paletteHeader, bands, bandStartColors };
+}
+
+/** Crop a Sixel image line vertically by slicing its 6-pixel bands in O(bands) time. */
+export function cropSixelImageLine(line: string, hiddenRows: number, visibleRows: number): string {
+	const metadata = getSixelImageMetadata(line);
+	const span = findSixelSequence(line);
+	if (!metadata || !span || hiddenRows < 0 || hiddenRows >= metadata.rows || visibleRows <= 0) return line;
+	const croppedRows = Math.min(visibleRows, metadata.rows - hiddenRows);
+	if (hiddenRows === 0 && croppedRows === metadata.rows) return line;
+	const sequence = line.slice(span.start, span.end);
+	const parsed = parseSixelBands(sequence, metadata.widthPx);
+	if (!parsed || parsed.bands.length === 0) return line;
+
+	const totalBands = parsed.bands.length;
+	const startBand = Math.min(totalBands - 1, Math.floor((hiddenRows * totalBands) / metadata.rows));
+	const endBand = Math.max(
+		startBand + 1,
+		Math.min(totalBands, Math.ceil(((hiddenRows + croppedRows) * totalBands) / metadata.rows)),
+	);
+	const croppedHeightPx = Math.max(1, (endBand - startBand) * 6);
+	const firstBand = parsed.bands[startBand] ?? "";
+	const inheritedColor = startBand > 0 ? parsed.bandStartColors[startBand] : undefined;
+	const colorPrefix = inheritedColor !== undefined && !firstBand.startsWith("#") ? `#${inheritedColor}` : "";
+	const croppedSequence = `${parsed.prefix}${parsed.rasterPrefix}${croppedHeightPx}${parsed.paletteHeader}${colorPrefix}${parsed.bands.slice(startBand, endBand).join("-")}\x1b\\`;
+	return `${line.slice(0, span.start)}${croppedSequence}${line.slice(span.end)}`;
+}
+
+/** Return metadata for any top-anchored croppable image (Kitty or Sixel). */
+export function getCroppableImageMetadata(line: string): (ImageCellSize & ImageDimensions) | undefined {
+	return getKittyImageMetadata(line) ?? getSixelImageMetadata(line);
+}
+
+/** Crop any top-anchored image line (Kitty or Sixel) to a vertical slice of rows. */
+export function cropImageLine(line: string, hiddenRows: number, visibleRows: number): string {
+	if (line.includes(KITTY_PREFIX)) return cropKittyImageLine(line, hiddenRows, visibleRows);
+	if (line.includes(SIXEL_PREFIX)) return cropSixelImageLine(line, hiddenRows, visibleRows);
+	return line;
+}
+
+/** Return the number of rows covered by a top-anchored image placement (Kitty or Sixel). */
+export function getImagePlacementRows(line: string): number | undefined {
+	return getKittyImagePlacementRows(line) ?? getSixelImageMetadata(line)?.rows;
 }
 
 function getRegisteredKittyImageMetadataFromControls(controls: string): RegisteredKittyImageMetadata | undefined {
@@ -636,6 +964,63 @@ export function getPngDimensions(base64Data: string): ImageDimensions | null {
 	}
 }
 
+function parseTiffOrientation(buffer: Buffer, tiffStart: number, end: number): number | undefined {
+	if (end - tiffStart < 8) return undefined;
+	const littleEndian = buffer[tiffStart] === 0x49 && buffer[tiffStart + 1] === 0x49;
+	const bigEndian = buffer[tiffStart] === 0x4d && buffer[tiffStart + 1] === 0x4d;
+	if (!littleEndian && !bigEndian) return undefined;
+	const readU16 = (pos: number) => (littleEndian ? buffer.readUInt16LE(pos) : buffer.readUInt16BE(pos));
+	const readU32 = (pos: number) => (littleEndian ? buffer.readUInt32LE(pos) : buffer.readUInt32BE(pos));
+	if (readU16(tiffStart + 2) !== 42) return undefined;
+	const ifdOffset = readU32(tiffStart + 4);
+	const ifdStart = tiffStart + ifdOffset;
+	if (ifdStart < tiffStart || ifdStart + 2 > end) return undefined;
+	const entryCount = readU16(ifdStart);
+	for (let i = 0; i < entryCount; i++) {
+		const entryStart = ifdStart + 2 + i * 12;
+		if (entryStart + 12 > end) break;
+		if (readU16(entryStart) === 0x0112) {
+			return readU16(entryStart + 8);
+		}
+	}
+	return undefined;
+}
+
+function hasExifHeader(buffer: Buffer, start: number, end: number): boolean {
+	return (
+		end - start >= 6 &&
+		buffer[start] === 0x45 &&
+		buffer[start + 1] === 0x78 &&
+		buffer[start + 2] === 0x69 &&
+		buffer[start + 3] === 0x66 &&
+		buffer[start + 4] === 0x00 &&
+		buffer[start + 5] === 0x00
+	);
+}
+
+function parseExifOrientation(buffer: Buffer, start: number, end: number): number | undefined {
+	if (!hasExifHeader(buffer, start, end)) return undefined;
+	return parseTiffOrientation(buffer, start + 6, end);
+}
+
+function parseWebpExifOrientation(buffer: Buffer): number | undefined {
+	let offset = 12;
+	while (offset + 8 <= buffer.length) {
+		const chunkId = buffer.slice(offset, offset + 4).toString("ascii");
+		const chunkSize = buffer.readUInt32LE(offset + 4);
+		const dataStart = offset + 8;
+		const dataEnd = dataStart + chunkSize;
+		if (dataEnd > buffer.length) return undefined;
+		if (chunkId === "EXIF") {
+			const tiffStart = hasExifHeader(buffer, dataStart, dataEnd) ? dataStart + 6 : dataStart;
+			return parseTiffOrientation(buffer, tiffStart, dataEnd);
+		}
+		// RIFF chunks are padded to an even byte boundary.
+		offset = dataEnd + (chunkSize % 2);
+	}
+	return undefined;
+}
+
 function parseJpegDimensions(
 	buffer: Buffer,
 	complete: boolean,
@@ -648,6 +1033,7 @@ function parseJpegDimensions(
 		return { kind: "done", dimensions: null };
 	}
 
+	let exifOrientation: number | undefined;
 	let offset = 2;
 	while (offset < buffer.length - 9) {
 		if (buffer[offset] !== 0xff) {
@@ -660,7 +1046,11 @@ function parseJpegDimensions(
 		if (marker >= 0xc0 && marker <= 0xc2) {
 			const height = buffer.readUInt16BE(offset + 5);
 			const width = buffer.readUInt16BE(offset + 7);
-			return { kind: "done", dimensions: { widthPx: width, heightPx: height } };
+			const rotated = exifOrientation !== undefined && exifOrientation >= 5 && exifOrientation <= 8;
+			return {
+				kind: "done",
+				dimensions: rotated ? { widthPx: height, heightPx: width } : { widthPx: width, heightPx: height },
+			};
 		}
 
 		if (offset + 3 >= buffer.length) {
@@ -670,7 +1060,15 @@ function parseJpegDimensions(
 		if (length < 2) {
 			return { kind: "done", dimensions: null };
 		}
-		offset += 2 + length;
+		const segmentEnd = offset + 2 + length;
+		if (marker === 0xe1) {
+			if (segmentEnd > buffer.length) {
+				if (!complete) return { kind: "truncated" };
+			} else if (exifOrientation === undefined) {
+				exifOrientation = parseExifOrientation(buffer, offset + 4, segmentEnd);
+			}
+		}
+		offset = segmentEnd;
 	}
 
 	return complete ? { kind: "done", dimensions: null } : { kind: "truncated" };
@@ -743,6 +1141,11 @@ export function getWebpDimensions(base64Data: string): ImageDimensions | null {
 			if (buffer.length < 30) return null;
 			const width = (buffer[24] | (buffer[25] << 8) | (buffer[26] << 16)) + 1;
 			const height = (buffer[27] | (buffer[28] << 8) | (buffer[29] << 16)) + 1;
+			const fullBuffer = Buffer.from(base64Data, "base64");
+			const orientation = parseWebpExifOrientation(fullBuffer);
+			if (orientation !== undefined && orientation >= 5 && orientation <= 8) {
+				return { widthPx: height, heightPx: width };
+			}
 			return { widthPx: width, heightPx: height };
 		}
 
@@ -780,13 +1183,14 @@ export function renderImage(
 	}
 
 	const maxWidth = options.maxWidthCells ?? 80;
+	const cellDims = getCellDimensions();
 	// Reduce Kitty's cell-aligned distortion without shrinking iTerm2 reservations.
 	const size = calculateImageCellSize(
 		imageDimensions,
 		maxWidth,
 		options.maxHeightCells,
-		getCellDimensions(),
-		caps.images === "kitty",
+		cellDims,
+		caps.images === "kitty" || caps.images === "sixel",
 	);
 
 	if (caps.images === "kitty") {
@@ -814,6 +1218,27 @@ export function renderImage(
 			height: "auto",
 			preserveAspectRatio: options.preserveAspectRatio ?? true,
 		});
+		return { sequence, columns: size.columns, rows: size.rows };
+	}
+
+	if (caps.images === "sixel") {
+		if (!sixelEncoder) return null;
+		const boxWidthPx = size.columns * cellDims.widthPx;
+		const boxHeightPx = size.rows * cellDims.heightPx;
+		const srcW = Math.max(1, imageDimensions.widthPx);
+		const srcH = Math.max(1, imageDimensions.heightPx);
+		const scale = Math.min(boxWidthPx / srcW, boxHeightPx / srcH);
+		const targetWidthPx = Math.max(1, Math.min(boxWidthPx, Math.round(srcW * scale)));
+		const targetHeightPx = Math.max(1, Math.min(boxHeightPx, Math.round(srcH * scale)));
+		const rawSequence = sixelEncoder({
+			base64Data,
+			mimeType: options.mimeType ?? "image/png",
+			widthPx: targetWidthPx,
+			heightPx: targetHeightPx,
+		});
+		if (!rawSequence) return null;
+		const sequence = ensureSixelRasterAttributes(rawSequence, targetWidthPx, targetHeightPx);
+		maxSixelImageRows = Math.max(maxSixelImageRows, size.rows);
 		return { sequence, columns: size.columns, rows: size.rows };
 	}
 

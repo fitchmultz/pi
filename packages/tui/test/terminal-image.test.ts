@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { Image, setImageTranscoder } from "../src/components/image.ts";
 import {
 	cropKittyImageLine,
+	cropSixelImageLine,
 	deleteAllKittyImages,
 	deleteAllKittyPlacements,
 	deleteKittyImage,
@@ -16,24 +17,31 @@ import {
 	encodeITerm2,
 	encodeKitty,
 	getCapabilities,
+	getCellDimensions,
 	getGifDimensions,
+	getImageLineExtent,
 	getJpegDimensions,
 	getKittyImageMetadata,
 	getKittyImagePlacement,
 	getKittyImagePlacementRows,
 	getPngDimensions,
+	getSixelImageMetadata,
 	getWebpDimensions,
 	hyperlink,
 	imageFallback,
 	isImageLine,
+	isSixelImageLine,
 	registerKittyImageMetadata,
 	renderImage,
 	resetCapabilitiesCache,
 	setCapabilities,
 	setCapabilityOverrides,
 	setCellDimensions,
+	setSixelEncoder,
+	stripImageSequences,
 } from "../src/terminal-image.ts";
-import { visibleWidth } from "../src/utils.ts";
+import { compositeTuiLine } from "../src/tui.ts";
+import { sliceByColumn, stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 
 const ENV_KEYS = [
 	"TERM",
@@ -1040,5 +1048,227 @@ describe("hyperlink", () => {
 		const result = hyperlink("README.md", "file:///home/user/README.md");
 		assert.ok(result.includes("file:///home/user/README.md"));
 		assert.ok(result.includes("README.md"));
+	});
+});
+
+describe("Sixel image protocol", () => {
+	afterEach(() => {
+		setSixelEncoder(undefined);
+		resetCapabilitiesCache();
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
+	});
+
+	it("detects Sixel DCS sequences without matching non-Sixel DCS replies", () => {
+		const sixel = '\x1bP0;1q"1;1;12;12#0;2;100;0;0#0~~~-~~~\x1b\\';
+		assert.strictEqual(isImageLine(sixel), true);
+		assert.strictEqual(isSixelImageLine(sixel), true);
+		assert.strictEqual(isImageLine(`prefix ${sixel} suffix`), true);
+		assert.strictEqual(stripImageSequences(`prefix ${sixel} suffix`), "prefix  suffix");
+
+		assert.strictEqual(isImageLine("\x1bP>|iTerm2 3.7.9\x1b\\"), false);
+		assert.strictEqual(isImageLine("\x1bP+q544e\x1b\\"), false);
+		assert.strictEqual(isImageLine("\x1bPtmux;\x1b\x1b]0;title\x07\x1b\\"), false);
+	});
+
+	it("detects Sixel capability via tmux probe, native terminals, and PI_IMAGE_PROTOCOL", () => {
+		withEnv({ TMUX: "/tmp/tmux-501/default,123,0" }, () => {
+			const caps = detectCapabilities(() => ({
+				hyperlinks: true,
+				sixel: true,
+				cellDimensions: { widthPx: 16, heightPx: 36 },
+			}));
+			assert.deepStrictEqual(caps, { images: "sixel", trueColor: false, hyperlinks: true });
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 16, heightPx: 36 });
+		});
+
+		withEnv({ TMUX: "/tmp/tmux-501/default,123,0" }, () => {
+			const caps = detectCapabilities(() => ({ hyperlinks: true, sixel: false }));
+			assert.deepStrictEqual(caps, { images: null, trueColor: false, hyperlinks: true });
+		});
+
+		withEnv({ TERM_PROGRAM: "foot" }, () => {
+			assert.deepStrictEqual(detectCapabilities(), { images: "sixel", trueColor: true, hyperlinks: true });
+		});
+
+		withEnv({ PI_IMAGE_PROTOCOL: "sixel" }, () => {
+			assert.strictEqual(detectCapabilities().images, "sixel");
+		});
+	});
+
+	it("falls back to text until a Sixel encoder is registered, caches results, and crops 6px bands cleanly", () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 18 });
+
+		const image = new Image(
+			"AAAA",
+			"image/png",
+			{ fallbackColor: (value) => value },
+			{ maxWidthCells: 4, filename: "shot.png" },
+			{ widthPx: 40, heightPx: 54 },
+		);
+		assert.match(image.render(40)[0] ?? "", /^\[Image: shot\.png \[image\/png\] 40x54\]$/);
+
+		let encodeCalls = 0;
+		setSixelEncoder(({ widthPx, heightPx }) => {
+			encodeCalls++;
+			// 9 bands (54px = 3 rows * 18px) with active color #1 carried from band 2 into band 3
+			return `\x1bP0;1q"1;1;${widthPx};${heightPx}#0;2;0;0;0#1;2;100;0;0#0AAA-BBB-#1CCC-DDD-EEE-FFF-#0GGG-HHH-III\x1b\\`;
+		});
+		image.invalidate();
+		const lines = image.render(40);
+		assert.strictEqual(encodeCalls, 1);
+		assert.strictEqual(lines.length, 3);
+		assert.deepStrictEqual(lines.slice(1), ["", ""]);
+		assert.deepStrictEqual(getSixelImageMetadata(lines[0]!), {
+			columns: 4,
+			rows: 3,
+			widthPx: 40,
+			heightPx: 54,
+		});
+		assert.deepStrictEqual(getImageLineExtent(lines[0]!), {
+			firstRow: 0,
+			lastRow: 2,
+			startCol: 0,
+			endCol: 4,
+		});
+
+		// Re-rendering the same Image at the same width reuses its component line cache.
+		assert.deepStrictEqual(image.render(40), lines);
+		assert.strictEqual(encodeCalls, 1);
+
+		// Crop middle row (hiddenRows=1, visibleRows=1 -> bands 3..5, preserving inherited active color #1).
+		const cropped = cropSixelImageLine(lines[0]!, 1, 1);
+		assert.strictEqual(cropped, '\x1bP0;1q"1;1;40;18#0;2;0;0;0#1;2;100;0;0#1DDD-EEE-FFF\x1b\\');
+		assert.strictEqual(getSixelImageMetadata(cropped)?.rows, 1);
+
+		// Raw Sixel lines report metadata directly from their DEC Sixel raster attributes.
+		const raw = '\x1bP0;1q"1;1;30;36#0~~~\x1b\\';
+		assert.deepStrictEqual(getSixelImageMetadata(raw), { columns: 3, rows: 2, widthPx: 30, heightPx: 36 });
+		assert.deepStrictEqual(getImageLineExtent(`  ${raw}`), { firstRow: 0, lastRow: 1, startCol: 2, endCol: 5 });
+	});
+
+	it("swaps width and height in getJpegDimensions for EXIF orientations 5-8", () => {
+		// Minimal JPEG: SOI + APP1(EXIF little-endian orientation=6) + SOF0(width=200, height=100) + EOI
+		const exifPayload = Buffer.from([
+			0x45,
+			0x78,
+			0x69,
+			0x66,
+			0x00,
+			0x00, // "Exif\0\0"
+			0x49,
+			0x49,
+			0x2a,
+			0x00,
+			0x08,
+			0x00,
+			0x00,
+			0x00, // TIFF II, magic 42, IFD0 @ 8
+			0x01,
+			0x00, // 1 IFD entry
+			0x12,
+			0x01,
+			0x03,
+			0x00,
+			0x01,
+			0x00,
+			0x00,
+			0x00,
+			0x06,
+			0x00,
+			0x00,
+			0x00, // Orientation = 6
+			0x00,
+			0x00,
+			0x00,
+			0x00,
+		]);
+		const app1Len = Buffer.alloc(2);
+		app1Len.writeUInt16BE(exifPayload.length + 2, 0);
+		const sof0 = Buffer.from([
+			0xff,
+			0xc0,
+			0x00,
+			0x0b,
+			0x08,
+			0x00,
+			0x64, // height = 100
+			0x00,
+			0xc8, // width = 200
+			0x01,
+			0x01,
+			0x11,
+			0x00,
+		]);
+		const jpeg = Buffer.concat([
+			Buffer.from([0xff, 0xd8, 0xff, 0xe1]),
+			app1Len,
+			exifPayload,
+			sof0,
+			Buffer.from([0xff, 0xd9]),
+		]);
+		assert.deepStrictEqual(getJpegDimensions(jpeg.toString("base64")), { widthPx: 100, heightPx: 200 });
+	});
+
+	it("applies EXIF orientation 5-8 to WebP VP8X dimensions", () => {
+		const vp8xPayload = Buffer.alloc(10);
+		vp8xPayload[0] = 0x08; // EXIF flag
+		// width - 1 = 199 (200px), height - 1 = 99 (100px)
+		vp8xPayload[4] = 199;
+		vp8xPayload[7] = 99;
+		const tiff = Buffer.from([
+			0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+			0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		]);
+		const vp8xChunk = Buffer.concat([Buffer.from("VP8X"), Buffer.from([10, 0, 0, 0]), vp8xPayload]);
+		const exifHeader = Buffer.alloc(8);
+		exifHeader.write("EXIF", 0, "ascii");
+		exifHeader.writeUInt32LE(tiff.length, 4);
+		const body = Buffer.concat([Buffer.from("WEBP"), vp8xChunk, exifHeader, tiff]);
+		const riffHeader = Buffer.alloc(8);
+		riffHeader.write("RIFF", 0, "ascii");
+		riffHeader.writeUInt32LE(body.length, 4);
+		const webp = Buffer.concat([riffHeader, body]);
+		assert.deepStrictEqual(getWebpDimensions(webp.toString("base64")), { widthPx: 100, heightPx: 200 });
+	});
+
+	it("treats Sixel DCS sequences as zero-width escape codes in width, slicing, stripping, and compositing", () => {
+		const sixel = '\x1bP0;1q"1;1;40;54#0;2;100;0;0#0~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\x1b\\';
+		assert.strictEqual(visibleWidth(sixel), 0);
+		assert.strictEqual(stripTerminalSequences(sixel), "");
+		assert.strictEqual(sliceByColumn(sixel, 0, 20, true), sixel);
+		assert.strictEqual(sliceByColumn(`abc${sixel}def`, 3, 3, true), `${sixel}def`);
+		assert.strictEqual(sliceByColumn(`${sixel}abcdef`, 2, 3, true), "cde");
+		const composited = compositeTuiLine(" ".repeat(40), sixel, 2, 20, 40);
+		assert.ok(composited.includes(sixel), "compositeTuiLine must preserve the complete Sixel DCS sequence with ST");
+	});
+
+	it("preserves placement metadata when a Sixel encoder or raw Sixel line omits raster attributes", () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		setSixelEncoder(() => "\x1bP0;1q#0;2;100;0;0#0!20~-!20~-!20~\x1b\\");
+		try {
+			const img = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: (v) => v },
+				{ maxWidthCells: 2, maxHeightCells: 5 },
+				{ widthPx: 20, heightPx: 30 },
+			);
+			const lines = img.render(20);
+			assert.strictEqual(lines.length, 3);
+			assert.deepStrictEqual(getSixelImageMetadata(lines[0]!), { columns: 2, rows: 3, widthPx: 20, heightPx: 30 });
+			// Standalone raster-less Sixel line also resolves dimensions from band geometry.
+			assert.deepStrictEqual(getSixelImageMetadata("\x1bP0;1q#0;2;100;0;0#0!20~-!20~-!20~\x1b\\"), {
+				columns: 2,
+				rows: 2,
+				widthPx: 20,
+				heightPx: 18,
+			});
+		} finally {
+			setSixelEncoder(undefined);
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+			resetCapabilitiesCache();
+		}
 	});
 });

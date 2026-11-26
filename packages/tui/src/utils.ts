@@ -579,7 +579,7 @@ function asciiVisibleWidth(str: string): number {
 	return width;
 }
 
-/** Length of the ANSI/OSC/APC escape sequence starting at `pos`, or 0 if there is none. */
+/** Length of the ANSI/OSC/APC/DCS escape sequence starting at `pos`, or 0 if there is none. */
 function ansiCodeLength(str: string, pos: number): number {
 	if (pos >= str.length || str.charCodeAt(pos) !== 0x1b) return 0;
 
@@ -604,6 +604,15 @@ function ansiCodeLength(str: string, pos: number): number {
 			const c = str.charCodeAt(j);
 			if (c === 0x07) return j + 1 - pos;
 			if (c === 0x1b && str[j + 1] === "\\") return j + 2 - pos;
+		}
+		return 0;
+	}
+
+	// DCS sequence: ESC P ... ST (ESC \)
+	// Used for Sixel graphics and device control replies.
+	if (next === "P") {
+		for (let j = pos + 2; j < str.length; j++) {
+			if (str.charCodeAt(j) === 0x1b && str[j + 1] === "\\") return j + 2 - pos;
 		}
 		return 0;
 	}
@@ -1431,7 +1440,12 @@ export function sliceWithWidth(
 				// Keep original order: codes from before the range must precede codes at the boundary
 				result += pendingAnsi + ansi.code;
 				pendingAnsi = "";
-			} else if (currentCol < startCol && !ansi.code.startsWith("\x1b_") && !ansi.code.startsWith("\x1b]pi:"))
+			} else if (
+				currentCol < startCol &&
+				!ansi.code.startsWith("\x1b_") &&
+				!ansi.code.startsWith("\x1bP") &&
+				!ansi.code.startsWith("\x1b]pi:")
+			)
 				pendingAnsi += ansi.code;
 			i += ansi.length;
 			continue;
@@ -1529,7 +1543,7 @@ export function extractSegments(
 			} else if (
 				currentCol >= afterStart &&
 				currentCol < afterEnd &&
-				(afterStarted || ansi.code.startsWith("\x1b_"))
+				(afterStarted || ansi.code.startsWith("\x1b_") || ansi.code.startsWith("\x1bP"))
 			) {
 				// SGR codes are only included after "after" started (styling already prepended). Zero-width APC
 				// markers like CURSOR_MARKER are not tracked styling, so keep them at the boundary too.

@@ -13,6 +13,7 @@ import {
 	resetCapabilitiesCache,
 	setCapabilities,
 	setCellDimensions,
+	setSixelEncoder,
 } from "../src/terminal-image.ts";
 import { type Component, CURSOR_MARKER, renderFakeCursor, type TUI } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
@@ -505,6 +506,53 @@ describe("TUI Kitty image cleanup", () => {
 
 			tui.stop();
 		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("clears reserved Sixel image rows before drawing and preserves cursor with DECSC/DECRC", async () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		setSixelEncoder(({ widthPx, heightPx }) => `\x1bP0;1q"1;1;${widthPx};${heightPx}#0;2;100;0;0#0~~~\x1b\\`);
+		try {
+			const terminal = new LoggingVirtualTerminal(40, 10);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const component = new TestComponent();
+			tui.addChild(component);
+
+			component.lines = ["before"];
+			tui.start();
+			await terminal.waitForRender();
+			terminal.clearWrites();
+
+			const image = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: (value) => value },
+				{ maxWidthCells: 2 },
+				{ widthPx: 20, heightPx: 20 },
+			);
+			const imageLines = image.render(40);
+			assert.strictEqual(imageLines.length, 2);
+			const imageSequence = imageLines[0]!;
+			component.lines = ["before", ...imageLines, "after"];
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			const writes = terminal.getWrites();
+			assert.ok(
+				writes.includes(`\x1b[2K\r\n\x1b[2K\x1b[1A\x1b7${imageSequence}\x1b8\x1b[1B`),
+				"reserved rows should be cleared before Sixel is drawn with DECSC/DECRC cursor protection",
+			);
+			assert.ok(
+				!writes.includes(`\x1b7${imageSequence}\x1b8\r\n\x1b[2K`),
+				"reserved row clears must not run after Sixel placement",
+			);
+
+			tui.stop();
+		} finally {
+			setSixelEncoder(undefined);
 			resetCapabilitiesCache();
 			setCellDimensions({ widthPx: 9, heightPx: 18 });
 		}

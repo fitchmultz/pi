@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
+import { deleteKittyImage, getImagePlacementRows, isImageLine, isSixelImageLine } from "./terminal-image.ts";
 import { type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
 import { visibleWidth } from "./utils.ts";
 
@@ -198,21 +198,25 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		return buffer;
 	}
 
-	private getKittyImageReservedRows(lines: string[], index: number, maxIndex = lines.length - 1): number {
-		const rows = extractKittyImageRows(lines[index] ?? "");
+	private getTopAnchoredImageReservedRows(lines: string[], index: number, maxIndex = lines.length - 1): number {
+		const line = lines[index] ?? "";
+		const isSixel = isSixelImageLine(line);
+		const rows = isSixel ? (getImagePlacementRows(line) ?? 1) : extractKittyImageRows(line);
 		if (rows <= 1) return 1;
 
 		const maxRows = Math.min(rows, maxIndex - index + 1, lines.length - index);
 		let reservedRows = 1;
 		while (reservedRows < maxRows) {
-			const line = lines[index + reservedRows] ?? "";
-			if (isImageLine(line) || visibleWidth(line) > 0) break;
+			const nextLine = lines[index + reservedRows] ?? "";
+			// Sixel reservation rows inside a Box or HStack carry space/background padding or sibling text,
+			// so treat every non-image row in the Sixel block as covered and draw the Sixel sequence last.
+			if (isImageLine(nextLine) || (!isSixel && visibleWidth(nextLine) > 0)) break;
 			reservedRows++;
 		}
 		return reservedRows;
 	}
 
-	private expandChangedRangeForKittyImages(
+	private expandChangedRangeForTopAnchoredImages(
 		firstChanged: number,
 		lastChanged: number,
 		newLines: string[],
@@ -221,8 +225,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		let expandedLastChanged = lastChanged;
 		const expandForLines = (lines: string[]): void => {
 			for (let i = 0; i < lines.length; i++) {
-				if (extractKittyImageIds(lines[i]).length === 0) continue;
-				const blockEnd = i + this.getKittyImageReservedRows(lines, i) - 1;
+				const line = lines[i] ?? "";
+				if (extractKittyImageIds(line).length === 0 && !isSixelImageLine(line)) continue;
+				const blockEnd = i + this.getTopAnchoredImageReservedRows(lines, i) - 1;
 				if (i >= firstChanged || (i <= lastChanged && blockEnd >= firstChanged)) {
 					expandedFirstChanged = Math.min(expandedFirstChanged, i);
 					expandedLastChanged = Math.max(expandedLastChanged, blockEnd);
@@ -293,18 +298,35 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				if (i > 0) output.append("\r\n");
 				const line = newLines[i];
 				const isImage = isImageLine(line);
-				const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i) : 1;
+				const isSixel = isImage && isSixelImageLine(line);
+				const imageReservedRows = isImage ? this.getTopAnchoredImageReservedRows(newLines, i) : 1;
 				if (imageReservedRows > 1 && imageReservedRows <= height) {
 					for (let row = 1; row < imageReservedRows; row++) {
-						output.append("\r\n");
+						const rowLine = newLines[i + row] ?? "";
+						output.append(isSixel && visibleWidth(rowLine) > 0 ? `\r\n${rowLine}\r` : "\r\n");
 					}
 					output.append(`\x1b[${imageReservedRows - 1}A`);
-					output.append(line);
+					output.append(isSixel ? `\x1b7${line}\x1b8` : line);
 					output.append(`\x1b[${imageReservedRows - 1}B`);
 					i += imageReservedRows - 1;
 					continue;
 				}
-				output.append(line);
+				if (isSixel && imageReservedRows > height) {
+					const predrawRows = Math.max(1, height);
+					for (let row = 1; row < predrawRows; row++) {
+						const rowLine = newLines[i + row] ?? "";
+						output.append(visibleWidth(rowLine) > 0 ? `\r\n${rowLine}\r` : "\r\n");
+					}
+					if (predrawRows > 1) output.append(`\x1b[${predrawRows - 1}A`);
+					output.append(`\x1b7${line}\x1b8`);
+					if (predrawRows > 1) output.append(`\x1b[${predrawRows - 1}B`);
+					for (let row = predrawRows; row < imageReservedRows; row++) {
+						output.append("\r\n");
+					}
+					i += imageReservedRows - 1;
+					continue;
+				}
+				output.append(isSixel ? `\x1b7${line}\x1b8` : line);
 			}
 			output.append("\x1b[?2026l"); // End synchronized output
 			output.flush();
@@ -389,7 +411,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			lastChanged = newLines.length - 1;
 		}
 		if (firstChanged !== -1) {
-			const expandedRange = this.expandChangedRangeForKittyImages(firstChanged, lastChanged, newLines);
+			const expandedRange = this.expandChangedRangeForTopAnchoredImages(firstChanged, lastChanged, newLines);
 			firstChanged = expandedRange.firstChanged;
 			lastChanged = expandedRange.lastChanged;
 		}
@@ -498,23 +520,23 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			if (i > firstChanged) output.append("\r\n");
 			const line = newLines[i];
 			const isImage = isImageLine(line);
-			const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i, renderEnd) : 1;
+			const isSixel = isImage && isSixelImageLine(line);
+			const imageReservedRows = isImage ? this.getTopAnchoredImageReservedRows(newLines, i, renderEnd) : 1;
 			if (imageReservedRows > 1) {
 				const imageStartScreenRow = i - viewportTop;
 				if (imageStartScreenRow < 0 || imageStartScreenRow + imageReservedRows > height) {
-					logRedraw(
-						`kitty image pre-clear would scroll (${imageStartScreenRow} + ${imageReservedRows} > ${height})`,
-					);
+					logRedraw(`image pre-clear would scroll (${imageStartScreenRow} + ${imageReservedRows} > ${height})`);
 					fullRender(true);
 					return;
 				}
 
 				output.append("\x1b[2K");
 				for (let row = 1; row < imageReservedRows; row++) {
-					output.append("\r\n\x1b[2K");
+					const rowLine = newLines[i + row] ?? "";
+					output.append(isSixel && visibleWidth(rowLine) > 0 ? `\r\n\x1b[2K${rowLine}\r` : "\r\n\x1b[2K");
 				}
 				output.append(`\x1b[${imageReservedRows - 1}A`);
-				output.append(line);
+				output.append(isSixel ? `\x1b7${line}\x1b8` : line);
 				output.append(`\x1b[${imageReservedRows - 1}B`);
 				i += imageReservedRows - 1;
 				continue;
@@ -555,7 +577,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				].join("\n");
 				throw new Error(errorMsg);
 			}
-			output.append(line);
+			output.append(isSixel ? `\x1b7${line}\x1b8` : line);
 		}
 
 		// Track where cursor ended up after rendering
