@@ -16,6 +16,7 @@
 			"import": "./dist/exif-orientation.js",
 			"default": "./dist/exif-orientation.js"
 		},
+		"./dist/*": "./dist/*",
 		"./native/*": "./native/*",
 		"./package.json": "./package.json"
 	},
