@@ -385,8 +385,6 @@ describe("createAgentSession stream options", () => {
 		const { session } = await createAgentSession({
 			cwd,
 			agentDir,
-			authStorage,
-			modelRegistry,
 			modelRuntime,
 			resourceLoader,
 			sessionManager,
