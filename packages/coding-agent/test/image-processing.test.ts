@@ -181,6 +181,37 @@ it("loadSixelEncoder converts synchronously to an oriented Sixel DCS sequence", 
 		setSixelEncoder(undefined);
 		resetCapabilitiesCache();
 	}
+
+	// Transparent PNG pixels must remain unpainted (not inverted with opaque regions by sixel@0.16.0's image2sixel).
+	const photon = await loadPhoton();
+	expect(photon).toBeDefined();
+	const rgba = new Uint8Array(8 * 4 * 4);
+	for (let y = 0; y < 4; y++) {
+		for (let x = 0; x < 4; x++) {
+			const idx = (y * 8 + x) * 4;
+			rgba[idx] = 255;
+			rgba[idx + 1] = 0;
+			rgba[idx + 2] = 0;
+			rgba[idx + 3] = 255;
+		}
+	}
+	const transparentImg = new photon!.PhotonImage(rgba, 8, 4);
+	let transparentPngBase64: string;
+	try {
+		transparentPngBase64 = Buffer.from(transparentImg.get_bytes()).toString("base64");
+	} finally {
+		transparentImg.free();
+	}
+	const transparentSixel = encoder({
+		base64Data: transparentPngBase64,
+		mimeType: "image/png",
+		widthPx: 8,
+		heightPx: 4,
+	});
+	expect(transparentSixel).not.toBeNull();
+	// Only columns 0-3 (opaque red) should emit painted sixel bits ('!4N'); columns 4-7 stay unpainted.
+	expect(transparentSixel).toContain("#0;2;100;0;0#0!4N$");
+	expect(transparentSixel).not.toContain("!4?!4N");
 });
 
 describe("resizeImage", () => {

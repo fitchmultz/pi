@@ -52,14 +52,87 @@ export async function loadPngTranscoder(): Promise<ImageTranscoder | undefined> 
 	};
 }
 
+type SixelModule = typeof import("sixel");
+
+function encodeRgbaToSixel(rgba: Uint8Array, width: number, height: number, sixelMod: SixelModule): string {
+	let hasTransparent = false;
+	let opaqueCount = 0;
+	for (let i = 3; i < rgba.length; i += 4) {
+		if (rgba[i] === 0) {
+			hasTransparent = true;
+		} else {
+			opaqueCount++;
+		}
+	}
+
+	if (!hasTransparent) {
+		// Normalize non-zero alpha to 255 so image2sixel's quantizer never creates an alpha=0 palette entry.
+		for (let i = 3; i < rgba.length; i += 4) {
+			rgba[i] = 255;
+		}
+		return sixelMod.image2sixel(rgba, width, height, 256, 1);
+	}
+
+	if (opaqueCount === 0) {
+		return `${sixelMod.introducer(1)}"1;1;${width};${height}${sixelMod.FINALIZER}`;
+	}
+
+	// sixel@0.16.0's image2sixel/sixelEncodeIndexed mis-indexes palette slots when alpha=0 entries are
+	// present, while sixelEncode handles alpha=0 correctly when every opaque pixel matches a palette entry.
+	const uniqueColors = new Map<number, [number, number, number]>();
+	let exceeds256 = false;
+	for (let i = 0; i < rgba.length; i += 4) {
+		if (rgba[i + 3] === 0) {
+			rgba[i] = 0;
+			rgba[i + 1] = 0;
+			rgba[i + 2] = 0;
+			continue;
+		}
+		rgba[i + 3] = 255;
+		if (!exceeds256) {
+			const key = (rgba[i]! << 16) | (rgba[i + 1]! << 8) | rgba[i + 2]!;
+			if (!uniqueColors.has(key)) {
+				if (uniqueColors.size >= 256) {
+					exceeds256 = true;
+				} else {
+					uniqueColors.set(key, [rgba[i]!, rgba[i + 1]!, rgba[i + 2]!]);
+				}
+			}
+		}
+	}
+
+	let palette: Array<[number, number, number]>;
+	if (!exceeds256) {
+		palette = Array.from(uniqueColors.values());
+	} else {
+		// Quantize opaque pixels onto a 6x7x6 RGB cube (<=252 entries) so every opaque pixel matches the palette.
+		const cubeColors = new Map<number, [number, number, number]>();
+		for (let i = 0; i < rgba.length; i += 4) {
+			if (rgba[i + 3] === 0) continue;
+			const r = Math.round(rgba[i]! / 51) * 51;
+			const g = Math.round((rgba[i + 1]! * 6) / 255) * 42 + (rgba[i + 1]! > 233 ? 3 : 0);
+			const b = Math.round(rgba[i + 2]! / 51) * 51;
+			rgba[i] = r;
+			rgba[i + 1] = g;
+			rgba[i + 2] = b;
+			const key = (r << 16) | (g << 8) | b;
+			if (!cubeColors.has(key)) {
+				cubeColors.set(key, [r, g, b]);
+			}
+		}
+		palette = Array.from(cubeColors.values());
+	}
+
+	return `${sixelMod.introducer(1)}${sixelMod.sixelEncode(rgba, width, height, palette)}${sixelMod.FINALIZER}`;
+}
+
 /**
  * Load photon and sixel and return a synchronous Sixel encoder for pi-tui.
  * Returns undefined if photon or sixel cannot be loaded.
  */
 export async function loadSixelEncoder(): Promise<SixelImageEncoder | undefined> {
 	const [photon, sixelMod] = await Promise.all([loadPhoton(), import("sixel").catch(() => undefined)]);
-	if (!photon || !sixelMod?.image2sixel) return undefined;
-	const { image2sixel } = sixelMod;
+	if (!photon || !sixelMod?.image2sixel || !sixelMod?.sixelEncode) return undefined;
 	return ({ base64Data, widthPx, heightPx }) => {
 		try {
 			const bytes = new Uint8Array(Buffer.from(base64Data, "base64"));
@@ -80,7 +153,7 @@ export async function loadSixelEncoder(): Promise<SixelImageEncoder | undefined>
 				}
 				const source = resized ?? oriented;
 				const rgba = source.get_raw_pixels();
-				return image2sixel(rgba, source.get_width(), source.get_height(), 256, 1);
+				return encodeRgbaToSixel(rgba, source.get_width(), source.get_height(), sixelMod);
 			} finally {
 				resized?.free();
 				oriented.free();
