@@ -699,6 +699,8 @@ export class InteractiveMode {
 
 	// Auto-retry state
 	private retryEscapeHandler?: () => void;
+	private lastFailedTurnComponents: Component[] = [];
+	private activeRetryErrorComponents: Component[] = [];
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
@@ -2352,6 +2354,8 @@ export class InteractiveMode {
 					}
 
 					this.chatContainer.clear();
+					this.lastFailedTurnComponents = [];
+					this.activeRetryErrorComponents = [];
 					this.renderInitialMessages();
 					this.showUnsavedRows();
 					if (result.editorText && !this.editor.getText().trim()) {
@@ -2630,6 +2634,8 @@ export class InteractiveMode {
 	private renderCurrentSessionState(): void {
 		this.loadedResourcesContainer.clear();
 		this.chatContainer.clear();
+		this.lastFailedTurnComponents = [];
+		this.activeRetryErrorComponents = [];
 		this.pendingMessagesContainer.clear();
 		this.pendingBashComponents = [];
 		this.compactionQueuedMessages = [];
@@ -3967,6 +3973,7 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
+					this.lastFailedTurnComponents = [];
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.hideThinkingBlock,
@@ -4059,9 +4066,14 @@ export class InteractiveMode {
 								isError: true,
 							});
 						}
+						this.lastFailedTurnComponents =
+							this.streamingMessage.stopReason === "error"
+								? [this.streamingComponent, ...this.pendingTools.values()]
+								: [];
 						this.pendingTools.clear();
 						this.maybeSuggestBugReport(this.streamingMessage);
 					} else {
+						this.lastFailedTurnComponents = [];
 						// Args are now complete - trigger diff computation for edit tools
 						const survivingToolCallIds = new Set(
 							this.streamingMessage.content
@@ -4229,6 +4241,11 @@ export class InteractiveMode {
 			case "auto_retry_start": {
 				this.prefillProgressMessage = undefined;
 				this.turnHasAssistantDelta = false;
+				for (const component of this.activeRetryErrorComponents) {
+					this.chatContainer.removeChild(component);
+				}
+				this.activeRetryErrorComponents = this.lastFailedTurnComponents;
+				this.lastFailedTurnComponents = [];
 				// Set up escape to abort retry
 				this.retryEscapeHandler = this.defaultEditor.onEscape;
 				this.defaultEditor.onEscape = () => {
@@ -4249,6 +4266,15 @@ export class InteractiveMode {
 					this.retryEscapeHandler = undefined;
 				}
 				this.clearStatusIndicator("retry");
+				if (event.success || this.lastFailedTurnComponents.length > 0) {
+					for (const component of this.activeRetryErrorComponents) {
+						this.chatContainer.removeChild(component);
+					}
+				}
+				this.activeRetryErrorComponents = [];
+				if (event.success) {
+					this.lastFailedTurnComponents = [];
+				}
 				// Show error only on final failure (success shows normal response)
 				if (!event.success) {
 					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
@@ -5049,6 +5075,8 @@ export class InteractiveMode {
 		const entries = this.sessionManager.getBranch();
 		const alreadyMountedEntries = entries.length - this.deferredSessionEntries.length;
 		this.chatContainer.clear();
+		this.lastFailedTurnComponents = [];
+		this.activeRetryErrorComponents = [];
 		this.renderSessionEntries(entries, {
 			minInitialEntries: this.transcriptScrollView?.isFollowingEnd === false ? alreadyMountedEntries : undefined,
 		});
@@ -6577,6 +6605,8 @@ export class InteractiveMode {
 
 						// Update UI
 						this.chatContainer.clear();
+						this.lastFailedTurnComponents = [];
+						this.activeRetryErrorComponents = [];
 						this.renderInitialMessages();
 						this.showUnsavedRows();
 						if (result.editorText && !this.editor.getText().trim()) {
