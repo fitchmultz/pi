@@ -2,6 +2,13 @@
  * Tests for image processing utilities using Photon.
  */
 
+import {
+	getSixelImageMetadata,
+	Image,
+	resetCapabilitiesCache,
+	setCapabilities,
+	setSixelEncoder,
+} from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import {
 	convertImageBytesToPng,
@@ -154,6 +161,26 @@ it("loadSixelEncoder converts synchronously to an oriented Sixel DCS sequence", 
 			heightPx: 24,
 		}),
 	).toBeNull();
+
+	// End-to-end Image layout for an EXIF orientation-6 (2x1 raw -> 1x2 oriented) JPEG must stay portrait.
+	setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+	setSixelEncoder(encoder);
+	try {
+		const image = new Image(
+			jpegWithXmpBeforeOrientation(),
+			"image/jpeg",
+			{ fallbackColor: (v) => v },
+			{ maxWidthCells: 20 },
+		);
+		const lines = image.render(40);
+		const metadata = getSixelImageMetadata(lines[0]!);
+		expect(metadata).toBeDefined();
+		expect(metadata!.heightPx).toBeGreaterThan(metadata!.widthPx);
+		expect(lines.length).toBe(metadata!.rows);
+	} finally {
+		setSixelEncoder(undefined);
+		resetCapabilitiesCache();
+	}
 });
 
 describe("resizeImage", () => {

@@ -66,8 +66,13 @@ export async function loadSixelEncoder(): Promise<SixelImageEncoder | undefined>
 			const rawImage = photon.PhotonImage.new_from_byteslice(bytes);
 			const oriented = applyExifOrientation(photon, rawImage, bytes);
 			if (oriented !== rawImage) rawImage.free();
-			const targetW = Math.max(1, Math.round(widthPx));
-			const targetH = Math.max(1, Math.round(heightPx));
+			const boxW = Math.max(1, Math.round(widthPx));
+			const boxH = Math.max(1, Math.round(heightPx));
+			const srcW = Math.max(1, oriented.get_width());
+			const srcH = Math.max(1, oriented.get_height());
+			const scale = Math.min(boxW / srcW, boxH / srcH);
+			const targetW = Math.max(1, Math.min(boxW, Math.round(srcW * scale)));
+			const targetH = Math.max(1, Math.min(boxH, Math.round(srcH * scale)));
 			let resized: ReturnType<typeof photon.PhotonImage.new_from_byteslice> | undefined;
 			try {
 				if (oriented.get_width() !== targetW || oriented.get_height() !== targetH) {
