@@ -66,6 +66,14 @@ describe("extractLocalImagePaths", () => {
 		expect(extracted.some((p) => p.includes("example.com"))).toBe(false);
 		expect(extracted.some((p) => p.includes("inside-code-fence"))).toBe(false);
 	});
+
+	it("extracts bare image paths inside prose containing contractions and quotes", () => {
+		expect(extractLocalImagePaths("It's at /tmp/shot.png, let's see.")).toEqual(["/tmp/shot.png"]);
+		expect(extractLocalImagePaths("I've saved the screenshot to /tmp/frame.png, isn't that better?")).toEqual([
+			"/tmp/frame.png",
+		]);
+		expect(extractLocalImagePaths('He said "check /tmp/quoted.png" earlier.')).toContain("/tmp/quoted.png");
+	});
 });
 
 describe("inline images in UserMessageComponent and AssistantMessageComponent", () => {
@@ -93,6 +101,13 @@ describe("inline images in UserMessageComponent and AssistantMessageComponent", 
 		expect(loaded).not.toBeNull();
 		expect(loaded!.mimeType).toBe("image/png");
 		expect(loaded!.data).toBe(PNG_1X1_BASE64);
+		// Percent-encoded CommonMark destination loads the real spaced file while literal %20 names still work first.
+		const spacedPath = join(tempDir, "Home Page.png");
+		writeFileSync(spacedPath, PNG_1X1_BYTES);
+		const encodedLoaded = await loadLocalImage("./Home%20Page.png", tempDir);
+		expect(encodedLoaded).not.toBeNull();
+		expect(encodedLoaded!.filename).toBe(spacedPath);
+		expect(encodedLoaded!.data).toBe(PNG_1X1_BASE64);
 		expect(await loadLocalImage(fakePng, tempDir)).toBeNull();
 		expect(await loadLocalImage(join(tempDir, "missing.png"), tempDir)).toBeNull();
 	});

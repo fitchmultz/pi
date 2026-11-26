@@ -57,7 +57,10 @@ function normalizeCandidatePath(raw: string): string | null {
 // 6. Quoted paths "..." or '...'
 // 7. Bare or backslash-escaped local paths (with optional leading @)
 const IMAGE_TOKEN_RE =
-	/(```[\s\S]*?```|~~~[\s\S]*?~~~)|!\[[^\]]*\]\((?:<([^>\n]+)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'))?\)|`([^`\n]+)`|\b(?:https?|ftp):\/\/[^\s"'<>()[\]]+|\bdata:[^\s"'<>()[\]]+|(file:\/\/[^\s"'<>()[\]]+)|(["'])((?:\\.|(?!\6)[^\n])+?)\6|(?<=^|[\s([{:;,=])(@?(?:~\/|\.\.?\/|\/)?(?:\\ |[^\s"'<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?])/gi;
+	/(```[\s\S]*?```|~~~[\s\S]*?~~~)|!\[[^\]]*\]\((?:<([^>\n]+)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'))?\)|`([^`\n]+)`|\b(?:https?|ftp):\/\/[^\s"'<>()[\]]+|\bdata:[^\s"'<>()[\]]+|(file:\/\/[^\s"'<>()[\]]+)|(?<=^|[\s([{:;,=])(["'])((?:\\.|(?!\6)[^\n])+?\.(?:png|jpe?g|gif|webp|bmp)(?:[?#][^\s"']*)?)\6|(?<=^|[\s([{:;,=])(@?(?:~\/|\.\.?\/|\/)?(?:\\ |[^\s"'<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?])/gi;
+
+const BARE_IMAGE_PATH_RE =
+	/(?<=^|[\s([{:;,=])(@?(?:~\/|\.\.?\/|\/)?(?:\\ |[^\s"'<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?])/gi;
 
 // Matches unquoted rooted paths containing literal spaces (e.g. Finder clipboard paste of macOS screenshots).
 const ROOTED_SPACED_IMAGE_PATH_RE =
@@ -91,7 +94,15 @@ export function extractLocalImagePaths(text: string): string[] {
 		} else if (match[5]) {
 			add(match[5]);
 		} else if (match[7]) {
-			add(match[7].replace(/\\ /g, " "));
+			const quoted = match[7].replace(/\\ /g, " ");
+			add(quoted);
+			// If a quoted phrase contains an embedded bare path (e.g. "see /tmp/shot.png"), extract it too.
+			BARE_IMAGE_PATH_RE.lastIndex = 0;
+			let inner = BARE_IMAGE_PATH_RE.exec(quoted);
+			while (inner !== null) {
+				add(inner[1]?.replace(/\\ /g, " "));
+				inner = BARE_IMAGE_PATH_RE.exec(quoted);
+			}
 		} else if (match[8]) {
 			add(match[8].replace(/\\ /g, " "));
 		}
@@ -113,25 +124,37 @@ export function extractLocalImagePaths(text: string): string[] {
  * Returns `null` for missing, unreadable, empty, or non-image files.
  */
 export async function loadLocalImage(rawPath: string, cwd: string): Promise<LoadedLocalImage | null> {
-	try {
-		const resolved = await resolveReadPathAsync(rawPath, cwd);
-		const fileStat = await stat(resolved);
-		if (!fileStat.isFile() || fileStat.size <= 0) {
-			return null;
+	const candidates = [rawPath];
+	if (rawPath.includes("%")) {
+		try {
+			const decoded = decodeURIComponent(rawPath);
+			if (decoded !== rawPath) candidates.push(decoded);
+		} catch {
+			// Ignore malformed percent sequences and try literal path only.
 		}
-
-		const mimeType = await detectSupportedImageMimeTypeFromFile(resolved);
-		if (!mimeType) return null;
-
-		const bytes = await readFile(resolved);
-		return {
-			data: bytes.toString("base64"),
-			mimeType,
-			filename: resolved,
-		};
-	} catch {
-		return null;
 	}
+	for (const candidate of candidates) {
+		try {
+			const resolved = await resolveReadPathAsync(candidate, cwd);
+			const fileStat = await stat(resolved);
+			if (!fileStat.isFile() || fileStat.size <= 0) {
+				continue;
+			}
+
+			const mimeType = await detectSupportedImageMimeTypeFromFile(resolved);
+			if (!mimeType) continue;
+
+			const bytes = await readFile(resolved);
+			return {
+				data: bytes.toString("base64"),
+				mimeType,
+				filename: resolved,
+			};
+		} catch {
+			// Try next candidate
+		}
+	}
+	return null;
 }
 
 /**
