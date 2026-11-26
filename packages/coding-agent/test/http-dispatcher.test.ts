@@ -267,9 +267,7 @@ console.log("process survived");
 				delete process.env.HTTPS_PROXY;
 				delete process.env.https_proxy;
 				configureHttpDispatcher(100);
-				expect(
-					getSessionHttpFetch({ httpIdleTimeoutMs: 100, httpProxy: "http://127.0.0.1:8222" }),
-				).toBeUndefined();
+				expect(getSessionHttpFetch({ httpIdleTimeoutMs: 100, httpProxy: "http://127.0.0.1:8222" })).toBeUndefined();
 			} finally {
 				if (prevHttpProxy === undefined) delete process.env.HTTP_PROXY;
 				else process.env.HTTP_PROXY = prevHttpProxy;
