@@ -182,7 +182,7 @@ export function createGoogleFetch<TModel extends AnyModel>(
 		if (!response.ok) {
 			onFailedHeaders(new Headers(response.headers));
 		} else if (onCandidateFinishMessage) {
-			// @google/genai strips candidate.finishMessage inside its MLDev response converter; capture it from the wire.
+			// Workaround for https://github.com/googleapis/js-genai/issues/2211 — @google/genai drops candidate.finishMessage in its MLDev response converter; capture it from the wire until fixed upstream.
 			const requestUrl =
 				typeof requestInput === "string"
 					? requestInput
