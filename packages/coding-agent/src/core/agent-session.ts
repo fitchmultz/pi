@@ -544,6 +544,12 @@ export class AgentSession {
 	private _steeringMessages: string[] = [];
 	/** Tracks pending follow-up messages for UI display. Removed when delivered. */
 	private _followUpMessages: string[] = [];
+	/** Prompts queued while manual compaction is running; flushed once compaction finishes. */
+	private _compactionPrompts: Array<{ text: string; options: PromptOptions; behavior: "steer" | "followUp" }> = [];
+	/** Covers an active or reserved compaction-prompt flush; keeps isIdle false and aborts on session.abort()/dispose(). */
+	private _compactionFlushAbortController: AbortController | undefined = undefined;
+	/** Monotonic counter incremented on session.abort() so an aborted compaction never flushes queued prompts later. */
+	private _sessionAbortGeneration = 0;
 	/** Queued user messages whose images are normalized when they are delivered. */
 	private _queuedMessagesWithImages = new WeakSet<AgentMessage>();
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
@@ -1762,8 +1768,8 @@ export class AgentSession {
 	private _emitQueueUpdate(): void {
 		this._emit({
 			type: "queue_update",
-			steering: [...this._steeringMessages],
-			followUp: [...this._followUpMessages],
+			steering: [...this.getSteeringMessages()],
+			followUp: [...this.getFollowUpMessages()],
 		});
 	}
 
@@ -2163,6 +2169,8 @@ export class AgentSession {
 	 */
 	dispose(): void {
 		this._disposed = true;
+		this._compactionPrompts = [];
+		this._compactionFlushAbortController?.abort();
 		this.workingSessionGate.invalidate("Native session disposed");
 		// Dispose is synchronous, so abort as a backstop. Releasing the hold below lets the usage of a
 		// run that already settled still be written; aborted runs skip their commit and message.
@@ -2245,7 +2253,7 @@ export class AgentSession {
 
 	/** Whether the session has no active agent run, compaction, branch summary, retry, or queued continuation. */
 	get isIdle(): boolean {
-		return !this._isAgentRunActive && !this.isCompacting;
+		return !this._isAgentRunActive && !this.isCompacting && this._compactionFlushAbortController === undefined;
 	}
 
 	/** Settled handlers and their deferred prompts may still be awaiting work while isIdle is true. */
@@ -2809,6 +2817,14 @@ export class AgentSession {
 		this._flushPendingBashMessages();
 		this._flushPendingCustomMessages();
 		onStarted?.();
+		if (
+			this._compactionAbortController === undefined &&
+			this._branchSummaryAbortController === undefined &&
+			!this._agentRunAbortRequested
+		) {
+			const flushController = this._reserveCompactionPromptFlush();
+			if (flushController) void this._flushCompactionPrompts(flushController);
+		}
 		// Preparation stays a busy activity; only the run itself may be captured at turn boundaries.
 		const restoreForeground = this.workingSessionGate.foreground();
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
@@ -3006,16 +3022,17 @@ export class AgentSession {
 	 * Send a prompt to the agent.
 	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
 	 * - Expands file-based prompt templates by default
-	 * - During streaming, queues via steer() or followUp() based on streamingBehavior option
+	 * - During streaming or manual compaction, queues based on streamingBehavior option
 	 * - Validates model and API key before sending (when not streaming)
-	 * @throws Error if streaming and no streamingBehavior specified
+	 * @throws Error if streaming or compacting and no streamingBehavior specified
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
 		return this.workingSessionGate.run(() => this._prompt(text, options));
 	}
 
-	private async _prompt(text: string, options?: PromptOptions): Promise<void> {
+	private async _prompt(text: string, options?: PromptOptions, signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return;
 		if (this._isEmittingAgentSettled) {
 			this._deferredSettledActions.push(async () => await this.prompt(text, options));
 			return;
@@ -3032,11 +3049,21 @@ export class AgentSession {
 				return;
 			}
 		}
+		if (signal?.aborted) return;
 
-		if (this._compactionAbortController !== undefined || this._branchSummaryAbortController !== undefined) {
+		if (this._branchSummaryAbortController !== undefined) {
 			throw new Error(
 				"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
 			);
+		}
+		if (this._compactionAbortController !== undefined) {
+			if (!options?.streamingBehavior) {
+				throw new Error(
+					"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
+				);
+			}
+			this._queueCompactionPrompt(text, options, options.streamingBehavior);
+			return;
 		}
 
 		// Reserve the context through async input hooks and auth checks so tree navigation cannot
@@ -3044,11 +3071,11 @@ export class AgentSession {
 		this._promptPreflightCount++;
 		let trigger: Extract<BeforeAgentStartTrigger, { messageType: "user" }> | undefined;
 		try {
-			trigger = await this._preparePrompt(text, options);
+			trigger = await this._preparePrompt(text, options, signal);
 		} finally {
 			this._promptPreflightCount--;
 		}
-		if (!trigger) return;
+		if (!trigger || signal?.aborted) return;
 		// Another prompt can start a run while this one awaits input hooks or auth. That run owns the
 		// session, so handle this prompt as one sent during it, without preparing it again.
 		if (this.isStreaming) await this._queuePrompt(trigger.prompt, trigger.images, options);
@@ -3062,6 +3089,7 @@ export class AgentSession {
 	private async _preparePrompt(
 		text: string,
 		options?: PromptOptions,
+		signal?: AbortSignal,
 	): Promise<Extract<BeforeAgentStartTrigger, { messageType: "user" }> | undefined> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
@@ -3077,6 +3105,7 @@ export class AgentSession {
 			preflightResult?.("handled");
 			return undefined;
 		}
+		if (signal?.aborted) return undefined;
 		const { text: currentText, images: currentImages } = processedInput;
 
 		// Expand skill commands (/skill:name args) and prompt templates (/template args)
@@ -3292,6 +3321,119 @@ export class AgentSession {
 		this.agent.followUp(message);
 	}
 
+	/**
+	 * Hold a prompt submitted with `streamingBehavior` while manual compaction is running
+	 * so it runs automatically once compaction completes.
+	 */
+	private _queueCompactionPrompt(text: string, options: PromptOptions, behavior: "steer" | "followUp"): void {
+		this.workingSessionGate.admitTurn();
+		const { preflightResult, ...restOptions } = options;
+		this._compactionPrompts.push({ text, options: restOptions, behavior });
+		this._emitQueueUpdate();
+		preflightResult?.("queued");
+	}
+
+	/**
+	 * Hold `isIdle` false across `_clearManualCompactionState()` when queued prompts will flush
+	 * after `compaction_end`, preventing a microtask idle flicker before the queued prompt starts.
+	 */
+	private _reserveCompactionPromptFlush(abortGeneration?: number): AbortController | undefined {
+		if (this._compactionPrompts.length === 0) return undefined;
+		if (this._disposed) {
+			this._compactionPrompts = [];
+			this._emitQueueUpdate();
+			return undefined;
+		}
+		if (this._compactionFlushAbortController !== undefined) return undefined;
+		if (abortGeneration !== undefined && this._sessionAbortGeneration !== abortGeneration) return undefined;
+		const controller = new AbortController();
+		this._compactionFlushAbortController = controller;
+		return controller;
+	}
+
+	/** Drain queued compaction prompts after `compaction_end`, always releasing any flush hold. */
+	private _releaseCompactionPromptFlush(controller: AbortController | undefined, abortGeneration: number): void {
+		const canFlush =
+			this._compactionPrompts.length > 0 &&
+			!this._disposed &&
+			!controller?.signal.aborted &&
+			this._sessionAbortGeneration === abortGeneration &&
+			this._compactionAbortController === undefined &&
+			this._branchSummaryAbortController === undefined;
+		if (canFlush) {
+			const flushController = controller ?? this._reserveCompactionPromptFlush(abortGeneration);
+			if (flushController) {
+				void this._flushCompactionPrompts(flushController);
+				return;
+			}
+		}
+		if (this._compactionPrompts.length > 0 && this._disposed) {
+			this._compactionPrompts = [];
+			this._emitQueueUpdate();
+		}
+		if (controller && this._compactionFlushAbortController === controller) {
+			this._compactionFlushAbortController = undefined;
+			this._resolveIdleWaitIfIdle();
+		}
+	}
+
+	private _reportCompactionPromptError(entry: { options: PromptOptions }, error: unknown): void {
+		this._extensionRunner.emitError({
+			extensionPath: "<runtime>",
+			event: entry.options.source === "extension" ? "send_user_message" : "prompt",
+			error: error instanceof Error ? error.message : String(error),
+			stack: error instanceof Error ? error.stack : undefined,
+		});
+	}
+
+	private async _flushCompactionPrompts(controller: AbortController): Promise<void> {
+		const { signal } = controller;
+		try {
+			while (this._compactionPrompts.length > 0) {
+				if (
+					signal.aborted ||
+					this._disposed ||
+					this._compactionAbortController !== undefined ||
+					this._branchSummaryAbortController !== undefined
+				) {
+					break;
+				}
+				const entry = this._compactionPrompts.shift()!;
+				this._emitQueueUpdate();
+				const preflightDone = Promise.withResolvers<void>();
+				const run = this.workingSessionGate
+					.run(() =>
+						this._prompt(
+							entry.text,
+							{
+								...entry.options,
+								preflightResult: (disposition) => {
+									preflightDone.resolve();
+									entry.options.preflightResult?.(disposition);
+								},
+							},
+							signal,
+						),
+					)
+					.catch((error) => {
+						this._reportCompactionPromptError(entry, error);
+					})
+					.finally(() => {
+						preflightDone.resolve();
+					});
+				// Wait for preflight so subsequent queued prompts preserve FIFO order and queue into
+				// the run started by an earlier prompt, without waiting for the full LLM turn.
+				await preflightDone.promise;
+				void run;
+			}
+		} finally {
+			if (this._compactionFlushAbortController === controller) {
+				this._compactionFlushAbortController = undefined;
+			}
+			this._resolveIdleWaitIfIdle();
+		}
+	}
+
 	/** Replace a queued user message's images in place with normalized ones, appending hints to its text. */
 	private async _normalizeQueuedMessageImages(message: UserMessage): Promise<void> {
 		if (typeof message.content === "string") return;
@@ -3454,10 +3596,11 @@ export class AgentSession {
 	 */
 	clearQueue(): { steering: string[]; followUp: string[] } {
 		this.workingSessionGate.beforeMutation();
-		const steering = [...this._steeringMessages];
-		const followUp = [...this._followUpMessages];
+		const steering = [...this.getSteeringMessages()];
+		const followUp = [...this.getFollowUpMessages()];
 		this._steeringMessages = [];
 		this._followUpMessages = [];
+		this._compactionPrompts = [];
 		this.agent.clearAllQueues();
 		this._emitQueueUpdate();
 		return { steering, followUp };
@@ -3465,7 +3608,7 @@ export class AgentSession {
 
 	/** Number of pending messages (includes both steering and follow-up) */
 	get pendingMessageCount(): number {
-		return this._steeringMessages.length + this._followUpMessages.length;
+		return this._steeringMessages.length + this._followUpMessages.length + this._compactionPrompts.length;
 	}
 
 	/** Context waiting for a future user prompt is not persisted until that prompt arrives. */
@@ -3475,12 +3618,20 @@ export class AgentSession {
 
 	/** Get pending steering messages (read-only) */
 	getSteeringMessages(): readonly string[] {
-		return this._steeringMessages;
+		if (this._compactionPrompts.length === 0) return this._steeringMessages;
+		return [
+			...this._steeringMessages,
+			...this._compactionPrompts.filter((entry) => entry.behavior === "steer").map((entry) => entry.text),
+		];
 	}
 
 	/** Get pending follow-up messages (read-only) */
 	getFollowUpMessages(): readonly string[] {
-		return this._followUpMessages;
+		if (this._compactionPrompts.length === 0) return this._followUpMessages;
+		return [
+			...this._followUpMessages,
+			...this._compactionPrompts.filter((entry) => entry.behavior === "followUp").map((entry) => entry.text),
+		];
 	}
 
 	get resourceLoader(): ResourceLoader {
@@ -3492,6 +3643,8 @@ export class AgentSession {
 	 */
 	async abort(): Promise<void> {
 		this.workingSessionGate.beforeMutation();
+		this._sessionAbortGeneration++;
+		this._compactionFlushAbortController?.abort();
 		this._agentRunAbortController?.abort();
 		this.abortRetry();
 		this.abortCompaction();
@@ -3861,10 +4014,12 @@ export class AgentSession {
 
 	private async _compact(customInstructions?: string): Promise<CompactionResult> {
 		await this.abort();
+		const compactionAbortGeneration = this._sessionAbortGeneration;
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
 		let fromExtension = false;
 		let cancelledByExtension = false;
+		let heldPromptFlush: AbortController | undefined;
 
 		try {
 			const model = this.model;
@@ -3989,6 +4144,7 @@ export class AgentSession {
 				usage,
 				details,
 			};
+			heldPromptFlush = this._reserveCompactionPromptFlush(compactionAbortGeneration);
 			// compaction_end listeners may submit queued prompts, so expose idle state before notifying them.
 			this._clearManualCompactionState();
 			this._emit({
@@ -4001,8 +4157,9 @@ export class AgentSession {
 			return compactionResult;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			const aborted = this._compactionAbortController.signal.aborted || cancelledByExtension;
+			const aborted = this._compactionAbortController?.signal.aborted === true || cancelledByExtension;
 			const errorMessage = aborted ? undefined : `Compaction failed: ${message}`;
+			if (!heldPromptFlush) heldPromptFlush = this._reserveCompactionPromptFlush(compactionAbortGeneration);
 			this._clearManualCompactionState();
 			this._emit({
 				type: "compaction_end",
@@ -4022,6 +4179,7 @@ export class AgentSession {
 			throw error;
 		} finally {
 			this._clearManualCompactionState();
+			this._releaseCompactionPromptFlush(heldPromptFlush, compactionAbortGeneration);
 		}
 	}
 
