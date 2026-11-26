@@ -2,7 +2,7 @@ import { type Component, type Container, type TuiMouseEvent, truncateToWidth } f
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { theme } from "../theme/theme.ts";
 
-const INLINE_IMAGE = /\x1b(?:_G|\]1337;File=)/;
+const INLINE_IMAGE = /\x1b(?:_G|\]1337;File=|P[0-9;]*q)/;
 
 /** Handled mouse dispatch receipt targeting `component` at `event`'s origin and bounds. */
 export function handledMouseTarget(

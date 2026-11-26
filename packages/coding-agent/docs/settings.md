@@ -166,7 +166,7 @@ See [Compaction Reference](compaction.md) for trigger, summarization, and valida
 | `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when rendered content shrinks. When unset, `PI_CLEAR_ON_SHRINK=1` enables it. |
 | `terminal.showTerminalProgress` | boolean | `false` | Show OSC 9;4 progress in the terminal tab. |
 | `terminal.hyperlinks` | `boolean \| "auto"` | `"auto"` | Override OSC 8 hyperlink detection. |
-| `terminal.images` | `"kitty" \| "iterm2" \| "auto" \| false` | `"auto"` | Override inline-image protocol detection. |
+| `terminal.images` | `"kitty" \| "iterm2" \| "sixel" \| "auto" \| false` | `"auto"` | Override inline-image protocol detection. |
 | `terminal.trueColor` | `boolean \| "auto"` | `"auto"` | Override true-color detection. |
 | `images.autoResize` | boolean | `true` | Resize images to at most 2000 by 2000 pixels before sending them to a model. |
 | `images.blockImages` | boolean | `false` | Prevent images from being sent to models. |

@@ -98,7 +98,13 @@ const TerminalSettingsSchema = Type.Object({
 	),
 	hyperlinks: Type.Optional(Type.Union([Type.Boolean(), Type.Literal("auto")])),
 	images: Type.Optional(
-		Type.Union([Type.Literal("kitty"), Type.Literal("iterm2"), Type.Literal("auto"), Type.Literal(false)]),
+		Type.Union([
+			Type.Literal("kitty"),
+			Type.Literal("iterm2"),
+			Type.Literal("sixel"),
+			Type.Literal("auto"),
+			Type.Literal(false),
+		]),
 	),
 	trueColor: Type.Optional(Type.Union([Type.Boolean(), Type.Literal("auto")])),
 });

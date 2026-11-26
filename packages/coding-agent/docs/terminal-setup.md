@@ -227,7 +227,7 @@ With hyperlinks enabled, Markdown links, URLs in inline code, and absolute or `~
 | Capability | Environment variable | Setting |
 |---|---|---|
 | Hyperlinks | `PI_HYPERLINKS=1\|0\|auto` | `terminal.hyperlinks: true\|false\|"auto"` |
-| Inline images | `PI_IMAGE_PROTOCOL=kitty\|iterm2\|none\|auto` | `terminal.images: "kitty"\|"iterm2"\|false\|"auto"` |
+| Inline images | `PI_IMAGE_PROTOCOL=kitty\|iterm2\|sixel\|none\|auto` | `terminal.images: "kitty"\|"iterm2"\|"sixel"\|false\|"auto"` |
 | Truecolor | `PI_TRUE_COLOR=1\|0\|auto` | `terminal.trueColor: true\|false\|"auto"` |
 
 Settings take precedence over environment variables. An unset value or `auto` preserves automatic detection.

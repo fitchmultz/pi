@@ -3,7 +3,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { convertImageBytesToPng, convertToPng, loadPngTranscoder } from "../src/utils/image-convert.ts";
+import {
+	convertImageBytesToPng,
+	convertToPng,
+	loadPngTranscoder,
+	loadSixelEncoder,
+} from "../src/utils/image-convert.ts";
 import { formatDimensionNote, resizeImage } from "../src/utils/image-resize.ts";
 import { resizeImageInProcess } from "../src/utils/image-resize-core.ts";
 import { loadPhoton } from "../src/utils/photon.ts";
@@ -128,6 +133,27 @@ it("loadPngTranscoder converts synchronously to oriented PNG data", async () => 
 	const png = Buffer.from(transcoder(jpegWithXmpBeforeOrientation(), "image/jpeg")!, "base64");
 	expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([1, 2]);
 	expect(transcoder(Buffer.from("not an image").toString("base64"), "image/jpeg")).toBeNull();
+});
+
+it("loadSixelEncoder converts synchronously to an oriented Sixel DCS sequence", async () => {
+	const encoder = (await loadSixelEncoder())!;
+	const sixel = encoder({
+		base64Data: jpegWithXmpBeforeOrientation(),
+		mimeType: "image/jpeg",
+		widthPx: 12,
+		heightPx: 24,
+	});
+	expect(sixel).not.toBeNull();
+	expect(sixel!).toMatch(/^\x1bP[0-9;]*q"1;1;12;24/);
+	expect(sixel!.endsWith("\x1b\\")).toBe(true);
+	expect(
+		encoder({
+			base64Data: Buffer.from("not an image").toString("base64"),
+			mimeType: "image/jpeg",
+			widthPx: 12,
+			heightPx: 24,
+		}),
+	).toBeNull();
 });
 
 describe("resizeImage", () => {

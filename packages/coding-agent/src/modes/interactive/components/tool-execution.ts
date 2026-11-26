@@ -20,7 +20,7 @@ import {
 	formatToolCallWithArgs,
 	getTextOutput as getRenderedTextOutput,
 } from "../../../core/tools/render-utils.ts";
-import { ensurePngTranscoder } from "../../../utils/image-convert.ts";
+import { ensureImageEncoders } from "../../../utils/image-convert.ts";
 import { theme } from "../theme/theme.ts";
 import { CompactPreview } from "./compact-preview.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
@@ -393,12 +393,10 @@ export class ToolExecutionComponent extends Container {
 									{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
 									{ maxWidthCells: source.widthCells },
 								);
-					if (source.mimeType !== "image/png") {
-						ensurePngTranscoder(() => {
-							this.invalidate();
-							this.ui.requestRender();
-						});
-					}
+					ensureImageEncoders(() => {
+						this.invalidate();
+						this.ui.requestRender();
+					}, source.mimeType);
 					this.imageComponents.push(imageComponent);
 					this.imageSources.push(source);
 					this.addChild(imageComponent);
