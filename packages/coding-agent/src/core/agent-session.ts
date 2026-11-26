@@ -546,10 +546,10 @@ export class AgentSession {
 	private _followUpMessages: string[] = [];
 	/** Prompts queued while manual compaction is running; flushed once compaction finishes. */
 	private _compactionPrompts: Array<{ text: string; options: PromptOptions; behavior: "steer" | "followUp" }> = [];
-	/** Active compaction-prompt flush tasks; keeps isIdle false across the handoff into the next run. */
-	private _flushingCompactionPrompts = 0;
-	/** Active session.abort() calls; suppresses launching queued compaction prompts during an explicit abort. */
-	private _abortingSessionCount = 0;
+	/** Covers an active or reserved compaction-prompt flush; keeps isIdle false and aborts on session.abort()/dispose(). */
+	private _compactionFlushAbortController: AbortController | undefined = undefined;
+	/** Monotonic counter incremented on session.abort() so an aborted compaction never flushes queued prompts later. */
+	private _sessionAbortGeneration = 0;
 	/** Queued user messages whose images are normalized when they are delivered. */
 	private _queuedMessagesWithImages = new WeakSet<AgentMessage>();
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
@@ -2170,6 +2170,7 @@ export class AgentSession {
 	dispose(): void {
 		this._disposed = true;
 		this._compactionPrompts = [];
+		this._compactionFlushAbortController?.abort();
 		this.workingSessionGate.invalidate("Native session disposed");
 		// Dispose is synchronous, so abort as a backstop. Releasing the hold below lets the usage of a
 		// run that already settled still be written; aborted runs skip their commit and message.
@@ -2252,7 +2253,7 @@ export class AgentSession {
 
 	/** Whether the session has no active agent run, compaction, branch summary, retry, or queued continuation. */
 	get isIdle(): boolean {
-		return !this._isAgentRunActive && !this.isCompacting && this._flushingCompactionPrompts === 0;
+		return !this._isAgentRunActive && !this.isCompacting && this._compactionFlushAbortController === undefined;
 	}
 
 	/** Settled handlers and their deferred prompts may still be awaiting work while isIdle is true. */
@@ -2817,14 +2818,12 @@ export class AgentSession {
 		this._flushPendingCustomMessages();
 		onStarted?.();
 		if (
-			this._compactionPrompts.length > 0 &&
-			this._flushingCompactionPrompts === 0 &&
-			!this._agentRunAbortRequested &&
-			!this._disposed &&
-			this._abortingSessionCount === 0
+			this._compactionAbortController === undefined &&
+			this._branchSummaryAbortController === undefined &&
+			!this._agentRunAbortRequested
 		) {
-			this._flushingCompactionPrompts++;
-			void this._flushCompactionPrompts();
+			const flushController = this._reserveCompactionPromptFlush();
+			if (flushController) void this._flushCompactionPrompts(flushController);
 		}
 		// Preparation stays a busy activity; only the run itself may be captured at turn boundaries.
 		const restoreForeground = this.workingSessionGate.foreground();
@@ -3032,7 +3031,8 @@ export class AgentSession {
 		return this.workingSessionGate.run(() => this._prompt(text, options));
 	}
 
-	private async _prompt(text: string, options?: PromptOptions, cancelOnAbort = false): Promise<void> {
+	private async _prompt(text: string, options?: PromptOptions, signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) return;
 		if (this._isEmittingAgentSettled) {
 			this._deferredSettledActions.push(async () => await this.prompt(text, options));
 			return;
@@ -3049,7 +3049,7 @@ export class AgentSession {
 				return;
 			}
 		}
-		if (cancelOnAbort && (this._disposed || this._abortingSessionCount > 0)) return;
+		if (signal?.aborted) return;
 
 		if (this._branchSummaryAbortController !== undefined) {
 			throw new Error(
@@ -3071,12 +3071,11 @@ export class AgentSession {
 		this._promptPreflightCount++;
 		let trigger: Extract<BeforeAgentStartTrigger, { messageType: "user" }> | undefined;
 		try {
-			trigger = await this._preparePrompt(text, options, cancelOnAbort);
+			trigger = await this._preparePrompt(text, options, signal);
 		} finally {
 			this._promptPreflightCount--;
 		}
-		if (!trigger) return;
-		if (cancelOnAbort && (this._disposed || this._abortingSessionCount > 0)) return;
+		if (!trigger || signal?.aborted) return;
 		// Another prompt can start a run while this one awaits input hooks or auth. That run owns the
 		// session, so handle this prompt as one sent during it, without preparing it again.
 		if (this.isStreaming) await this._queuePrompt(trigger.prompt, trigger.images, options);
@@ -3090,7 +3089,7 @@ export class AgentSession {
 	private async _preparePrompt(
 		text: string,
 		options?: PromptOptions,
-		cancelOnAbort = false,
+		signal?: AbortSignal,
 	): Promise<Extract<BeforeAgentStartTrigger, { messageType: "user" }> | undefined> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
@@ -3106,7 +3105,7 @@ export class AgentSession {
 			preflightResult?.("handled");
 			return undefined;
 		}
-		if (cancelOnAbort && (this._disposed || this._abortingSessionCount > 0)) return undefined;
+		if (signal?.aborted) return undefined;
 		const { text: currentText, images: currentImages } = processedInput;
 
 		// Expand skill commands (/skill:name args) and prompt templates (/template args)
@@ -3338,32 +3337,42 @@ export class AgentSession {
 	 * Hold `isIdle` false across `_clearManualCompactionState()` when queued prompts will flush
 	 * after `compaction_end`, preventing a microtask idle flicker before the queued prompt starts.
 	 */
-	private _reserveCompactionPromptFlush(): boolean {
-		if (this._compactionPrompts.length === 0) return false;
+	private _reserveCompactionPromptFlush(abortGeneration?: number): AbortController | undefined {
+		if (this._compactionPrompts.length === 0) return undefined;
 		if (this._disposed) {
 			this._compactionPrompts = [];
 			this._emitQueueUpdate();
-			return false;
+			return undefined;
 		}
-		if (this._abortingSessionCount > 0) return false;
-		this._flushingCompactionPrompts++;
-		return true;
+		if (this._compactionFlushAbortController !== undefined) return undefined;
+		if (abortGeneration !== undefined && this._sessionAbortGeneration !== abortGeneration) return undefined;
+		const controller = new AbortController();
+		this._compactionFlushAbortController = controller;
+		return controller;
 	}
 
 	/** Drain queued compaction prompts after `compaction_end`, always releasing any flush hold. */
-	private _releaseCompactionPromptFlush(heldFlush: boolean): void {
-		const shouldFlush = this._compactionPrompts.length > 0 && !this._disposed && this._abortingSessionCount === 0;
-		if (shouldFlush) {
-			if (!heldFlush) this._flushingCompactionPrompts++;
-			void this._flushCompactionPrompts();
-			return;
+	private _releaseCompactionPromptFlush(controller: AbortController | undefined, abortGeneration: number): void {
+		const canFlush =
+			this._compactionPrompts.length > 0 &&
+			!this._disposed &&
+			!controller?.signal.aborted &&
+			this._sessionAbortGeneration === abortGeneration &&
+			this._compactionAbortController === undefined &&
+			this._branchSummaryAbortController === undefined;
+		if (canFlush) {
+			const flushController = controller ?? this._reserveCompactionPromptFlush(abortGeneration);
+			if (flushController) {
+				void this._flushCompactionPrompts(flushController);
+				return;
+			}
 		}
 		if (this._compactionPrompts.length > 0 && this._disposed) {
 			this._compactionPrompts = [];
 			this._emitQueueUpdate();
 		}
-		if (heldFlush) {
-			this._flushingCompactionPrompts--;
+		if (controller && this._compactionFlushAbortController === controller) {
+			this._compactionFlushAbortController = undefined;
 			this._resolveIdleWaitIfIdle();
 		}
 	}
@@ -3377,10 +3386,18 @@ export class AgentSession {
 		});
 	}
 
-	private async _flushCompactionPrompts(): Promise<void> {
+	private async _flushCompactionPrompts(controller: AbortController): Promise<void> {
+		const { signal } = controller;
 		try {
 			while (this._compactionPrompts.length > 0) {
-				if (this._disposed || this._abortingSessionCount > 0) break;
+				if (
+					signal.aborted ||
+					this._disposed ||
+					this._compactionAbortController !== undefined ||
+					this._branchSummaryAbortController !== undefined
+				) {
+					break;
+				}
 				const entry = this._compactionPrompts.shift()!;
 				this._emitQueueUpdate();
 				const preflightDone = Promise.withResolvers<void>();
@@ -3395,7 +3412,7 @@ export class AgentSession {
 									entry.options.preflightResult?.(disposition);
 								},
 							},
-							true,
+							signal,
 						),
 					)
 					.catch((error) => {
@@ -3410,7 +3427,9 @@ export class AgentSession {
 				void run;
 			}
 		} finally {
-			this._flushingCompactionPrompts--;
+			if (this._compactionFlushAbortController === controller) {
+				this._compactionFlushAbortController = undefined;
+			}
 			this._resolveIdleWaitIfIdle();
 		}
 	}
@@ -3624,18 +3643,15 @@ export class AgentSession {
 	 */
 	async abort(): Promise<void> {
 		this.workingSessionGate.beforeMutation();
-		this._abortingSessionCount++;
-		try {
-			this._agentRunAbortController?.abort();
-			this.abortRetry();
-			this.abortCompaction();
-			this.abortBranchSummary();
-			this.agent.abort();
-			await this._cancelBackgroundRuns("Session aborted");
-			await this.waitForIdle();
-		} finally {
-			this._abortingSessionCount--;
-		}
+		this._sessionAbortGeneration++;
+		this._compactionFlushAbortController?.abort();
+		this._agentRunAbortController?.abort();
+		this.abortRetry();
+		this.abortCompaction();
+		this.abortBranchSummary();
+		this.agent.abort();
+		await this._cancelBackgroundRuns("Session aborted");
+		await this.waitForIdle();
 	}
 
 	/** Runtime exit cancels this capability before joining the paused agent. */
@@ -3998,11 +4014,12 @@ export class AgentSession {
 
 	private async _compact(customInstructions?: string): Promise<CompactionResult> {
 		await this.abort();
+		const compactionAbortGeneration = this._sessionAbortGeneration;
 		this._compactionAbortController = new AbortController();
 		this._emit({ type: "compaction_start", reason: "manual" });
 		let fromExtension = false;
 		let cancelledByExtension = false;
-		let heldPromptFlush = false;
+		let heldPromptFlush: AbortController | undefined;
 
 		try {
 			const model = this.model;
@@ -4127,7 +4144,7 @@ export class AgentSession {
 				usage,
 				details,
 			};
-			heldPromptFlush = this._reserveCompactionPromptFlush();
+			heldPromptFlush = this._reserveCompactionPromptFlush(compactionAbortGeneration);
 			// compaction_end listeners may submit queued prompts, so expose idle state before notifying them.
 			this._clearManualCompactionState();
 			this._emit({
@@ -4142,7 +4159,7 @@ export class AgentSession {
 			const message = error instanceof Error ? error.message : String(error);
 			const aborted = this._compactionAbortController?.signal.aborted === true || cancelledByExtension;
 			const errorMessage = aborted ? undefined : `Compaction failed: ${message}`;
-			if (!heldPromptFlush) heldPromptFlush = this._reserveCompactionPromptFlush();
+			if (!heldPromptFlush) heldPromptFlush = this._reserveCompactionPromptFlush(compactionAbortGeneration);
 			this._clearManualCompactionState();
 			this._emit({
 				type: "compaction_end",
@@ -4162,7 +4179,7 @@ export class AgentSession {
 			throw error;
 		} finally {
 			this._clearManualCompactionState();
-			this._releaseCompactionPromptFlush(heldPromptFlush);
+			this._releaseCompactionPromptFlush(heldPromptFlush, compactionAbortGeneration);
 		}
 	}
 

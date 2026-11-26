@@ -921,6 +921,101 @@ describe("AgentSession prompt characterization", () => {
 		expect(getUserTexts(harness)).not.toContain("queued second");
 	});
 
+	it("does not flush compaction-queued prompts after session.abort() even when session_compact_failed yields", async () => {
+		const compactionStarted = Promise.withResolvers<void>();
+		const compactFailedYield = Promise.withResolvers<void>();
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						compactionStarted.resolve();
+						await new Promise<void>((resolve) => {
+							if (event.signal.aborted) resolve();
+							else event.signal.addEventListener("abort", () => resolve(), { once: true });
+						});
+						return { cancel: true };
+					});
+					pi.on("session_compact_failed", async () => {
+						await compactFailedYield.promise;
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("one"),
+			fauxAssistantMessage("two"),
+			fauxAssistantMessage("should not run"),
+		]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+		const callsBeforeCompact = harness.faux.state.callCount;
+
+		const compactPromise = harness.session.compact().catch(() => undefined);
+		await compactionStarted.promise;
+		await harness.session.sendUserMessage("queued before abort", { deliverAs: "steer" });
+
+		// session.abort() resolves as soon as _clearManualCompactionState() runs, before session_compact_failed finishes.
+		await harness.session.abort();
+		compactFailedYield.resolve();
+		await compactPromise;
+		await harness.session.waitForIdle();
+
+		expect(harness.faux.state.callCount).toBe(callsBeforeCompact);
+		expect(getUserTexts(harness)).not.toContain("queued before abort");
+		expect(harness.session.clearQueue()).toEqual({ steering: ["queued before abort"], followUp: [] });
+	});
+
+	it("does not livelock when sendCustomMessage(triggerTurn: true) runs during manual compaction with a queued steer prompt", async () => {
+		const compactionStarted = Promise.withResolvers<void>();
+		const compactionReleased = Promise.withResolvers<void>();
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						compactionStarted.resolve();
+						await compactionReleased.promise;
+						return {
+							compaction: {
+								summary: "manual compacted",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: {},
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("one"),
+			fauxAssistantMessage("two"),
+			fauxAssistantMessage("custom reply"),
+			fauxAssistantMessage("queued steer reply"),
+		]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+
+		const compactPromise = harness.session.compact();
+		await compactionStarted.promise;
+		await harness.session.sendUserMessage("queued during compaction", { deliverAs: "steer" });
+		await harness.session.sendCustomMessage(
+			{ customType: "trigger", content: "background trigger", display: true },
+			{ triggerTurn: true },
+		);
+		expect(harness.session.getSteeringMessages()).toEqual(["queued during compaction"]);
+
+		compactionReleased.resolve();
+		await compactPromise;
+		await harness.session.waitForIdle();
+
+		expect(getUserTexts(harness)).toContain("queued during compaction");
+		expect(harness.session.getLastAssistantText()).toBe("queued steer reply");
+	});
+
 	it("throws when prompting without a model", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
