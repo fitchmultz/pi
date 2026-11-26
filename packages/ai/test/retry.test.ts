@@ -337,14 +337,22 @@ describe("provider retry classification", () => {
 	});
 
 	it.each([
-		["deadline_exceeded", "Deadline expired before operation could complete."],
-		["gateway_timeout", "Deadline expired before operation could complete."],
-		["service_unavailable", "The backend is temporarily overloaded."],
+		["deadline_exceeded", "Operation did not finish in time."],
+		["gateway_timeout", "Upstream did not finish in time."],
+		["service_unavailable", "The service is currently down."],
 		["rate_limit_exceeded", "Per-minute request limit reached."],
 		["too_many_requests", "Slow down and retry."],
 		["api_error", "An unexpected error occurred on the server."],
 		["malformed_tool_call", "Tool call could not be parsed."],
 	] as const)("retries transient Google Interactions SSE error code %s", (rawStopReason, errorMessage) => {
+		// Ensure the message text alone does not trigger retry, so each row directly protects the code set.
+		expect(
+			isRetryableAssistantError({
+				...fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+				api: "google-interactions",
+				provider: "google",
+			}),
+		).toBe(false);
 		expect(
 			isRetryableAssistantError({
 				...fauxAssistantMessage("", { stopReason: "error", errorMessage }),
