@@ -88,6 +88,14 @@ describe("extractLocalImagePaths", () => {
 				"Compare /Users/me/Desktop/Capture d'écran 2026-11-26 à 12.00.00.png with 'relative/quoted.png'.",
 			),
 		).toEqual(["/Users/me/Desktop/Capture d'écran 2026-11-26 à 12.00.00.png", "relative/quoted.png"]);
+		expect(
+			extractLocalImagePaths(
+				"Open '/Users/me/Desktop/Capture d'écran 2026-11-26 à 12.00.00.png' and 'not an image' then '/Users/me/Desktop/Capture d'écran.png' please.",
+			),
+		).toEqual([
+			"/Users/me/Desktop/Capture d'écran 2026-11-26 à 12.00.00.png",
+			"/Users/me/Desktop/Capture d'écran.png",
+		]);
 		expect(extractLocalImagePaths("Compare /tmp/before.png and /tmp/after.png")).toEqual([
 			"/tmp/before.png",
 			"/tmp/after.png",
