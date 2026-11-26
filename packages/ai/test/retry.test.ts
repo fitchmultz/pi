@@ -330,9 +330,58 @@ describe("provider retry classification", () => {
 		"Provider finish_reason: error",
 		"Provider returned an empty response",
 		"Upstream error from Relace: The model stopped before completing the response.",
+		"Deadline expired before operation could complete.",
+		"DEADLINE_EXCEEDED: upstream timed out",
 	])("retries temporary provider failures: %s", (errorMessage) => {
 		expect(isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage }))).toBe(true);
 	});
+
+	it.each([
+		["deadline_exceeded", "Operation did not finish in time."],
+		["gateway_timeout", "Upstream did not finish in time."],
+		["service_unavailable", "The service is currently down."],
+		["rate_limit_exceeded", "Per-minute request limit reached."],
+		["too_many_requests", "Slow down and retry."],
+		["api_error", "An unexpected error occurred on the server."],
+		["malformed_tool_call", "Tool call could not be parsed."],
+	] as const)("retries transient Google Interactions SSE error code %s", (rawStopReason, errorMessage) => {
+		// Ensure the message text alone does not trigger retry, so each row directly protects the code set.
+		expect(
+			isRetryableAssistantError({
+				...fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+				api: "google-interactions",
+				provider: "google",
+			}),
+		).toBe(false);
+		expect(
+			isRetryableAssistantError({
+				...fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+				api: "google-interactions",
+				provider: "google",
+				rawStopReason,
+			}),
+		).toBe(true);
+	});
+
+	it.each([
+		["quota_exceeded", "You have exceeded your daily quota."],
+		["payment_required", "Your prepayment credits are depleted."],
+		["invalid_request", "The request payload is malformed."],
+		["rate_limit_exceeded", "Monthly quota exceeded"],
+		["too_many_requests", "Your prepayment credits are depleted."],
+	] as const)(
+		"keeps non-retryable Google Interactions error code %s or limit text non-retryable",
+		(rawStopReason, errorMessage) => {
+			expect(
+				isRetryableAssistantError({
+					...fauxAssistantMessage("", { stopReason: "error", errorMessage }),
+					api: "google-interactions",
+					provider: "google",
+					rawStopReason,
+				}),
+			).toBe(false);
+		},
+	);
 
 	it.each([
 		// A cancellation, usually the user's.
