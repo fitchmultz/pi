@@ -161,7 +161,7 @@ See [Compaction Reference](compaction.md) for trigger, summarization, and valida
 | `outputPad` | `0 \| 1` | `1` | Horizontal transcript padding for messages, tool output, `!` command output, and summary blocks. |
 | `autocompleteMaxVisible` | number | `5` | Visible autocomplete entries, from 3 to 20. |
 | `showHardwareCursor` | boolean | `false` | Use the terminal cursor instead of Pi's drawn cursor. Pi still positions it for input methods. |
-| `terminal.showImages` | boolean | `true` | Display inline images when supported. |
+| `terminal.showImages` | boolean | `true` | Display inline images in tool output, custom messages, and user/assistant messages when supported. Set `false` for text-only output. |
 | `terminal.imageWidthCells` | number | `60` | Preferred inline image width in terminal cells. |
 | `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when rendered content shrinks. When unset, `PI_CLEAR_ON_SHRINK=1` enables it. |
 | `terminal.showTerminalProgress` | boolean | `false` | Show OSC 9;4 progress in the terminal tab. |

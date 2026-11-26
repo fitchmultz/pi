@@ -3977,6 +3977,7 @@ export class InteractiveMode {
 						undefined,
 						undefined,
 						!!this.compactView,
+						this.getMessageImageOptions(),
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
@@ -4300,6 +4301,22 @@ export class InteractiveMode {
 		return textBlocks.map((c) => (c as { text: string }).text).join("");
 	}
 
+	/** Extract attached ImageContent blocks from a user message */
+	private getUserMessageImages(message: Message): ImageContent[] {
+		if (message.role !== "user" || typeof message.content === "string") return [];
+		return message.content.filter((c): c is ImageContent => c.type === "image");
+	}
+
+	private getMessageImageOptions(images?: readonly ImageContent[]) {
+		return {
+			images,
+			cwd: this.sessionManager.getCwd(),
+			showImages: this.settingsManager.getShowImages(),
+			imageWidthCells: this.settingsManager.getImageWidthCells(),
+			onImageLoaded: () => this.ui.requestRender(),
+		};
+	}
+
 	/** Show a managed-tool status update in the chat. */
 	private showManagedToolStatus(status: ToolStatus): void {
 		if (!this.managedToolStatusStarted) {
@@ -4447,11 +4464,12 @@ export class InteractiveMode {
 				break;
 			case "user": {
 				const textContent = this.getUserMessageText(message);
-				if (textContent) {
+				const imageBlocks = this.getUserMessageImages(message);
+				if (textContent || imageBlocks.length > 0) {
 					if (this.chatContainer.children.length > 0) {
 						this.chatContainer.addChild(new Spacer(1));
 					}
-					const skillBlock = parseSkillBlock(textContent);
+					const skillBlock = textContent ? parseSkillBlock(textContent) : null;
 					if (skillBlock) {
 						// Render skill block (collapsible)
 						const component = new SkillInvocationMessageComponent(
@@ -4465,15 +4483,16 @@ export class InteractiveMode {
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
 						// Render user message separately if present
-						if (skillBlock.userMessage) {
+						if (skillBlock.userMessage || imageBlocks.length > 0) {
 							this.chatContainer.addChild(new Spacer(1));
 							const userComponent = new UserMessageComponent(
-								skillBlock.userMessage,
+								skillBlock.userMessage ?? "",
 								this.getMarkdownThemeWithSettings(),
 								this.outputPad,
 								this.getMarkdownTransformers(),
 								options?.messageId,
 								options?.timestamp,
+								this.getMessageImageOptions(imageBlocks),
 							);
 							this.chatContainer.addChild(userComponent);
 						}
@@ -4485,10 +4504,11 @@ export class InteractiveMode {
 							this.getMarkdownTransformers(),
 							options?.messageId,
 							options?.timestamp,
+							this.getMessageImageOptions(imageBlocks),
 						);
 						this.chatContainer.addChild(userComponent);
 					}
-					if (options?.populateHistory) {
+					if (textContent && options?.populateHistory) {
 						this.editor.addToHistory?.(textContent);
 					}
 				}
@@ -4505,6 +4525,7 @@ export class InteractiveMode {
 					options?.messageId,
 					options?.timestamp,
 					!!this.compactView,
+					this.getMessageImageOptions(),
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
@@ -5804,18 +5825,30 @@ export class InteractiveMode {
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent || child instanceof CustomMessageComponent) {
+							if (
+								child instanceof ToolExecutionComponent ||
+								child instanceof CustomMessageComponent ||
+								child instanceof UserMessageComponent ||
+								child instanceof AssistantMessageComponent
+							) {
 								child.setShowImages(enabled);
 							}
 						}
+						this.ui.requestRender();
 					},
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent || child instanceof CustomMessageComponent) {
+							if (
+								child instanceof ToolExecutionComponent ||
+								child instanceof CustomMessageComponent ||
+								child instanceof UserMessageComponent ||
+								child instanceof AssistantMessageComponent
+							) {
 								child.setImageWidthCells(width);
 							}
 						}
+						this.ui.requestRender();
 					},
 					onAutoResizeImagesChange: (enabled) => {
 						this.settingsManager.setImageAutoResize(enabled);
