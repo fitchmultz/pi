@@ -1266,6 +1266,34 @@ describe("TuiAltScreen", () => {
 				restoreIdx !== -1 && !afterSixel.slice(0, restoreIdx).includes("\r\n"),
 				"stop dump must restore cursor and advance past pre-drawn Sixel rows without overwriting them",
 			);
+
+			// Also verify tall placements exceeding terminal height never emit EL2 clears over lower Sixel rows.
+			const shortTerminal = new RecordingTerminal(20, 3);
+			const shortTui = new TuiAltScreen(shortTerminal);
+			shortTui.addChild(
+				new Image(
+					"AAAA",
+					"image/png",
+					{ fallbackColor: (value) => value },
+					{ maxWidthCells: 4, maxHeightCells: 6 },
+					{ widthPx: 40, heightPx: 90 },
+				),
+			);
+			shortTui.start();
+			await shortTerminal.waitForRender();
+			const shortStopStart = shortTerminal.events.length;
+			shortTui.stop();
+			const shortStopDump = shortTerminal.events
+				.slice(shortStopStart)
+				.filter((event) => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const shortSixelEnd = shortStopDump.indexOf("\x1b\\");
+			assert.ok(shortSixelEnd !== -1, "expected tall Sixel payload in short-terminal stop dump");
+			assert.ok(
+				!shortStopDump.slice(shortSixelEnd).includes("\x1b[2K"),
+				"tall Sixel placement exceeding terminal height must not emit EL2 clears over leftover reservation rows",
+			);
 		} finally {
 			setSixelEncoder(undefined);
 			resetCapabilitiesCache();

@@ -476,21 +476,27 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				const line = this.lastDocument[row] ?? "";
 				const sixelMeta = getSixelImageMetadata(line);
 				if (sixelMeta && sixelMeta.rows > 1) {
-					let span = 1;
-					const limit = Math.min(sixelMeta.rows, maxSpan, this.lastDocument.length - row);
-					while (span < limit && !isImageLine(this.lastDocument[row + span] ?? "")) {
-						span++;
+					let totalSpan = 1;
+					const totalLimit = Math.min(sixelMeta.rows, this.lastDocument.length - row);
+					while (totalSpan < totalLimit && !isImageLine(this.lastDocument[row + totalSpan] ?? "")) {
+						totalSpan++;
 					}
+					const predrawSpan = Math.min(totalSpan, maxSpan);
 					// Draw covered reservation rows (including Box padding/backgrounds or side text) before the
 					// Sixel payload so multi-row placements are never erased by later EL2 clears or padding spaces.
 					buffer += "\r\x1b[2K";
-					for (let offset = 1; offset < span; offset++) {
+					for (let offset = 1; offset < predrawSpan; offset++) {
 						buffer += `\r\n\r\x1b[2K${this.lastDocument[row + offset] ?? ""}`;
 					}
-					if (span > 1) buffer += `\x1b[${span - 1}A`;
+					if (predrawSpan > 1) buffer += `\x1b[${predrawSpan - 1}A`;
 					buffer += `\r\x1b7${line}\x1b8`;
-					if (span > 1) buffer += `\x1b[${span - 1}B`;
-					row += span - 1;
+					if (predrawSpan > 1) buffer += `\x1b[${predrawSpan - 1}B`;
+					// For placements taller than the terminal height, preserve remaining reservation rows without EL2 clears.
+					for (let offset = predrawSpan; offset < totalSpan; offset++) {
+						const extraLine = this.lastDocument[row + offset] ?? "";
+						buffer += visibleWidth(extraLine) === 0 ? "\r\n" : `\r\n${extraLine}`;
+					}
+					row += totalSpan - 1;
 				} else if (sixelMeta) {
 					buffer += `\r\x1b[2K\x1b7${line}\x1b8`;
 				} else {
