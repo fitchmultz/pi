@@ -21,7 +21,7 @@ import {
 	getCapabilities,
 	hyperlink,
 	registerKittyImageMetadata,
-	registerSixelImageMetadata,
+	renderImage,
 	resetCapabilitiesCache,
 	setCapabilities,
 	setCellDimensions,
@@ -1243,8 +1243,20 @@ describe("TuiAltScreen", () => {
 			assert.ok(
 				terminal.events.some((event) => event.type === "write" && event.data.includes('\x1bP0;1q"1;1;40;18')),
 			);
+			const stopStart = terminal.events.length;
 			tui.stop();
 			assert.strictEqual(getCapabilities().images, "iterm2");
+			const stopDump = terminal.events
+				.slice(stopStart)
+				.filter((event) => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const sixelEnd = stopDump.indexOf("\x1b\\");
+			assert.ok(sixelEnd !== -1, "expected Sixel payload in alt-screen stop dump");
+			assert.ok(
+				!stopDump.slice(sixelEnd).includes("\r\x1b[2K\r\n"),
+				"stop dump must not EL2-clear empty Sixel reservation rows",
+			);
 		} finally {
 			setSixelEncoder(undefined);
 			resetCapabilitiesCache();
@@ -1254,13 +1266,15 @@ describe("TuiAltScreen", () => {
 
 	it("crops a Sixel image whose first line is above the viewport and draws it after clearing rows", async () => {
 		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 18 });
+		setSixelEncoder(() => '\x1bP0;1q"1;1;20;54#0;2;0;0;100#0AAA-BBB-CCC-DDD-EEE-FFF-GGG-HHH-III\x1b\\');
 		try {
 			const terminal = new RecordingTerminal(20, 3);
 			const tui = new TuiAltScreen(terminal);
-			const sixel = '\x1bP0;1q"1;1;20;54#0;2;0;0;100#0AAA-BBB-CCC-DDD-EEE-FFF-GGG-HHH-III\x1b\\';
-			registerSixelImageMetadata(sixel, { columns: 2, rows: 3, widthPx: 20, heightPx: 54 });
+			const rendered = renderImage("AAAA", { widthPx: 20, heightPx: 54 }, { maxWidthCells: 2 });
+			assert.ok(rendered, "expected rendered Sixel image");
 			tui.addChild({
-				render: () => ["before", sixel, "", "", "after", "end"],
+				render: () => ["before", rendered.sequence, "", "", "after", "end"],
 				invalidate: () => {},
 			});
 			tui.start();
@@ -1279,6 +1293,8 @@ describe("TuiAltScreen", () => {
 
 			tui.stop();
 		} finally {
+			setSixelEncoder(undefined);
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
 			resetCapabilitiesCache();
 		}
 	});

@@ -156,7 +156,6 @@ export {
 	imageFallback,
 	isImageLine,
 	isSixelImageLine,
-	registerSixelImageMetadata,
 	renderImage,
 	resetCapabilitiesCache,
 	type SixelEncodeRequest,

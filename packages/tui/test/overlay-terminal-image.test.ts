@@ -6,9 +6,9 @@ import {
 	encodeKitty,
 	getImageLineExtent,
 	registerKittyImageMetadata,
-	registerSixelImageMetadata,
 	resetCapabilitiesCache,
 	setCapabilities,
+	setCellDimensions,
 } from "../src/terminal-image.ts";
 import type { Component, OverlayOptions } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
@@ -251,11 +251,11 @@ describe("overlays over terminal images", () => {
 
 	it("hides Sixel images in fullscreen mode while an overlay covers them and redraws after close", async () => {
 		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 18 });
 		const terminal = new RecordingTerminal(20, 6);
 		const tui = new TuiAltScreen(terminal);
 		try {
 			const sixel = '\x1bP0;1q"1;1;40;54#0;2;100;0;0#0AAA-BBB-CCC\x1b\\';
-			registerSixelImageMetadata(sixel, { columns: 4, rows: 3, widthPx: 40, heightPx: 54 });
 			tui.setLayoutRoot(staticComponent(["top", sixel, "", "", "after", ""]));
 			tui.start();
 			await terminal.waitForRender();
@@ -274,6 +274,7 @@ describe("overlays over terminal images", () => {
 			assert.ok(terminal.writes.includes(sixel), "the Sixel image redraws once uncovered");
 		} finally {
 			tui.stop();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
 			resetCapabilitiesCache();
 		}
 	});

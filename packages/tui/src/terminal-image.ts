@@ -60,10 +60,6 @@ export type TmuxCapabilityProbe = () => boolean | TmuxCapabilities;
 let cachedCapabilities: TerminalCapabilities | null = null;
 let capabilityOverrides: Partial<TerminalCapabilities> = {};
 let sixelEncoder: SixelImageEncoder | undefined;
-const MAX_SIXEL_CACHE_ENTRIES = 32;
-const MAX_SIXEL_CACHE_CHARS = 16 * 1024 * 1024;
-const sixelCache = new Map<string, string | null>();
-let sixelCacheChars = 0;
 
 // Default cell dimensions - updated by TUI when terminal responds to query
 let cellDimensions: CellDimensions = { widthPx: 9, heightPx: 18 };
@@ -82,38 +78,6 @@ export function setCellDimensions(dims: CellDimensions): void {
  */
 export function setSixelEncoder(encoder: SixelImageEncoder | undefined): void {
 	sixelEncoder = encoder;
-	sixelCache.clear();
-	sixelCacheChars = 0;
-}
-
-function sixelCacheEntryChars(key: string, value: string | null): number {
-	return key.length + (value?.length ?? 0);
-}
-
-function encodeSixelCached(request: SixelEncodeRequest): string | null {
-	if (!sixelEncoder) return null;
-	const key = `${request.widthPx}x${request.heightPx}:${request.mimeType}:${request.base64Data}`;
-	if (sixelCache.has(key)) {
-		const cached = sixelCache.get(key) ?? null;
-		sixelCache.delete(key);
-		sixelCache.set(key, cached);
-		return cached;
-	}
-	const encoded = sixelEncoder(request);
-	const entryChars = sixelCacheEntryChars(key, encoded);
-	if (entryChars > MAX_SIXEL_CACHE_CHARS) {
-		return encoded;
-	}
-	sixelCache.set(key, encoded);
-	sixelCacheChars += entryChars;
-	while (sixelCache.size > MAX_SIXEL_CACHE_ENTRIES || sixelCacheChars > MAX_SIXEL_CACHE_CHARS) {
-		const oldest = sixelCache.entries().next();
-		if (oldest.done) break;
-		const [oldestKey, oldestValue] = oldest.value;
-		sixelCache.delete(oldestKey);
-		sixelCacheChars -= sixelCacheEntryChars(oldestKey, oldestValue);
-	}
-	return encoded;
 }
 
 /**
@@ -591,10 +555,6 @@ interface ParsedSixelBands {
 	bandStartColors: Array<number | undefined>;
 }
 
-interface RegisteredSixelImageMetadata extends SixelImageMetadata {
-	parsedBands?: ParsedSixelBands;
-}
-
 interface RegisteredKittyImageMetadata extends KittyImageMetadata {
 	transmissionGeneration: number;
 }
@@ -614,8 +574,6 @@ let kittyTransmissionGeneration = 0;
 // Tallest registered image. Bounds backward searches for image lines above a
 // viewport: no image line further up than this can reach into it.
 let maxKittyImageRows = 0;
-const MAX_SIXEL_METADATA_ENTRIES = 128;
-const sixelImageMetadata = new Map<string, RegisteredSixelImageMetadata>();
 let maxSixelImageRows = 0;
 
 export function registerKittyImageMetadata(metadata: KittyImageMetadata): void {
@@ -634,17 +592,6 @@ export function getMaxKittyImageRows(): number {
 	return maxKittyImageRows;
 }
 
-export function registerSixelImageMetadata(sequence: string, metadata: SixelImageMetadata): void {
-	maxSixelImageRows = Math.max(maxSixelImageRows, metadata.rows);
-	sixelImageMetadata.delete(sequence);
-	sixelImageMetadata.set(sequence, { ...metadata });
-	while (sixelImageMetadata.size > MAX_SIXEL_METADATA_ENTRIES) {
-		const oldest = sixelImageMetadata.keys().next().value;
-		if (oldest === undefined) break;
-		sixelImageMetadata.delete(oldest);
-	}
-}
-
 /** Return the row height of the tallest top-anchored image (Kitty or Sixel) registered so far. */
 export function getMaxImageRows(): number {
 	return Math.max(maxKittyImageRows, maxSixelImageRows);
@@ -661,38 +608,20 @@ function parseSixelRasterDimensions(sequence: string): ImageDimensions | undefin
 	return widthPx > 0 && heightPx > 0 ? { widthPx, heightPx } : undefined;
 }
 
-function getRegisteredSixelImage(
-	line: string,
-): { sequence: string; metadata: RegisteredSixelImageMetadata } | undefined {
-	const direct = sixelImageMetadata.get(line);
-	if (direct) return { sequence: line, metadata: direct };
+export function getSixelImageMetadata(line: string): SixelImageMetadata | undefined {
 	const span = findSixelSequence(line);
 	if (!span) return undefined;
 	const sequence = line.slice(span.start, span.end);
-	const found = sixelImageMetadata.get(sequence);
-	if (found) return { sequence, metadata: found };
 	const raster = parseSixelRasterDimensions(sequence);
 	if (!raster) return undefined;
 	const dims = getCellDimensions();
+	const rows = Math.max(1, Math.ceil(raster.heightPx / dims.heightPx));
+	maxSixelImageRows = Math.max(maxSixelImageRows, rows);
 	return {
-		sequence,
-		metadata: {
-			columns: Math.max(1, Math.ceil(raster.widthPx / dims.widthPx)),
-			rows: Math.max(1, Math.ceil(raster.heightPx / dims.heightPx)),
-			widthPx: raster.widthPx,
-			heightPx: raster.heightPx,
-		},
-	};
-}
-
-export function getSixelImageMetadata(line: string): SixelImageMetadata | undefined {
-	const entry = getRegisteredSixelImage(line);
-	if (!entry) return undefined;
-	return {
-		columns: entry.metadata.columns,
-		rows: entry.metadata.rows,
-		widthPx: entry.metadata.widthPx,
-		heightPx: entry.metadata.heightPx,
+		columns: Math.max(1, Math.ceil(raster.widthPx / dims.widthPx)),
+		rows,
+		widthPx: raster.widthPx,
+		heightPx: raster.heightPx,
 	};
 }
 
@@ -735,35 +664,26 @@ function parseSixelBands(sequence: string, fallbackWidthPx: number): ParsedSixel
 
 /** Crop a Sixel image line vertically by slicing its 6-pixel bands in O(bands) time. */
 export function cropSixelImageLine(line: string, hiddenRows: number, visibleRows: number): string {
-	const entry = getRegisteredSixelImage(line);
+	const metadata = getSixelImageMetadata(line);
 	const span = findSixelSequence(line);
-	if (!entry || !span || hiddenRows < 0 || hiddenRows >= entry.metadata.rows || visibleRows <= 0) return line;
-	const croppedRows = Math.min(visibleRows, entry.metadata.rows - hiddenRows);
-	if (hiddenRows === 0 && croppedRows === entry.metadata.rows) return line;
-	let parsed = entry.metadata.parsedBands;
-	if (!parsed) {
-		parsed = parseSixelBands(entry.sequence, entry.metadata.widthPx);
-		entry.metadata.parsedBands = parsed;
-	}
+	if (!metadata || !span || hiddenRows < 0 || hiddenRows >= metadata.rows || visibleRows <= 0) return line;
+	const croppedRows = Math.min(visibleRows, metadata.rows - hiddenRows);
+	if (hiddenRows === 0 && croppedRows === metadata.rows) return line;
+	const sequence = line.slice(span.start, span.end);
+	const parsed = parseSixelBands(sequence, metadata.widthPx);
 	if (!parsed || parsed.bands.length === 0) return line;
 
 	const totalBands = parsed.bands.length;
-	const startBand = Math.min(totalBands - 1, Math.floor((hiddenRows * totalBands) / entry.metadata.rows));
+	const startBand = Math.min(totalBands - 1, Math.floor((hiddenRows * totalBands) / metadata.rows));
 	const endBand = Math.max(
 		startBand + 1,
-		Math.min(totalBands, Math.ceil(((hiddenRows + croppedRows) * totalBands) / entry.metadata.rows)),
+		Math.min(totalBands, Math.ceil(((hiddenRows + croppedRows) * totalBands) / metadata.rows)),
 	);
 	const croppedHeightPx = Math.max(1, (endBand - startBand) * 6);
 	const firstBand = parsed.bands[startBand] ?? "";
 	const inheritedColor = startBand > 0 ? parsed.bandStartColors[startBand] : undefined;
 	const colorPrefix = inheritedColor !== undefined && !firstBand.startsWith("#") ? `#${inheritedColor}` : "";
 	const croppedSequence = `${parsed.prefix}${parsed.rasterPrefix}${croppedHeightPx}${parsed.paletteHeader}${colorPrefix}${parsed.bands.slice(startBand, endBand).join("-")}\x1b\\`;
-	registerSixelImageMetadata(croppedSequence, {
-		columns: entry.metadata.columns,
-		rows: croppedRows,
-		widthPx: entry.metadata.widthPx,
-		heightPx: croppedHeightPx,
-	});
 	return `${line.slice(0, span.start)}${croppedSequence}${line.slice(span.end)}`;
 }
 
@@ -991,6 +911,40 @@ export function getPngDimensions(base64Data: string): ImageDimensions | null {
 	}
 }
 
+function parseExifOrientation(buffer: Buffer, start: number, end: number): number | undefined {
+	// EXIF APP1 payload starts with "Exif\0\0" followed by a TIFF header (II or MM).
+	if (end - start < 14) return undefined;
+	if (
+		buffer[start] !== 0x45 ||
+		buffer[start + 1] !== 0x78 ||
+		buffer[start + 2] !== 0x69 ||
+		buffer[start + 3] !== 0x66 ||
+		buffer[start + 4] !== 0x00 ||
+		buffer[start + 5] !== 0x00
+	) {
+		return undefined;
+	}
+	const tiffStart = start + 6;
+	const littleEndian = buffer[tiffStart] === 0x49 && buffer[tiffStart + 1] === 0x49;
+	const bigEndian = buffer[tiffStart] === 0x4d && buffer[tiffStart + 1] === 0x4d;
+	if (!littleEndian && !bigEndian) return undefined;
+	const readU16 = (pos: number) => (littleEndian ? buffer.readUInt16LE(pos) : buffer.readUInt16BE(pos));
+	const readU32 = (pos: number) => (littleEndian ? buffer.readUInt32LE(pos) : buffer.readUInt32BE(pos));
+	if (readU16(tiffStart + 2) !== 42) return undefined;
+	const ifdOffset = readU32(tiffStart + 4);
+	const ifdStart = tiffStart + ifdOffset;
+	if (ifdStart < tiffStart || ifdStart + 2 > end) return undefined;
+	const entryCount = readU16(ifdStart);
+	for (let i = 0; i < entryCount; i++) {
+		const entryStart = ifdStart + 2 + i * 12;
+		if (entryStart + 12 > end) break;
+		if (readU16(entryStart) === 0x0112) {
+			return readU16(entryStart + 8);
+		}
+	}
+	return undefined;
+}
+
 function parseJpegDimensions(
 	buffer: Buffer,
 	complete: boolean,
@@ -1003,6 +957,7 @@ function parseJpegDimensions(
 		return { kind: "done", dimensions: null };
 	}
 
+	let exifOrientation: number | undefined;
 	let offset = 2;
 	while (offset < buffer.length - 9) {
 		if (buffer[offset] !== 0xff) {
@@ -1015,7 +970,11 @@ function parseJpegDimensions(
 		if (marker >= 0xc0 && marker <= 0xc2) {
 			const height = buffer.readUInt16BE(offset + 5);
 			const width = buffer.readUInt16BE(offset + 7);
-			return { kind: "done", dimensions: { widthPx: width, heightPx: height } };
+			const rotated = exifOrientation !== undefined && exifOrientation >= 5 && exifOrientation <= 8;
+			return {
+				kind: "done",
+				dimensions: rotated ? { widthPx: height, heightPx: width } : { widthPx: width, heightPx: height },
+			};
 		}
 
 		if (offset + 3 >= buffer.length) {
@@ -1025,7 +984,15 @@ function parseJpegDimensions(
 		if (length < 2) {
 			return { kind: "done", dimensions: null };
 		}
-		offset += 2 + length;
+		const segmentEnd = offset + 2 + length;
+		if (marker === 0xe1) {
+			if (segmentEnd > buffer.length) {
+				if (!complete) return { kind: "truncated" };
+			} else if (exifOrientation === undefined) {
+				exifOrientation = parseExifOrientation(buffer, offset + 4, segmentEnd);
+			}
+		}
+		offset = segmentEnd;
 	}
 
 	return complete ? { kind: "done", dimensions: null } : { kind: "truncated" };
@@ -1174,6 +1141,7 @@ export function renderImage(
 	}
 
 	if (caps.images === "sixel") {
+		if (!sixelEncoder) return null;
 		const boxWidthPx = size.columns * cellDims.widthPx;
 		const boxHeightPx = size.rows * cellDims.heightPx;
 		const srcW = Math.max(1, imageDimensions.widthPx);
@@ -1181,19 +1149,14 @@ export function renderImage(
 		const scale = Math.min(boxWidthPx / srcW, boxHeightPx / srcH);
 		const targetWidthPx = Math.max(1, Math.min(boxWidthPx, Math.round(srcW * scale)));
 		const targetHeightPx = Math.max(1, Math.min(boxHeightPx, Math.round(srcH * scale)));
-		const sequence = encodeSixelCached({
+		const sequence = sixelEncoder({
 			base64Data,
 			mimeType: options.mimeType ?? "image/png",
 			widthPx: targetWidthPx,
 			heightPx: targetHeightPx,
 		});
 		if (!sequence) return null;
-		registerSixelImageMetadata(sequence, {
-			columns: size.columns,
-			rows: size.rows,
-			widthPx: targetWidthPx,
-			heightPx: targetHeightPx,
-		});
+		maxSixelImageRows = Math.max(maxSixelImageRows, size.rows);
 		return { sequence, columns: size.columns, rows: size.rows };
 	}
 

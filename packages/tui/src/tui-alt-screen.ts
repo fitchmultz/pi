@@ -27,6 +27,7 @@ import {
 	getCapabilities,
 	getImagePlacementRows,
 	getKittyImagePlacement,
+	getSixelImageMetadata,
 	type ImageProtocol,
 	isImageLine,
 	setCapabilities,
@@ -469,9 +470,23 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				(line) => (isImageLine(line) || visibleWidth(line) <= width ? line : sliceByColumn(line, 0, width, true)),
 			);
 			let buffer = `${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}${DISABLE_AUTOWRAP}`;
+			let sixelCoveredRows = 0;
 			for (let row = 0; row < this.lastDocument.length; row++) {
 				if (row > 0) buffer += "\r\n";
-				buffer += `\r\x1b[2K${this.lastDocument[row] ?? ""}`;
+				const line = this.lastDocument[row] ?? "";
+				if (sixelCoveredRows > 0 && visibleWidth(line) === 0 && !isImageLine(line)) {
+					// Skip EL2 on empty Sixel reservation rows so the preceding multi-row Sixel raster stays intact.
+					sixelCoveredRows -= 1;
+					continue;
+				}
+				const sixelMeta = getSixelImageMetadata(line);
+				if (sixelMeta) {
+					sixelCoveredRows = Math.max(0, sixelMeta.rows - 1);
+					buffer += `\r\x1b[2K\x1b7${line}\x1b8`;
+				} else {
+					sixelCoveredRows = 0;
+					buffer += `\r\x1b[2K${line}`;
+				}
 			}
 			buffer += `\x1b[0m${ENABLE_AUTOWRAP}\r\n\x1b[?25h${END_SYNCHRONIZED_OUTPUT}`;
 			this.terminal.write(buffer);

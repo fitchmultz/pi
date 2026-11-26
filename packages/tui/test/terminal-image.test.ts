@@ -32,7 +32,6 @@ import {
 	isImageLine,
 	isSixelImageLine,
 	registerKittyImageMetadata,
-	registerSixelImageMetadata,
 	renderImage,
 	resetCapabilitiesCache,
 	setCapabilities,
@@ -1132,14 +1131,8 @@ describe("Sixel image protocol", () => {
 			endCol: 4,
 		});
 
-		// Re-rendering a fresh Image instance hits the shared Sixel cache.
-		new Image(
-			"AAAA",
-			"image/png",
-			{ fallbackColor: (v) => v },
-			{ maxWidthCells: 4 },
-			{ widthPx: 40, heightPx: 54 },
-		).render(40);
+		// Re-rendering the same Image at the same width reuses its component line cache.
+		assert.deepStrictEqual(image.render(40), lines);
 		assert.strictEqual(encodeCalls, 1);
 
 		// Crop middle row (hiddenRows=1, visibleRows=1 -> bands 3..5, preserving inherited active color #1).
@@ -1147,10 +1140,72 @@ describe("Sixel image protocol", () => {
 		assert.strictEqual(cropped, '\x1bP0;1q"1;1;40;18#0;2;0;0;0#1;2;100;0;0#1DDD-EEE-FFF\x1b\\');
 		assert.strictEqual(getSixelImageMetadata(cropped)?.rows, 1);
 
-		// Unregistered raw Sixel lines still report metadata via raster attributes.
+		// Raw Sixel lines report metadata directly from their DEC Sixel raster attributes.
 		const raw = '\x1bP0;1q"1;1;30;36#0~~~\x1b\\';
 		assert.deepStrictEqual(getSixelImageMetadata(raw), { columns: 3, rows: 2, widthPx: 30, heightPx: 36 });
-		registerSixelImageMetadata(raw, { columns: 3, rows: 2, widthPx: 30, heightPx: 36 });
 		assert.deepStrictEqual(getImageLineExtent(`  ${raw}`), { firstRow: 0, lastRow: 1, startCol: 2, endCol: 5 });
+	});
+
+	it("swaps width and height in getJpegDimensions for EXIF orientations 5-8", () => {
+		// Minimal JPEG: SOI + APP1(EXIF little-endian orientation=6) + SOF0(width=200, height=100) + EOI
+		const exifPayload = Buffer.from([
+			0x45,
+			0x78,
+			0x69,
+			0x66,
+			0x00,
+			0x00, // "Exif\0\0"
+			0x49,
+			0x49,
+			0x2a,
+			0x00,
+			0x08,
+			0x00,
+			0x00,
+			0x00, // TIFF II, magic 42, IFD0 @ 8
+			0x01,
+			0x00, // 1 IFD entry
+			0x12,
+			0x01,
+			0x03,
+			0x00,
+			0x01,
+			0x00,
+			0x00,
+			0x00,
+			0x06,
+			0x00,
+			0x00,
+			0x00, // Orientation = 6
+			0x00,
+			0x00,
+			0x00,
+			0x00,
+		]);
+		const app1Len = Buffer.alloc(2);
+		app1Len.writeUInt16BE(exifPayload.length + 2, 0);
+		const sof0 = Buffer.from([
+			0xff,
+			0xc0,
+			0x00,
+			0x0b,
+			0x08,
+			0x00,
+			0x64, // height = 100
+			0x00,
+			0xc8, // width = 200
+			0x01,
+			0x01,
+			0x11,
+			0x00,
+		]);
+		const jpeg = Buffer.concat([
+			Buffer.from([0xff, 0xd8, 0xff, 0xe1]),
+			app1Len,
+			exifPayload,
+			sof0,
+			Buffer.from([0xff, 0xd9]),
+		]);
+		assert.deepStrictEqual(getJpegDimensions(jpeg.toString("base64")), { widthPx: 100, heightPx: 200 });
 	});
 });
