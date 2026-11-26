@@ -1128,4 +1128,83 @@ describe("Google SDK streaming protocol", () => {
 		expect(result.usage.cost.output).toBeCloseTo(20 * 1.8, 6);
 		expect(result.usage.cost.cacheRead).toBeCloseTo(150 * 1.8, 6);
 	});
+
+	it("preserves candidate.finishMessage stripped by @google/genai MLDev converters across chunked SSE responses", async () => {
+		const encoder = new TextEncoder();
+		const sseText = `data: ${JSON.stringify({
+			responseId: "resp_sse",
+			candidates: [
+				{
+					finishReason: "MALFORMED_FUNCTION_CALL",
+					finishMessage: "  Malformed function call: call:default_api:read{path:foo}  ",
+					content: { parts: [] },
+				},
+			],
+		})}\r\n\r\n`;
+		// Split directly between \r and \n of the blank delimiter to verify CRLF chunk handling.
+		const splitIndex = sseText.indexOf("\r\n\r\n") + 3;
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(encoder.encode(sseText.slice(0, splitIndex)));
+				controller.enqueue(encoder.encode(sseText.slice(splitIndex)));
+				controller.close();
+			},
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn<FetchFunction>(
+				async () =>
+					new Response(stream, {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					}),
+			),
+		);
+
+		const result = await streamGoogleSimple(model("google-generative-ai"), context, { apiKey: "test-key" }).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe(
+			"Provider stopped with: MALFORMED_FUNCTION_CALL (Malformed function call: call:default_api:read{path:foo})",
+		);
+	});
+
+	it("clears captured finishMessage on continuation hops so an earlier hop does not leak", async () => {
+		let call = 0;
+		vi.stubGlobal(
+			"fetch",
+			vi.fn<FetchFunction>(async () => {
+				call++;
+				const payload =
+					call === 1
+						? {
+								candidates: [
+									{
+										finishReason: "CONTINUATION",
+										continuationToken: "hop-2",
+										finishMessage: "stale hop notice",
+										content: { parts: [{ text: "partial" }] },
+									},
+								],
+							}
+						: {
+								candidates: [
+									{
+										finishReason: "SAFETY",
+										content: { parts: [] },
+									},
+								],
+							};
+				return new Response(`data: ${JSON.stringify(payload)}\n\n`, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				});
+			}),
+		);
+
+		const result = await streamGoogleSimple(model("google-generative-ai"), context, { apiKey: "test-key" }).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toBe("Provider stopped with: SAFETY");
+	});
 });

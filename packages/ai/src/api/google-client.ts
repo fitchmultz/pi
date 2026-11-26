@@ -74,11 +74,100 @@ export function createGoogleClient(
 	return new GoogleGenAI({ apiKey, httpOptions });
 }
 
+function extractCandidateFinishMessage(payload: unknown): string | undefined {
+	if (typeof payload !== "object" || payload === null) return undefined;
+	const candidates = (payload as { candidates?: unknown }).candidates;
+	if (!Array.isArray(candidates) || candidates.length === 0) return undefined;
+	const first = candidates[0];
+	if (typeof first !== "object" || first === null) return undefined;
+	const finishMessage = (first as { finishMessage?: unknown }).finishMessage;
+	if (typeof finishMessage !== "string") return undefined;
+	const trimmed = finishMessage.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function parseSseEventLines(lines: readonly string[], onCandidateFinishMessage: (message: string) => void): void {
+	if (lines.length === 0) return;
+	const data = lines.join("\n").trim();
+	if (!data || !data.includes('"finishMessage"')) return;
+	try {
+		const message = extractCandidateFinishMessage(JSON.parse(data));
+		if (message) {
+			onCandidateFinishMessage(message);
+		}
+	} catch {
+		// Leave malformed JSON handling to the downstream SDK parser.
+	}
+}
+
+function tapGoogleSseFinishMessages(
+	body: ReadableStream<Uint8Array>,
+	onCandidateFinishMessage: (message: string) => void,
+): ReadableStream<Uint8Array> {
+	const decoder = new TextDecoder("utf-8");
+	let buffer = "";
+	let eventDataLines: string[] = [];
+
+	const drainBuffer = (isFlush: boolean): void => {
+		let pos = 0;
+		while (pos < buffer.length) {
+			const cr = buffer.indexOf("\r", pos);
+			const lf = buffer.indexOf("\n", pos);
+			let sep = -1;
+			let sepLen = 1;
+			if (cr !== -1 && (lf === -1 || cr < lf)) {
+				if (cr + 1 === buffer.length && !isFlush) {
+					break;
+				}
+				sep = cr;
+				sepLen = buffer[cr + 1] === "\n" ? 2 : 1;
+			} else if (lf !== -1) {
+				sep = lf;
+			} else {
+				break;
+			}
+			const line = buffer.slice(pos, sep);
+			pos = sep + sepLen;
+			if (line === "") {
+				parseSseEventLines(eventDataLines, onCandidateFinishMessage);
+				eventDataLines = [];
+			} else if (line.startsWith("data:")) {
+				eventDataLines.push(line.slice(5).trimStart());
+			}
+		}
+		if (pos > 0) {
+			buffer = buffer.slice(pos);
+		}
+		if (isFlush) {
+			if (buffer.length > 0 && buffer.startsWith("data:")) {
+				eventDataLines.push(buffer.slice(5).trimStart());
+			}
+			buffer = "";
+			parseSseEventLines(eventDataLines, onCandidateFinishMessage);
+			eventDataLines = [];
+		}
+	};
+
+	const tap = new TransformStream<Uint8Array, Uint8Array>({
+		transform(chunk, controller) {
+			buffer += decoder.decode(chunk, { stream: true });
+			drainBuffer(false);
+			controller.enqueue(chunk);
+		},
+		flush() {
+			buffer += decoder.decode();
+			drainBuffer(true);
+		},
+	});
+	return body.pipeThrough(tap);
+}
+
 export function createGoogleFetch<TModel extends AnyModel>(
 	providerLabel: string,
 	model: TModel,
 	options: ProviderRequestOptions<TModel> | undefined,
 	onFailedHeaders: (headers: Headers | undefined) => void,
+	onCandidateFinishMessage?: (message: string) => void,
 ): FetchFunction {
 	const baseFetch = options?.fetch ?? globalThis.fetch;
 	const timeoutMs = options?.timeoutMs;
@@ -133,10 +222,50 @@ export function createGoogleFetch<TModel extends AnyModel>(
 
 		if (!response.ok) {
 			onFailedHeaders(new Headers(response.headers));
+		} else if (onCandidateFinishMessage) {
+			// @google/genai strips candidate.finishMessage inside its MLDev response converter; capture it from the wire.
+			const requestUrl =
+				typeof requestInput === "string"
+					? requestInput
+					: requestInput instanceof URL
+						? requestInput.href
+						: requestInput.url;
+			const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+			const isSse = contentType.includes("text/event-stream") || /[?&]alt=sse(?:&|$)/.test(requestUrl);
+			if (isSse && response.body) {
+				response = new Response(tapGoogleSseFinishMessages(response.body, onCandidateFinishMessage), {
+					status: response.status,
+					statusText: response.statusText,
+					headers: response.headers,
+				});
+			} else {
+				const originalJson = response.json.bind(response);
+				Object.defineProperty(response, "json", {
+					configurable: true,
+					writable: true,
+					value: async () => {
+						const parsed: unknown = await originalJson();
+						const finishMessage = extractCandidateFinishMessage(parsed);
+						if (finishMessage) {
+							onCandidateFinishMessage(finishMessage);
+						}
+						return parsed;
+					},
+				});
+			}
 		}
 		await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 		return response;
 	};
+}
+
+/** Format a non-success Gemini candidate finish reason and optional diagnostic message. */
+export function formatGoogleStopError(finishReason: string | undefined, finishMessage: string | undefined): string {
+	const message = finishMessage?.trim();
+	if (finishReason) {
+		return message ? `Provider stopped with: ${finishReason} (${message})` : `Provider stopped with: ${finishReason}`;
+	}
+	return message || "An unknown error occurred";
 }
 
 /**

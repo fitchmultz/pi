@@ -50,6 +50,7 @@ import { resolveStrictJsonSchema } from "./constrained-sampling.ts";
 import { getGeminiVersion, isGemini4OrLaterModelId } from "./google-catalog.ts";
 import {
 	createGoogleFetch,
+	formatGoogleStopError,
 	isCloudflareGoogleAiStudioUrl,
 	retryGoogleRequest,
 	sendsToGeminiApi,
@@ -135,10 +136,19 @@ export function streamGoogle(
 
 		try {
 			let lastFailedHeaders: Headers | undefined;
+			let lastFinishMessage: string | undefined;
 			const providerLabel = api === "google-vertex" ? "Google Vertex" : "Google";
-			const googleFetch = createGoogleFetch(providerLabel, model, options, (headers) => {
-				lastFailedHeaders = headers;
-			});
+			const googleFetch = createGoogleFetch(
+				providerLabel,
+				model,
+				options,
+				(headers) => {
+					lastFailedHeaders = headers;
+				},
+				(message) => {
+					lastFinishMessage = message;
+				},
+			);
 			// createGoogleFetch already reports every HTTP response with its real headers to options.onResponse.
 			const retryOptions = {
 				maxRetries: options?.maxRetries,
@@ -163,6 +173,7 @@ export function streamGoogle(
 					googleStream = await retryGoogleRequest(
 						() => {
 							lastFailedHeaders = undefined;
+							lastFinishMessage = undefined;
 							return client.models.generateContentStream(baseParams);
 						},
 						model,
@@ -249,6 +260,10 @@ export function streamGoogle(
 					const candidate = chunk.candidates?.[0];
 					if (candidate?.continuationToken) {
 						hopContinuationToken = candidate.continuationToken;
+					}
+					const finishMessage = candidate?.finishMessage?.trim();
+					if (finishMessage) {
+						lastFinishMessage = finishMessage;
 					}
 					if (candidate?.content?.parts) {
 						for (const part of candidate.content.parts) {
@@ -445,6 +460,7 @@ export function streamGoogle(
 				}
 				output.stopReason = "pending";
 				output.rawStopReason = undefined;
+				lastFinishMessage = undefined;
 				seenContinuationTokens.add(hopContinuationToken);
 				const nextHopParams: GenerateContentParameters = {
 					...baseParams,
@@ -457,6 +473,7 @@ export function streamGoogle(
 				googleStream = await retryGoogleRequest(
 					() => {
 						lastFailedHeaders = undefined;
+						lastFinishMessage = undefined;
 						return client.models.generateContentStream(nextHopParams);
 					},
 					model,
@@ -483,10 +500,7 @@ export function streamGoogle(
 				);
 			}
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				const errorMessage = output.rawStopReason
-					? `Provider stopped with: ${output.rawStopReason}`
-					: "An unknown error occurred";
-				throw new Error(errorMessage);
+				throw new Error(formatGoogleStopError(output.rawStopReason, lastFinishMessage));
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });

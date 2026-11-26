@@ -280,6 +280,29 @@ describe("google-images", () => {
 		);
 		expect(safetyFinish.stopReason).toBe("error");
 		expect(safetyFinish.errorMessage).toContain("IMAGE_SAFETY");
+
+		const detailedFinish = await generateImages(
+			NANO_BANANA_2_1,
+			{ input: [{ type: "text", text: "bad call" }] },
+			{
+				apiKey: "test-key",
+				fetch: async () =>
+					new Response(
+						JSON.stringify({
+							candidates: [
+								{
+									finishReason: "OTHER",
+									finishMessage: "  Request blocked upstream  ",
+									content: { role: "model", parts: [] },
+								},
+							],
+						}),
+						{ status: 200, headers: { "content-type": "application/json" } },
+					),
+			},
+		);
+		expect(detailedFinish.stopReason).toBe("error");
+		expect(detailedFinish.errorMessage).toBe("Provider stopped with: OTHER (Request blocked upstream)");
 	});
 
 	it("returns stopReason error when no API key or gateway token is available", async () => {
