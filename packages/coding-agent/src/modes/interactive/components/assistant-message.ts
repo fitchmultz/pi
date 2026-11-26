@@ -11,6 +11,7 @@ import {
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
+import { type MessageImageDisplayOptions, MessageImagesContainer } from "./message-images.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -33,6 +34,7 @@ interface MarkdownSlot {
  */
 export class AssistantMessageComponent extends Container {
 	private contentContainer: Container;
+	private imagesContainer: MessageImagesContainer;
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
 	private hiddenThinkingLabel: string;
@@ -58,6 +60,7 @@ export class AssistantMessageComponent extends Container {
 		messageId?: string,
 		timestamp?: string,
 		compactView = false,
+		imageOptions?: MessageImageDisplayOptions,
 	) {
 		super();
 
@@ -73,6 +76,8 @@ export class AssistantMessageComponent extends Container {
 		// Container for text/thinking content
 		this.contentContainer = new Container();
 		this.addChild(this.contentContainer);
+		this.imagesContainer = new MessageImagesContainer((s) => theme.fg("toolOutput", s), imageOptions);
+		this.addChild(this.imagesContainer);
 
 		if (message) {
 			this.updateContent(message);
@@ -116,9 +121,17 @@ export class AssistantMessageComponent extends Container {
 		if (this.lastMessage) this.updateContent(this.lastMessage);
 	}
 
+	setShowImages(show: boolean): void {
+		this.imagesContainer.setShowImages(show);
+	}
+
+	setImageWidthCells(widthCells: number): void {
+		this.imagesContainer.setImageWidthCells(widthCells);
+	}
+
 	isEmpty(): boolean {
 		// Spacers precede visible blocks only, so an empty container means nothing is displayed.
-		return this.contentContainer.children.length === 0;
+		return this.contentContainer.children.length === 0 && !this.imagesContainer.hasImages();
 	}
 
 	override render(width: number): readonly string[] {
@@ -126,12 +139,20 @@ export class AssistantMessageComponent extends Container {
 		if (this.hasToolCalls || lines.length === 0) {
 			return lines;
 		}
+		const contentLineCount = this.imagesContainer.hasImages()
+			? this.contentContainer.render(width).length
+			: lines.length;
+		if (contentLineCount === 0) {
+			return lines;
+		}
 
 		// Container output is shared across frames; copy it once per change instead of mutating it.
 		if (this.zoneLines?.source !== lines) {
 			const zoned = [...lines];
 			zoned[0] = OSC133_ZONE_START + zoned[0];
-			zoned[zoned.length - 1] = OSC133_ZONE_END + OSC133_ZONE_FINAL + zoned[zoned.length - 1];
+			// Keep OSC 133 end markers on the last text row so appended image/reservation lines stay untouched.
+			const lastTextRow = Math.min(contentLineCount, zoned.length) - 1;
+			zoned[lastTextRow] = OSC133_ZONE_END + OSC133_ZONE_FINAL + zoned[lastTextRow];
 			this.zoneLines = { source: lines, lines: zoned };
 		}
 		return this.zoneLines.lines;
@@ -170,12 +191,14 @@ export class AssistantMessageComponent extends Container {
 
 		// Render content in order
 		let thinkingRunIndex = 0;
+		const assistantTextParts: string[] = [];
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const text = content.text.trim();
+				assistantTextParts.push(text);
 				addVisibleChild(
 					markdownBlock(
 						"text",
@@ -287,5 +310,8 @@ export class AssistantMessageComponent extends Container {
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));
 			}
 		}
+
+		// Resolve and render local image references once streaming finishes.
+		this.imagesContainer.sync(assistantTextParts.join("\n\n"), [], !this.isStreaming);
 	}
 }
