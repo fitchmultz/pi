@@ -297,6 +297,8 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		}
 		return STALE_QUIET_MS;
 	};
+	// If this worker started as a one-shot startup fallback, avoid auto-restarting into the same failed runtime.
+	const suppressedFallbackRuntimeKey = handoff?.failure ? getStaleRuntimeKey() : undefined;
 	/**
 	 * Show in the footer whether loaded extension code or the installed Pi runtime has changed on disk,
 	 * restart for it when the user's `restartWhenStale` setting asks for that, and look again later.
@@ -311,10 +313,14 @@ export function createManagedRestart(): ManagedRestart | undefined {
 		const staleRuntimeKey = getStaleRuntimeKey();
 		const statusLabel = formatStaleStatus(stale.length > 0, staleRuntimeKey !== undefined);
 		context.ui.setStatus("restart", statusLabel ? context.ui.theme.fg("warning", statusLabel) : undefined);
-		if (stale.length === 0 && staleRuntimeKey === undefined) staleSince = undefined;
+		const autoRestartRuntimeKey =
+			staleRuntimeKey !== undefined && staleRuntimeKey !== suppressedFallbackRuntimeKey
+				? staleRuntimeKey
+				: undefined;
+		if (stale.length === 0 && autoRestartRuntimeKey === undefined) staleSince = undefined;
 		const wait =
-			statusLabel !== undefined && current.settingsManager.getRestartWhenStale()
-				? await restartWhenQuiet(context, current, stale, staleRuntimeKey)
+			(stale.length > 0 || autoRestartRuntimeKey !== undefined) && current.settingsManager.getRestartWhenStale()
+				? await restartWhenQuiet(context, current, stale, autoRestartRuntimeKey)
 				: STALE_CHECK_INTERVAL_MS;
 		if (ctx !== context) return;
 		clearTimeout(staleTimer);

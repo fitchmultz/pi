@@ -31,6 +31,7 @@ import {
 	MANAGED_CLI_ENV,
 	MANAGED_INVOCATION_ENV,
 	MANAGED_WORKER_ENV,
+	RESTART_HANDOFF_ENV,
 	RESTART_SOCKET_ENV,
 } from "../src/cli/restart-protocol.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -784,5 +785,61 @@ describe("stale extension code in a managed session", () => {
 		await vi.advanceTimersByTimeAsync(60_000);
 		expect(f.shutdownRequested()).toBe(false);
 		expect(f.seen.notices).toEqual([]);
+	});
+
+	it("does not loop auto-restart after a startup fallback into the same failed runtime until the selector changes again", async () => {
+		const runtimeRoot = realpathSync(mkdtempSync(join(tmpdir(), "pi-runtime-fallback-")));
+		cleanups.push(async () => rmSync(runtimeRoot, { recursive: true, force: true }));
+		const makeRuntime = (name: string) => {
+			const bundle = join(runtimeRoot, name, "dist", "bundle");
+			mkdirSync(bundle, { recursive: true });
+			writeFileSync(join(bundle, "cli.js"), "");
+			writeFileSync(join(bundle, "cli-worker.js"), "");
+			return join(runtimeRoot, name);
+		};
+		const runtimeA = makeRuntime("A");
+		const runtimeB = makeRuntime("B");
+		const runtimeC = makeRuntime("C");
+		const selector = join(runtimeRoot, "pi");
+		// Selector already points at failed candidate B while the rolled-back worker runs A.
+		symlinkSync(join(runtimeB, "dist", "bundle", "cli.js"), selector);
+
+		const seedSession = SessionManager.create(runtimeRoot, runtimeRoot);
+		seedSession.appendMessage({ role: "user", content: "seed", timestamp: 1 });
+		const workingSession = join(runtimeRoot, "fallback-working-session.json");
+		writeFileSync(workingSession, JSON.stringify({ header: seedSession.getHeader(), entries: [] }));
+
+		vi.stubEnv(MANAGED_INVOCATION_ENV, selector);
+		vi.stubEnv(MANAGED_WORKER_ENV, getRestartRuntimeWorker(runtimeA));
+		vi.stubEnv(
+			RESTART_HANDOFF_ENV,
+			JSON.stringify({
+				sessionId: seedSession.getSessionId(),
+				sessionFile: seedSession.getSessionFile()!,
+				workingSession,
+				failure: "Candidate runtime failed readiness check",
+			}),
+		);
+		const f = await staleFixture({ restartWhenStale: true });
+
+		await f.prompt("After rollback");
+		await vi.waitFor(() => expect(f.seen.status).toContain("pi changed on disk: /restart"));
+
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(f.shutdownRequested()).toBe(false);
+		expect(f.seen.notices).toEqual(["Candidate runtime failed readiness check"]);
+
+		// Updating the selector to a newer runtime C resumes automatic restart.
+		const before = f.seen.looks;
+		unlinkSync(selector);
+		symlinkSync(join(runtimeC, "dist", "bundle", "cli.js"), selector);
+		await f.prompt("After fixed release C");
+		await vi.waitFor(() => expect(f.seen.looks).toBeGreaterThan(before));
+		await vi.advanceTimersByTimeAsync(30_000);
+		await vi.waitFor(() => expect(f.shutdownRequested()).toBe(true));
+		expect(f.seen.notices).toEqual([
+			"Candidate runtime failed readiness check",
+			"Pi changed on disk; restarting Pi on the same saved session.",
+		]);
 	});
 });

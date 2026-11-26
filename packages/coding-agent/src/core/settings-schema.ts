@@ -483,7 +483,7 @@ export const SettingsSchema = Type.Object(
 		restartWhenStale: Type.Optional(
 			Type.Boolean({
 				description:
-					"Restart an idle managed interactive session on the same saved session when its loaded extension code has changed on disk.",
+					"Restart an idle managed interactive session on the same saved session when loaded extension code or the installed Pi runtime has changed on disk.",
 				default: SETTINGS_DEFAULTS.restartWhenStale,
 			}),
 		),
