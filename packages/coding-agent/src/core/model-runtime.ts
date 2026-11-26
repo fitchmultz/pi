@@ -955,18 +955,6 @@ export class ModelRuntime implements Models {
 			effectiveBaseUrl !== configuredModel.baseUrl
 				? { ...configuredModel, baseUrl: effectiveBaseUrl }
 				: configuredModel;
-		// OpenAI Responses disables WebSocket transport whenever `options.fetch` is provided.
-		// Strip Pi's own transport fetch after virtual-model routing unless SSE was explicitly requested.
-		const effectiveTransport =
-			"transport" in providerOptions ? (providerOptions.transport as string | undefined) : undefined;
-		const preserveOpenAIWebSocket =
-			isPiTransportFetch &&
-			requestModel.provider === "openai" &&
-			requestModel.api === "openai-responses" &&
-			effectiveTransport !== "sse";
-		const effectiveProviderOptions = preserveOpenAIWebSocket
-			? (({ fetch: _ignored, ...rest }) => rest)(providerOptions)
-			: providerOptions;
 		const sessionId =
 			"sessionId" in providerOptions && typeof providerOptions.sessionId === "string"
 				? providerOptions.sessionId
@@ -984,7 +972,7 @@ export class ModelRuntime implements Models {
 			provider,
 			model: requestModel,
 			options: {
-				...effectiveProviderOptions,
+				...providerOptions,
 				apiKey: providerOptions.apiKey ?? resolution.auth.apiKey,
 				headers,
 				env,

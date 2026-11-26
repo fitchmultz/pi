@@ -12,6 +12,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ExtensionFactory } from "../src/core/extensions/types.ts";
+import { isSessionTransportFetch } from "../src/core/http-dispatcher.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -341,7 +342,7 @@ describe("createAgentSession stream options", () => {
 			undefined,
 			"openai",
 		);
-		expect(openaiAutoOptions?.fetch).toBeUndefined();
+		expect(isSessionTransportFetch(openaiAutoOptions?.fetch)).toBe(true);
 
 		const openaiSseOptions = await captureStreamOptions(
 			"openai-responses",
@@ -367,6 +368,18 @@ describe("createAgentSession stream options", () => {
 
 		modelRegistry.registerProvider("openai", {
 			api: "openai-responses",
+			baseUrl: physicalOpenAI.baseUrl,
+			models: [
+				{
+					id: physicalOpenAI.id,
+					name: physicalOpenAI.name,
+					reasoning: physicalOpenAI.reasoning,
+					input: physicalOpenAI.input,
+					cost: physicalOpenAI.cost,
+					contextWindow: physicalOpenAI.contextWindow,
+					maxTokens: physicalOpenAI.maxTokens,
+				},
+			],
 			streamSimple: (_model, _context, providerOptions) => {
 				capturedOptions = providerOptions;
 				return createDoneStream("openai-responses");
@@ -398,8 +411,9 @@ describe("createAgentSession stream options", () => {
 				normalizeContext({ messages: [{ role: "user", content: "hi", timestamp: 1 }] }),
 				{},
 			);
-			await stream.result();
-			expect(capturedOptions?.fetch).toBeUndefined();
+			const result = await stream.result();
+			expect(result.stopReason).toBe("stop");
+			expect(isSessionTransportFetch(capturedOptions?.fetch)).toBe(true);
 		} finally {
 			session.dispose();
 		}

@@ -560,4 +560,39 @@ describe("openai-responses WebSocket mode", () => {
 		expect(second.responseId).toBe("resp_fresh");
 		expect(harness.sockets).toHaveLength(2);
 	});
+
+	it("attempts WebSocket with a Pi-tagged transport fetch and reuses that fetch on SSE fallback", async () => {
+		const model = createOpenAIModel();
+		let taggedFetchCalls = 0;
+		const taggedFetch = Object.assign(
+			async () => {
+				taggedFetchCalls++;
+				return createSseReplyResponse("resp_sse_tagged", "from-tagged-sse");
+			},
+			{ [Symbol.for("pi.transportFetch")]: true },
+		) as unknown as typeof globalThis.fetch;
+
+		// 1. With a working WebSocket, Pi's tagged transport fetch still allows WebSocket transport.
+		harness.onSend((socket) => emitSimpleReply(socket, "resp_ws_tagged", "msg_ws", "from-ws"));
+		const wsResult = await streamOpenAIResponses(
+			model,
+			normalizeContext({ messages: [{ role: "user", content: "ws", timestamp: 1 }] }),
+			{ apiKey: "sk-test-key", sessionId: "ws-tagged-ok", transport: "auto", fetch: taggedFetch },
+		).result();
+		expect(wsResult.stopReason).toBe("stop");
+		expect(wsResult.responseId).toBe("resp_ws_tagged");
+		expect(harness.sockets).toHaveLength(1);
+		expect(taggedFetchCalls).toBe(0);
+
+		// 2. When WebSocket fails before streaming, SSE fallback uses the same Pi-tagged session fetch.
+		harness.onConnect((socket) => socket.emitError("ECONNREFUSED"));
+		const fallbackResult = await streamOpenAIResponses(
+			model,
+			normalizeContext({ messages: [{ role: "user", content: "fallback", timestamp: 2 }] }),
+			{ apiKey: "sk-test-key", sessionId: "ws-tagged-fallback", transport: "auto", fetch: taggedFetch },
+		).result();
+		expect(fallbackResult.stopReason).toBe("stop");
+		expect(fallbackResult.responseId).toBe("resp_sse_tagged");
+		expect(taggedFetchCalls).toBe(1);
+	});
 });

@@ -21,11 +21,14 @@ let activeDispatcher: undici.Dispatcher | undefined;
 let activeDispatcherSignature: string | undefined;
 const MAX_SESSION_DISPATCHERS = 8;
 const sessionFetches = new Map<string, { dispatcher: undici.Dispatcher; fetch: typeof globalThis.fetch }>();
-const sessionTransportFetches = new WeakSet<typeof globalThis.fetch>();
+const PI_TRANSPORT_FETCH_SYMBOL = Symbol.for("pi.transportFetch");
 
 /** Returns true when `fetchFn` was created by `getSessionHttpFetch` (Pi's own transport wrapper, not a caller fetch). */
 export function isSessionTransportFetch(fetchFn: unknown): boolean {
-	return typeof fetchFn === "function" && sessionTransportFetches.has(fetchFn as typeof globalThis.fetch);
+	return (
+		typeof fetchFn === "function" &&
+		Boolean((fetchFn as unknown as Record<symbol, unknown>)[PI_TRANSPORT_FETCH_SYMBOL])
+	);
 }
 
 function resolveEffectiveProxies(httpProxy?: string): {
@@ -256,7 +259,7 @@ export function getSessionHttpFetch(settings: HttpTransportSettings): typeof glo
 		});
 	}) as unknown as typeof globalThis.fetch;
 
-	sessionTransportFetches.add(sessionFetch);
+	Object.defineProperty(sessionFetch, PI_TRANSPORT_FETCH_SYMBOL, { value: true });
 	sessionFetches.set(signature, { dispatcher, fetch: sessionFetch });
 	while (sessionFetches.size > MAX_SESSION_DISPATCHERS) {
 		const oldest = sessionFetches.entries().next();

@@ -22,6 +22,13 @@ import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { getDeclaredTools } from "../utils/transcript.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
+
+const PI_TRANSPORT_FETCH_SYMBOL = Symbol.for("pi.transportFetch");
+
+function isCallerCustomFetch(fetchFn: unknown): boolean {
+	return fetchFn !== undefined && !(fetchFn as Record<symbol, unknown>)[PI_TRANSPORT_FETCH_SYMBOL];
+}
+
 import {
 	applyOpenAISessionAffinityHeaders,
 	clampOpenAIPromptCacheKey,
@@ -197,7 +204,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			const shouldTryWebSocket =
 				model.provider === "openai" &&
 				transport !== "sse" &&
-				options?.fetch === undefined &&
+				!isCallerCustomFetch(options?.fetch) &&
 				paramsRecord.background !== true &&
 				options?.providerSummary === undefined &&
 				!isOpenAIResponsesWebSocketSseFallbackActive(cacheSessionId);
