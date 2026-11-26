@@ -77,8 +77,9 @@ function encodeRgbaToSixel(rgba: Uint8Array, width: number, height: number, sixe
 		return `${sixelMod.introducer(1)}"1;1;${width};${height}${sixelMod.FINALIZER}`;
 	}
 
-	// sixel@0.16.0's image2sixel/sixelEncodeIndexed mis-indexes palette slots when alpha=0 entries are
-	// present, while sixelEncode handles alpha=0 correctly when every opaque pixel matches a palette entry.
+	// Workaround for sixel@0.16.0 (tracked upstream at https://github.com/jerch/node-sixel/issues/34):
+	// image2sixel/sixelEncodeIndexed mis-indexes palette slots when alpha=0 entries are present, while
+	// sixelEncode handles alpha=0 correctly when every opaque pixel matches a palette entry.
 	const uniqueColors = new Map<number, [number, number, number]>();
 	let exceeds256 = false;
 	for (let i = 0; i < rgba.length; i += 4) {
@@ -131,6 +132,12 @@ function encodeRgbaToSixel(rgba: Uint8Array, width: number, height: number, sixe
  * Returns undefined if photon or sixel cannot be loaded.
  */
 export async function loadSixelEncoder(): Promise<SixelImageEncoder | undefined> {
+	// sixel@0.16.0's upng.js executes sloppy-mode `module.exports = UPNG = {};` and references `UPNG`
+	// inside `UPNG.quantize`. Ensure a global binding exists for strict ESM bundlers (such as Bun
+	// `--compile`) that do not run scripts/build-coding-agent-bundle.mjs's strict-mode transform.
+	if (!("UPNG" in globalThis)) {
+		(globalThis as Record<string, unknown>).UPNG = undefined;
+	}
 	const [photon, sixelMod] = await Promise.all([loadPhoton(), import("sixel").catch(() => undefined)]);
 	if (!photon || !sixelMod?.image2sixel || !sixelMod?.sixelEncode) return undefined;
 	return ({ base64Data, widthPx, heightPx }) => {

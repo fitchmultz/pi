@@ -2,6 +2,10 @@
  * Tests for image processing utilities using Photon.
  */
 
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
 	getSixelImageMetadata,
 	Image,
@@ -9,6 +13,7 @@ import {
 	setCapabilities,
 	setSixelEncoder,
 } from "@earendil-works/pi-tui";
+import { build as esbuild } from "esbuild";
 import { describe, expect, it } from "vitest";
 import {
 	convertImageBytesToPng,
@@ -212,6 +217,46 @@ it("loadSixelEncoder converts synchronously to an oriented Sixel DCS sequence", 
 	// Only columns 0-3 (opaque red) should emit painted sixel bits ('!4N'); columns 4-7 stay unpainted.
 	expect(transparentSixel).toContain("#0;2;100;0;0#0!4N$");
 	expect(transparentSixel).not.toContain("!4?!4N");
+});
+
+it("loadSixelEncoder works in a fresh process when bundled into strict ESM by esbuild", async () => {
+	const repoRoot = join(import.meta.dirname, "../../..");
+	const cacheRoot = join(repoRoot, "node_modules/.cache");
+	mkdirSync(cacheRoot, { recursive: true });
+	const outDir = mkdtempSync(join(cacheRoot, "pi-sixel-bundle-"));
+	const outfile = join(outDir, "image-convert.mjs");
+	try {
+		await esbuild({
+			absWorkingDir: repoRoot,
+			banner: {
+				js: 'import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url);',
+			},
+			bundle: true,
+			entryPoints: [join(import.meta.dirname, "../src/utils/image-convert.ts")],
+			external: ["@silvia-odwyer/photon-node"],
+			format: "esm",
+			minifySyntax: true,
+			minifyWhitespace: true,
+			outfile,
+			platform: "node",
+			target: "node22.19",
+		});
+		const script = [
+			`const mod = await import(${JSON.stringify(pathToFileURL(outfile).href)});`,
+			"const encoder = await mod.loadSixelEncoder();",
+			'if (!encoder) throw new Error("loadSixelEncoder returned undefined");',
+			`const sixel = encoder({ base64Data: ${JSON.stringify(TINY_PNG)}, mimeType: "image/png", widthPx: 8, heightPx: 8 });`,
+			'if (!sixel) throw new Error("encoder returned null");',
+			"process.stdout.write(sixel);",
+		].join("\n");
+		const sixel = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+			encoding: "utf8",
+		});
+		expect(sixel).toMatch(/^\x1bP[0-9;]*q"1;1;8;8/);
+		expect(sixel.endsWith("\x1b\\")).toBe(true);
+	} finally {
+		rmSync(outDir, { force: true, recursive: true });
+	}
 });
 
 describe("resizeImage", () => {
