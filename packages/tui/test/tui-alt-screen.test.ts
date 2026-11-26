@@ -1367,6 +1367,35 @@ describe("TuiAltScreen", () => {
 				"differential render must jump past padded rows after Sixel",
 			);
 			tui.stop();
+
+			// Also verify tall padded-Box Sixel placements exceeding terminal height on TuiMainScreen full render.
+			const shortTerminal = new RecordingTerminal(20, 3);
+			const shortTui = new TuiMainScreen(shortTerminal);
+			const shortBox = new Box(1, 1, (s) => `\x1b[48;5;236m${s}\x1b[0m`);
+			shortBox.addChild(
+				new Image(
+					"AAAA",
+					"image/png",
+					{ fallbackColor: (v) => v },
+					{ maxWidthCells: 2, maxHeightCells: 5 },
+					{ widthPx: 20, heightPx: 50 },
+				),
+			);
+			shortTui.addChild(shortBox);
+			shortTui.start();
+			await shortTerminal.waitForRender();
+			const shortFrame = shortTerminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const shortSixelEnd = shortFrame.indexOf("\x1b\\");
+			assert.ok(shortSixelEnd !== -1, "expected tall Sixel payload in short TuiMainScreen render");
+			const shortAfterRestore = shortFrame.slice(shortFrame.indexOf("\x1b8\x1b[2B", shortSixelEnd) + 6);
+			assert.ok(
+				shortAfterRestore.startsWith("\r\n\r\n"),
+				"tall padded-Box Sixel placement on TuiMainScreen must not overwrite lower bands with padded spaces",
+			);
+			shortTui.stop();
 		} finally {
 			setSixelEncoder(undefined);
 			resetCapabilitiesCache();

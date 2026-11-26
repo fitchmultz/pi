@@ -311,6 +311,21 @@ export class TuiMainScreen extends TuiBase implements TUI {
 					i += imageReservedRows - 1;
 					continue;
 				}
+				if (isSixel && imageReservedRows > height) {
+					const predrawRows = Math.max(1, height);
+					for (let row = 1; row < predrawRows; row++) {
+						const rowLine = newLines[i + row] ?? "";
+						output.append(visibleWidth(rowLine) > 0 ? `\r\n${rowLine}\r` : "\r\n");
+					}
+					if (predrawRows > 1) output.append(`\x1b[${predrawRows - 1}A`);
+					output.append(`\x1b7${line}\x1b8`);
+					if (predrawRows > 1) output.append(`\x1b[${predrawRows - 1}B`);
+					for (let row = predrawRows; row < imageReservedRows; row++) {
+						output.append("\r\n");
+					}
+					i += imageReservedRows - 1;
+					continue;
+				}
 				output.append(isSixel ? `\x1b7${line}\x1b8` : line);
 			}
 			output.append("\x1b[?2026l"); // End synchronized output
