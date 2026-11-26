@@ -3,6 +3,7 @@ import type { AnyModel, BaseModel, FetchFunction, ProviderHeaders, ProviderReque
 import { headersToRecord, providerHeadersToRecord, removedProviderHeaderNames } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
+import { SseDecoder } from "../utils/sse.ts";
 
 const MAX_HEADER_TIMEOUT_MS = 0x7fffffff;
 
@@ -86,12 +87,11 @@ function extractCandidateFinishMessage(payload: unknown): string | undefined {
 	return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function parseSseEventLines(lines: readonly string[], onCandidateFinishMessage: (message: string) => void): void {
-	if (lines.length === 0) return;
-	const data = lines.join("\n").trim();
-	if (!data || !data.includes('"finishMessage"')) return;
+function inspectSseEventData(data: string, onCandidateFinishMessage: (message: string) => void): void {
+	const trimmed = data.trim();
+	if (!trimmed || !trimmed.includes('"finishMessage"')) return;
 	try {
-		const message = extractCandidateFinishMessage(JSON.parse(data));
+		const message = extractCandidateFinishMessage(JSON.parse(trimmed));
 		if (message) {
 			onCandidateFinishMessage(message);
 		}
@@ -104,59 +104,18 @@ function tapGoogleSseFinishMessages(
 	body: ReadableStream<Uint8Array>,
 	onCandidateFinishMessage: (message: string) => void,
 ): ReadableStream<Uint8Array> {
-	const decoder = new TextDecoder("utf-8");
-	let buffer = "";
-	let eventDataLines: string[] = [];
-
-	const drainBuffer = (isFlush: boolean): void => {
-		let pos = 0;
-		while (pos < buffer.length) {
-			const cr = buffer.indexOf("\r", pos);
-			const lf = buffer.indexOf("\n", pos);
-			let sep = -1;
-			let sepLen = 1;
-			if (cr !== -1 && (lf === -1 || cr < lf)) {
-				if (cr + 1 === buffer.length && !isFlush) {
-					break;
-				}
-				sep = cr;
-				sepLen = buffer[cr + 1] === "\n" ? 2 : 1;
-			} else if (lf !== -1) {
-				sep = lf;
-			} else {
-				break;
-			}
-			const line = buffer.slice(pos, sep);
-			pos = sep + sepLen;
-			if (line === "") {
-				parseSseEventLines(eventDataLines, onCandidateFinishMessage);
-				eventDataLines = [];
-			} else if (line.startsWith("data:")) {
-				eventDataLines.push(line.slice(5).trimStart());
-			}
-		}
-		if (pos > 0) {
-			buffer = buffer.slice(pos);
-		}
-		if (isFlush) {
-			if (buffer.length > 0 && buffer.startsWith("data:")) {
-				eventDataLines.push(buffer.slice(5).trimStart());
-			}
-			buffer = "";
-			parseSseEventLines(eventDataLines, onCandidateFinishMessage);
-			eventDataLines = [];
-		}
-	};
-
+	const sse = new SseDecoder();
 	const tap = new TransformStream<Uint8Array, Uint8Array>({
 		transform(chunk, controller) {
-			buffer += decoder.decode(chunk, { stream: true });
-			drainBuffer(false);
+			for (const event of sse.push(chunk)) {
+				inspectSseEventData(event.data, onCandidateFinishMessage);
+			}
 			controller.enqueue(chunk);
 		},
 		flush() {
-			buffer += decoder.decode();
-			drainBuffer(true);
+			for (const event of sse.end()) {
+				inspectSseEventData(event.data, onCandidateFinishMessage);
+			}
 		},
 	});
 	return body.pipeThrough(tap);
