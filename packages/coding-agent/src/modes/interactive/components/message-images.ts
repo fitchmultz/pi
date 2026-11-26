@@ -213,7 +213,12 @@ export class MessageImagesContainer extends Container {
 		this.rebuildChildren();
 
 		if (!allowFileLoad || !this.cwd) return;
-		const candidatePaths = extractLocalImagePaths(text);
+		// `@file` image attachments emit `<file name="/abs/path">...</file>` alongside an ImageContent block
+		// that may have been resized. Skip those attachment tags when attached images are already present
+		// so resized `@file` images do not reload from disk and render twice.
+		const extractableText =
+			attachedImages.length > 0 ? text.replace(/<file\s+name="[^"]*">[\s\S]*?<\/file>/g, " ") : text;
+		const candidatePaths = extractLocalImagePaths(extractableText);
 		const pathsKey = `${this.cwd}\0${candidatePaths.join("\0")}`;
 		if (pathsKey === this.lastLoadedPathsKey) return;
 		this.lastLoadedPathsKey = pathsKey;

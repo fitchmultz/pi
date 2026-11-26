@@ -156,6 +156,59 @@ describe("inline images in UserMessageComponent and AssistantMessageComponent", 
 		expect(imageLines).toHaveLength(1);
 	});
 
+	it("does not render a resized @file image attachment twice from its <file name> tag while keeping extra paths", async () => {
+		const attachedPath = join(tempDir, "large-shot.png");
+		const extraPath = join(tempDir, "extra.png");
+		// Different valid 1x1 PNG bytes on disk vs resized attached ImageContent payload
+		const otherPngBase64 =
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+		writeFileSync(attachedPath, PNG_1X1_BYTES);
+		writeFileSync(extraPath, Buffer.from(otherPngBase64, "base64"));
+
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+
+		// Case 1: only `<file name="...">` tag + resized attachment -> must render exactly 1 image (no disk reload).
+		const singleComponent = new UserMessageComponent(
+			`<file name="${attachedPath}">[Image resized to 1000x1000]</file>\nDescribe this`,
+			undefined,
+			1,
+			[],
+			undefined,
+			undefined,
+			{
+				cwd: tempDir,
+				showImages: true,
+				imageWidthCells: 10,
+				images: [{ type: "image", data: otherPngBase64, mimeType: "image/png" }],
+			},
+		);
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		expect(singleComponent.render(80).filter((line) => isImageLine(line))).toHaveLength(1);
+
+		// Case 2: `<file name="...">` tag + separate referenced local path -> renders both without duplicating the @file image.
+		let resolveExtra!: () => void;
+		const extraLoaded = new Promise<void>((resolve) => {
+			resolveExtra = resolve;
+		});
+		const combinedComponent = new UserMessageComponent(
+			`<file name="${attachedPath}"></file>\nCompare with ${extraPath}`,
+			undefined,
+			1,
+			[],
+			undefined,
+			undefined,
+			{
+				cwd: tempDir,
+				showImages: true,
+				imageWidthCells: 10,
+				images: [{ type: "image", data: PNG_1X1_BASE64, mimeType: "image/png" }],
+				onImageLoaded: () => resolveExtra(),
+			},
+		);
+		await extraLoaded;
+		expect(combinedComponent.render(80).filter((line) => isImageLine(line))).toHaveLength(2);
+	});
+
 	it("renders Markdown and local-path images inline in AssistantMessageComponent once streaming finishes", async () => {
 		const shotPath = join(tempDir, "capture.png");
 		writeFileSync(shotPath, PNG_1X1_BYTES);
