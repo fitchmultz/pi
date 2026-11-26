@@ -57,7 +57,7 @@ function normalizeCandidatePath(raw: string): string | null {
 // 6. Quoted paths "..." or '...' at a token boundary
 // 7. Bare, backslash-escaped, or unquoted rooted spaced local paths (with optional leading @)
 const IMAGE_TOKEN_RE =
-	/(```[\s\S]*?```|~~~[\s\S]*?~~~)|!\[[^\]]*\]\((?:<([^>\n]+)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'))?\)|`([^`\n]+)`|\b(?:https?|ftp):\/\/[^\s"'<>()[\]]+|\bdata:[^\s"'<>()[\]]+|(file:\/\/[^\s"'<>()[\]]+)|(?<=^|[\s([{:;,=])(["'])((?:\\.|(?!\6(?=$|[\s)\]}.,;:!?]))[^\n])+?\.(?:png|jpe?g|gif|webp|bmp)(?:[?#][^\s"']*)?)\6(?=$|[\s)\]}.,;:!?])|(?<=^|[\s([{:;,=])(@?(?:~\/|\.\.?\/|\/)(?:(?:\\ |[^\s"<>()[\]`,;:])+(?<!\.(?:png|jpe?g|gif|webp|bmp))(?:\s+(?!@?(?:~\/|\.\.?\/|\/))))*(?:\\ |[^\s"<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?'])|(?<=^|[\s([{:;,=])(@?(?:\\ |[^\s"<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?'])/gi;
+	/(```[\s\S]*?```|~~~[\s\S]*?~~~)|!\[[^\]]*\]\((?:<([^>\n]+)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'))?\)|`([^`\n]+)`|\b(?:https?|ftp):\/\/[^\s"'<>()[\]]+|\bdata:[^\s"'<>()[\]]+|(file:\/\/[^\s"'<>()[\]]+)|(?<=^|[\s([{:;,=])"((?:\\.|[^"\n])+?\.(?:png|jpe?g|gif|webp|bmp)(?:[?#][^\s"]*)?)"|(?<=^|[\s([{:;,=])'((?:\\.|(?!'(?![\p{L}\p{N}]))[^\n])+?\.(?:png|jpe?g|gif|webp|bmp)(?:[?#][^\s']*)?)'(?![\p{L}\p{N}])|(?<=^|[\s([{:;,=])(@?(?:~\/|\.\.?\/|\/)(?:(?:\\ |[^\s"<>()[\]`,;:])+(?<!\.(?:png|jpe?g|gif|webp|bmp))(?:\s+(?!@?(?:~\/|\.\.?\/|\/))))*(?:\\ |[^\s"<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?'>])|(?<=^|[\s([{:;,=])(@?(?:\\ |[^\s"<>()[\]`,;:=])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?'>])/giu;
 
 const ROOTED_PREFIX_RE = /^@?(?:~\/|\.\.?\/|\/)/;
 const EMBEDDED_ROOTED_IMAGE_PATH_RE =
@@ -90,8 +90,8 @@ export function extractLocalImagePaths(text: string): string[] {
 			add(match[4]);
 		} else if (match[5]) {
 			add(match[5]);
-		} else if (match[7]) {
-			const quoted = match[7].replace(/\\ /g, " ");
+		} else if (match[6] || match[7]) {
+			const quoted = (match[6] ?? match[7])!.replace(/\\ /g, " ");
 			if (ROOTED_PREFIX_RE.test(quoted)) {
 				add(quoted);
 			} else {

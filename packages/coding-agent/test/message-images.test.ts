@@ -96,6 +96,9 @@ describe("extractLocalImagePaths", () => {
 			"/Users/me/Desktop/Capture d'écran 2026-11-26 à 12.00.00.png",
 			"/Users/me/Desktop/Capture d'écran.png",
 		]);
+		expect(
+			extractLocalImagePaths('<img src="/tmp/hero.png"> <img src=\'/tmp/alt.png\'> "/tmp/glued.png"please'),
+		).toEqual(["/tmp/hero.png", "/tmp/alt.png", "/tmp/glued.png"]);
 		expect(extractLocalImagePaths("Compare /tmp/before.png and /tmp/after.png")).toEqual([
 			"/tmp/before.png",
 			"/tmp/after.png",
