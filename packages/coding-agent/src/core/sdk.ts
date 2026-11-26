@@ -541,19 +541,13 @@ export async function createAgentSessionWithDiagnostics(
 		() => settingsManager.getCacheWarmingMode(),
 		async (event) => extensionRunnerRef.current?.emitCacheWarmingDecision(event) ?? event.action,
 	);
-	const buildRequestOptions = (
-		options: ModelsSimpleStreamOptions = {},
-		requestModel?: Model<any>,
-	): ModelsSimpleStreamOptions => {
+	const buildRequestOptions = (options: ModelsSimpleStreamOptions = {}): ModelsSimpleStreamOptions => {
 		const providerRetrySettings = settingsManager.getProviderRetrySettings();
 		const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 		const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
 		const headerRunner = extensionRunnerRef.current;
-		const effectiveTransport = options.transport ?? settingsManager.getTransport();
-		const preserveOpenAIWebSocket =
-			requestModel?.provider === "openai" && requestModel.api === "openai-responses" && effectiveTransport !== "sse";
 		const sessionFetch =
-			options.fetch !== undefined || preserveOpenAIWebSocket
+			options.fetch !== undefined
 				? options.fetch
 				: getSessionHttpFetch({
 						httpIdleTimeoutMs,
@@ -561,6 +555,7 @@ export async function createAgentSessionWithDiagnostics(
 					});
 		return {
 			...options,
+			transport: options.transport ?? settingsManager.getTransport(),
 			...(sessionFetch !== undefined ? { fetch: sessionFetch } : {}),
 			...(options.reasoningSummary !== undefined
 				? {}
@@ -644,7 +639,7 @@ export async function createAgentSessionWithDiagnostics(
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
-			const requestOptions = buildRequestOptions(options, model);
+			const requestOptions = buildRequestOptions(options);
 			// Compaction and summaries use their own routing ids; only session requests
 			// replace the cache entry, so warming restarts from them. Keep warming while
 			// the current transcript still extends the request's prefix. Agent state may

@@ -21,16 +21,23 @@ let activeDispatcher: undici.Dispatcher | undefined;
 let activeDispatcherSignature: string | undefined;
 const MAX_SESSION_DISPATCHERS = 8;
 const sessionFetches = new Map<string, { dispatcher: undici.Dispatcher; fetch: typeof globalThis.fetch }>();
+const sessionTransportFetches = new WeakSet<typeof globalThis.fetch>();
+
+/** Returns true when `fetchFn` was created by `getSessionHttpFetch` (Pi's own transport wrapper, not a caller fetch). */
+export function isSessionTransportFetch(fetchFn: unknown): boolean {
+	return typeof fetchFn === "function" && sessionTransportFetches.has(fetchFn as typeof globalThis.fetch);
+}
 
 function resolveEffectiveProxies(httpProxy?: string): {
 	httpProxy: string | undefined;
 	httpsProxy: string | undefined;
 } {
 	const fallback = httpProxy?.trim() || undefined;
-	const resolvedHttp = process.env.HTTP_PROXY ?? process.env.http_proxy ?? fallback;
+	// Match Undici's EnvHttpProxyAgent and pi-ai's getProxyEnv: lowercase env vars take precedence.
+	const resolvedHttp = process.env.http_proxy ?? process.env.HTTP_PROXY ?? fallback;
 	return {
 		httpProxy: resolvedHttp,
-		httpsProxy: process.env.HTTPS_PROXY ?? process.env.https_proxy ?? resolvedHttp,
+		httpsProxy: process.env.https_proxy ?? process.env.HTTPS_PROXY ?? resolvedHttp,
 	};
 }
 
@@ -249,6 +256,7 @@ export function getSessionHttpFetch(settings: HttpTransportSettings): typeof glo
 		});
 	}) as unknown as typeof globalThis.fetch;
 
+	sessionTransportFetches.add(sessionFetch);
 	sessionFetches.set(signature, { dispatcher, fetch: sessionFetch });
 	while (sessionFetches.size > MAX_SESSION_DISPATCHERS) {
 		const oldest = sessionFetches.entries().next();

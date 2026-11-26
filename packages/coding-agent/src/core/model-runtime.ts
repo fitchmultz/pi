@@ -76,6 +76,7 @@ import {
 import { getAgentDir } from "../config.ts";
 import { operationSignal, raceWithAbortSignal } from "../utils/abort.ts";
 import { AuthStorage as DefaultAuthStorage } from "./auth-storage.ts";
+import { isSessionTransportFetch } from "./http-dispatcher.ts";
 import { resolveSameHostLoopbackBaseUrl } from "./local-loopback-url.ts";
 import { ModelConfig } from "./model-config.ts";
 import {
@@ -944,7 +945,8 @@ export class ModelRuntime implements Models {
 			this.extensionProviders.get(model.provider)?.preferLocalLoopback ??
 			this.config.getProvider(model.provider)?.preferLocalLoopback ??
 			false;
-		const customFetch = "fetch" in providerOptions && providerOptions.fetch !== undefined;
+		const isPiTransportFetch = "fetch" in providerOptions && isSessionTransportFetch(providerOptions.fetch);
+		const customFetch = "fetch" in providerOptions && providerOptions.fetch !== undefined && !isPiTransportFetch;
 		const effectiveBaseUrl =
 			preferLocalLoopback && !customFetch
 				? await resolveSameHostLoopbackBaseUrl(configuredModel.baseUrl, options?.signal)
@@ -953,6 +955,18 @@ export class ModelRuntime implements Models {
 			effectiveBaseUrl !== configuredModel.baseUrl
 				? { ...configuredModel, baseUrl: effectiveBaseUrl }
 				: configuredModel;
+		// OpenAI Responses disables WebSocket transport whenever `options.fetch` is provided.
+		// Strip Pi's own transport fetch after virtual-model routing unless SSE was explicitly requested.
+		const effectiveTransport =
+			"transport" in providerOptions ? (providerOptions.transport as string | undefined) : undefined;
+		const preserveOpenAIWebSocket =
+			isPiTransportFetch &&
+			requestModel.provider === "openai" &&
+			requestModel.api === "openai-responses" &&
+			effectiveTransport !== "sse";
+		const effectiveProviderOptions = preserveOpenAIWebSocket
+			? (({ fetch: _ignored, ...rest }) => rest)(providerOptions)
+			: providerOptions;
 		const sessionId =
 			"sessionId" in providerOptions && typeof providerOptions.sessionId === "string"
 				? providerOptions.sessionId
@@ -970,7 +984,7 @@ export class ModelRuntime implements Models {
 			provider,
 			model: requestModel,
 			options: {
-				...providerOptions,
+				...effectiveProviderOptions,
 				apiKey: providerOptions.apiKey ?? resolution.auth.apiKey,
 				headers,
 				env,

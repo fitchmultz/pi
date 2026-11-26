@@ -335,4 +335,46 @@ console.log("process survived");
 		});
 		expect(result.status, result.stderr).toBe(0);
 	});
+
+	it("prefers lowercase http_proxy/https_proxy over uppercase env vars, matching Undici EnvHttpProxyAgent", async () => {
+		const origin = http.createServer((_req, res) => {
+			res.writeHead(200, { "content-type": "text/plain" });
+			res.end("origin");
+		});
+		await new Promise<void>((resolve) => origin.listen(0, "127.0.0.1", resolve));
+		const originAddress = origin.address();
+		if (!originAddress || typeof originAddress === "string") throw new Error("Origin missing port");
+
+		const lowercaseRequests: string[] = [];
+		const lowercaseProxy = net.createServer((client) => {
+			client.once("data", (data) => {
+				const [requestLine = ""] = data.toString().split("\r\n");
+				lowercaseRequests.push(requestLine);
+				const upstream = net.connect(originAddress.port, "127.0.0.1", () => {
+					client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+					client.pipe(upstream).pipe(client);
+				});
+				upstream.on("error", () => client.destroy());
+				client.on("error", () => upstream.destroy());
+			});
+		});
+		await new Promise<void>((resolve) => lowercaseProxy.listen(0, "127.0.0.1", resolve));
+		const proxyAddress = lowercaseProxy.address();
+		if (!proxyAddress || typeof proxyAddress === "string") throw new Error("Proxy missing port");
+
+		process.env.http_proxy = `http://127.0.0.1:${proxyAddress.port}`;
+		process.env.HTTP_PROXY = "http://127.0.0.1:1";
+		try {
+			const sessionFetch = getSessionHttpFetch({ httpIdleTimeoutMs: 5_000 });
+			expect(sessionFetch).toBeDefined();
+			const originUrl = `http://127.0.0.1:${originAddress.port}/check`;
+			await expect(sessionFetch!(originUrl).then((response) => response.text())).resolves.toBe("origin");
+			expect(lowercaseRequests).not.toHaveLength(0);
+		} finally {
+			await Promise.all([
+				new Promise<void>((resolve) => lowercaseProxy.close(() => resolve())),
+				new Promise<void>((resolve) => origin.close(() => resolve())),
+			]);
+		}
+	});
 });
