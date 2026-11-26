@@ -233,7 +233,7 @@ export function getSessionHttpFetch(settings: HttpTransportSettings): typeof glo
 		) {
 			const mergedInit: undici.RequestInit = {
 				method: input.method,
-				headers: input.headers,
+				headers: Array.from(input.headers.entries()),
 				body: input.body as undici.RequestInit["body"],
 				signal: input.signal,
 				...(input.body ? { duplex: "half" as const } : {}),
