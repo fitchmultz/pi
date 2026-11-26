@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { isTransportFetch, markTransportFetch } from "@earendil-works/pi-ai";
 import * as undici from "undici";
 
 export const DEFAULT_HTTP_IDLE_TIMEOUT_MS = 300_000;
@@ -21,14 +22,10 @@ let activeDispatcher: undici.Dispatcher | undefined;
 let activeDispatcherSignature: string | undefined;
 const MAX_SESSION_DISPATCHERS = 8;
 const sessionFetches = new Map<string, { dispatcher: undici.Dispatcher; fetch: typeof globalThis.fetch }>();
-const PI_TRANSPORT_FETCH_SYMBOL = Symbol.for("pi.transportFetch");
 
 /** Returns true when `fetchFn` was created by `getSessionHttpFetch` (Pi's own transport wrapper, not a caller fetch). */
 export function isSessionTransportFetch(fetchFn: unknown): boolean {
-	return (
-		typeof fetchFn === "function" &&
-		Boolean((fetchFn as unknown as Record<symbol, unknown>)[PI_TRANSPORT_FETCH_SYMBOL])
-	);
+	return isTransportFetch(fetchFn);
 }
 
 function resolveEffectiveProxies(httpProxy?: string): {
@@ -259,7 +256,7 @@ export function getSessionHttpFetch(settings: HttpTransportSettings): typeof glo
 		});
 	}) as unknown as typeof globalThis.fetch;
 
-	Object.defineProperty(sessionFetch, PI_TRANSPORT_FETCH_SYMBOL, { value: true });
+	markTransportFetch(sessionFetch);
 	sessionFetches.set(signature, { dispatcher, fetch: sessionFetch });
 	while (sessionFetches.size > MAX_SESSION_DISPATCHERS) {
 		const oldest = sessionFetches.entries().next();

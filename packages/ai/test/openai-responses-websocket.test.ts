@@ -3,6 +3,7 @@ import { stream as streamOpenAIResponses } from "../src/api/openai-responses.ts"
 import { cleanupSessionResources } from "../src/session-resources.ts";
 import type { AssistantMessage, Model, TranscriptContext } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
+import { markTransportFetch } from "../src/utils/transport-fetch.ts";
 
 type FakeListener = (event: unknown) => void;
 
@@ -564,13 +565,10 @@ describe("openai-responses WebSocket mode", () => {
 	it("attempts WebSocket with a Pi-tagged transport fetch and reuses that fetch on SSE fallback", async () => {
 		const model = createOpenAIModel();
 		let taggedFetchCalls = 0;
-		const taggedFetch = Object.assign(
-			async () => {
-				taggedFetchCalls++;
-				return createSseReplyResponse("resp_sse_tagged", "from-tagged-sse");
-			},
-			{ [Symbol.for("pi.transportFetch")]: true },
-		) as unknown as typeof globalThis.fetch;
+		const taggedFetch = markTransportFetch((async () => {
+			taggedFetchCalls++;
+			return createSseReplyResponse("resp_sse_tagged", "from-tagged-sse");
+		}) as unknown as typeof globalThis.fetch);
 
 		// 1. With a working WebSocket, Pi's tagged transport fetch still allows WebSocket transport.
 		harness.onSend((socket) => emitSimpleReply(socket, "resp_ws_tagged", "msg_ws", "from-ws"));

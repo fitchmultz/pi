@@ -20,13 +20,12 @@ import { hasCredentialHeader, headersToRecord } from "../utils/headers.ts";
 import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { getDeclaredTools } from "../utils/transcript.ts";
+import { isTransportFetch } from "../utils/transport-fetch.ts";
 import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 
-const PI_TRANSPORT_FETCH_SYMBOL = Symbol.for("pi.transportFetch");
-
 function isCallerCustomFetch(fetchFn: unknown): boolean {
-	return fetchFn !== undefined && !(fetchFn as Record<symbol, unknown>)[PI_TRANSPORT_FETCH_SYMBOL];
+	return fetchFn !== undefined && !isTransportFetch(fetchFn);
 }
 
 import {
