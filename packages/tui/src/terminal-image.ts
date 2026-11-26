@@ -608,11 +608,64 @@ function parseSixelRasterDimensions(sequence: string): ImageDimensions | undefin
 	return widthPx > 0 && heightPx > 0 ? { widthPx, heightPx } : undefined;
 }
 
+function ensureSixelRasterAttributes(sequence: string, widthPx: number, heightPx: number): string {
+	if (parseSixelRasterDimensions(sequence)) return sequence;
+	const span = findSixelSequence(sequence);
+	if (!span) return sequence;
+	return `${sequence.slice(0, span.bodyStart)}"1;1;${widthPx};${heightPx}${sequence.slice(span.bodyStart)}`;
+}
+
+function measureSixelBandDimensions(sequence: string): { widthPx: number; heightPx: number } | undefined {
+	const parsed = parseSixelBands(sequence, 1);
+	if (!parsed || parsed.bands.length === 0) return undefined;
+	let maxCols = 0;
+	for (const band of parsed.bands) {
+		for (const pass of band.split("$")) {
+			let cols = 0;
+			let i = 0;
+			while (i < pass.length) {
+				const ch = pass.charCodeAt(i);
+				if (ch === 0x23) {
+					// Color selector (#n or #n;...)
+					i++;
+					while (
+						i < pass.length &&
+						((pass.charCodeAt(i) >= 0x30 && pass.charCodeAt(i) <= 0x39) || pass.charCodeAt(i) === 0x3b)
+					) {
+						i++;
+					}
+					continue;
+				}
+				if (ch === 0x21) {
+					// Repeat introducer (!<count><sixel>)
+					i++;
+					let count = 0;
+					while (i < pass.length && pass.charCodeAt(i) >= 0x30 && pass.charCodeAt(i) <= 0x39) {
+						count = count * 10 + (pass.charCodeAt(i) - 0x30);
+						i++;
+					}
+					if (i < pass.length && pass.charCodeAt(i) >= 0x3f && pass.charCodeAt(i) <= 0x7e) {
+						cols += Math.max(1, count);
+						i++;
+					}
+					continue;
+				}
+				if (ch >= 0x3f && ch <= 0x7e) {
+					cols++;
+				}
+				i++;
+			}
+			if (cols > maxCols) maxCols = cols;
+		}
+	}
+	return { widthPx: Math.max(1, maxCols), heightPx: parsed.bands.length * 6 };
+}
+
 export function getSixelImageMetadata(line: string): SixelImageMetadata | undefined {
 	const span = findSixelSequence(line);
 	if (!span) return undefined;
 	const sequence = line.slice(span.start, span.end);
-	const raster = parseSixelRasterDimensions(sequence);
+	const raster = parseSixelRasterDimensions(sequence) ?? measureSixelBandDimensions(sequence);
 	if (!raster) return undefined;
 	const dims = getCellDimensions();
 	const rows = Math.max(1, Math.ceil(raster.heightPx / dims.heightPx));
@@ -1177,13 +1230,14 @@ export function renderImage(
 		const scale = Math.min(boxWidthPx / srcW, boxHeightPx / srcH);
 		const targetWidthPx = Math.max(1, Math.min(boxWidthPx, Math.round(srcW * scale)));
 		const targetHeightPx = Math.max(1, Math.min(boxHeightPx, Math.round(srcH * scale)));
-		const sequence = sixelEncoder({
+		const rawSequence = sixelEncoder({
 			base64Data,
 			mimeType: options.mimeType ?? "image/png",
 			widthPx: targetWidthPx,
 			heightPx: targetHeightPx,
 		});
-		if (!sequence) return null;
+		if (!rawSequence) return null;
+		const sequence = ensureSixelRasterAttributes(rawSequence, targetWidthPx, targetHeightPx);
 		maxSixelImageRows = Math.max(maxSixelImageRows, size.rows);
 		return { sequence, columns: size.columns, rows: size.rows };
 	}

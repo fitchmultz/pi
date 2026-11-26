@@ -29,6 +29,7 @@ import {
 } from "../src/terminal-image.ts";
 import { CURSOR_MARKER, renderFakeCursor, type TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
+import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
@@ -1226,22 +1227,24 @@ describe("TuiAltScreen", () => {
 		setCellDimensions({ widthPx: 10, heightPx: 18 });
 		setSixelEncoder(({ widthPx, heightPx }) => `\x1bP0;1q"1;1;${widthPx};${heightPx}#0;2;0;100;0#0~~~\x1b\\`);
 		try {
-			const terminal = new RecordingTerminal(20, 4);
+			const terminal = new RecordingTerminal(20, 8);
 			const tui = new TuiAltScreen(terminal);
-			tui.addChild(
+			const box = new Box(1, 1, (s) => `\x1b[48;5;236m${s}\x1b[0m`);
+			box.addChild(
 				new Image(
 					"AAAA",
 					"image/png",
 					{ fallbackColor: (value) => value },
 					{ maxWidthCells: 4 },
-					{ widthPx: 40, heightPx: 18 },
+					{ widthPx: 40, heightPx: 36 },
 				),
 			);
+			tui.addChild(box);
 			tui.start();
 			await terminal.waitForRender();
 			assert.strictEqual(getCapabilities().images, "sixel");
 			assert.ok(
-				terminal.events.some((event) => event.type === "write" && event.data.includes('\x1bP0;1q"1;1;40;18')),
+				terminal.events.some((event) => event.type === "write" && event.data.includes('\x1bP0;1q"1;1;40;36')),
 			);
 			const stopStart = terminal.events.length;
 			tui.stop();
@@ -1251,12 +1254,88 @@ describe("TuiAltScreen", () => {
 				.filter((event) => event.type === "write")
 				.map((event) => event.data)
 				.join("");
-			const sixelEnd = stopDump.indexOf("\x1b\\");
-			assert.ok(sixelEnd !== -1, "expected Sixel payload in alt-screen stop dump");
+			const sixelIdx = stopDump.indexOf('\x1bP0;1q"1;1;40;36');
+			assert.ok(sixelIdx !== -1, "expected multi-row Sixel payload in alt-screen stop dump");
 			assert.ok(
-				!stopDump.slice(sixelEnd).includes("\r\x1b[2K\r\n"),
-				"stop dump must not EL2-clear empty Sixel reservation rows",
+				stopDump.slice(0, sixelIdx).includes("\x1b[1A"),
+				"stop dump must pre-draw covered padded Box rows before writing Sixel",
 			);
+			const afterSixel = stopDump.slice(stopDump.indexOf("\x1b\\", sixelIdx) + 2);
+			const restoreIdx = afterSixel.indexOf("\x1b8\x1b[1B");
+			assert.ok(
+				restoreIdx !== -1 && !afterSixel.slice(0, restoreIdx).includes("\r\n"),
+				"stop dump must restore cursor and advance past pre-drawn Sixel rows without overwriting them",
+			);
+		} finally {
+			setSixelEncoder(undefined);
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("draws Sixel last over padded Box reservation rows on TuiMainScreen full and differential renders", async () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		setSixelEncoder(({ widthPx, heightPx }) => `\x1bP0;1q"1;1;${widthPx};${heightPx}#0;2;100;0;0#0~~~\x1b\\`);
+		try {
+			const terminal = new RecordingTerminal(20, 8);
+			const tui = new TuiMainScreen(terminal);
+			let bg = "\x1b[48;5;236m";
+			const box = new Box(1, 1, (s) => `${bg}${s}\x1b[0m`);
+			box.addChild(
+				new Image(
+					"AAAA",
+					"image/png",
+					{ fallbackColor: (v) => v },
+					{ maxWidthCells: 2, maxHeightCells: 5 },
+					{ widthPx: 20, heightPx: 30 },
+				),
+			);
+			tui.addChild(box);
+			tui.start();
+			await terminal.waitForRender();
+
+			const firstFrame = terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const firstSixel = firstFrame.indexOf('\x1bP0;1q"1;1;20;30');
+			assert.ok(firstSixel !== -1, "expected Sixel in TuiMainScreen full render");
+			assert.ok(
+				firstFrame.slice(0, firstSixel).includes("\x1b[2A\r"),
+				"full render must draw padded rows before Sixel",
+			);
+			const afterFirstSixel = firstFrame.slice(firstFrame.indexOf("\x1b\\", firstSixel) + 2);
+			const firstRestore = afterFirstSixel.indexOf("\x1b8\x1b[2B");
+			assert.ok(
+				firstRestore !== -1 && !afterFirstSixel.slice(0, firstRestore).includes("\r\n"),
+				"full render must jump past padded rows after Sixel",
+			);
+
+			// Differential update changing the Box background: must pre-clear and redraw padded rows before Sixel.
+			const diffStart = terminal.events.length;
+			bg = "\x1b[48;5;238m";
+			box.invalidate();
+			tui.requestRender();
+			await terminal.waitForRender();
+			const diffFrame = terminal.events
+				.slice(diffStart)
+				.filter((event) => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const diffSixel = diffFrame.indexOf('\x1bP0;1q"1;1;20;30');
+			assert.ok(diffSixel !== -1, "differential update must redraw Sixel when covered Box rows change");
+			assert.ok(
+				diffFrame.slice(0, diffSixel).includes("\x1b[2A\r"),
+				"differential render must draw padded rows before Sixel",
+			);
+			const afterDiffSixel = diffFrame.slice(diffFrame.indexOf("\x1b\\", diffSixel) + 2);
+			const diffRestore = afterDiffSixel.indexOf("\x1b8\x1b[2B");
+			assert.ok(
+				diffRestore !== -1 && !afterDiffSixel.slice(0, diffRestore).includes("\r\n"),
+				"differential render must jump past padded rows after Sixel",
+			);
+			tui.stop();
 		} finally {
 			setSixelEncoder(undefined);
 			resetCapabilitiesCache();

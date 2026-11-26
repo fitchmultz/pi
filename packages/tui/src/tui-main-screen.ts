@@ -200,14 +200,17 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 	private getTopAnchoredImageReservedRows(lines: string[], index: number, maxIndex = lines.length - 1): number {
 		const line = lines[index] ?? "";
-		const rows = isSixelImageLine(line) ? (getImagePlacementRows(line) ?? 1) : extractKittyImageRows(line);
+		const isSixel = isSixelImageLine(line);
+		const rows = isSixel ? (getImagePlacementRows(line) ?? 1) : extractKittyImageRows(line);
 		if (rows <= 1) return 1;
 
 		const maxRows = Math.min(rows, maxIndex - index + 1, lines.length - index);
 		let reservedRows = 1;
 		while (reservedRows < maxRows) {
 			const nextLine = lines[index + reservedRows] ?? "";
-			if (isImageLine(nextLine) || visibleWidth(nextLine) > 0) break;
+			// Sixel reservation rows inside a Box or HStack carry space/background padding or sibling text,
+			// so treat every non-image row in the Sixel block as covered and draw the Sixel sequence last.
+			if (isImageLine(nextLine) || (!isSixel && visibleWidth(nextLine) > 0)) break;
 			reservedRows++;
 		}
 		return reservedRows;
@@ -299,9 +302,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				const imageReservedRows = isImage ? this.getTopAnchoredImageReservedRows(newLines, i) : 1;
 				if (imageReservedRows > 1 && imageReservedRows <= height) {
 					for (let row = 1; row < imageReservedRows; row++) {
-						output.append("\r\n");
+						output.append(isSixel ? `\r\n${newLines[i + row] ?? ""}` : "\r\n");
 					}
-					output.append(`\x1b[${imageReservedRows - 1}A`);
+					output.append(`\x1b[${imageReservedRows - 1}A\r`);
 					output.append(isSixel ? `\x1b7${line}\x1b8` : line);
 					output.append(`\x1b[${imageReservedRows - 1}B`);
 					i += imageReservedRows - 1;
@@ -513,9 +516,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 				output.append("\x1b[2K");
 				for (let row = 1; row < imageReservedRows; row++) {
-					output.append("\r\n\x1b[2K");
+					output.append(isSixel ? `\r\n\x1b[2K${newLines[i + row] ?? ""}` : "\r\n\x1b[2K");
 				}
-				output.append(`\x1b[${imageReservedRows - 1}A`);
+				output.append(`\x1b[${imageReservedRows - 1}A\r`);
 				output.append(isSixel ? `\x1b7${line}\x1b8` : line);
 				output.append(`\x1b[${imageReservedRows - 1}B`);
 				i += imageReservedRows - 1;

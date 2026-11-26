@@ -470,21 +470,30 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				(line) => (isImageLine(line) || visibleWidth(line) <= width ? line : sliceByColumn(line, 0, width, true)),
 			);
 			let buffer = `${BEGIN_SYNCHRONIZED_OUTPUT}${EXIT_ALT_SCREEN}${DISABLE_AUTOWRAP}`;
-			let sixelCoveredRows = 0;
+			const maxSpan = Math.max(1, this.terminal.rows);
 			for (let row = 0; row < this.lastDocument.length; row++) {
 				if (row > 0) buffer += "\r\n";
 				const line = this.lastDocument[row] ?? "";
-				if (sixelCoveredRows > 0 && visibleWidth(line) === 0 && !isImageLine(line)) {
-					// Skip EL2 on empty Sixel reservation rows so the preceding multi-row Sixel raster stays intact.
-					sixelCoveredRows -= 1;
-					continue;
-				}
 				const sixelMeta = getSixelImageMetadata(line);
-				if (sixelMeta) {
-					sixelCoveredRows = Math.max(0, sixelMeta.rows - 1);
+				if (sixelMeta && sixelMeta.rows > 1) {
+					let span = 1;
+					const limit = Math.min(sixelMeta.rows, maxSpan, this.lastDocument.length - row);
+					while (span < limit && !isImageLine(this.lastDocument[row + span] ?? "")) {
+						span++;
+					}
+					// Draw covered reservation rows (including Box padding/backgrounds or side text) before the
+					// Sixel payload so multi-row placements are never erased by later EL2 clears or padding spaces.
+					buffer += "\r\x1b[2K";
+					for (let offset = 1; offset < span; offset++) {
+						buffer += `\r\n\r\x1b[2K${this.lastDocument[row + offset] ?? ""}`;
+					}
+					if (span > 1) buffer += `\x1b[${span - 1}A`;
+					buffer += `\r\x1b7${line}\x1b8`;
+					if (span > 1) buffer += `\x1b[${span - 1}B`;
+					row += span - 1;
+				} else if (sixelMeta) {
 					buffer += `\r\x1b[2K\x1b7${line}\x1b8`;
 				} else {
-					sixelCoveredRows = 0;
 					buffer += `\r\x1b[2K${line}`;
 				}
 			}

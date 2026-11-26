@@ -1242,4 +1242,33 @@ describe("Sixel image protocol", () => {
 		const composited = compositeTuiLine(" ".repeat(40), sixel, 2, 20, 40);
 		assert.ok(composited.includes(sixel), "compositeTuiLine must preserve the complete Sixel DCS sequence with ST");
 	});
+
+	it("preserves placement metadata when a Sixel encoder or raw Sixel line omits raster attributes", () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		setSixelEncoder(() => "\x1bP0;1q#0;2;100;0;0#0!20~-!20~-!20~\x1b\\");
+		try {
+			const img = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: (v) => v },
+				{ maxWidthCells: 2, maxHeightCells: 5 },
+				{ widthPx: 20, heightPx: 30 },
+			);
+			const lines = img.render(20);
+			assert.strictEqual(lines.length, 3);
+			assert.deepStrictEqual(getSixelImageMetadata(lines[0]!), { columns: 2, rows: 3, widthPx: 20, heightPx: 30 });
+			// Standalone raster-less Sixel line also resolves dimensions from band geometry.
+			assert.deepStrictEqual(getSixelImageMetadata("\x1bP0;1q#0;2;100;0;0#0!20~-!20~-!20~\x1b\\"), {
+				columns: 2,
+				rows: 2,
+				widthPx: 20,
+				heightPx: 18,
+			});
+		} finally {
+			setSixelEncoder(undefined);
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+			resetCapabilitiesCache();
+		}
+	});
 });
