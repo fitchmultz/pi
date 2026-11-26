@@ -3,6 +3,7 @@ import {
 	type Api,
 	type AssistantMessage,
 	type AssistantMessageEventStream,
+	createAssistantMessageEventStream,
 	evaluateCacheWarming,
 	type FetchFunction,
 	getCacheWarmingDelayMs,
@@ -1173,6 +1174,118 @@ describe("cache warming", () => {
 		// Short context tier: input=$2/M, cacheRead=$0.1/M, 12h write=$5/M (2.5x)
 		expect(longDecision.missCost).toBeCloseTo((200_000 * (5 - 0.1)) / 1_000_000, 9);
 		expect(longDecision.action).toBe("warm");
+	});
+
+	it("keeps idle warming active across turn_end boundaries and context refreshes with custom messages", async () => {
+		const model = getBuiltinModel("google", "gemini-4-neon");
+		const credentials = AuthStorage.inMemory();
+		await credentials.modify(model.provider, async () => ({
+			type: "api_key",
+			key: "offline-key",
+		}));
+		const modelRuntime = await ModelRuntime.create({ credentials, modelsPath: null, allowModelNetwork: false });
+		const settingsManager = SettingsManager.inMemory({
+			cacheWarming: "idle",
+			httpIdleTimeoutMs: 0,
+			compaction: { enabled: false },
+			retry: { enabled: false },
+		});
+		const resourceLoader = new DefaultResourceLoader({
+			cwd: process.cwd(),
+			agentDir: tmpdir(),
+			settingsManager,
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+			systemPromptOverride: () => "Offline idle warming test.",
+			extensionFactories: [
+				(pi) => {
+					let injected = false;
+					pi.on("before_agent_start", () => {
+						if (injected) return;
+						injected = true;
+						return {
+							message: {
+								customType: "test-session-meta",
+								content: "Session metadata tag",
+								display: false,
+							},
+						};
+					});
+					// Any turn_end boundary handler exercises AgentSession._dispatchBoundary().
+					pi.on("turn_end", () => undefined);
+				},
+			],
+		});
+		await resourceLoader.reload();
+		const sessionManager = SessionManager.inMemory();
+		const { session } = await createAgentSession({
+			model,
+			modelRuntime,
+			settingsManager,
+			sessionManager,
+			resourceLoader,
+			thinkingLevel: "high",
+			tools: ["read"],
+		});
+		const origStream = modelRuntime.streamSimple.bind(modelRuntime);
+		let calls = 0;
+		modelRuntime.streamSimple = (reqModel, _context, options, onPrepared) => {
+			calls++;
+			onPrepared?.(reqModel, options ?? {});
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: {
+						...response(reqModel, "stop"),
+						content: [{ type: "text", text: "ok" }],
+						usage: {
+							...warmUsage,
+							input: 2_050,
+							output: 10,
+							cacheRead: 200_000,
+							cacheWrite: 0,
+							totalTokens: 202_060,
+						},
+					},
+				});
+			});
+			return stream;
+		};
+		try {
+			await session.bindExtensions({});
+			await session.prompt("First turn with custom metadata.");
+			expect(calls).toBe(1);
+			expect(session.cacheWarmingStatus).toMatchObject({
+				state: "scheduled",
+				decision: { phase: "idle", action: "warm" },
+			});
+
+			// Re-projecting the same branch (or appending a trailing custom message while idle) preserves the prefix.
+			session.refreshContext();
+			expect(session.cacheWarmingStatus?.state).toBe("scheduled");
+			await session.sendCustomMessage(
+				{ customType: "idle-note", content: "Trailing idle note", display: false },
+				{ triggerTurn: false },
+			);
+			expect(session.cacheWarmingStatus?.state).toBe("scheduled");
+
+			// Editing an earlier custom message in the warmed prefix must still invalidate warming.
+			const customEntry = sessionManager
+				.getBranch()
+				.find((entry) => entry.type === "custom_message" && entry.customType === "test-session-meta");
+			if (!customEntry) throw new Error("Expected persisted custom_message entry");
+			sessionManager.appendContextEdit(customEntry.id, { content: "Edited metadata tag" });
+			session.refreshContext();
+			expect(session.cacheWarmingStatus).toEqual({ state: "inactive", reason: "conversation context changed" });
+		} finally {
+			modelRuntime.streamSimple = origStream;
+			session.dispose();
+		}
 	});
 });
 

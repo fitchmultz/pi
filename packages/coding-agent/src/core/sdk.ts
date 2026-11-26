@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
 import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
@@ -205,6 +206,23 @@ export {
 	createLsTool,
 	createPowerShellTool,
 };
+
+// Session projection reconstructs custom, summary, and edited entries as new objects when
+// finalized context refreshes (and custom messages can pick up a slightly newer persistence
+// timestamp on flush). Treat structurally unchanged projections as the same prefix message.
+function sameProjectedMessage(current: AgentMessage, captured: AgentMessage): boolean {
+	if (current === captured) return true;
+	if (current.role !== captured.role) return false;
+	if (current.role === "custom" && captured.role === "custom") {
+		return (
+			current.customType === captured.customType &&
+			current.display === captured.display &&
+			isDeepStrictEqual(current.content, captured.content) &&
+			isDeepStrictEqual(current.details, captured.details)
+		);
+	}
+	return isDeepStrictEqual(current, captured);
+}
 
 // Helper Functions
 
@@ -580,7 +598,7 @@ export async function createAgentSessionWithDiagnostics(
 				currentModel.provider === requestModel.provider &&
 				currentModel.id === requestModel.id &&
 				messages.length <= currentMessages.length &&
-				messages.every((message, index) => currentMessages[index] === message)
+				messages.every((message, index) => sameProjectedMessage(currentMessages[index], message))
 			);
 		};
 	};
