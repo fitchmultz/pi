@@ -132,8 +132,8 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 	undici.setGlobalDispatcher(dispatcher);
 	activeDispatcher = dispatcher;
 	activeDispatcherSignature = getDispatcherSignature(normalizedTimeoutMs);
-	if (previousDispatcher && previousDispatcher !== dispatcher) {
-		void previousDispatcher.close().catch(() => {});
+	if (previousDispatcher && previousDispatcher !== dispatcher && typeof previousDispatcher.close === "function") {
+		void Promise.resolve(previousDispatcher.close()).catch(() => {});
 	}
 	// Keep fetch and the dispatcher on the same undici implementation. Node 26.0's
 	// bundled fetch can otherwise consume compressed responses through npm undici's
