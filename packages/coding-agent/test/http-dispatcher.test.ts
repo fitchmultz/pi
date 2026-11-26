@@ -1,15 +1,18 @@
 import { spawnSync } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
+import { tmpdir } from "node:os";
 import tls from "node:tls";
 import * as undici from "undici";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import {
 	applyHttpProxySettings,
 	configureHttpDispatcher,
 	formatHttpIdleTimeoutMs,
 	HTTP_IDLE_TIMEOUT_CHOICES,
 } from "../src/core/http-dispatcher.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY"] as const;
 const DISPATCHER_PROXY_ENV_KEYS = [...PROXY_ENV_KEYS, "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"] as const;
@@ -236,5 +239,58 @@ console.log("process survived");
 			30_000, 60_000, 120_000, 300_000, 1_200_000, 0,
 		]);
 		expect(formatHttpIdleTimeoutMs(1_200_000)).toBe("20 min");
+	});
+
+	it("applies httpIdleTimeoutMs to the Undici dispatcher when SDK sessions create services", async () => {
+		const server = http.createServer((_request, response) => {
+			setTimeout(() => {
+				response.end("delayed-ok");
+			}, 1_250);
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		const address = server.address();
+		if (!address || typeof address === "string") {
+			throw new Error("Server did not bind to a TCP port");
+		}
+		const url = `http://127.0.0.1:${address.port}/interactions`;
+		try {
+			// Simulate a shorter default headersTimeout than the user's configured httpIdleTimeoutMs
+			// (Undici checks headersTimeout on 1-second fastTimer ticks).
+			configureHttpDispatcher(100);
+			await expect(undici.fetch(url)).rejects.toThrow();
+
+			const settingsManager = SettingsManager.inMemory({ httpIdleTimeoutMs: 5_000 });
+			await createAgentSessionServices({
+				cwd: process.cwd(),
+				agentDir: tmpdir(),
+				settingsManager,
+				resourceLoaderOptions: {
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+				},
+			});
+			const configuredDispatcher = undici.getGlobalDispatcher();
+			await expect(undici.fetch(url).then((response) => response.text())).resolves.toBe("delayed-ok");
+
+			// Repeated service creation with identical settings reuses the active dispatcher.
+			await createAgentSessionServices({
+				cwd: process.cwd(),
+				agentDir: tmpdir(),
+				settingsManager,
+				resourceLoaderOptions: {
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+				},
+			});
+			expect(undici.getGlobalDispatcher()).toBe(configuredDispatcher);
+		} finally {
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
 	});
 });

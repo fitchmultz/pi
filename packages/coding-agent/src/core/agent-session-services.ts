@@ -5,6 +5,7 @@ import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { applyProviderRegistrations } from "./extensions/provider-registrations.ts";
+import { applyHttpTransportSettings } from "./http-dispatcher.ts";
 import { ModelRuntime } from "./model-runtime.ts";
 import {
 	DefaultResourceLoader,
@@ -167,6 +168,10 @@ export async function createAgentSessionServices(
 		options.settingsManager ?? SettingsManager.create(cwd, agentDir, { projectTrusted: saved?.launch?.trustProject });
 	if (saved?.launch?.trustProject !== undefined) settingsManager.setProjectTrusted(saved.launch.trustProject);
 	if (saved) settingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
+	applyHttpTransportSettings({
+		httpIdleTimeoutMs: settingsManager.getHttpIdleTimeoutMs(),
+		httpProxy: settingsManager.getGlobalSettings().httpProxy,
+	});
 	const reloadOptions = saved ? { workingSession: saved } : options.resourceLoaderReloadOptions;
 	const resourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),

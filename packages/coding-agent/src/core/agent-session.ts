@@ -131,6 +131,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { type BeforeAgentStartTrigger, emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { applyHttpTransportSettings } from "./http-dispatcher.ts";
 import { findStaleSources, type StaleSource } from "./loaded-sources.ts";
 import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
 import { type BashExecutionMessage, type CustomMessage, convertToLlm } from "./messages.ts";
@@ -4976,6 +4977,10 @@ export class AgentSession {
 				: this._isActivatedOnRegistration(name);
 		const previouslyUndeclared = [...this._toolRegistry.keys()].filter((name) => !isDeclaredByDefault(name));
 		await this.settingsManager.reload();
+		applyHttpTransportSettings({
+			httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
+			httpProxy: this.settingsManager.getGlobalSettings().httpProxy,
+		});
 		this.syncQueueModesFromSettings();
 		clearConfigValueCache();
 		resetApiProviders();

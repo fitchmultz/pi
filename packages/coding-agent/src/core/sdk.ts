@@ -12,6 +12,7 @@ import { getClientIdentity } from "./client-identity.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { applyProviderRegistrations } from "./extensions/provider-registrations.ts";
+import { applyHttpTransportSettings } from "./http-dispatcher.ts";
 import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
 import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
@@ -316,6 +317,10 @@ export async function createAgentSessionWithDiagnostics(
 		if (saved.launch?.trustProject !== undefined) settingsManager.setProjectTrusted(saved.launch.trustProject);
 		settingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
 	}
+	applyHttpTransportSettings({
+		httpIdleTimeoutMs: settingsManager.getHttpIdleTimeoutMs(),
+		httpProxy: settingsManager.getGlobalSettings().httpProxy,
+	});
 	const sessionManager =
 		savedManager ?? options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 

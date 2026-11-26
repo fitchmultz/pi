@@ -16,6 +16,20 @@ export const HTTP_IDLE_TIMEOUT_CHOICES = [
 
 const originalGlobalFetch = globalThis.fetch;
 let installedGlobalFetch: typeof globalThis.fetch | undefined;
+const DISPATCHER_PROXY_ENV_KEYS = [
+	"HTTP_PROXY",
+	"HTTPS_PROXY",
+	"http_proxy",
+	"https_proxy",
+	"NO_PROXY",
+	"no_proxy",
+] as const;
+let activeDispatcher: undici.Dispatcher | undefined;
+let activeDispatcherSignature: string | undefined;
+
+function getDispatcherSignature(timeoutMs: number): string {
+	return JSON.stringify([timeoutMs, ...DISPATCHER_PROXY_ENV_KEYS.map((key) => process.env[key] ?? null)]);
+}
 
 export function parseHttpIdleTimeoutMs(value: unknown): number | undefined {
 	if (typeof value === "string") {
@@ -100,6 +114,7 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 	if (normalizedTimeoutMs === undefined) {
 		throw new Error(`Invalid HTTP idle timeout: ${String(timeoutMs)}`);
 	}
+	const previousDispatcher = activeDispatcher;
 	const dispatcher = withUndiciErrorListener(
 		new undici.EnvHttpProxyAgent({
 			allowH2: false,
@@ -115,6 +130,11 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 		}),
 	);
 	undici.setGlobalDispatcher(dispatcher);
+	activeDispatcher = dispatcher;
+	activeDispatcherSignature = getDispatcherSignature(normalizedTimeoutMs);
+	if (previousDispatcher && previousDispatcher !== dispatcher) {
+		void previousDispatcher.close().catch(() => {});
+	}
 	// Keep fetch and the dispatcher on the same undici implementation. Node 26.0's
 	// bundled fetch can otherwise consume compressed responses through npm undici's
 	// dispatcher without decompressing them, causing response.json() failures.
@@ -127,4 +147,30 @@ export function configureHttpDispatcher(timeoutMs: number = DEFAULT_HTTP_IDLE_TI
 		undici.install?.();
 		installedGlobalFetch = globalThis.fetch;
 	}
+}
+
+export interface HttpTransportSettings {
+	httpIdleTimeoutMs: number;
+	httpProxy?: string;
+}
+
+/**
+ * Apply proxy settings and ensure the global Undici dispatcher honors `httpIdleTimeoutMs`.
+ * Reuses the active Pi-managed dispatcher when neither the timeout nor proxy env changed.
+ */
+export function applyHttpTransportSettings(settings: HttpTransportSettings): void {
+	applyHttpProxySettings(settings.httpProxy);
+	const normalizedTimeoutMs = parseHttpIdleTimeoutMs(settings.httpIdleTimeoutMs);
+	if (normalizedTimeoutMs === undefined) {
+		throw new Error(`Invalid HTTP idle timeout: ${String(settings.httpIdleTimeoutMs)}`);
+	}
+	const signature = getDispatcherSignature(normalizedTimeoutMs);
+	if (
+		activeDispatcher !== undefined &&
+		undici.getGlobalDispatcher() === activeDispatcher &&
+		activeDispatcherSignature === signature
+	) {
+		return;
+	}
+	configureHttpDispatcher(normalizedTimeoutMs);
 }
