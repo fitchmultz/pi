@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { TerminalColorMode } from "./colors.ts";
+import { parseExifOrientation, parseWebpExifOrientation } from "./exif-orientation.ts";
 import { visibleWidth } from "./utils.ts";
 
 export type ImageProtocol = "kitty" | "iterm2" | "sixel" | null;
@@ -46,6 +47,11 @@ export interface SixelEncodeRequest {
  * Encodes source base64 image data into a DEC Sixel DCS sequence (`\x1bP...q...\x1b\\`)
  * sized to the requested pixel box, or returns null if it cannot.
  * Called synchronously during rendering.
+ */
+/**
+ * Encode an image to a Sixel DCS sequence (`\x1bP...q...\x1b\\`).
+ * Encoders should include DEC raster attributes (`"Pan;Pad;Ph;Pv`); `renderImage` inserts
+ * `"1;1;<widthPx>;<heightPx>` automatically when an encoder omits them.
  */
 export type SixelImageEncoder = (request: SixelEncodeRequest) => string | null;
 
@@ -962,63 +968,6 @@ export function getPngDimensions(base64Data: string): ImageDimensions | null {
 	} catch {
 		return null;
 	}
-}
-
-function parseTiffOrientation(buffer: Buffer, tiffStart: number, end: number): number | undefined {
-	if (end - tiffStart < 8) return undefined;
-	const littleEndian = buffer[tiffStart] === 0x49 && buffer[tiffStart + 1] === 0x49;
-	const bigEndian = buffer[tiffStart] === 0x4d && buffer[tiffStart + 1] === 0x4d;
-	if (!littleEndian && !bigEndian) return undefined;
-	const readU16 = (pos: number) => (littleEndian ? buffer.readUInt16LE(pos) : buffer.readUInt16BE(pos));
-	const readU32 = (pos: number) => (littleEndian ? buffer.readUInt32LE(pos) : buffer.readUInt32BE(pos));
-	if (readU16(tiffStart + 2) !== 42) return undefined;
-	const ifdOffset = readU32(tiffStart + 4);
-	const ifdStart = tiffStart + ifdOffset;
-	if (ifdStart < tiffStart || ifdStart + 2 > end) return undefined;
-	const entryCount = readU16(ifdStart);
-	for (let i = 0; i < entryCount; i++) {
-		const entryStart = ifdStart + 2 + i * 12;
-		if (entryStart + 12 > end) break;
-		if (readU16(entryStart) === 0x0112) {
-			return readU16(entryStart + 8);
-		}
-	}
-	return undefined;
-}
-
-function hasExifHeader(buffer: Buffer, start: number, end: number): boolean {
-	return (
-		end - start >= 6 &&
-		buffer[start] === 0x45 &&
-		buffer[start + 1] === 0x78 &&
-		buffer[start + 2] === 0x69 &&
-		buffer[start + 3] === 0x66 &&
-		buffer[start + 4] === 0x00 &&
-		buffer[start + 5] === 0x00
-	);
-}
-
-function parseExifOrientation(buffer: Buffer, start: number, end: number): number | undefined {
-	if (!hasExifHeader(buffer, start, end)) return undefined;
-	return parseTiffOrientation(buffer, start + 6, end);
-}
-
-function parseWebpExifOrientation(buffer: Buffer): number | undefined {
-	let offset = 12;
-	while (offset + 8 <= buffer.length) {
-		const chunkId = buffer.slice(offset, offset + 4).toString("ascii");
-		const chunkSize = buffer.readUInt32LE(offset + 4);
-		const dataStart = offset + 8;
-		const dataEnd = dataStart + chunkSize;
-		if (dataEnd > buffer.length) return undefined;
-		if (chunkId === "EXIF") {
-			const tiffStart = hasExifHeader(buffer, dataStart, dataEnd) ? dataStart + 6 : dataStart;
-			return parseTiffOrientation(buffer, tiffStart, dataEnd);
-		}
-		// RIFF chunks are padded to an even byte boundary.
-		offset = dataEnd + (chunkSize % 2);
-	}
-	return undefined;
 }
 
 function parseJpegDimensions(

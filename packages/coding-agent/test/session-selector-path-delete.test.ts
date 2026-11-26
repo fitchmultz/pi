@@ -394,10 +394,7 @@ describe("session selector path/delete interactions", () => {
 			return makeSession({ id: `s${i}`, path, modified: new Date(10_000 - i * 1000) });
 		});
 
-		let resolvePostDeleteReload: (() => void) | undefined;
-		const postDeleteReload = new Promise<void>((resolve) => {
-			resolvePostDeleteReload = resolve;
-		});
+		const { promise: postDeleteReload, resolve: resolvePostDeleteReload } = Promise.withResolvers<void>();
 
 		const selector = new SessionSelectorComponent(
 			async (onProgress) => {
@@ -406,7 +403,7 @@ describe("session selector path/delete interactions", () => {
 				onProgress?.(1, remaining.length, [remaining[remaining.length - 1]!]);
 				onProgress?.(remaining.length, remaining.length, remaining);
 				if (remaining.length < sessions.length) {
-					resolvePostDeleteReload?.();
+					resolvePostDeleteReload();
 				}
 				return remaining;
 			},

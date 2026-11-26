@@ -40,6 +40,13 @@ const BUDGETS = {
 		// The format checks (vendored from TypeBox, about 40 KB) load only through ./formats.
 		".": { maxFiles: 10, forbid: ["schema/src/formats/"] },
 	},
+	"packages/tui": {
+		// Pure byte-level EXIF orientation reader shared by pi-tui and coding-agent's image-resize worker.
+		"./exif-orientation": {
+			maxFiles: 1,
+			forbid: ["packages/tui/src/index.ts", "packages/tui/src/terminal-image.ts"],
+		},
+	},
 	"packages/ai": {
 		"./models": {
 			// Request telemetry reaches pi-ai's telemetry.ts and pi-telemetry's root (index, noop, metrics, memory).
@@ -147,6 +154,18 @@ const BUDGETS = {
 				"packages/schema/",
 			],
 			forbidExternal: ["typebox"],
+		},
+		"./src/utils/image-resize-worker.ts": {
+			maxFiles: 6,
+			forbid: [
+				"core/settings-manager.ts",
+				"modes/",
+				"packages/ai/",
+				"packages/tui/src/index.ts",
+				"packages/tui/src/terminal-image.ts",
+				"packages/schema/",
+			],
+			forbidExternal: ["diff", "get-east-asian-width", "marked", "marked-cjk-friendly", "typebox"],
 		},
 	},
 };
