@@ -8,6 +8,18 @@ import type { SettingsSelectorComponent } from "../src/modes/interactive/compone
 import { createHarness } from "./suite/harness.ts";
 import { createTestInteractiveView } from "./suite/ui-harness.ts";
 
+async function rebuildViaNoticesSetting(view: Awaited<ReturnType<typeof createTestInteractiveView>>): Promise<void> {
+	const childrenBefore = view.view.chatContainer.children[0];
+	await view.submit("/settings");
+	const selector = view.view.editorContainer.children[0] as SettingsSelectorComponent;
+	selector.getSettingsList().selectItem("notices");
+	selector.getSettingsList().handleInput("\r");
+	selector.getSettingsList().handleInput("\r");
+	selector.getSettingsList().handleInput("\x1b");
+	selector.getSettingsList().handleInput("\x1b");
+	expect(view.view.chatContainer.children[0]).not.toBe(childrenBefore);
+}
+
 describe("InteractiveMode auto-retry error cleanup", () => {
 	test("removes superseded retried error rows when a retry recovers, including across transcript rebuild and session resume", async () => {
 		const sessionDir = mkdtempSync(join(tmpdir(), "pi-retry-ui-"));
@@ -40,12 +52,8 @@ describe("InteractiveMode auto-retry error cleanup", () => {
 			expect(view.text()).not.toContain("MALFORMED_FUNCTION_CALL");
 			expect(view.text()).toContain("Recovered response");
 
-			// Rebuilding the transcript in-session (/settings -> rebuildChatFromMessages) keeps superseded error rows hidden.
-			await view.submit("/settings");
-			const selector = view.view.editorContainer.children[0] as SettingsSelectorComponent;
-			selector.getSettingsList().selectItem("cache-miss-notices");
-			selector.getSettingsList().handleInput("\r");
-			selector.getSettingsList().handleInput("\x1b");
+			// Rebuilding the transcript in-session (/settings -> notices -> cacheMisses -> rebuildChatFromMessages) keeps superseded error rows hidden.
+			await rebuildViaNoticesSetting(view);
 			expect(view.text()).not.toContain("MALFORMED_FUNCTION_CALL");
 			expect(view.text()).toContain("Recovered response");
 
@@ -95,11 +103,7 @@ describe("InteractiveMode auto-retry error cleanup", () => {
 			);
 
 			// Rebuilding the transcript keeps only the final non-omitted error attempt (not superseded attempts 1..3).
-			await view.submit("/settings");
-			const selector = view.view.editorContainer.children[0] as SettingsSelectorComponent;
-			selector.getSettingsList().selectItem("cache-miss-notices");
-			selector.getSettingsList().handleInput("\r");
-			selector.getSettingsList().handleInput("\x1b");
+			await rebuildViaNoticesSetting(view);
 			expect(view.text().match(/Error: Provider stopped with:/g) ?? []).toHaveLength(1);
 			expect(view.text()).toContain("MALFORMED_FUNCTION_CALL");
 		} finally {
@@ -107,8 +111,11 @@ describe("InteractiveMode auto-retry error cleanup", () => {
 		}
 	});
 
-	test("keeps the error row above the cancellation notice when retry backoff is aborted via Escape", async () => {
+	test("keeps the error row above the cancellation notice when retry backoff is aborted via Escape, including on rebuild and resume", async () => {
+		const sessionDir = mkdtempSync(join(tmpdir(), "pi-retry-cancel-"));
+		const sessionManager = SessionManager.create(sessionDir, sessionDir);
 		const harness = await createHarness({
+			sessionManager,
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 5000, maxAgentDelayMs: 5000 } },
 		});
 		try {
@@ -131,8 +138,27 @@ describe("InteractiveMode auto-retry error cleanup", () => {
 			const rendered = view.text();
 			expect(rendered.match(/MALFORMED_FUNCTION_CALL/g) ?? []).toHaveLength(1);
 			expect(rendered).toContain("Retry failed after 1 attempts: Retry cancelled");
+
+			// Rebuilding or resuming a cancelled leaf preserves the last error row since no later assistant superseded it.
+			await rebuildViaNoticesSetting(view);
+			expect(view.text().match(/Error: Provider stopped with:/g) ?? []).toHaveLength(1);
+			expect(view.text()).toContain("MALFORMED_FUNCTION_CALL");
+
+			const sessionFile = sessionManager.getSessionFile()!;
+			const resumedHarness = await createHarness({
+				sessionManager: SessionManager.open(sessionFile, sessionDir),
+			});
+			try {
+				const resumedView = await createTestInteractiveView(resumedHarness);
+				(resumedView.view as unknown as { renderInitialMessages(): void }).renderInitialMessages();
+				expect(resumedView.text().match(/Error: Provider stopped with:/g) ?? []).toHaveLength(1);
+				expect(resumedView.text()).toContain("MALFORMED_FUNCTION_CALL");
+			} finally {
+				resumedHarness.cleanup();
+			}
 		} finally {
 			harness.cleanup();
+			rmSync(sessionDir, { recursive: true, force: true });
 		}
 	});
 

@@ -392,15 +392,20 @@ function alignTranscriptChunkStartIndex(entries: readonly SessionEntry[], target
 }
 
 function collectOmittedErrorEntryIds(entries: readonly SessionEntry[]): Set<string> {
+	let lastAssistantIndex = -1;
 	const latestEdits = new Map<string, ContextEditEntry>();
-	for (const entry of entries) {
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i]!;
 		if (entry.type === "context_edit") {
 			latestEdits.set(entry.targetId, entry);
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			lastAssistantIndex = i;
 		}
 	}
 	const omitted = new Set<string>();
 	const omittedToolCallIds = new Set<string>();
-	for (const entry of entries) {
+	for (let i = 0; i < lastAssistantIndex; i++) {
+		const entry = entries[i]!;
 		if (
 			entry.type === "message" &&
 			entry.message.role === "assistant" &&
