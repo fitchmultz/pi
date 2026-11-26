@@ -64,16 +64,22 @@ const listWork = async (h: Harness) =>
 // slowest test took 60 s. The limit is three times that, rounded up to a minute.
 describe("background command extension delivery", { timeout: 180_000 }, () => {
 	const harnesses: Harness[] = [];
+	const allowAssistantErrors = new Set<Harness>();
 	const roots: string[] = [];
-	async function harness(owner?: SessionManager, extensions: NonNullable<HarnessOptions["extensionFactories"]> = []) {
+	async function harness(
+		owner?: SessionManager,
+		extensions: NonNullable<HarnessOptions["extensionFactories"]> = [],
+		options?: { settings?: HarnessOptions["settings"]; allowAssistantErrors?: boolean },
+	) {
 		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-background-session-")));
 		roots.push(root);
 		const h = await createHarness({
 			extensionFactories: [backgroundCommand, ...extensions],
 			sessionManager: owner ?? SessionManager.create(root, join(root, "sessions")),
-			settings: { compaction: { enabled: false }, retry: { enabled: false } },
+			settings: options?.settings ?? { compaction: { enabled: false }, retry: { enabled: false } },
 		});
 		harnesses.push(h);
+		if (options?.allowAssistantErrors) allowAssistantErrors.add(h);
 		await h.session.bindExtensions({ mode: "rpc" });
 		return h;
 	}
@@ -117,9 +123,12 @@ describe("background command extension delivery", { timeout: 180_000 }, () => {
 	}
 	afterEach(async () => {
 		vi.useRealTimers();
-		const failures = harnesses.flatMap((h) =>
-			h.session.messages.filter((message) => message.role === "assistant" && message.stopReason === "error"),
-		);
+		const failures = harnesses
+			.filter((h) => !allowAssistantErrors.has(h))
+			.flatMap((h) =>
+				h.session.messages.filter((message) => message.role === "assistant" && message.stopReason === "error"),
+			);
+		allowAssistantErrors.clear();
 		for (const h of harnesses.splice(0)) {
 			await h.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 			for (const job of listBackgroundCommands(backgroundCommandDirectory(h.sessionManager)))
@@ -997,5 +1006,53 @@ describe("background command extension delivery", { timeout: 180_000 }, () => {
 		expect(waiting.guidelines).toHaveLength(plain.guidelines.length - 1);
 		expect(plain.guidelines).toEqual(expect.arrayContaining(waiting.guidelines));
 		expect(waiting.description).toBe(plain.description);
+	});
+	it("delivers finished background jobs at agent_before_settle when a turn ends in a non-retryable error", async () => {
+		const h = await harness(undefined, [], { allowAssistantErrors: true });
+		const job = seedRunningJob(h);
+		const seenPrompts: string[] = [];
+		h.setResponses([
+			() => {
+				job.finish();
+				return fauxAssistantMessage("", { stopReason: "error", errorMessage: "invalid_api_key" });
+			},
+			(context) => {
+				seenPrompts.push(getMessageText(context.messages.at(-1)));
+				return fauxAssistantMessage("Handled completion after error");
+			},
+		]);
+
+		await h.session.prompt("Start");
+
+		expect(notices(h)).toHaveLength(1);
+		expect(h.faux.state.callCount).toBe(2);
+		expect(seenPrompts[0]).toContain("Background commands finished:");
+		expect(h.session.getLastAssistantText()).toBe("Handled completion after error");
+	});
+	it("defers background job delivery past a retryable error turn until the retried turn completes", async () => {
+		const h = await harness(undefined, [], {
+			allowAssistantErrors: true,
+			settings: { compaction: { enabled: false }, retry: { enabled: true, maxRetries: 1, baseDelayMs: 0 } },
+		});
+		const job = seedRunningJob(h);
+		const seenContexts: string[] = [];
+		h.setResponses([
+			() => {
+				job.finish();
+				return fauxAssistantMessage("", { stopReason: "error", errorMessage: "HTTP 503 service unavailable" });
+			},
+			() => fauxAssistantMessage("Retried foreground turn"),
+			(context) => {
+				seenContexts.push(getMessageText(context.messages.at(-1)));
+				return fauxAssistantMessage("Consumed completion after retry");
+			},
+		]);
+
+		await h.session.prompt("Start");
+
+		expect(notices(h)).toHaveLength(1);
+		expect(h.faux.state.callCount).toBe(3);
+		expect(seenContexts[0]).toContain("Background commands finished:");
+		expect(h.session.getLastAssistantText()).toBe("Consumed completion after retry");
 	});
 });

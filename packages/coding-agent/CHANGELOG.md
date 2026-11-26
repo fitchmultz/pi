@@ -88,6 +88,7 @@
 
 ### Fixed
 
+- Fixed `background-command` completion notices being appended on errored `turn_end` boundaries (where the agent loop exits without running `continue`) and then marked seen before `agent_before_settle`, which stranded finished jobs until a later prompt; `boundary()` now skips `turn_end` when `outcome === "error"` so delivery waits for retry recovery or `agent_before_settle`.
 - Fixed `/llama` "Download model" downloading the typed text instead of the highlighted result when the query looked like `owner/repository` and the user had moved the selection with the arrow keys ([#12465](https://github.com/earendil-works/pi/issues/12465))
 - Fixed managed restarts (`pi restart`, `/restart`, and `restartWhenStale`) restoring stale pre-restart `settings.json` snapshots over updated disk settings files; managed restarts now refresh global and trusted project settings from disk while preserving transient `applyOverrides` (falling back per scope on parse errors), and `/reload` now also refreshes setting-managed `httpProxy` environment variables. Explicit `--working-session` and SDK restores keep exact captured settings.
 - Fixed `background_command` calls failing validation on strict-schema providers that forced every optional action field to be populated: `background_command` no longer requests strict JSON-schema sampling, matching Pi's other multiplexed tools.
