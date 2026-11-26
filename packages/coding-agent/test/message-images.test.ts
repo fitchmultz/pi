@@ -99,6 +99,18 @@ describe("extractLocalImagePaths", () => {
 		expect(
 			extractLocalImagePaths('<img src="/tmp/hero.png"> <img src=\'/tmp/alt.png\'> "/tmp/glued.png"please'),
 		).toEqual(["/tmp/hero.png", "/tmp/alt.png", "/tmp/glued.png"]);
+		expect(
+			extractLocalImagePaths(
+				"Paste: /Users/me/Desktop/Screenshot 2026-11-26 at 1.23.45 PM (2).png, ![shot](/tmp/a(1).png), /tmp/a(b) c.png, (/tmp/dir(v2)/img(1).png), a(1).png, and /tmp/notes (see /tmp/b.png).",
+			),
+		).toEqual([
+			"/Users/me/Desktop/Screenshot 2026-11-26 at 1.23.45 PM (2).png",
+			"/tmp/a(1).png",
+			"/tmp/a(b) c.png",
+			"/tmp/dir(v2)/img(1).png",
+			"a(1).png",
+			"/tmp/b.png",
+		]);
 		expect(extractLocalImagePaths("Compare /tmp/before.png and /tmp/after.png")).toEqual([
 			"/tmp/before.png",
 			"/tmp/after.png",
@@ -140,6 +152,15 @@ describe("inline images in UserMessageComponent and AssistantMessageComponent", 
 		expect(encodedLoaded!.data).toBe(PNG_1X1_BASE64);
 		expect(await loadLocalImage(fakePng, tempDir)).toBeNull();
 		expect(await loadLocalImage(join(tempDir, "missing.png"), tempDir)).toBeNull();
+		// Unquoted duplicate screenshot names and CommonMark links with balanced parentheses extract & load cleanly.
+		const dupShot = join(tempDir, "Screenshot (1).png");
+		const mdParenShot = join(tempDir, "a(1).png");
+		writeFileSync(dupShot, PNG_1X1_BYTES);
+		writeFileSync(mdParenShot, PNG_1X1_BYTES);
+		const extracted = extractLocalImagePaths(`Paste: ${dupShot} and ![alt](${mdParenShot})`);
+		expect(extracted).toEqual([dupShot, mdParenShot]);
+		expect((await loadLocalImage(extracted[0]!, tempDir))?.filename).toBe(dupShot);
+		expect((await loadLocalImage(extracted[1]!, tempDir))?.filename).toBe(mdParenShot);
 	});
 
 	it("renders local path images inline in UserMessageComponent under Sixel, supports live toggle, and keeps OSC 133 off image rows", async () => {
