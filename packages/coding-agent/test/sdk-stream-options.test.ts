@@ -37,12 +37,12 @@ describe("createAgentSession stream options", () => {
 		}
 	});
 
-	function createModel(api: Api): Model<Api> {
+	function createModel(api: Api, provider = "capture-provider"): Model<Api> {
 		return {
 			id: "capture-model",
 			name: "Capture Model",
 			api,
-			provider: "capture-provider",
+			provider,
 			baseUrl: "https://capture.invalid/v1",
 			reasoning: false,
 			input: ["text"],
@@ -85,8 +85,9 @@ describe("createAgentSession stream options", () => {
 		requestOptions: SimpleStreamOptions = {},
 		extensionFactory?: ExtensionFactory,
 		providerEvent?: unknown,
+		provider = "capture-provider",
 	): Promise<SimpleStreamOptions | undefined> {
-		const model = createModel(api);
+		const model = createModel(api, provider);
 		const settingsManager = SettingsManager.inMemory(settings);
 		const resourceLoader = new DefaultResourceLoader({
 			cwd,
@@ -320,5 +321,36 @@ describe("createAgentSession stream options", () => {
 			"x-hook": "provider:model:explicit",
 		});
 		expect(options).not.toHaveProperty("transformHeaders");
+	});
+
+	it("passes isolated per-session fetch for non-default httpIdleTimeoutMs while preserving OpenAI WebSocket auto transport", async () => {
+		const googleOptions = await captureStreamOptions("google-interactions", { httpIdleTimeoutMs: 1_200_000 });
+		const shortOptions = await captureStreamOptions("google-interactions", { httpIdleTimeoutMs: 60_000 });
+		expect(typeof googleOptions?.fetch).toBe("function");
+		expect(typeof shortOptions?.fetch).toBe("function");
+		expect(googleOptions?.fetch).not.toBe(shortOptions?.fetch);
+
+		const defaultOptions = await captureStreamOptions("google-interactions", {});
+		expect(defaultOptions?.fetch).toBeUndefined();
+
+		const openaiAutoOptions = await captureStreamOptions(
+			"openai-responses",
+			{ httpIdleTimeoutMs: 1_200_000 },
+			{},
+			undefined,
+			undefined,
+			"openai",
+		);
+		expect(openaiAutoOptions?.fetch).toBeUndefined();
+
+		const openaiSseOptions = await captureStreamOptions(
+			"openai-responses",
+			{ httpIdleTimeoutMs: 1_200_000, transport: "sse" },
+			{},
+			undefined,
+			undefined,
+			"openai",
+		);
+		expect(typeof openaiSseOptions?.fetch).toBe("function");
 	});
 });

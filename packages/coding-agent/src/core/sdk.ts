@@ -12,7 +12,7 @@ import { getClientIdentity } from "./client-identity.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { applyProviderRegistrations } from "./extensions/provider-registrations.ts";
-import { applyHttpTransportSettings } from "./http-dispatcher.ts";
+import { getSessionHttpFetch } from "./http-dispatcher.ts";
 import { createToolNameMatcher, isMcpToolName } from "./mcp-servers.ts";
 import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
@@ -317,10 +317,6 @@ export async function createAgentSessionWithDiagnostics(
 		if (saved.launch?.trustProject !== undefined) settingsManager.setProjectTrusted(saved.launch.trustProject);
 		settingsManager.restoreWorkingSession(saved.settings, saved.settingsLayers);
 	}
-	applyHttpTransportSettings({
-		httpIdleTimeoutMs: settingsManager.getHttpIdleTimeoutMs(),
-		httpProxy: settingsManager.getGlobalSettings().httpProxy,
-	});
 	const sessionManager =
 		savedManager ?? options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 
@@ -545,13 +541,27 @@ export async function createAgentSessionWithDiagnostics(
 		() => settingsManager.getCacheWarmingMode(),
 		async (event) => extensionRunnerRef.current?.emitCacheWarmingDecision(event) ?? event.action,
 	);
-	const buildRequestOptions = (options: ModelsSimpleStreamOptions = {}): ModelsSimpleStreamOptions => {
+	const buildRequestOptions = (
+		options: ModelsSimpleStreamOptions = {},
+		requestModel?: Model<any>,
+	): ModelsSimpleStreamOptions => {
 		const providerRetrySettings = settingsManager.getProviderRetrySettings();
 		const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 		const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
 		const headerRunner = extensionRunnerRef.current;
+		const effectiveTransport = options.transport ?? settingsManager.getTransport();
+		const preserveOpenAIWebSocket =
+			requestModel?.provider === "openai" && requestModel.api === "openai-responses" && effectiveTransport !== "sse";
+		const sessionFetch =
+			options.fetch !== undefined || preserveOpenAIWebSocket
+				? options.fetch
+				: getSessionHttpFetch({
+						httpIdleTimeoutMs,
+						httpProxy: settingsManager.getGlobalSettings().httpProxy,
+					});
 		return {
 			...options,
+			...(sessionFetch !== undefined ? { fetch: sessionFetch } : {}),
 			...(options.reasoningSummary !== undefined
 				? {}
 				: settingsManager.getHideThinkingBlock()
@@ -634,7 +644,7 @@ export async function createAgentSessionWithDiagnostics(
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
-			const requestOptions = buildRequestOptions(options);
+			const requestOptions = buildRequestOptions(options, model);
 			// Compaction and summaries use their own routing ids; only session requests
 			// replace the cache entry, so warming restarts from them. Keep warming while
 			// the current transcript still extends the request's prefix. Agent state may

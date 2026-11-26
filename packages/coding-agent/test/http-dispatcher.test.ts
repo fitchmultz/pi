@@ -1,18 +1,16 @@
 import { spawnSync } from "node:child_process";
 import http from "node:http";
 import net from "node:net";
-import { tmpdir } from "node:os";
 import tls from "node:tls";
 import * as undici from "undici";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import {
 	applyHttpProxySettings,
 	configureHttpDispatcher,
 	formatHttpIdleTimeoutMs,
+	getSessionHttpFetch,
 	HTTP_IDLE_TIMEOUT_CHOICES,
 } from "../src/core/http-dispatcher.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
 
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY"] as const;
 const DISPATCHER_PROXY_ENV_KEYS = [...PROXY_ENV_KEYS, "http_proxy", "https_proxy", "NO_PROXY", "no_proxy"] as const;
@@ -241,7 +239,7 @@ console.log("process survived");
 		expect(formatHttpIdleTimeoutMs(1_200_000)).toBe("20 min");
 	});
 
-	it("applies httpIdleTimeoutMs to the Undici dispatcher when SDK sessions create services", async () => {
+	it("isolates per-session httpIdleTimeoutMs without mutating the global dispatcher or host overrides", async () => {
 		const server = http.createServer((_request, response) => {
 			setTimeout(() => {
 				response.end("delayed-ok");
@@ -254,43 +252,65 @@ console.log("process survived");
 		}
 		const url = `http://127.0.0.1:${address.port}/interactions`;
 		try {
-			// Simulate a shorter default headersTimeout than the user's configured httpIdleTimeoutMs
+			// Simulate a shorter process-wide headersTimeout than the session's configured httpIdleTimeoutMs
 			// (Undici checks headersTimeout on 1-second fastTimer ticks).
 			configureHttpDispatcher(100);
-			await expect(undici.fetch(url)).rejects.toThrow();
+			const globalBefore = undici.getGlobalDispatcher();
+			expect(getSessionHttpFetch({ httpIdleTimeoutMs: 100 })).toBeUndefined();
 
-			const settingsManager = SettingsManager.inMemory({ httpIdleTimeoutMs: 5_000 });
-			await createAgentSessionServices({
-				cwd: process.cwd(),
-				agentDir: tmpdir(),
-				settingsManager,
-				resourceLoaderOptions: {
-					noExtensions: true,
-					noSkills: true,
-					noPromptTemplates: true,
-					noThemes: true,
-					noContextFiles: true,
-				},
-			});
-			const configuredDispatcher = undici.getGlobalDispatcher();
+			const longFetch = getSessionHttpFetch({ httpIdleTimeoutMs: 5_000 });
+			expect(longFetch).toBeDefined();
+			expect(undici.getGlobalDispatcher()).toBe(globalBefore);
+
+			// Long-timeout session succeeds without loosening the process-wide dispatcher.
+			await expect(longFetch!(url).then((response) => response.text())).resolves.toBe("delayed-ok");
+			await expect(undici.fetch(url)).rejects.toThrow();
+			expect(getSessionHttpFetch({ httpIdleTimeoutMs: 5_000 })).toBe(longFetch);
+
+			// A shorter-timeout session cannot narrow a longer-timeout session either.
+			configureHttpDispatcher(5_000);
+			const shortFetch = getSessionHttpFetch({ httpIdleTimeoutMs: 100 });
+			expect(shortFetch).toBeDefined();
+			await expect(shortFetch!(url)).rejects.toThrow();
 			await expect(undici.fetch(url).then((response) => response.text())).resolves.toBe("delayed-ok");
 
-			// Repeated service creation with identical settings reuses the active dispatcher.
-			await createAgentSessionServices({
-				cwd: process.cwd(),
-				agentDir: tmpdir(),
-				settingsManager,
-				resourceLoaderOptions: {
-					noExtensions: true,
-					noSkills: true,
-					noPromptTemplates: true,
-					noThemes: true,
-					noContextFiles: true,
-				},
-			});
-			expect(undici.getGlobalDispatcher()).toBe(configuredDispatcher);
+			// Host overrides of globalThis.fetch or the global Undici dispatcher are preserved.
+			const activeBeforeCustom = undici.getGlobalDispatcher();
+			const customAgent = new undici.Agent();
+			try {
+				undici.setGlobalDispatcher(customAgent);
+				expect(getSessionHttpFetch({ httpIdleTimeoutMs: 1_200_000 })).toBeUndefined();
+			} finally {
+				undici.setGlobalDispatcher(activeBeforeCustom);
+				if (typeof customAgent.close === "function") await customAgent.close();
+			}
+			globalThis.fetch = async () => {
+				throw new Error("Host fetch override");
+			};
+			expect(getSessionHttpFetch({ httpIdleTimeoutMs: 1_200_000 })).toBeUndefined();
 		} finally {
 			await new Promise<void>((resolve) => server.close(() => resolve()));
 		}
+	});
+
+	it("does not replace host WebSocket or EventSource globals from getSessionHttpFetch", () => {
+		const script = `
+			import { getSessionHttpFetch } from "./packages/coding-agent/src/core/http-dispatcher.ts";
+			const customWebSocket = class CustomWebSocket {};
+			const customEventSource = class CustomEventSource {};
+			globalThis.WebSocket = customWebSocket;
+			globalThis.EventSource = customEventSource;
+			const originalFetch = globalThis.fetch;
+			const sessionFetch = getSessionHttpFetch({ httpIdleTimeoutMs: 1_200_000 });
+			if (typeof sessionFetch !== "function") throw new Error("expected sessionFetch");
+			if (globalThis.WebSocket !== customWebSocket) throw new Error("WebSocket replaced");
+			if (globalThis.EventSource !== customEventSource) throw new Error("EventSource replaced");
+			if (globalThis.fetch !== originalFetch) throw new Error("global fetch replaced");
+		`;
+		const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+			cwd: process.cwd(),
+			encoding: "utf8",
+		});
+		expect(result.status, result.stderr).toBe(0);
 	});
 });
