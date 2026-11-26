@@ -25,8 +25,8 @@ import {
 	deleteAllKittyPlacements,
 	deleteKittyImage,
 	getCapabilities,
+	getImagePlacementRows,
 	getKittyImagePlacement,
-	getKittyImagePlacementRows,
 	type ImageProtocol,
 	isImageLine,
 	setCapabilities,
@@ -413,8 +413,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.imageProtocol = capabilities.images;
 		this.uploadedKittyImages.clear();
 		if (capabilities.images === "iterm2") {
+			// OSC 1337 iTerm2 placements cannot be cropped on scroll in alternate screen;
+			// iTerm2 natively supports Sixel, which crops cleanly per 6px band.
 			this.savedCapabilities = capabilities;
-			setCapabilities({ ...capabilities, images: null });
+			setCapabilities({ ...capabilities, images: "sixel" });
+			this.imageProtocol = "sixel";
 			this.invalidate();
 		}
 		this.lastDocument = [];
@@ -1840,10 +1843,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		);
 		const imageCellsNeedRedraw =
 			!imageAnchorsNeedRedraw &&
-			this.imageProtocol === "kitty" &&
+			(this.imageProtocol === "kitty" || this.imageProtocol === "sixel") &&
 			changedRows.some(Boolean) &&
 			screen.some((line, row) => {
-				const placementRows = getKittyImagePlacementRows(line);
+				const placementRows = getImagePlacementRows(line);
 				if (placementRows === undefined) return false;
 				for (let coveredRow = row; coveredRow < row + placementRows; coveredRow++) {
 					if (changedRows[coveredRow]) return true;
@@ -1869,17 +1872,18 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				buffer += `${this.deleteKittyImages()}\x1b[2J`;
 			}
 		} else if (imagesNeedRedraw) {
-			if (this.imageProtocol === "iterm2") buffer += "\x1b[2J";
+			if (this.imageProtocol === "iterm2" || this.imageProtocol === "sixel") buffer += "\x1b[2J";
 			else if (this.imageProtocol === "kitty") buffer += deleteAllKittyPlacements();
 		}
 		buffer += preparedKittyScreen.evictedImageDeletion;
 
-		// Some terminals store Kitty images in the cells they cover (WezTerm, xterm.js's image addon in Orca),
+		// Sixel and some Kitty terminals store images in the cells they cover (tmux, iTerm2, WezTerm, Orca),
 		// so clearing or writing a covered row erases that part of the image. Draw placements after every clear
 		// and text write so nothing later intersects them. Terminals that keep images on a separate layer
 		// (Kitty, Ghostty) render the same result; text-only frames keep the interleaved output.
-		const drawKittyImagesLast = redrawImages && this.imageProtocol === "kitty" && screen.some(isImageLine);
-		if (drawKittyImagesLast) {
+		const drawImagesLast =
+			redrawImages && (this.imageProtocol === "kitty" || this.imageProtocol === "sixel") && screen.some(isImageLine);
+		if (drawImagesLast) {
 			for (let row = 0; row < height; row++) {
 				if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
 				buffer += `\x1b[${row + 1};1H\x1b[2K`;

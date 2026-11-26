@@ -16,7 +16,7 @@ import {
 import {
 	getCapabilities,
 	getImageLineExtent,
-	getMaxKittyImageRows,
+	getMaxImageRows,
 	isImageLine,
 	setCellDimensions,
 	stripImageSequences,
@@ -520,8 +520,8 @@ export function compositeTuiLine(
  */
 function hideImagesUnderOverlay(lines: string[], overlay: OverlayBounds, viewportStart: number): void {
 	if (overlay.height === 0) return;
-	// Kitty images extend downward, so an image line above the viewport can still reach into it.
-	for (let index = Math.max(0, viewportStart - getMaxKittyImageRows()); index < lines.length; index++) {
+	// Top-anchored images (Kitty, Sixel) extend downward, so an image line above the viewport can still reach into it.
+	for (let index = Math.max(0, viewportStart - getMaxImageRows()); index < lines.length; index++) {
 		const line = lines[index]!;
 		const extent = getImageLineExtent(line);
 		if (!extent) continue;

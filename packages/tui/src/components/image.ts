@@ -143,6 +143,7 @@ export class Image implements Component {
 				maxHeightCells: maxHeight,
 				imageId: this.imageId,
 				moveCursor: false,
+				mimeType: this.mimeType,
 			});
 
 			if (result) {
@@ -151,9 +152,9 @@ export class Image implements Component {
 					this.imageId = result.imageId;
 				}
 
-				if (caps.images === "kitty") {
-					// For Kitty: C=1 prevents cursor movement.
-					// Don't need the cursor movement.
+				if (caps.images === "kitty" || caps.images === "sixel") {
+					// Kitty (C=1) and Sixel are top-anchored: emit sequence on the first row
+					// followed by empty reservation rows so cropping and layout share one model.
 					lines = [result.sequence];
 
 					// Return `rows` lines so TUI accounts for image height.

@@ -18,10 +18,14 @@ import { VStack } from "../src/components/v-stack.ts";
 import { getKeybindings, KeybindingsManager, setKeybindings, TUI_KEYBINDINGS } from "../src/keybindings.ts";
 import {
 	encodeKitty,
+	getCapabilities,
 	hyperlink,
 	registerKittyImageMetadata,
+	registerSixelImageMetadata,
 	resetCapabilitiesCache,
 	setCapabilities,
+	setCellDimensions,
+	setSixelEncoder,
 } from "../src/terminal-image.ts";
 import { CURSOR_MARKER, renderFakeCursor, type TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
@@ -1215,6 +1219,68 @@ describe("TuiAltScreen", () => {
 		);
 
 		tui.stop();
+	});
+
+	it("uses Sixel in alt-screen for iTerm2 terminals when an encoder is registered and restores iTerm2 on stop", async () => {
+		setCapabilities({ images: "iterm2", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 18 });
+		setSixelEncoder(({ widthPx, heightPx }) => `\x1bP0;1q"1;1;${widthPx};${heightPx}#0;2;0;100;0#0~~~\x1b\\`);
+		try {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal);
+			tui.addChild(
+				new Image(
+					"AAAA",
+					"image/png",
+					{ fallbackColor: (value) => value },
+					{ maxWidthCells: 4 },
+					{ widthPx: 40, heightPx: 18 },
+				),
+			);
+			tui.start();
+			await terminal.waitForRender();
+			assert.strictEqual(getCapabilities().images, "sixel");
+			assert.ok(
+				terminal.events.some((event) => event.type === "write" && event.data.includes('\x1bP0;1q"1;1;40;18')),
+			);
+			tui.stop();
+			assert.strictEqual(getCapabilities().images, "iterm2");
+		} finally {
+			setSixelEncoder(undefined);
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("crops a Sixel image whose first line is above the viewport and draws it after clearing rows", async () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		try {
+			const terminal = new RecordingTerminal(20, 3);
+			const tui = new TuiAltScreen(terminal);
+			const sixel = '\x1bP0;1q"1;1;20;54#0;2;0;0;100#0AAA-BBB-CCC-DDD-EEE-FFF-GGG-HHH-III\x1b\\';
+			registerSixelImageMetadata(sixel, { columns: 2, rows: 3, widthPx: 20, heightPx: 54 });
+			tui.addChild({
+				render: () => ["before", sixel, "", "", "after", "end"],
+				invalidate: () => {},
+			});
+			tui.start();
+			await terminal.waitForRender();
+
+			assert.strictEqual(tui.viewportTop, 3);
+			const writes = terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			const expectedCropped = '\x1bP0;1q"1;1;20;18#0;2;0;0;100#0GGG-HHH-III\x1b\\';
+			assert.ok(writes.includes(expectedCropped), "expected bottom row of cropped Sixel");
+			const clearIndex = writes.lastIndexOf("\x1b[3;1H\x1b[2K");
+			const imageIndex = writes.lastIndexOf(expectedCropped);
+			assert.ok(imageIndex > clearIndex, "Sixel placement must be drawn after clearing covered rows");
+
+			tui.stop();
+		} finally {
+			resetCapabilitiesCache();
+		}
 	});
 
 	it("crops a Kitty image in a padded, colored box whose first line is above the viewport", async () => {

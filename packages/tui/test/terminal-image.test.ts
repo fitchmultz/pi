@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { Image, setImageTranscoder } from "../src/components/image.ts";
 import {
 	cropKittyImageLine,
+	cropSixelImageLine,
 	deleteAllKittyImages,
 	deleteAllKittyPlacements,
 	deleteKittyImage,
@@ -16,22 +17,29 @@ import {
 	encodeITerm2,
 	encodeKitty,
 	getCapabilities,
+	getCellDimensions,
 	getGifDimensions,
+	getImageLineExtent,
 	getJpegDimensions,
 	getKittyImageMetadata,
 	getKittyImagePlacement,
 	getKittyImagePlacementRows,
 	getPngDimensions,
+	getSixelImageMetadata,
 	getWebpDimensions,
 	hyperlink,
 	imageFallback,
 	isImageLine,
+	isSixelImageLine,
 	registerKittyImageMetadata,
+	registerSixelImageMetadata,
 	renderImage,
 	resetCapabilitiesCache,
 	setCapabilities,
 	setCapabilityOverrides,
 	setCellDimensions,
+	setSixelEncoder,
+	stripImageSequences,
 } from "../src/terminal-image.ts";
 import { visibleWidth } from "../src/utils.ts";
 
@@ -1040,5 +1048,109 @@ describe("hyperlink", () => {
 		const result = hyperlink("README.md", "file:///home/user/README.md");
 		assert.ok(result.includes("file:///home/user/README.md"));
 		assert.ok(result.includes("README.md"));
+	});
+});
+
+describe("Sixel image protocol", () => {
+	afterEach(() => {
+		setSixelEncoder(undefined);
+		resetCapabilitiesCache();
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
+	});
+
+	it("detects Sixel DCS sequences without matching non-Sixel DCS replies", () => {
+		const sixel = '\x1bP0;1q"1;1;12;12#0;2;100;0;0#0~~~-~~~\x1b\\';
+		assert.strictEqual(isImageLine(sixel), true);
+		assert.strictEqual(isSixelImageLine(sixel), true);
+		assert.strictEqual(isImageLine(`prefix ${sixel} suffix`), true);
+		assert.strictEqual(stripImageSequences(`prefix ${sixel} suffix`), "prefix  suffix");
+
+		assert.strictEqual(isImageLine("\x1bP>|iTerm2 3.7.9\x1b\\"), false);
+		assert.strictEqual(isImageLine("\x1bP+q544e\x1b\\"), false);
+		assert.strictEqual(isImageLine("\x1bPtmux;\x1b\x1b]0;title\x07\x1b\\"), false);
+	});
+
+	it("detects Sixel capability via tmux probe, native terminals, and PI_IMAGE_PROTOCOL", () => {
+		withEnv({ TMUX: "/tmp/tmux-501/default,123,0" }, () => {
+			const caps = detectCapabilities(() => ({
+				hyperlinks: true,
+				sixel: true,
+				cellDimensions: { widthPx: 16, heightPx: 36 },
+			}));
+			assert.deepStrictEqual(caps, { images: "sixel", trueColor: false, hyperlinks: true });
+			assert.deepStrictEqual(getCellDimensions(), { widthPx: 16, heightPx: 36 });
+		});
+
+		withEnv({ TMUX: "/tmp/tmux-501/default,123,0" }, () => {
+			const caps = detectCapabilities(() => ({ hyperlinks: true, sixel: false }));
+			assert.deepStrictEqual(caps, { images: null, trueColor: false, hyperlinks: true });
+		});
+
+		withEnv({ TERM_PROGRAM: "foot" }, () => {
+			assert.deepStrictEqual(detectCapabilities(), { images: "sixel", trueColor: true, hyperlinks: true });
+		});
+
+		withEnv({ PI_IMAGE_PROTOCOL: "sixel" }, () => {
+			assert.strictEqual(detectCapabilities().images, "sixel");
+		});
+	});
+
+	it("falls back to text until a Sixel encoder is registered, caches results, and crops 6px bands cleanly", () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 18 });
+
+		const image = new Image(
+			"AAAA",
+			"image/png",
+			{ fallbackColor: (value) => value },
+			{ maxWidthCells: 4, filename: "shot.png" },
+			{ widthPx: 40, heightPx: 54 },
+		);
+		assert.match(image.render(40)[0] ?? "", /^\[Image: shot\.png \[image\/png\] 40x54\]$/);
+
+		let encodeCalls = 0;
+		setSixelEncoder(({ widthPx, heightPx }) => {
+			encodeCalls++;
+			// 9 bands (54px = 3 rows * 18px) with active color #1 carried from band 2 into band 3
+			return `\x1bP0;1q"1;1;${widthPx};${heightPx}#0;2;0;0;0#1;2;100;0;0#0AAA-BBB-#1CCC-DDD-EEE-FFF-#0GGG-HHH-III\x1b\\`;
+		});
+		image.invalidate();
+		const lines = image.render(40);
+		assert.strictEqual(encodeCalls, 1);
+		assert.strictEqual(lines.length, 3);
+		assert.deepStrictEqual(lines.slice(1), ["", ""]);
+		assert.deepStrictEqual(getSixelImageMetadata(lines[0]!), {
+			columns: 4,
+			rows: 3,
+			widthPx: 40,
+			heightPx: 54,
+		});
+		assert.deepStrictEqual(getImageLineExtent(lines[0]!), {
+			firstRow: 0,
+			lastRow: 2,
+			startCol: 0,
+			endCol: 4,
+		});
+
+		// Re-rendering a fresh Image instance hits the shared Sixel cache.
+		new Image(
+			"AAAA",
+			"image/png",
+			{ fallbackColor: (v) => v },
+			{ maxWidthCells: 4 },
+			{ widthPx: 40, heightPx: 54 },
+		).render(40);
+		assert.strictEqual(encodeCalls, 1);
+
+		// Crop middle row (hiddenRows=1, visibleRows=1 -> bands 3..5, preserving inherited active color #1).
+		const cropped = cropSixelImageLine(lines[0]!, 1, 1);
+		assert.strictEqual(cropped, '\x1bP0;1q"1;1;40;18#0;2;0;0;0#1;2;100;0;0#1DDD-EEE-FFF\x1b\\');
+		assert.strictEqual(getSixelImageMetadata(cropped)?.rows, 1);
+
+		// Unregistered raw Sixel lines still report metadata via raster attributes.
+		const raw = '\x1bP0;1q"1;1;30;36#0~~~\x1b\\';
+		assert.deepStrictEqual(getSixelImageMetadata(raw), { columns: 3, rows: 2, widthPx: 30, heightPx: 36 });
+		registerSixelImageMetadata(raw, { columns: 3, rows: 2, widthPx: 30, heightPx: 36 });
+		assert.deepStrictEqual(getImageLineExtent(`  ${raw}`), { firstRow: 0, lastRow: 1, startCol: 2, endCol: 5 });
 	});
 });
