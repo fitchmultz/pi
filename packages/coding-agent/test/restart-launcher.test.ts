@@ -40,6 +40,8 @@ interface Receipt {
 	execArgv: string[];
 	compileCacheEnv?: string;
 	compileCacheDir?: string;
+	managedInvocation?: string;
+	managedWorker?: string;
 	handoff?: { sessionId: string; workingSession: string; message?: string; failure?: string };
 }
 
@@ -78,7 +80,7 @@ import { appendFileSync, existsSync, unlinkSync, symlinkSync, writeFileSync } fr
 import { createHash } from 'node:crypto';
 import { getCompileCacheDir } from 'node:module';
 const handoff = process.env.PI_RESTART_HANDOFF ? JSON.parse(process.env.PI_RESTART_HANDOFF) : undefined;
-appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(name)}, pid: process.pid, args: process.argv.slice(2), execArgv: process.execArgv, compileCacheEnv: process.env.NODE_COMPILE_CACHE, compileCacheDir: getCompileCacheDir(), handoff }) + '\\n');
+appendFileSync(${JSON.stringify(log)}, JSON.stringify({ runtime: ${JSON.stringify(name)}, pid: process.pid, args: process.argv.slice(2), execArgv: process.execArgv, compileCacheEnv: process.env.NODE_COMPILE_CACHE, compileCacheDir: getCompileCacheDir(), managedInvocation: process.env.PI_MANAGED_INVOCATION, managedWorker: process.env.PI_MANAGED_WORKER, handoff }) + '\\n');
 const select = (name) => { if (existsSync(${JSON.stringify(selector)})) unlinkSync(${JSON.stringify(selector)}); symlinkSync(${JSON.stringify(root)} + '/' + name + '/dist/bundle/cli.js', ${JSON.stringify(selector)}); };
 const session = ${JSON.stringify(session)};
 ${session.workingSession === defaultArtifact ? "session.workingSession += '-' + process.pid;" : ""}
@@ -667,4 +669,19 @@ await import(${JSON.stringify(new URL("../src/cli-launcher.ts", import.meta.url)
 			expect(outcome).toEqual({ code: 0, signal: null });
 		},
 	);
+
+	it("passes managed invocation and worker env vars on unpinned launches and omits them when pinned via --runtime", async () => {
+		const f = await fixture();
+		const b = f.release("B", `if (!handoff) restart({}); else ready();`);
+		const a = f.release("A", `if (!handoff) restart({ runtime: ${JSON.stringify(b)} }); else ready();`);
+		f.select(a);
+		expect(await f.run(a)).toBe(0);
+
+		const receipts = f.read();
+		expect(receipts.map((receipt) => receipt.runtime)).toEqual(["A", "B"]);
+		expect(receipts[0].managedInvocation).toBe(f.selector);
+		expect(receipts[0].managedWorker).toBe(getRestartRuntimeWorker(a));
+		expect(receipts[1].managedInvocation).toBeUndefined();
+		expect(receipts[1].managedWorker).toBeUndefined();
+	});
 });

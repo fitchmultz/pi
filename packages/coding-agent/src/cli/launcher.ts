@@ -11,8 +11,10 @@ import {
 	type CompletedWorkingSession,
 	isRestartSession,
 	MANAGED_CLI_ENV,
+	MANAGED_INVOCATION_ENV,
 	MANAGED_PROTOCOL_ENV,
 	MANAGED_PROTOCOL_VERSION,
+	MANAGED_WORKER_ENV,
 	parseRestartCommand,
 	parseRestartRequest,
 	RESTART_HANDOFF_ENV,
@@ -212,7 +214,9 @@ export async function superviseCli(
 	delete env[RESTART_SOCKET_ENV];
 	delete env[RESTART_HANDOFF_ENV];
 	delete env[MANAGED_CLI_ENV];
+	delete env[MANAGED_INVOCATION_ENV];
 	delete env[MANAGED_PROTOCOL_ENV];
+	delete env[MANAGED_WORKER_ENV];
 	const workerCompileCacheDir = getWorkerCompileCacheDir(env);
 	if (workerCompileCacheDir) {
 		for (const key of Object.keys(env)) {
@@ -256,6 +260,12 @@ export async function superviseCli(
 					[MANAGED_PROTOCOL_ENV]: MANAGED_PROTOCOL_VERSION,
 					[WORKING_SESSION_LAUNCH_ENV]: launchId,
 					[WORKING_SESSION_WORKER_ENV]: workerId,
+					...(!launch.pinnedWorker && options.invocationPath
+						? {
+								[MANAGED_INVOCATION_ENV]: options.invocationPath,
+								[MANAGED_WORKER_ENV]: launch.worker,
+							}
+						: {}),
 					...(handoff ? { [RESTART_HANDOFF_ENV]: JSON.stringify(handoff) } : {}),
 				},
 			});

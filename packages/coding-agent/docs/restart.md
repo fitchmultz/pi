@@ -24,18 +24,21 @@ Requests require a saved session. Ephemeral sessions, stale session IDs, invalid
 
 A Pi process imports each extension once. `/new`, `/resume` and `/fork` in the same directory keep that code. So an update does not reach a running session: not `pi update`, not a `git pull` in a package checkout, not an edited extension file.
 
-A managed interactive session compares the code it imported with the disk when the session starts, after every agent run and every minute. While they differ, the footer shows:
+A managed interactive session compares its loaded extension code and, unless pinned via `--runtime`, its Pi runtime with the disk when the session starts, after every agent run and every minute. While they differ, the footer shows:
 
 ```text
 extensions changed on disk: /restart
 ```
 
-The status is for the user. The system prompt, the tools and the messages the model gets do not change. `/restart` loads the current code and keeps the session. `/reload` also imports the extensions again and clears the status, but the modules that Node loads natively keep their first version until a restart: a package's dependencies in `node_modules`, and `.mjs` files.
+(Or `pi changed on disk: /restart` when only the Pi runtime changed, and `pi and extensions changed on disk: /restart` when both changed.)
+
+The status is for the user. The system prompt, the tools and the messages the model gets do not change. `/restart` loads the current code and keeps the session. `/reload` also imports the extensions again and clears the extension status, but the modules that Node loads natively keep their first version until a restart: a package's dependencies in `node_modules`, and `.mjs` files.
 
 What is compared:
 
 | Loaded source | Compared |
 | --- | --- |
+| Installed Pi runtime (unpinned launcher invocation) | Re-resolved invocation entrypoint worker path, installed `package.json` `version`, and `fork-release.json` `commit` |
 | A package from settings that supplied an extension | `version` of its `package.json` and, if the package directory is the root of a git checkout, the checked-out commit |
 | Any other extension file, including `-e` sources | SHA-256 of the entry file |
 
@@ -45,7 +48,7 @@ These are the values of the [runtime record](session-format.md#runtime-record-pi
 - Any change in a package that has neither a `version` in its `package.json` nor a git checkout of its own. Examples are a single extension file listed in `packages` and a package directory inside a larger repository.
 - An npm package that is installed again at the same version.
 - A changed file that an extension outside a package imports, when its entry file is unchanged.
-- A new Pi runtime. Only extension code is compared.
+- An unpinned runtime update after pinning via `pi restart --runtime <dir>` from a shell tool (another `pi restart --runtime <dir>` updates the pin, and only a full CLI launch resumes tracking the original invocation path).
 
 Print, JSON, RPC and SDK sessions show no status. An SDK host can ask its session; see [Stale extension code](sdk.md#stale-extension-code).
 
@@ -69,7 +72,7 @@ The session restarts when all of the following are true:
 
 If one of them is not true, nothing happens and nothing is shown except the footer status. The session looks again every 30 seconds and after every agent run. A draft is never discarded and a running agent is never interrupted.
 
-The restart is the same managed restart as `/restart` without text: the same saved session, no continuation message and no model request. The session shows `Extensions changed on disk; restarting Pi on the same saved session.` before the worker is replaced. [Startup recovery](#startup-recovery) applies if the replacement does not start.
+The restart is the same managed restart as `/restart` without text: the same saved session, no continuation message and no model request. The session shows `Extensions changed on disk; restarting Pi on the same saved session.` (or `Pi changed on disk; ...` / `Pi and extensions changed on disk; ...`) before the worker is replaced. [Startup recovery](#startup-recovery) applies if the replacement does not start.
 
 A restarted worker compares against the code it imported, so it restarts again only after the disk changes again. The 30 seconds cover an update made by hand, such as `git pull` and then `npm install` in a package checkout. If the install takes longer, the session can restart before the install is finished; `/restart` afterwards loads the finished package.
 
@@ -97,7 +100,7 @@ Without a pin, each restart re-resolves the original invocation path, including 
 
 ## Startup recovery
 
-Readiness is signalled only after TUI initialization. If the selected worker cannot start, exits before readiness (even with exit 0), or is not ready within 60 seconds, the launcher starts the **exact previous worker and arguments once**, resuming the same saved session with the previous explicit extensions and pin policy. Models removed from the saved cycling list are omitted during restoration; the selected model must still exist. The startup failure is shown as a warning; when a message was supplied, the labelled continuation also includes it. Without a message, no model turn starts. If recovery also fails, Pi stops; it never loops.
+Readiness is signalled only after TUI initialization. If the selected worker cannot start, exits before readiness (even with exit 0), or is not ready within 60 seconds, the launcher starts the **exact previous worker and arguments once**, resuming the same saved session with the previous explicit extensions and pin policy. Models removed from the saved cycling list are omitted during restoration; the selected model must still exist. The startup failure is shown as a warning; when a message was supplied, the labelled continuation also includes it. Without a message, no model turn starts. If recovery also fails, Pi stops; it never loops. After a failed startup rollback, automatic restarts (`restartWhenStale`) suppress re-attempting that same failed runtime while keeping the footer indicator and manual `/restart`, resuming automatic restarts only if the target runtime changes again.
 
 When recovery also fails before readiness, the launcher keeps the complete private state file and prints its exact path. It does not pick another model, relax validation, or fall back to journal-only resume. If the saved model is no longer registered, the startup error names the configuration layer that excludes it; see [Unavailable model diagnostics](models.md#a-saved-or-selected-model-is-unavailable). Fix the cause, then resume the exact state:
 

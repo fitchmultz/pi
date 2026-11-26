@@ -1142,7 +1142,7 @@ export class SettingsManager {
 		this.save();
 	}
 
-	/** Whether an idle managed interactive session restarts itself when its loaded extension code has changed on disk. */
+	/** Whether an idle managed interactive session restarts itself when loaded extension code or the installed Pi runtime has changed on disk. */
 	getRestartWhenStale(): boolean {
 		return this.settings.restartWhenStale ?? SETTINGS_DEFAULTS.restartWhenStale;
 	}
