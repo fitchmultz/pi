@@ -3,10 +3,11 @@ import { createInterface } from "node:readline";
 import { Box, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import lockfile from "proper-lockfile";
 import type {
-	BoundaryState,
+	AgentBeforeSettleEvent,
 	CustomMessageEntryDraft,
 	ExtensionContext,
 	ExtensionFactory,
+	TurnEndEvent,
 } from "../../core/extensions/types.ts";
 import { type FileEntry, parseSessionEntries } from "../../core/session-manager.ts";
 import { formatExpandMoreHint } from "../../core/tools/render-utils.ts";
@@ -214,12 +215,15 @@ export function createBackgroundCommandExtension(options: BackgroundCommandExten
 			if (!wakeSuppressed) pi.appendEntry(RUN_STATE, true);
 			wakeSuppressed = true;
 		}
-		async function boundary(event: BoundaryState, ctx: ExtensionContext) {
+		async function boundary(event: TurnEndEvent | AgentBeforeSettleEvent, ctx: ExtensionContext) {
 			const signal = ctx.signal;
 			if (event.outcome === "aborted" || signal?.aborted) {
 				suppressWake();
 				return;
 			}
+			// Error turns always exit the low-level loop and ignore turn_end continuation;
+			// defer completion delivery until retries finish or agent_before_settle can wake the run.
+			if (event.type === "turn_end" && event.outcome === "error") return;
 			start(ctx);
 			const notice = await completion(ctx);
 			if (signal?.aborted) suppressWake();
