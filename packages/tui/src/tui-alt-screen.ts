@@ -491,10 +491,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 					if (predrawSpan > 1) buffer += `\x1b[${predrawSpan - 1}A`;
 					buffer += `\r\x1b7${line}\x1b8`;
 					if (predrawSpan > 1) buffer += `\x1b[${predrawSpan - 1}B`;
-					// For placements taller than the terminal height, preserve remaining reservation rows without EL2 clears.
+					// For placements taller than the terminal height, advance past remaining covered rows without
+					// emitting EL2 clears or padded spaces that would overwrite the lower Sixel raster bands.
 					for (let offset = predrawSpan; offset < totalSpan; offset++) {
-						const extraLine = this.lastDocument[row + offset] ?? "";
-						buffer += visibleWidth(extraLine) === 0 ? "\r\n" : `\r\n${extraLine}`;
+						buffer += "\r\n";
 					}
 					row += totalSpan - 1;
 				} else if (sixelMeta) {
