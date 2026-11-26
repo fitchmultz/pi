@@ -117,6 +117,7 @@ import {
 } from "../../core/session-cwd.ts";
 import {
 	type CompactionEntry,
+	type ContextEditEntry,
 	type SessionEntry,
 	type SessionInfo,
 	SessionManager,
@@ -390,12 +391,62 @@ function alignTranscriptChunkStartIndex(entries: readonly SessionEntry[], target
 	return 0;
 }
 
-function projectSessionEntriesToRenderItems(entries: readonly SessionEntry[]): {
+function collectOmittedErrorEntryIds(entries: readonly SessionEntry[]): Set<string> {
+	let lastAssistantIndex = -1;
+	const latestEdits = new Map<string, ContextEditEntry>();
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i]!;
+		if (entry.type === "context_edit") {
+			latestEdits.set(entry.targetId, entry);
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			lastAssistantIndex = i;
+		}
+	}
+	const omitted = new Set<string>();
+	const omittedToolCallIds = new Set<string>();
+	for (let i = 0; i < lastAssistantIndex; i++) {
+		const entry = entries[i]!;
+		if (
+			entry.type === "message" &&
+			entry.message.role === "assistant" &&
+			entry.message.stopReason === "error" &&
+			latestEdits.get(entry.id)?.replacement === null
+		) {
+			omitted.add(entry.id);
+			for (const block of entry.message.content) {
+				if (block.type === "toolCall") {
+					omittedToolCallIds.add(block.id);
+				}
+			}
+		}
+	}
+	if (omittedToolCallIds.size > 0) {
+		for (const entry of entries) {
+			if (
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				omittedToolCallIds.has(entry.message.toolCallId) &&
+				latestEdits.get(entry.id)?.replacement === null
+			) {
+				omitted.add(entry.id);
+			}
+		}
+	}
+	return omitted;
+}
+
+function projectSessionEntriesToRenderItems(
+	entries: readonly SessionEntry[],
+	omittedEntryIds: ReadonlySet<string> = new Set(),
+): {
 	items: RenderSessionItem[];
 	messageMeta: Map<AgentMessage, { id: string; timestamp: string }>;
 } {
 	const messageMeta = new Map<AgentMessage, { id: string; timestamp: string }>();
 	const items = entries.flatMap((entry): RenderSessionItem[] => {
+		if (omittedEntryIds.has(entry.id)) {
+			return [];
+		}
 		if (entry.type === "custom" || (entry.type === "usage" && entry.kind === "cache_warm")) {
 			return [entry];
 		}
@@ -699,12 +750,15 @@ export class InteractiveMode {
 
 	// Auto-retry state
 	private retryEscapeHandler?: () => void;
+	private lastFailedTurnComponents: Component[] = [];
+	private activeRetryErrorComponents: Component[] = [];
 
 	// Messages queued while compaction is running
 	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
 
 	// Older branch entries deferred above the mounted fullscreen transcript window
 	private deferredSessionEntries: SessionEntry[] = [];
+	private omittedErrorEntryIds: ReadonlySet<string> = new Set();
 	private transcriptPrefixIndex = 0;
 	private hydratingDeferredTranscript = false;
 
@@ -2352,6 +2406,8 @@ export class InteractiveMode {
 					}
 
 					this.chatContainer.clear();
+					this.lastFailedTurnComponents = [];
+					this.activeRetryErrorComponents = [];
 					this.renderInitialMessages();
 					this.showUnsavedRows();
 					if (result.editorText && !this.editor.getText().trim()) {
@@ -2630,6 +2686,8 @@ export class InteractiveMode {
 	private renderCurrentSessionState(): void {
 		this.loadedResourcesContainer.clear();
 		this.chatContainer.clear();
+		this.lastFailedTurnComponents = [];
+		this.activeRetryErrorComponents = [];
 		this.pendingMessagesContainer.clear();
 		this.pendingBashComponents = [];
 		this.compactionQueuedMessages = [];
@@ -3967,6 +4025,7 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
+					this.lastFailedTurnComponents = [];
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.hideThinkingBlock,
@@ -4059,9 +4118,14 @@ export class InteractiveMode {
 								isError: true,
 							});
 						}
+						this.lastFailedTurnComponents =
+							this.streamingMessage.stopReason === "error"
+								? [this.streamingComponent, ...this.pendingTools.values()]
+								: [];
 						this.pendingTools.clear();
 						this.maybeSuggestBugReport(this.streamingMessage);
 					} else {
+						this.lastFailedTurnComponents = [];
 						// Args are now complete - trigger diff computation for edit tools
 						const survivingToolCallIds = new Set(
 							this.streamingMessage.content
@@ -4229,6 +4293,11 @@ export class InteractiveMode {
 			case "auto_retry_start": {
 				this.prefillProgressMessage = undefined;
 				this.turnHasAssistantDelta = false;
+				for (const component of this.activeRetryErrorComponents) {
+					this.chatContainer.removeChild(component);
+				}
+				this.activeRetryErrorComponents = this.lastFailedTurnComponents;
+				this.lastFailedTurnComponents = [];
 				// Set up escape to abort retry
 				this.retryEscapeHandler = this.defaultEditor.onEscape;
 				this.defaultEditor.onEscape = () => {
@@ -4249,6 +4318,15 @@ export class InteractiveMode {
 					this.retryEscapeHandler = undefined;
 				}
 				this.clearStatusIndicator("retry");
+				if (event.success || this.lastFailedTurnComponents.length > 0) {
+					for (const component of this.activeRetryErrorComponents) {
+						this.chatContainer.removeChild(component);
+					}
+				}
+				this.activeRetryErrorComponents = [];
+				if (event.success) {
+					this.lastFailedTurnComponents = [];
+				}
 				// Show error only on final failure (success shows normal response)
 				if (!event.success) {
 					this.showError(`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
@@ -4658,7 +4736,7 @@ export class InteractiveMode {
 		entries: readonly SessionEntry[],
 		options: { updateFooter?: boolean; populateHistory?: boolean; suppressRequestRender?: boolean } = {},
 	): void {
-		const { items, messageMeta } = projectSessionEntriesToRenderItems(entries);
+		const { items, messageMeta } = projectSessionEntriesToRenderItems(entries, this.omittedErrorEntryIds);
 		this.renderSessionItems(items, messageMeta, options);
 	}
 
@@ -4747,6 +4825,7 @@ export class InteractiveMode {
 		// Selection coordinates point into the transcript being replaced (#9311).
 		if (this.renderer instanceof TuiAltScreen) this.renderer.resetTextSelection();
 		this.deferredSessionEntries = [];
+		this.omittedErrorEntryIds = collectOmittedErrorEntryIds(entries);
 		this.transcriptPrefixIndex = this.chatContainer?.children.length ?? 0;
 
 		const minInitialEntries = Math.max(INITIAL_FULLSCREEN_TRANSCRIPT_ENTRIES, options.minInitialEntries ?? 0);
@@ -4779,7 +4858,7 @@ export class InteractiveMode {
 			return;
 		}
 
-		const { items, messageMeta } = projectSessionEntriesToRenderItems(entries);
+		const { items, messageMeta } = projectSessionEntriesToRenderItems(entries, this.omittedErrorEntryIds);
 		this.renderSessionItems(items, messageMeta, options);
 	}
 
@@ -5049,6 +5128,8 @@ export class InteractiveMode {
 		const entries = this.sessionManager.getBranch();
 		const alreadyMountedEntries = entries.length - this.deferredSessionEntries.length;
 		this.chatContainer.clear();
+		this.lastFailedTurnComponents = [];
+		this.activeRetryErrorComponents = [];
 		this.renderSessionEntries(entries, {
 			minInitialEntries: this.transcriptScrollView?.isFollowingEnd === false ? alreadyMountedEntries : undefined,
 		});
@@ -6577,6 +6658,8 @@ export class InteractiveMode {
 
 						// Update UI
 						this.chatContainer.clear();
+						this.lastFailedTurnComponents = [];
+						this.activeRetryErrorComponents = [];
 						this.renderInitialMessages();
 						this.showUnsavedRows();
 						if (result.editorText && !this.editor.getText().trim()) {
