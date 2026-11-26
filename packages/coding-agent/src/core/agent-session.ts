@@ -2816,6 +2816,16 @@ export class AgentSession {
 		this._flushPendingBashMessages();
 		this._flushPendingCustomMessages();
 		onStarted?.();
+		if (
+			this._compactionPrompts.length > 0 &&
+			this._flushingCompactionPrompts === 0 &&
+			!this._agentRunAbortRequested &&
+			!this._disposed &&
+			this._abortingSessionCount === 0
+		) {
+			this._flushingCompactionPrompts++;
+			void this._flushCompactionPrompts();
+		}
 		// Preparation stays a busy activity; only the run itself may be captured at turn boundaries.
 		const restoreForeground = this.workingSessionGate.foreground();
 		// Compaction before the prompt may have scheduled a retry; the new prompt replaces it.
@@ -3022,7 +3032,7 @@ export class AgentSession {
 		return this.workingSessionGate.run(() => this._prompt(text, options));
 	}
 
-	private async _prompt(text: string, options?: PromptOptions): Promise<void> {
+	private async _prompt(text: string, options?: PromptOptions, cancelOnAbort = false): Promise<void> {
 		if (this._isEmittingAgentSettled) {
 			this._deferredSettledActions.push(async () => await this.prompt(text, options));
 			return;
@@ -3039,6 +3049,7 @@ export class AgentSession {
 				return;
 			}
 		}
+		if (cancelOnAbort && (this._disposed || this._abortingSessionCount > 0)) return;
 
 		if (this._branchSummaryAbortController !== undefined) {
 			throw new Error(
@@ -3060,11 +3071,12 @@ export class AgentSession {
 		this._promptPreflightCount++;
 		let trigger: Extract<BeforeAgentStartTrigger, { messageType: "user" }> | undefined;
 		try {
-			trigger = await this._preparePrompt(text, options);
+			trigger = await this._preparePrompt(text, options, cancelOnAbort);
 		} finally {
 			this._promptPreflightCount--;
 		}
 		if (!trigger) return;
+		if (cancelOnAbort && (this._disposed || this._abortingSessionCount > 0)) return;
 		// Another prompt can start a run while this one awaits input hooks or auth. That run owns the
 		// session, so handle this prompt as one sent during it, without preparing it again.
 		if (this.isStreaming) await this._queuePrompt(trigger.prompt, trigger.images, options);
@@ -3078,6 +3090,7 @@ export class AgentSession {
 	private async _preparePrompt(
 		text: string,
 		options?: PromptOptions,
+		cancelOnAbort = false,
 	): Promise<Extract<BeforeAgentStartTrigger, { messageType: "user" }> | undefined> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
@@ -3093,6 +3106,7 @@ export class AgentSession {
 			preflightResult?.("handled");
 			return undefined;
 		}
+		if (cancelOnAbort && (this._disposed || this._abortingSessionCount > 0)) return undefined;
 		const { text: currentText, images: currentImages } = processedInput;
 
 		// Expand skill commands (/skill:name args) and prompt templates (/template args)
@@ -3326,11 +3340,12 @@ export class AgentSession {
 	 */
 	private _reserveCompactionPromptFlush(): boolean {
 		if (this._compactionPrompts.length === 0) return false;
-		if (this._disposed || this._abortingSessionCount > 0) {
+		if (this._disposed) {
 			this._compactionPrompts = [];
 			this._emitQueueUpdate();
 			return false;
 		}
+		if (this._abortingSessionCount > 0) return false;
 		this._flushingCompactionPrompts++;
 		return true;
 	}
@@ -3339,13 +3354,11 @@ export class AgentSession {
 	private _releaseCompactionPromptFlush(heldFlush: boolean): void {
 		const shouldFlush = this._compactionPrompts.length > 0 && !this._disposed && this._abortingSessionCount === 0;
 		if (shouldFlush) {
-			const prompts = this._compactionPrompts.splice(0);
 			if (!heldFlush) this._flushingCompactionPrompts++;
-			this._emitQueueUpdate();
-			void this._flushCompactionPrompts(prompts);
+			void this._flushCompactionPrompts();
 			return;
 		}
-		if (this._compactionPrompts.length > 0) {
+		if (this._compactionPrompts.length > 0 && this._disposed) {
 			this._compactionPrompts = [];
 			this._emitQueueUpdate();
 		}
@@ -3364,20 +3377,27 @@ export class AgentSession {
 		});
 	}
 
-	private async _flushCompactionPrompts(
-		prompts: Array<{ text: string; options: PromptOptions; behavior: "steer" | "followUp" }>,
-	): Promise<void> {
+	private async _flushCompactionPrompts(): Promise<void> {
 		try {
-			for (const entry of prompts) {
+			while (this._compactionPrompts.length > 0) {
 				if (this._disposed || this._abortingSessionCount > 0) break;
+				const entry = this._compactionPrompts.shift()!;
+				this._emitQueueUpdate();
 				const preflightDone = Promise.withResolvers<void>();
-				const run = this.prompt(entry.text, {
-					...entry.options,
-					preflightResult: (disposition) => {
-						preflightDone.resolve();
-						entry.options.preflightResult?.(disposition);
-					},
-				})
+				const run = this.workingSessionGate
+					.run(() =>
+						this._prompt(
+							entry.text,
+							{
+								...entry.options,
+								preflightResult: (disposition) => {
+									preflightDone.resolve();
+									entry.options.preflightResult?.(disposition);
+								},
+							},
+							true,
+						),
+					)
 					.catch((error) => {
 						this._reportCompactionPromptError(entry, error);
 					})

@@ -775,7 +775,7 @@ describe("AgentSession prompt characterization", () => {
 		expect(getUserTexts(escapeCase.harness)).toContain("run after escape");
 		expect(escapeCase.harness.session.getLastAssistantText()).toBe("ran after cancel");
 
-		// session.abort() stops the session and does not start a new turn.
+		// session.abort() stops the session without starting a new turn, while keeping queued prompts recoverable.
 		const abortCase = await createCompactingHarness();
 		const compactAbort = abortCase.harness.session.compact().catch(() => undefined);
 		await abortCase.started.promise;
@@ -783,8 +783,142 @@ describe("AgentSession prompt characterization", () => {
 		await abortCase.harness.session.abort();
 		await compactAbort;
 		expect(getUserTexts(abortCase.harness)).not.toContain("do not run after session abort");
-		expect(abortCase.harness.session.pendingMessageCount).toBe(0);
+		expect(abortCase.harness.session.pendingMessageCount).toBe(1);
 		expect(abortCase.harness.session.isIdle).toBe(true);
+		expect(abortCase.harness.session.clearQueue()).toEqual({
+			steering: ["do not run after session abort"],
+			followUp: [],
+		});
+	});
+
+	it("cancels a flushed compaction prompt if session.abort() runs during its input hook", async () => {
+		const compactionStarted = Promise.withResolvers<void>();
+		const compactionReleased = Promise.withResolvers<void>();
+		const inputStarted = Promise.withResolvers<void>();
+		const inputReleased = Promise.withResolvers<void>();
+
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						compactionStarted.resolve();
+						await compactionReleased.promise;
+						return {
+							compaction: {
+								summary: "manual compacted",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: {},
+							},
+						};
+					});
+					pi.on("input", async (event) => {
+						if (event.text !== "queued first") return { action: "continue" };
+						inputStarted.resolve();
+						await inputReleased.promise;
+						return { action: "continue" };
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("one"),
+			fauxAssistantMessage("two"),
+			fauxAssistantMessage("unexpected"),
+		]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+		const callsBeforeCompact = harness.faux.state.callCount;
+
+		const compactPromise = harness.session.compact();
+		await compactionStarted.promise;
+		await harness.session.sendUserMessage("queued first", { deliverAs: "steer" });
+		await harness.session.sendUserMessage("queued second", { deliverAs: "steer" });
+		compactionReleased.resolve();
+		await compactPromise;
+
+		await inputStarted.promise;
+		// Second queued prompt stays visible and recoverable while the first is in preflight.
+		expect(harness.session.pendingMessageCount).toBe(1);
+		expect(harness.session.getSteeringMessages()).toEqual(["queued second"]);
+
+		const abortPromise = harness.session.abort();
+		inputReleased.resolve();
+		await abortPromise;
+
+		expect(harness.session.isIdle).toBe(true);
+		expect(harness.faux.state.callCount).toBe(callsBeforeCompact);
+		expect(getUserTexts(harness)).not.toContain("queued first");
+		expect(getUserTexts(harness)).not.toContain("queued second");
+		expect(harness.session.clearQueue()).toEqual({ steering: ["queued second"], followUp: [] });
+	});
+
+	it("keeps later compaction-queued prompts visible to clearQueue() while the first is in before_agent_start", async () => {
+		const compactionStarted = Promise.withResolvers<void>();
+		const compactionReleased = Promise.withResolvers<void>();
+		const beforeStartEntered = Promise.withResolvers<void>();
+		const beforeStartReleased = Promise.withResolvers<void>();
+
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						compactionStarted.resolve();
+						await compactionReleased.promise;
+						return {
+							compaction: {
+								summary: "manual compacted",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: {},
+							},
+						};
+					});
+					pi.on("before_agent_start", async (event) => {
+						if (event.messageType !== "user" || event.prompt !== "queued first") return;
+						beforeStartEntered.resolve();
+						await beforeStartReleased.promise;
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("one"),
+			fauxAssistantMessage("two"),
+			fauxAssistantMessage("unexpected"),
+		]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+
+		const compactPromise = harness.session.compact();
+		await compactionStarted.promise;
+		await harness.session.sendUserMessage("queued first", { deliverAs: "steer" });
+		await harness.session.sendUserMessage("queued second", { deliverAs: "steer" });
+		compactionReleased.resolve();
+		await compactPromise;
+
+		await beforeStartEntered.promise;
+		expect(harness.session.isStreaming).toBe(true);
+		expect(harness.session.pendingMessageCount).toBe(1);
+		expect(harness.session.getSteeringMessages()).toEqual(["queued second"]);
+
+		// InteractiveMode Escape/Alt+Up path: clearQueue() recovers the second prompt before abort().
+		expect(harness.session.clearQueue()).toEqual({ steering: ["queued second"], followUp: [] });
+		expect(harness.session.pendingMessageCount).toBe(0);
+
+		const abortPromise = harness.session.abort();
+		beforeStartReleased.resolve();
+		await abortPromise;
+
+		expect(harness.session.isIdle).toBe(true);
+		const last = harness.session.messages.at(-1);
+		expect(last?.role).toBe("assistant");
+		expect(last?.role === "assistant" && last.stopReason).toBe("aborted");
+		expect(getUserTexts(harness)).not.toContain("queued second");
 	});
 
 	it("throws when prompting without a model", async () => {
