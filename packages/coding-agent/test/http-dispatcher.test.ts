@@ -255,8 +255,31 @@ console.log("process survived");
 			// Simulate a shorter process-wide headersTimeout than the session's configured httpIdleTimeoutMs
 			// (Undici checks headersTimeout on 1-second fastTimer ticks).
 			configureHttpDispatcher(100);
-			const globalBefore = undici.getGlobalDispatcher();
 			expect(getSessionHttpFetch({ httpIdleTimeoutMs: 100 })).toBeUndefined();
+
+			// When HTTP_PROXY is set and HTTPS_PROXY is unset, settings.httpProxy must not split HTTPS
+			// onto a separate proxy or break reuse of the matching global CLI dispatcher.
+			const prevHttpProxy = process.env.HTTP_PROXY;
+			const prevHttpsProxy = process.env.HTTPS_PROXY;
+			const prevLowerHttpsProxy = process.env.https_proxy;
+			try {
+				process.env.HTTP_PROXY = "http://127.0.0.1:8111";
+				delete process.env.HTTPS_PROXY;
+				delete process.env.https_proxy;
+				configureHttpDispatcher(100);
+				expect(
+					getSessionHttpFetch({ httpIdleTimeoutMs: 100, httpProxy: "http://127.0.0.1:8222" }),
+				).toBeUndefined();
+			} finally {
+				if (prevHttpProxy === undefined) delete process.env.HTTP_PROXY;
+				else process.env.HTTP_PROXY = prevHttpProxy;
+				if (prevHttpsProxy === undefined) delete process.env.HTTPS_PROXY;
+				else process.env.HTTPS_PROXY = prevHttpsProxy;
+				if (prevLowerHttpsProxy === undefined) delete process.env.https_proxy;
+				else process.env.https_proxy = prevLowerHttpsProxy;
+				configureHttpDispatcher(100);
+			}
+			const globalBefore = undici.getGlobalDispatcher();
 
 			const longFetch = getSessionHttpFetch({ httpIdleTimeoutMs: 5_000 });
 			expect(longFetch).toBeDefined();

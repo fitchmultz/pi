@@ -27,9 +27,10 @@ function resolveEffectiveProxies(httpProxy?: string): {
 	httpsProxy: string | undefined;
 } {
 	const fallback = httpProxy?.trim() || undefined;
+	const resolvedHttp = process.env.HTTP_PROXY ?? process.env.http_proxy ?? fallback;
 	return {
-		httpProxy: process.env.HTTP_PROXY ?? process.env.http_proxy ?? fallback,
-		httpsProxy: process.env.HTTPS_PROXY ?? process.env.https_proxy ?? fallback,
+		httpProxy: resolvedHttp,
+		httpsProxy: process.env.HTTPS_PROXY ?? process.env.https_proxy ?? resolvedHttp,
 	};
 }
 
