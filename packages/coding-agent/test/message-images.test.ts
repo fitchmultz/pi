@@ -276,6 +276,13 @@ describe("inline images in UserMessageComponent and AssistantMessageComponent", 
 		expect(component.render(80).some((line) => isImageLine(line))).toBe(false);
 		expect(loadCount).toBe(0);
 
+		// Toggling showImages off -> on mid-stream must still respect the streaming gate (no premature disk load).
+		component.setShowImages(false);
+		component.setShowImages(true);
+		await new Promise((resolve) => setTimeout(resolve, 25));
+		expect(component.render(80).some((line) => isImageLine(line))).toBe(false);
+		expect(loadCount).toBe(0);
+
 		// Once streaming completes, the image loads and renders inline.
 		component.updateContent(message, false);
 		await loadedPromise;

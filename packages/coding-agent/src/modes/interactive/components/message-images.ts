@@ -168,6 +168,7 @@ export class MessageImagesContainer extends Container {
 
 	private lastText = "";
 	private lastAttached: readonly ImageContent[] = [];
+	private lastAllowFileLoad = false;
 	private lastExtractSource?: { text: string; hasAttached: boolean };
 	private cachedCandidatePaths: string[] = [];
 	private lastLoadedPathsKey?: string;
@@ -200,7 +201,7 @@ export class MessageImagesContainer extends Container {
 			this.invalidate();
 			return;
 		}
-		this.sync(this.lastText, this.lastAttached, true);
+		this.sync(this.lastText, this.lastAttached, this.lastAllowFileLoad);
 	}
 
 	setImageWidthCells(widthCells: number): void {
@@ -212,6 +213,7 @@ export class MessageImagesContainer extends Container {
 	sync(text: string, attachedImages: readonly ImageContent[], allowFileLoad: boolean): void {
 		this.lastText = text;
 		this.lastAttached = attachedImages;
+		this.lastAllowFileLoad = allowFileLoad;
 
 		if (!this.showImages) {
 			this.loadGeneration += 1;
