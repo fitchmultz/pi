@@ -54,17 +54,14 @@ function normalizeCandidatePath(raw: string): string | null {
 // 3. Inline code spans `path`
 // 4. Remote URLs http(s)/ftp/data (skipped so host/path segments are not matched as local files)
 // 5. file:// URLs
-// 6. Quoted paths "..." or '...'
-// 7. Bare or backslash-escaped local paths (with optional leading @)
+// 6. Quoted paths "..." or '...' at a token boundary
+// 7. Bare, backslash-escaped, or unquoted rooted spaced local paths (with optional leading @)
 const IMAGE_TOKEN_RE =
-	/(```[\s\S]*?```|~~~[\s\S]*?~~~)|!\[[^\]]*\]\((?:<([^>\n]+)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'))?\)|`([^`\n]+)`|\b(?:https?|ftp):\/\/[^\s"'<>()[\]]+|\bdata:[^\s"'<>()[\]]+|(file:\/\/[^\s"'<>()[\]]+)|(?<=^|[\s([{:;,=])(["'])((?:\\.|(?!\6)[^\n])+?\.(?:png|jpe?g|gif|webp|bmp)(?:[?#][^\s"']*)?)\6|(?<=^|[\s([{:;,=])(@?(?:~\/|\.\.?\/|\/)?(?:\\ |[^\s"'<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?])/gi;
+	/(```[\s\S]*?```|~~~[\s\S]*?~~~)|!\[[^\]]*\]\((?:<([^>\n]+)>|([^)\s]+))(?:\s+(?:"[^"]*"|'[^']*'))?\)|`([^`\n]+)`|\b(?:https?|ftp):\/\/[^\s"'<>()[\]]+|\bdata:[^\s"'<>()[\]]+|(file:\/\/[^\s"'<>()[\]]+)|(?<=^|[\s([{:;,=])(["'])((?:\\.|(?!\6)[^\n])+?\.(?:png|jpe?g|gif|webp|bmp)(?:[?#][^\s"']*)?)\6|(?<=^|[\s([{:;,=])(@?(?:~\/|\.\.?\/|\/)(?:(?:\\ |[^\s"'<>()[\]`,;:])+(?<!\.(?:png|jpe?g|gif|webp|bmp))(?:\s+(?!@?(?:~\/|\.\.?\/|\/))))*(?:\\ |[^\s"'<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?])|(?<=^|[\s([{:;,=])(@?(?:\\ |[^\s"'<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?])/gi;
 
-const BARE_IMAGE_PATH_RE =
-	/(?<=^|[\s([{:;,=])(@?(?:~\/|\.\.?\/|\/)?(?:\\ |[^\s"'<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?])/gi;
-
-// Matches unquoted rooted paths containing literal spaces (e.g. Finder clipboard paste of macOS screenshots).
-const ROOTED_SPACED_IMAGE_PATH_RE =
-	/(?<=^|[\s([{:;,=])(@?(?:~\/|\.\.?\/|\/)(?:(?!\s+(?:~\/|\.\.?\/|\/))[^\n"'<>()[\]`,;:])*?\s(?:(?!\s+(?:~\/|\.\.?\/|\/))[^\n"'<>()[\]`,;:])*?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?])/gi;
+const ROOTED_PREFIX_RE = /^@?(?:~\/|\.\.?\/|\/)/;
+const EMBEDDED_ROOTED_IMAGE_PATH_RE =
+	/(?<=[\s([{:;,=])(@?(?:~\/|\.\.?\/|\/)(?:(?:\\ |[^\s"'<>()[\]`,;:])+(?<!\.(?:png|jpe?g|gif|webp|bmp))(?:\s+(?!@?(?:~\/|\.\.?\/|\/))))*(?:\\ |[^\s"'<>()[\]`,;:])+?\.(?:png|jpe?g|gif|webp|bmp))(?=$|[\s)\]}.,;:!?])/gi;
 
 /**
  * Extract deduplicated local image file paths referenced in user or assistant message text.
@@ -95,27 +92,29 @@ export function extractLocalImagePaths(text: string): string[] {
 			add(match[5]);
 		} else if (match[7]) {
 			const quoted = match[7].replace(/\\ /g, " ");
-			add(quoted);
-			// If a quoted phrase contains an embedded bare path (e.g. "see /tmp/shot.png"), extract it too.
-			BARE_IMAGE_PATH_RE.lastIndex = 0;
-			let inner = BARE_IMAGE_PATH_RE.exec(quoted);
-			while (inner !== null) {
-				add(inner[1]?.replace(/\\ /g, " "));
-				inner = BARE_IMAGE_PATH_RE.exec(quoted);
+			if (ROOTED_PREFIX_RE.test(quoted)) {
+				add(quoted);
+			} else {
+				// For non-rooted quoted text (e.g. "check /tmp/shot.png"), prefer any embedded rooted paths
+				// instead of extracting bare relative suffixes from spaced filenames.
+				EMBEDDED_ROOTED_IMAGE_PATH_RE.lastIndex = 0;
+				let foundEmbedded = false;
+				let inner = EMBEDDED_ROOTED_IMAGE_PATH_RE.exec(quoted);
+				while (inner !== null) {
+					foundEmbedded = true;
+					add(inner[1]?.replace(/\\ /g, " "));
+					inner = EMBEDDED_ROOTED_IMAGE_PATH_RE.exec(quoted);
+				}
+				if (!foundEmbedded) {
+					add(quoted);
+				}
 			}
-		} else if (match[8]) {
-			add(match[8].replace(/\\ /g, " "));
+		} else if (match[8] || match[9]) {
+			add((match[8] ?? match[9])!.replace(/\\ /g, " "));
 		}
 		match = IMAGE_TOKEN_RE.exec(text);
 	}
 
-	const withoutFences = text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, "\n");
-	ROOTED_SPACED_IMAGE_PATH_RE.lastIndex = 0;
-	let spacedMatch = ROOTED_SPACED_IMAGE_PATH_RE.exec(withoutFences);
-	while (spacedMatch !== null) {
-		add(spacedMatch[1]?.replace(/\\ /g, " "));
-		spacedMatch = ROOTED_SPACED_IMAGE_PATH_RE.exec(withoutFences);
-	}
 	return paths;
 }
 

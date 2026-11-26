@@ -72,7 +72,21 @@ describe("extractLocalImagePaths", () => {
 		expect(extractLocalImagePaths("I've saved the screenshot to /tmp/frame.png, isn't that better?")).toEqual([
 			"/tmp/frame.png",
 		]);
-		expect(extractLocalImagePaths('He said "check /tmp/quoted.png" earlier.')).toContain("/tmp/quoted.png");
+		expect(extractLocalImagePaths('He said "check /tmp/quoted.png" earlier.')).toEqual(["/tmp/quoted.png"]);
+		// Spaced quoted and unquoted paths must not also extract bare relative suffixes like shot.png or PM.png.
+		expect(extractLocalImagePaths('see "/Users/me/Desktop/final shot.png"')).toEqual([
+			"/Users/me/Desktop/final shot.png",
+		]);
+		expect(extractLocalImagePaths('Saved to "/Users/test/My Folder/chart.webp"')).toEqual([
+			"/Users/test/My Folder/chart.webp",
+		]);
+		expect(extractLocalImagePaths("Paste: /Users/test/Desktop/Screenshot 2026-11-26 at 2.00.00 PM.png")).toEqual([
+			"/Users/test/Desktop/Screenshot 2026-11-26 at 2.00.00 PM.png",
+		]);
+		expect(extractLocalImagePaths("Compare /tmp/before.png and /tmp/after.png")).toEqual([
+			"/tmp/before.png",
+			"/tmp/after.png",
+		]);
 	});
 });
 
