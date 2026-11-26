@@ -911,20 +911,8 @@ export function getPngDimensions(base64Data: string): ImageDimensions | null {
 	}
 }
 
-function parseExifOrientation(buffer: Buffer, start: number, end: number): number | undefined {
-	// EXIF APP1 payload starts with "Exif\0\0" followed by a TIFF header (II or MM).
-	if (end - start < 14) return undefined;
-	if (
-		buffer[start] !== 0x45 ||
-		buffer[start + 1] !== 0x78 ||
-		buffer[start + 2] !== 0x69 ||
-		buffer[start + 3] !== 0x66 ||
-		buffer[start + 4] !== 0x00 ||
-		buffer[start + 5] !== 0x00
-	) {
-		return undefined;
-	}
-	const tiffStart = start + 6;
+function parseTiffOrientation(buffer: Buffer, tiffStart: number, end: number): number | undefined {
+	if (end - tiffStart < 8) return undefined;
 	const littleEndian = buffer[tiffStart] === 0x49 && buffer[tiffStart + 1] === 0x49;
 	const bigEndian = buffer[tiffStart] === 0x4d && buffer[tiffStart + 1] === 0x4d;
 	if (!littleEndian && !bigEndian) return undefined;
@@ -941,6 +929,41 @@ function parseExifOrientation(buffer: Buffer, start: number, end: number): numbe
 		if (readU16(entryStart) === 0x0112) {
 			return readU16(entryStart + 8);
 		}
+	}
+	return undefined;
+}
+
+function hasExifHeader(buffer: Buffer, start: number, end: number): boolean {
+	return (
+		end - start >= 6 &&
+		buffer[start] === 0x45 &&
+		buffer[start + 1] === 0x78 &&
+		buffer[start + 2] === 0x69 &&
+		buffer[start + 3] === 0x66 &&
+		buffer[start + 4] === 0x00 &&
+		buffer[start + 5] === 0x00
+	);
+}
+
+function parseExifOrientation(buffer: Buffer, start: number, end: number): number | undefined {
+	if (!hasExifHeader(buffer, start, end)) return undefined;
+	return parseTiffOrientation(buffer, start + 6, end);
+}
+
+function parseWebpExifOrientation(buffer: Buffer): number | undefined {
+	let offset = 12;
+	while (offset + 8 <= buffer.length) {
+		const chunkId = buffer.slice(offset, offset + 4).toString("ascii");
+		const chunkSize = buffer.readUInt32LE(offset + 4);
+		const dataStart = offset + 8;
+		const dataEnd = dataStart + chunkSize;
+		if (dataEnd > buffer.length) return undefined;
+		if (chunkId === "EXIF") {
+			const tiffStart = hasExifHeader(buffer, dataStart, dataEnd) ? dataStart + 6 : dataStart;
+			return parseTiffOrientation(buffer, tiffStart, dataEnd);
+		}
+		// RIFF chunks are padded to an even byte boundary.
+		offset = dataEnd + (chunkSize % 2);
 	}
 	return undefined;
 }
@@ -1065,6 +1088,11 @@ export function getWebpDimensions(base64Data: string): ImageDimensions | null {
 			if (buffer.length < 30) return null;
 			const width = (buffer[24] | (buffer[25] << 8) | (buffer[26] << 16)) + 1;
 			const height = (buffer[27] | (buffer[28] << 8) | (buffer[29] << 16)) + 1;
+			const fullBuffer = Buffer.from(base64Data, "base64");
+			const orientation = parseWebpExifOrientation(fullBuffer);
+			if (orientation !== undefined && orientation >= 5 && orientation <= 8) {
+				return { widthPx: height, heightPx: width };
+			}
 			return { widthPx: width, heightPx: height };
 		}
 

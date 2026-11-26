@@ -2,11 +2,19 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import { Box } from "../src/components/box.ts";
 import { HStack } from "../src/components/h-stack.ts";
+import { Image } from "../src/components/image.ts";
 import { ScrollView } from "../src/components/scroll-view.ts";
 import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
 import { renderLayoutFrame } from "../src/layout.ts";
-import { encodeKitty, registerKittyImageMetadata } from "../src/terminal-image.ts";
+import {
+	encodeKitty,
+	registerKittyImageMetadata,
+	resetCapabilitiesCache,
+	setCapabilities,
+	setCellDimensions,
+	setSixelEncoder,
+} from "../src/terminal-image.ts";
 import { stripTerminalSequences } from "../src/utils.ts";
 
 function visibleLines(lines: string[]): string[] {
@@ -479,5 +487,43 @@ describe("viewport layout", () => {
 
 		assert.strictEqual(first.root.children[0]?.lines?.length, 1);
 		assert.strictEqual(second.root.children[0]?.lines?.length, 3);
+	});
+
+	it("measures and composites a Sixel Image inside an HStack without truncating its DCS sequence", () => {
+		const pngBase64 =
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
+		const sixelPayload = '\x1bP0;1q"1;1;40;54#0;2;100;0;0#0~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\x1b\\';
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 18 });
+		setSixelEncoder(() => sixelPayload);
+		try {
+			const img = new Image(pngBase64, "image/png", { fallbackColor: (v) => v }, { maxWidthCells: 4 });
+			const side = new Text("side panel text", 0, 0);
+			const autoFrame = renderLayoutFrame(
+				new HStack([img, { component: side, basis: 20 }], { gap: 1 }),
+				80,
+				10,
+				() => {},
+			);
+			assert.strictEqual(autoFrame.root.children[0]?.rect.width, 0);
+			const frame = renderLayoutFrame(
+				new HStack(
+					[
+						{ component: side, basis: 20 },
+						{ component: img, basis: 10 },
+					],
+					{ gap: 1 },
+				),
+				80,
+				10,
+				() => {},
+			);
+			assert.ok(frame.lines[0]!.includes(sixelPayload), "Sixel DCS sequence must remain complete with ST");
+			assert.ok(stripTerminalSequences(frame.lines[0]!).includes("side panel text"));
+		} finally {
+			setSixelEncoder(undefined);
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+			resetCapabilitiesCache();
+		}
 	});
 });

@@ -40,7 +40,8 @@ import {
 	setSixelEncoder,
 	stripImageSequences,
 } from "../src/terminal-image.ts";
-import { visibleWidth } from "../src/utils.ts";
+import { compositeTuiLine } from "../src/tui.ts";
+import { sliceByColumn, stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 
 const ENV_KEYS = [
 	"TERM",
@@ -1207,5 +1208,38 @@ describe("Sixel image protocol", () => {
 			Buffer.from([0xff, 0xd9]),
 		]);
 		assert.deepStrictEqual(getJpegDimensions(jpeg.toString("base64")), { widthPx: 100, heightPx: 200 });
+	});
+
+	it("applies EXIF orientation 5-8 to WebP VP8X dimensions", () => {
+		const vp8xPayload = Buffer.alloc(10);
+		vp8xPayload[0] = 0x08; // EXIF flag
+		// width - 1 = 199 (200px), height - 1 = 99 (100px)
+		vp8xPayload[4] = 199;
+		vp8xPayload[7] = 99;
+		const tiff = Buffer.from([
+			0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00, 0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
+			0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		]);
+		const vp8xChunk = Buffer.concat([Buffer.from("VP8X"), Buffer.from([10, 0, 0, 0]), vp8xPayload]);
+		const exifHeader = Buffer.alloc(8);
+		exifHeader.write("EXIF", 0, "ascii");
+		exifHeader.writeUInt32LE(tiff.length, 4);
+		const body = Buffer.concat([Buffer.from("WEBP"), vp8xChunk, exifHeader, tiff]);
+		const riffHeader = Buffer.alloc(8);
+		riffHeader.write("RIFF", 0, "ascii");
+		riffHeader.writeUInt32LE(body.length, 4);
+		const webp = Buffer.concat([riffHeader, body]);
+		assert.deepStrictEqual(getWebpDimensions(webp.toString("base64")), { widthPx: 100, heightPx: 200 });
+	});
+
+	it("treats Sixel DCS sequences as zero-width escape codes in width, slicing, stripping, and compositing", () => {
+		const sixel = '\x1bP0;1q"1;1;40;54#0;2;100;0;0#0~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\x1b\\';
+		assert.strictEqual(visibleWidth(sixel), 0);
+		assert.strictEqual(stripTerminalSequences(sixel), "");
+		assert.strictEqual(sliceByColumn(sixel, 0, 20, true), sixel);
+		assert.strictEqual(sliceByColumn(`abc${sixel}def`, 3, 3, true), `${sixel}def`);
+		assert.strictEqual(sliceByColumn(`${sixel}abcdef`, 2, 3, true), "cde");
+		const composited = compositeTuiLine(" ".repeat(40), sixel, 2, 20, 40);
+		assert.ok(composited.includes(sixel), "compositeTuiLine must preserve the complete Sixel DCS sequence with ST");
 	});
 });
