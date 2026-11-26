@@ -1739,10 +1739,8 @@ export class AgentSession {
 			appended.push(...this._applyBoundaryDrafts(this.sessionManager, [draft], providerSummary, pruned));
 			if (pruned && pruned.size > 0) this._deactivatePrunedTools(pruned);
 		}
-		if (appended.length > 0) {
-			this._refreshFinalizedContext();
-			for (const entry of appended) this._emit({ type: "entry_appended", entry });
-		}
+		this._refreshFinalizedContext();
+		for (const entry of appended) this._emit({ type: "entry_appended", entry });
 		return result.continue;
 	}
 
