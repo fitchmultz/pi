@@ -46,14 +46,32 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 	"usage limit reached for the past",
 ]);
 
-const RETRYABLE_RAW_STOP_REASONS = new Set([
+const RETRYABLE_GENERATION_RAW_STOP_REASONS = new Set([
 	// Gemini ends an HTTP 200 stream with these finish reasons on transient
 	// malformed generations or stochastic false-positive prohibited-content blocks;
-	// retrying the turn recovers them cleanly (bounded by maxRetries).
+	// retrying the turn recovers them cleanly (bounded by maxRetries). Checked
+	// before provider-limit text matching because tool/argument excerpts in the
+	// stop details can mention words like "billing".
 	"malformed_function_call",
+	"malformed_tool_call",
 	"malformed_response",
 	"prohibited_content",
 	"unexpected_tool_call",
+]);
+
+const RETRYABLE_PROVIDER_RAW_STOP_REASONS = new Set([
+	// Google Interactions API delivers server-side failures over HTTP 200 SSE
+	// `event_type: "error"` frames using snake_case error codes without an HTTP
+	// status in the error message (https://aistudio.google.com/docs/api-errors,
+	// https://aistudio.google.com/docs/streaming). Keep non-retryable account
+	// limits (`quota_exceeded`, `payment_required`) out of this set and check
+	// `isProviderLimitError` first so quota/billing bodies still fail fast.
+	"deadline_exceeded",
+	"gateway_timeout",
+	"service_unavailable",
+	"rate_limit_exceeded",
+	"too_many_requests",
+	"api_error",
 ]);
 
 const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
@@ -131,6 +149,11 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"socket connection was closed",
 	"timed? out",
 	"timeout",
+	// Canonical gRPC / Google API DEADLINE_EXCEEDED error code and message
+	// ("Deadline expired before operation could complete."), including when
+	// relayed over SSE or through a gateway without rawStopReason.
+	"deadline.?exceeded",
+	"deadline expired",
 	"terminated",
 
 	// WebSocket transports can report close/error text instead of HTTP/fetch text.
@@ -194,7 +217,7 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 
 	// Gemini generation failures relayed through formatted error text or
 	// OpenAI-compatible gateways without `rawStopReason`.
-	"(?<![a-z0-9_])(?:malformed_function_call|malformed_response|prohibited_content|unexpected_tool_call)(?![a-z0-9_])",
+	"(?<![a-z0-9_])(?:malformed_function_call|malformed_tool_call|malformed_response|prohibited_content|unexpected_tool_call)(?![a-z0-9_])",
 ]);
 
 /**
@@ -319,12 +342,16 @@ export async function retryAssistantCall(
  */
 export function isRetryableAssistantError(message: AssistantMessage): boolean {
 	if (message.stopReason !== "error") return false;
-	if (message.rawStopReason && RETRYABLE_RAW_STOP_REASONS.has(message.rawStopReason.toLowerCase())) {
+	const rawStopReason = message.rawStopReason?.toLowerCase();
+	if (rawStopReason && RETRYABLE_GENERATION_RAW_STOP_REASONS.has(rawStopReason)) {
 		return true;
 	}
 	const errorMessage = message.errorMessage;
+	if (errorMessage && isProviderLimitError(errorMessage)) return false;
+	if (rawStopReason && RETRYABLE_PROVIDER_RAW_STOP_REASONS.has(rawStopReason)) {
+		return true;
+	}
 	if (!errorMessage) return false;
-	if (isProviderLimitError(errorMessage)) return false;
 	return RETRYABLE_PROVIDER_ERROR_PATTERN.test(errorMessage);
 }
 

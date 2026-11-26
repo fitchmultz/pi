@@ -16,6 +16,7 @@ import type {
 	UserMessage,
 } from "../src/types.ts";
 import { isRecoverableLength } from "../src/utils/overflow.ts";
+import { isRetryableAssistantError, retryAssistantCall } from "../src/utils/retry.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
 
 const model = {
@@ -737,6 +738,32 @@ describe("Google Interactions response stream", () => {
 			rawStopReason: "decode_failure",
 			errorMessage: "Google decode failed",
 		});
+	});
+
+	it("marks SSE deadline_exceeded errors retryable and recovers through retryAssistantCall", async () => {
+		const { fetch, requests } = stub(
+			sse({
+				event_type: "error",
+				error: { code: "deadline_exceeded", message: "Deadline expired before operation could complete." },
+			}),
+			answer("recovered"),
+		);
+		let attempts = 0;
+		const firstErrors: boolean[] = [];
+		const result = await retryAssistantCall(
+			async () => {
+				attempts++;
+				const message = await send(fetch, [initial]).result();
+				if (attempts === 1) firstErrors.push(isRetryableAssistantError(message));
+				return message;
+			},
+			{ enabled: true, maxRetries: 2, baseDelayMs: 0 },
+			undefined,
+		);
+		expect(firstErrors).toEqual([true]);
+		expect(attempts).toBe(2);
+		expect(requests).toHaveLength(2);
+		expect(result).toMatchObject({ stopReason: "stop", responseId: "recovered" });
 	});
 });
 
