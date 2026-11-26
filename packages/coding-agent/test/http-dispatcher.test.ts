@@ -294,8 +294,9 @@ console.log("process survived");
 	});
 
 	it("does not replace host WebSocket or EventSource globals from getSessionHttpFetch", () => {
+		const moduleUrl = new URL("../src/core/http-dispatcher.ts", import.meta.url).href;
 		const script = `
-			import { getSessionHttpFetch } from "./packages/coding-agent/src/core/http-dispatcher.ts";
+			import { getSessionHttpFetch } from ${JSON.stringify(moduleUrl)};
 			const customWebSocket = class CustomWebSocket {};
 			const customEventSource = class CustomEventSource {};
 			globalThis.WebSocket = customWebSocket;
@@ -308,7 +309,7 @@ console.log("process survived");
 			if (globalThis.fetch !== originalFetch) throw new Error("global fetch replaced");
 		`;
 		const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
-			cwd: process.cwd(),
+			cwd: new URL("..", import.meta.url),
 			encoding: "utf8",
 		});
 		expect(result.status, result.stderr).toBe(0);
