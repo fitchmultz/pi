@@ -200,7 +200,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 	private getTopAnchoredImageReservedRows(lines: string[], index: number, maxIndex = lines.length - 1): number {
 		const line = lines[index] ?? "";
-		const rows = extractKittyImageRows(line) || (getImagePlacementRows(line) ?? 0);
+		const rows = isSixelImageLine(line) ? (getImagePlacementRows(line) ?? 1) : extractKittyImageRows(line);
 		if (rows <= 1) return 1;
 
 		const maxRows = Math.min(rows, maxIndex - index + 1, lines.length - index);
