@@ -394,12 +394,20 @@ describe("session selector path/delete interactions", () => {
 			return makeSession({ id: `s${i}`, path, modified: new Date(10_000 - i * 1000) });
 		});
 
+		let resolvePostDeleteReload: (() => void) | undefined;
+		const postDeleteReload = new Promise<void>((resolve) => {
+			resolvePostDeleteReload = resolve;
+		});
+
 		const selector = new SessionSelectorComponent(
 			async (onProgress) => {
 				const remaining = sessions.filter((session) => existsSync(session.path));
 				// The first partial list holds only the file that finished loading first, here the oldest
 				onProgress?.(1, remaining.length, [remaining[remaining.length - 1]!]);
 				onProgress?.(remaining.length, remaining.length, remaining);
+				if (remaining.length < sessions.length) {
+					resolvePostDeleteReload?.();
+				}
 				return remaining;
 			},
 			async () => [],
@@ -418,9 +426,7 @@ describe("session selector path/delete interactions", () => {
 
 		list.handleInput(CTRL_D);
 		list.handleInput("\r");
-		for (let i = 0; i < 10 && existsSync(sessions[0]!.path); i++) {
-			await new Promise((resolve) => setTimeout(resolve, 10));
-		}
+		await postDeleteReload;
 		await flushPromises();
 
 		expect(existsSync(sessions[0]!.path)).toBe(false);
