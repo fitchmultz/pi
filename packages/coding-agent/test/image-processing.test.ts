@@ -2,8 +2,25 @@
  * Tests for image processing utilities using Photon.
  */
 
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import {
+	getSixelImageMetadata,
+	Image,
+	resetCapabilitiesCache,
+	setCapabilities,
+	setSixelEncoder,
+} from "@earendil-works/pi-tui";
+import { build as esbuild } from "esbuild";
 import { describe, expect, it } from "vitest";
-import { convertImageBytesToPng, convertToPng, loadPngTranscoder } from "../src/utils/image-convert.ts";
+import {
+	convertImageBytesToPng,
+	convertToPng,
+	loadPngTranscoder,
+	loadSixelEncoder,
+} from "../src/utils/image-convert.ts";
 import { formatDimensionNote, resizeImage } from "../src/utils/image-resize.ts";
 import { resizeImageInProcess } from "../src/utils/image-resize-core.ts";
 import { loadPhoton } from "../src/utils/photon.ts";
@@ -128,6 +145,121 @@ it("loadPngTranscoder converts synchronously to oriented PNG data", async () => 
 	const png = Buffer.from(transcoder(jpegWithXmpBeforeOrientation(), "image/jpeg")!, "base64");
 	expect([png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([1, 2]);
 	expect(transcoder(Buffer.from("not an image").toString("base64"), "image/jpeg")).toBeNull();
+});
+
+it("loadSixelEncoder converts synchronously to an oriented Sixel DCS sequence", async () => {
+	const encoder = (await loadSixelEncoder())!;
+	const sixel = encoder({
+		base64Data: jpegWithXmpBeforeOrientation(),
+		mimeType: "image/jpeg",
+		widthPx: 12,
+		heightPx: 24,
+	});
+	expect(sixel).not.toBeNull();
+	expect(sixel!).toMatch(/^\x1bP[0-9;]*q"1;1;12;24/);
+	expect(sixel!.endsWith("\x1b\\")).toBe(true);
+	expect(
+		encoder({
+			base64Data: Buffer.from("not an image").toString("base64"),
+			mimeType: "image/jpeg",
+			widthPx: 12,
+			heightPx: 24,
+		}),
+	).toBeNull();
+
+	// End-to-end Image layout for an EXIF orientation-6 (2x1 raw -> 1x2 oriented) JPEG must stay portrait.
+	setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+	setSixelEncoder(encoder);
+	try {
+		const image = new Image(
+			jpegWithXmpBeforeOrientation(),
+			"image/jpeg",
+			{ fallbackColor: (v) => v },
+			{ maxWidthCells: 20 },
+		);
+		const lines = image.render(40);
+		const metadata = getSixelImageMetadata(lines[0]!);
+		expect(metadata).toBeDefined();
+		expect(metadata!.heightPx).toBeGreaterThan(metadata!.widthPx);
+		expect(lines.length).toBe(metadata!.rows);
+	} finally {
+		setSixelEncoder(undefined);
+		resetCapabilitiesCache();
+	}
+
+	// Transparent PNG pixels must remain unpainted (not inverted with opaque regions by sixel@0.16.0's image2sixel).
+	const photon = await loadPhoton();
+	expect(photon).toBeDefined();
+	const rgba = new Uint8Array(8 * 4 * 4);
+	for (let y = 0; y < 4; y++) {
+		for (let x = 0; x < 4; x++) {
+			const idx = (y * 8 + x) * 4;
+			rgba[idx] = 255;
+			rgba[idx + 1] = 0;
+			rgba[idx + 2] = 0;
+			rgba[idx + 3] = 255;
+		}
+	}
+	const transparentImg = new photon!.PhotonImage(rgba, 8, 4);
+	let transparentPngBase64: string;
+	try {
+		transparentPngBase64 = Buffer.from(transparentImg.get_bytes()).toString("base64");
+	} finally {
+		transparentImg.free();
+	}
+	const transparentSixel = encoder({
+		base64Data: transparentPngBase64,
+		mimeType: "image/png",
+		widthPx: 8,
+		heightPx: 4,
+	});
+	expect(transparentSixel).not.toBeNull();
+	// Only columns 0-3 (opaque red) should emit painted sixel bits ('!4N'); columns 4-7 stay unpainted.
+	expect(transparentSixel).toContain("#0;2;100;0;0#0!4N$");
+	expect(transparentSixel).not.toContain("!4?!4N");
+});
+
+it("loadSixelEncoder works in a fresh process when bundled with splitting into strict ESM by esbuild", async () => {
+	const repoRoot = join(import.meta.dirname, "../../..");
+	const cacheRoot = join(repoRoot, "node_modules/.cache");
+	mkdirSync(cacheRoot, { recursive: true });
+	const outDir = mkdtempSync(join(cacheRoot, "pi-sixel-bundle-"));
+	const entryOutfile = join(outDir, "image-convert.mjs");
+	try {
+		await esbuild({
+			absWorkingDir: repoRoot,
+			banner: {
+				js: 'import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url);',
+			},
+			bundle: true,
+			chunkNames: "chunks/[name]-[hash]",
+			entryPoints: [join(import.meta.dirname, "../src/utils/image-convert.ts")],
+			external: ["@silvia-odwyer/photon-node"],
+			format: "esm",
+			minifySyntax: true,
+			minifyWhitespace: true,
+			outdir: outDir,
+			outExtension: { ".js": ".mjs" },
+			platform: "node",
+			splitting: true,
+			target: "node22.19",
+		});
+		const script = [
+			`const mod = await import(${JSON.stringify(pathToFileURL(entryOutfile).href)});`,
+			"const encoder = await mod.loadSixelEncoder();",
+			'if (!encoder) throw new Error("loadSixelEncoder returned undefined");',
+			`const sixel = encoder({ base64Data: ${JSON.stringify(TINY_PNG)}, mimeType: "image/png", widthPx: 8, heightPx: 8 });`,
+			'if (!sixel) throw new Error("encoder returned null");',
+			"process.stdout.write(sixel);",
+		].join("\n");
+		const sixel = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+			encoding: "utf8",
+		});
+		expect(sixel).toMatch(/^\x1bP[0-9;]*q"1;1;8;8/);
+		expect(sixel.endsWith("\x1b\\")).toBe(true);
+	} finally {
+		rmSync(outDir, { force: true, recursive: true });
+	}
 });
 
 describe("resizeImage", () => {

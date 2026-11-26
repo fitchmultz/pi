@@ -145,7 +145,7 @@ import { copyToClipboard, readClipboardFilePaths, readClipboardText } from "../.
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { flushStdout } from "../../utils/flush-stdout.ts";
 import { parseGitUrl } from "../../utils/git.ts";
-import { ensurePngTranscoder } from "../../utils/image-convert.ts";
+import { ensureImageEncoders } from "../../utils/image-convert.ts";
 import { getCwdRelativePath, shortenHomePath } from "../../utils/paths.ts";
 import { getPiUserAgent } from "../../utils/pi-user-agent.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
@@ -1162,6 +1162,7 @@ export class InteractiveMode {
 		if (!startRenderer) return true;
 		this.options.tuiMode = mode;
 		nextUi.start();
+		this.ensureImageEncoders();
 		this.themeController.rebindTui();
 		this.rebindExtensionTerminalInputListeners();
 		if (
@@ -1230,7 +1231,7 @@ export class InteractiveMode {
 		this.ui.start();
 		this.isInitialized = true;
 		this.programStatus.report();
-		this.ensurePngTranscoder();
+		this.ensureImageEncoders();
 
 		this.themeController.applyFromSettings();
 		// The header and startup notices bake theme colors into their text, so build them once the terminal
@@ -2391,9 +2392,9 @@ export class InteractiveMode {
 		this.transcriptScrollView?.setScrollbar(this.settingsManager.getFullscreenScrollbar());
 	}
 
-	/** Lets extension images use the PNG transcoder; tool results register it themselves. */
-	private ensurePngTranscoder(): void {
-		ensurePngTranscoder(() => {
+	/** Lets extension and UI images use the protocol's image encoder; tool results also register lazily. */
+	private ensureImageEncoders(): void {
+		ensureImageEncoders(() => {
 			this.ui.invalidate();
 			this.ui.requestRender();
 		});
@@ -2401,7 +2402,7 @@ export class InteractiveMode {
 
 	private applyRuntimeSettings(): void {
 		setCapabilityOverrides(this.settingsManager.getTerminalCapabilityOverrides());
-		this.ensurePngTranscoder();
+		this.ensureImageEncoders();
 		applyHttpProxySettings(this.settingsManager.getGlobalSettings().httpProxy);
 		configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
 		this.applyFullscreenScrollbarSetting();

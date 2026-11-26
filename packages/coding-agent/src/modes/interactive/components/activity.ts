@@ -2,6 +2,7 @@ import {
 	Box,
 	type Component,
 	Container,
+	isImageLine,
 	MouseRegion,
 	Spacer,
 	Text,
@@ -157,7 +158,7 @@ export class ChatContainer extends Container {
 				? line.replace(/^ ((?:\x1b\]133;[ABC](?:\x07|\x1b\\))+)/, "$1 ")
 				: line;
 			// Printing padding after image placement can wrap or overwrite the image's cells.
-			return /\x1b(?:_G|\]1337;File=)/.test(padded) ? padded.replace(/ +$/, "") : padded;
+			return isImageLine(padded) ? padded.replace(/ +$/, "") : padded;
 		});
 	}
 

@@ -1418,7 +1418,11 @@ export class SettingsManager {
 		const terminal = this.settings.terminal;
 		const images = terminal?.images;
 		return {
-			...(images === "kitty" || images === "iterm2" ? { images } : images === false ? { images: null } : {}),
+			...(images === "kitty" || images === "iterm2" || images === "sixel"
+				? { images }
+				: images === false
+					? { images: null }
+					: {}),
 			...(typeof terminal?.trueColor === "boolean" ? { trueColor: terminal.trueColor } : {}),
 			...(typeof terminal?.hyperlinks === "boolean" ? { hyperlinks: terminal.hyperlinks } : {}),
 		};

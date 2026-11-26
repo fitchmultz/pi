@@ -8,6 +8,7 @@ import {
 	resetCapabilitiesCache,
 	Spacer,
 	setCapabilities,
+	setSixelEncoder,
 	Text,
 	type TUI,
 	type TuiMouseEvent,
@@ -52,7 +53,7 @@ function compactRows(component: Component, width: number): readonly string[] {
 	expect(lines.length).toBeLessThanOrEqual(2);
 	for (const line of lines) {
 		expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-		expect(line).not.toMatch(/\x1b(?:_G|\]1337;File=)/);
+		expect(line).not.toMatch(/\x1b(?:_G|\]1337;File=|P[0-9;]*q)/);
 	}
 	return lines;
 }
@@ -203,35 +204,48 @@ describe("compact tool cards", () => {
 		expect(component.render(40)).toEqual(normal);
 	});
 
-	test.each(["kitty", "iterm2"] as const)("%s image protocols are complete only when expanded", (protocol) => {
-		setCapabilities({ images: protocol, trueColor: true, hyperlinks: false });
-		for (const renderer of [
-			undefined,
-			createAllToolRenderers().read,
-			{
-				renderShell: "self" as const,
-				renderCall: () => new Text("image tool", 0, 0),
-				renderResult: () => new Image(png, "image/png", { fallbackColor: (text) => text }, { maxWidthCells: 30 }),
-			},
-		]) {
-			const component = new ToolExecutionComponent(
-				"image",
-				"id",
-				args,
-				{ compactView: true },
-				renderer,
-				ui,
-				process.cwd(),
-			);
-			const result = { content: [{ type: "image", data: png, mimeType: "image/png" }], isError: false };
-			const saved = structuredClone(result);
-			component.updateResult(result);
-			for (const width of [1, 12, 40]) compactRows(component, width);
-			component.setExpanded(true);
-			expect(component.render(40).join("\n")).toContain(protocol === "kitty" ? "\x1b_G" : "\x1b]1337;File=");
-			expect(result).toEqual(saved);
-		}
-	});
+	test.each(["kitty", "iterm2", "sixel"] as const)(
+		"%s image protocols are complete only when expanded",
+		(protocol) => {
+			setCapabilities({ images: protocol, trueColor: true, hyperlinks: false });
+			if (protocol === "sixel") {
+				setSixelEncoder(({ widthPx, heightPx }) => `\x1bP0;1q"1;1;${widthPx};${heightPx}#0;2;100;0;0#0~~~\x1b\\`);
+			}
+			try {
+				for (const renderer of [
+					undefined,
+					createAllToolRenderers().read,
+					{
+						renderShell: "self" as const,
+						renderCall: () => new Text("image tool", 0, 0),
+						renderResult: () =>
+							new Image(png, "image/png", { fallbackColor: (text) => text }, { maxWidthCells: 30 }),
+					},
+				]) {
+					const component = new ToolExecutionComponent(
+						"image",
+						"id",
+						args,
+						{ compactView: true },
+						renderer,
+						ui,
+						process.cwd(),
+					);
+					const result = { content: [{ type: "image", data: png, mimeType: "image/png" }], isError: false };
+					const saved = structuredClone(result);
+					component.updateResult(result);
+					for (const width of [1, 12, 40]) compactRows(component, width);
+					component.setExpanded(true);
+					expect(component.render(40).join("\n")).toContain(
+						protocol === "kitty" ? "\x1b_G" : protocol === "iterm2" ? "\x1b]1337;File=" : "\x1bP0;1q",
+					);
+					expect(result).toEqual(saved);
+				}
+			} finally {
+				setSixelEncoder(undefined);
+			}
+		},
+	);
 
 	test.each(["default", "self"] as const)(
 		"%s cards retain mutable child layouts and inner click priority",
@@ -699,24 +713,33 @@ describe("compact Activity and messages", () => {
 		expect(collapsed()).toEqual(preview);
 	});
 
-	test.each(["kitty", "iterm2"] as const)("collapsed custom cards show no %s image", (protocol) => {
+	test.each(["kitty", "iterm2", "sixel"] as const)("collapsed custom cards show no %s image", (protocol) => {
 		setCapabilities({ images: protocol, trueColor: true, hyperlinks: false });
-		const withImage: CustomMessage = {
-			...notice,
-			content: [
-				{ type: "text", text: "caption" },
-				{ type: "image", data: png, mimeType: "image/png" },
-			],
-		};
-		const inline = () => new Image(png, "image/png", { fallbackColor: (text) => text }, { maxWidthCells: 30 });
-		for (const component of [
-			new CustomMessageComponent(withImage, undefined, undefined, 1, [], undefined, undefined, true),
-			customMessage(inline)(true),
-			customEntry(inline)(true),
-		]) {
-			for (const width of [1, 12, 40]) compactRows(component, width);
-			component.setExpanded(true);
-			expect(component.render(40).join("\n")).toContain(protocol === "kitty" ? "\x1b_G" : "\x1b]1337;File=");
+		if (protocol === "sixel") {
+			setSixelEncoder(({ widthPx, heightPx }) => `\x1bP0;1q"1;1;${widthPx};${heightPx}#0;2;100;0;0#0~~~\x1b\\`);
+		}
+		try {
+			const withImage: CustomMessage = {
+				...notice,
+				content: [
+					{ type: "text", text: "caption" },
+					{ type: "image", data: png, mimeType: "image/png" },
+				],
+			};
+			const inline = () => new Image(png, "image/png", { fallbackColor: (text) => text }, { maxWidthCells: 30 });
+			for (const component of [
+				new CustomMessageComponent(withImage, undefined, undefined, 1, [], undefined, undefined, true),
+				customMessage(inline)(true),
+				customEntry(inline)(true),
+			]) {
+				for (const width of [1, 12, 40]) compactRows(component, width);
+				component.setExpanded(true);
+				expect(component.render(40).join("\n")).toContain(
+					protocol === "kitty" ? "\x1b_G" : protocol === "iterm2" ? "\x1b]1337;File=" : "\x1bP0;1q",
+				);
+			}
+		} finally {
+			setSixelEncoder(undefined);
 		}
 	});
 

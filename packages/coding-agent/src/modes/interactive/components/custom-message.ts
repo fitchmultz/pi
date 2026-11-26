@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { MarkdownTransformer, MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
-import { ensurePngTranscoder } from "../../../utils/image-convert.ts";
+import { ensureImageEncoders } from "../../../utils/image-convert.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { CompactPreview, handledMouseTarget } from "./compact-preview.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
@@ -215,7 +215,7 @@ export class CustomMessageComponent extends Container {
 				{ fallbackColor: (text: string) => theme.fg("customMessageText", text) },
 				{ maxWidthCells: this.imageWidthCells },
 			);
-			if (block.mimeType !== "image/png") ensurePngTranscoder(() => this.invalidate());
+			ensureImageEncoders(() => this.invalidate(), block.mimeType);
 			this.imageChildren.push(spacer, image);
 			this.addChild(spacer);
 			this.addChild(image);

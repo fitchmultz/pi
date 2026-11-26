@@ -460,6 +460,10 @@
             },
             {
               "type": "string",
+              "const": "sixel"
+            },
+            {
+              "type": "string",
               "const": "auto"
             },
             {
