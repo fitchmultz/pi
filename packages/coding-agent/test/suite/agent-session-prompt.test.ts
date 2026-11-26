@@ -16,7 +16,7 @@ import type { BeforeAgentStartEvent, ExtensionAPI, InputEvent } from "../../src/
 import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
 import { createTestResourceLoader } from "../utilities.ts";
-import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createHarness, getMessageText, getUserTexts, type Harness } from "./harness.ts";
 
 const processImage = vi.hoisted(() =>
 	vi.fn(async (_bytes: Uint8Array, mimeType: string) => ({
@@ -545,6 +545,246 @@ describe("AgentSession prompt characterization", () => {
 			releaseCompaction();
 			await compactPromise;
 		}
+	});
+
+	it("queues extension sendUserMessage prompts with deliverAs during manual compaction and runs them once compaction finishes", async () => {
+		const compactionStarted = Promise.withResolvers<void>();
+		const compactionReleased = Promise.withResolvers<void>();
+		const extensionErrors: string[] = [];
+		const queueUpdates: Array<{ steering: readonly string[]; followUp: readonly string[] }> = [];
+
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						compactionStarted.resolve();
+						await compactionReleased.promise;
+						return {
+							compaction: {
+								summary: "manual compacted",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: {},
+							},
+						};
+					});
+					// Mirrors /draft: runs as an extension command during compaction and submits via sendUserMessage.
+					pi.registerCommand("draft", {
+						description: "Submit drafted prompt",
+						handler: async (args, ctx) => {
+							if (ctx.isIdle()) {
+								pi.sendUserMessage(args);
+							} else {
+								pi.sendUserMessage(args, { deliverAs: "steer" });
+							}
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		await harness.session.bindExtensions({
+			onError: (err) => extensionErrors.push(`${err.extensionPath}: ${err.error}`),
+		});
+		harness.session.subscribe((event) => {
+			if (event.type === "queue_update") {
+				queueUpdates.push({ steering: [...event.steering], followUp: [...event.followUp] });
+			}
+		});
+
+		harness.setResponses([
+			fauxAssistantMessage("one"),
+			fauxAssistantMessage("two"),
+			fauxAssistantMessage("answered drafted prompt"),
+		]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+
+		const compactPromise = harness.session.compact();
+		await compactionStarted.promise;
+
+		try {
+			await harness.session.prompt("/draft drafted during compaction");
+			// Give fire-and-forget sendUserMessage a microtask turn to settle.
+			await Promise.resolve();
+			expect(extensionErrors).toEqual([]);
+			expect(harness.session.getSteeringMessages()).toEqual(["drafted during compaction"]);
+			expect(harness.session.pendingMessageCount).toBe(1);
+			expect(queueUpdates.at(-1)).toEqual({ steering: ["drafted during compaction"], followUp: [] });
+		} finally {
+			compactionReleased.resolve();
+			await compactPromise;
+		}
+
+		await harness.session.waitForIdle();
+		expect(extensionErrors).toEqual([]);
+		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(getUserTexts(harness)).toContain("drafted during compaction");
+		expect(harness.session.getLastAssistantText()).toBe("answered drafted prompt");
+	});
+
+	it("preserves images and FIFO order for multiple prompts queued during manual compaction, and supports clearQueue", async () => {
+		const compactionStarted = Promise.withResolvers<void>();
+		const compactionReleased = Promise.withResolvers<void>();
+
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						compactionStarted.resolve();
+						await compactionReleased.promise;
+						return {
+							compaction: {
+								summary: "manual compacted",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: {},
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage("one"),
+			fauxAssistantMessage("two"),
+			fauxAssistantMessage("reply 1"),
+			fauxAssistantMessage("reply 2"),
+		]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+
+		// First verify clearQueue() cancels prompts queued during compaction.
+		const compact1 = harness.session.compact();
+		await compactionStarted.promise;
+		const dispositions: PromptDisposition[] = [];
+		await harness.session.prompt("cancelled prompt", {
+			streamingBehavior: "steer",
+			preflightResult: (d) => dispositions.push(d),
+		});
+		expect(dispositions).toEqual(["queued"]);
+		expect(harness.session.clearQueue()).toEqual({ steering: ["cancelled prompt"], followUp: [] });
+		expect(harness.session.pendingMessageCount).toBe(0);
+		compactionReleased.resolve();
+		await compact1;
+		await harness.session.waitForIdle();
+		expect(getUserTexts(harness)).not.toContain("cancelled prompt");
+
+		// Now seed a second manual compaction and queue two prompts (first with image, second as followUp).
+		const compaction2Started = Promise.withResolvers<void>();
+		const compaction2Released = Promise.withResolvers<void>();
+		const harness2 = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						compaction2Started.resolve();
+						await compaction2Released.promise;
+						return {
+							compaction: {
+								summary: "manual compacted 2",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: {},
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness2);
+		harness2.setResponses([
+			fauxAssistantMessage("a"),
+			fauxAssistantMessage("b"),
+			fauxAssistantMessage("first queued reply"),
+			fauxAssistantMessage("second queued reply"),
+		]);
+		await harness2.session.prompt("seed 1");
+		await harness2.session.prompt("seed 2");
+
+		const compact2 = harness2.session.compact();
+		await compaction2Started.promise;
+		const tinyPngBase64 =
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+ip1sAAAAASUVORK5CYII=";
+		await harness2.session.sendUserMessage(
+			[
+				{ type: "text", text: "queued with image" },
+				{ type: "image", data: tinyPngBase64, mimeType: "image/png" },
+			],
+			{ deliverAs: "steer" },
+		);
+		await harness2.session.sendUserMessage("queued follow up", { deliverAs: "followUp" });
+		expect(harness2.session.getSteeringMessages()).toEqual(["queued with image"]);
+		expect(harness2.session.getFollowUpMessages()).toEqual(["queued follow up"]);
+		expect(harness2.session.pendingMessageCount).toBe(2);
+
+		compaction2Released.resolve();
+		await compact2;
+		await harness2.session.waitForIdle();
+
+		const userMessages = harness2.session.messages.filter((m) => m.role === "user");
+		const imageMsg = userMessages.find(
+			(m) => Array.isArray(m.content) && m.content.some((c) => c.type === "text" && c.text === "queued with image"),
+		);
+		expect(imageMsg).toBeDefined();
+		expect(Array.isArray(imageMsg?.content) && imageMsg.content.some((c) => c.type === "image")).toBe(true);
+		expect(getUserTexts(harness2).slice(-2)).toEqual(["queued with image", "queued follow up"]);
+		expect(harness2.session.getLastAssistantText()).toBe("second queued reply");
+	});
+
+	it("flushes queued prompts on abortCompaction (Escape) but not on session.abort()", async () => {
+		const createCompactingHarness = async () => {
+			const started = Promise.withResolvers<void>();
+			const harness = await createHarness({
+				settings: { compaction: { keepRecentTokens: 1 } },
+				extensionFactories: [
+					(pi) => {
+						pi.on("session_before_compact", async (event) => {
+							started.resolve();
+							await new Promise<void>((resolve) => {
+								if (event.signal.aborted) resolve();
+								else event.signal.addEventListener("abort", () => resolve(), { once: true });
+							});
+							return { cancel: true };
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.setResponses([
+				fauxAssistantMessage("one"),
+				fauxAssistantMessage("two"),
+				fauxAssistantMessage("ran after cancel"),
+			]);
+			await harness.session.prompt("first");
+			await harness.session.prompt("second");
+			return { harness, started };
+		};
+
+		// abortCompaction() (Escape during compaction) cancels compaction and still runs queued prompt.
+		const escapeCase = await createCompactingHarness();
+		const compactEscape = escapeCase.harness.session.compact().catch(() => undefined);
+		await escapeCase.started.promise;
+		await escapeCase.harness.session.sendUserMessage("run after escape", { deliverAs: "steer" });
+		escapeCase.harness.session.abortCompaction();
+		await compactEscape;
+		await escapeCase.harness.session.waitForIdle();
+		expect(getUserTexts(escapeCase.harness)).toContain("run after escape");
+		expect(escapeCase.harness.session.getLastAssistantText()).toBe("ran after cancel");
+
+		// session.abort() stops the session and does not start a new turn.
+		const abortCase = await createCompactingHarness();
+		const compactAbort = abortCase.harness.session.compact().catch(() => undefined);
+		await abortCase.started.promise;
+		await abortCase.harness.session.sendUserMessage("do not run after session abort", { deliverAs: "steer" });
+		await abortCase.harness.session.abort();
+		await compactAbort;
+		expect(getUserTexts(abortCase.harness)).not.toContain("do not run after session abort");
+		expect(abortCase.harness.session.pendingMessageCount).toBe(0);
+		expect(abortCase.harness.session.isIdle).toBe(true);
 	});
 
 	it("throws when prompting without a model", async () => {
