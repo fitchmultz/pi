@@ -181,7 +181,11 @@ export function evaluateCacheWarming(
 	const warmCost = price(model, { input: uncachedTailTokens, cacheRead: cachedPromptTokens, output: 1 });
 	const missCost = Math.max(0, cacheMissCost - cacheHitCost);
 	const continuationProbability =
-		phase === "streaming" ? 1 : isGoogleImplicitCache ? 0 : CACHE_WARMING_IDLE_CONTINUATION_PROBABILITY;
+		phase === "streaming"
+			? 1
+			: getCacheWarmingMaxIdleAgeMs(model) <= 0
+				? 0
+				: CACHE_WARMING_IDLE_CONTINUATION_PROBABILITY;
 	const economicsAvailable = promptTokens > 0 && (cacheHitCost > 0 || cacheMissCost > 0);
 	const expectedSavings = continuationProbability * missCost - warmCost;
 	return {

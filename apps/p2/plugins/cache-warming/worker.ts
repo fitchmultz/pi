@@ -1,6 +1,6 @@
 // Cache warming in the session worker: a Durable extension whose `afterResponse` hook starts warming each
 // conversation's last request (`./warmer.ts`), bound to the Harness, the settings and the worker's liveness.
-import { type Message, type Usage, usesGoogleImplicitCache } from "@earendil-works/pi-ai";
+import { getCacheWarmingMaxIdleAgeMs, type Message, type Usage, usesGoogleImplicitCache } from "@earendil-works/pi-ai";
 import { defineExtension, GenerationTask, hook, LiveDoc, UsageDoc, type UsageState } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT, defineFacet, local } from "@p2/app/v1";
 import { ExtensionSwitches } from "@p2/app/v1/node";
@@ -38,7 +38,8 @@ export default defineFacet((host) => {
 						const current = (await conversation.context(context)).messages;
 						if (!startsWith(current, request.messages)) return undefined;
 						// Only the main conversation and its `/tree` branches can warm while idle, and never for Google.
-						const idleEligible = generation === undefined && (await isTopLevel(session, conversationId, context));
+						const idleEligible =
+							getCacheWarmingMaxIdleAgeMs(request.model) > 0 && (await isTopLevel(session, conversationId, context));
 						// Read the run last: it can settle while we load the agent and context.
 						const live = await session.snapshot(LiveDoc, conversationId, context);
 						if (generation !== undefined && live?.run?.taskId !== generation.taskId) return undefined;
