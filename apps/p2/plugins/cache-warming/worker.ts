@@ -1,12 +1,12 @@
 // Cache warming in the session worker: a Durable extension whose `afterResponse` hook starts warming each
 // conversation's last request (`./warmer.ts`), bound to the Harness, the settings and the worker's liveness.
-import type { Message, Usage } from "@earendil-works/pi-ai";
+import { getCacheWarmingMaxIdleAgeMs, type Message, type Usage, usesGoogleImplicitCache } from "@earendil-works/pi-ai";
 import { defineExtension, GenerationTask, hook, LiveDoc, UsageDoc, type UsageState } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT, defineFacet, local } from "@p2/app/v1";
 import { ExtensionSwitches } from "@p2/app/v1/node";
 import { Extensions, harnessOf, isTopLevel, workerOf } from "@p2/app/v1/worker";
 import { WorkerModels } from "../models/contract.ts";
-import { ConversationWarmers } from "./warmer.ts";
+import { ConversationWarmers, type ReplayGeneration } from "./warmer.ts";
 
 /**
  * Keeps the prompt cache entries of the session's conversations warm (`./warmer.ts`): one per worker, started with
@@ -27,15 +27,9 @@ export default defineFacet((host) => {
 			async () =>
 				new ConversationWarmers({
 					mode: () => settings.settings.value.cacheWarming ?? "idle",
-					phase: async (conversationId, request) => {
-						const live = await durable().snapshot(LiveDoc, conversationId, context);
-						// A request is in flight, backing off or being polled: its response replaces the run.
-						if (live?.generation !== undefined) return undefined;
-						const running = live?.run !== undefined;
-						// After its run, a subagent's or one-shot agent's work is usually done; the main conversation and its
-						// `/tree` branches wait for the person or for agents' reports.
-						if (!running && !(await isTopLevel(durable(), conversationId, context))) return undefined;
-						const conversation = await durable().conversation(conversationId, context);
+					phase: async (conversationId, request, generation) => {
+						const session = durable();
+						const conversation = await session.conversation(conversationId, context);
 						if (conversation === undefined) return undefined;
 						const { model } = await conversation.agent(context);
 						if (model?.provider !== request.model.provider || model.modelId !== request.model.id)
@@ -43,7 +37,16 @@ export default defineFacet((host) => {
 						// A reset, compaction or edit replaced what the request sent: the next request starts differently.
 						const current = (await conversation.context(context)).messages;
 						if (!startsWith(current, request.messages)) return undefined;
-						return running ? "streaming" : "idle";
+						// Only the main conversation and its `/tree` branches can warm while idle, and never for Google.
+						const idleEligible =
+							getCacheWarmingMaxIdleAgeMs(request.model) > 0 &&
+							(await isTopLevel(session, conversationId, context));
+						// Read the run last: it can settle while we load the agent and context.
+						const live = await session.snapshot(LiveDoc, conversationId, context);
+						if (generation !== undefined && live?.run?.taskId !== generation.taskId) return undefined;
+						// afterResponse precedes the tool-round commit. Its own finished generation still owns the run.
+						if (live?.generation !== undefined && generation?.next !== "tool-round") return undefined;
+						return live?.run !== undefined ? "streaming" : idleEligible ? "idle" : undefined;
 					},
 					record: async (conversationId, { provider, model, usage }) => {
 						await durable().commit(async (tx) => {
@@ -61,7 +64,18 @@ export default defineFacet((host) => {
 				hook(GenerationTask, {
 					afterResponse: (message, api) => {
 						const request = harness().requestOf(message);
-						if (request !== undefined) warmers.value.start(api.conversationId, message, request, api.models);
+						if (request === undefined) return;
+						const generation: ReplayGeneration | undefined = usesGoogleImplicitCache(request.model.api)
+							? {
+									taskId: api.taskId,
+									next:
+										message.stopReason === "toolUse" &&
+										message.content.some((item) => item.type === "toolCall")
+											? "tool-round"
+											: "answer",
+								}
+							: undefined;
+						warmers.value.start(api.conversationId, message, request, api.models, generation);
 					},
 				}),
 			],

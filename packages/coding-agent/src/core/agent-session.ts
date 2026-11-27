@@ -1869,15 +1869,6 @@ export class AgentSession {
 			}
 		}
 
-		if (
-			event.type === "message_end" &&
-			event.message.role === "assistant" &&
-			event.message.stopReason !== "error" &&
-			event.message.stopReason !== "aborted"
-		) {
-			this._cacheWarmer?.onResponseCompleted();
-		}
-
 		// Emit to extensions first, then notify public listeners.
 		await this._emitExtensionEvent(event);
 		this._emit(event.type === "agent_end" ? { ...event, willRetry: this._willRetryAfterAgentEnd(event) } : event);
@@ -1911,6 +1902,10 @@ export class AgentSession {
 			if (event.message.role === "assistant") {
 				const assistantMsg = event.message as AssistantMessage;
 				this._lastAssistantMessage = assistantMsg;
+				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted") {
+					// An already-due Google replay must journal usage after the response it warms.
+					this._cacheWarmer?.onResponseCompleted();
+				}
 				if (assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "length") {
 					this._overflowRecoveryAttempted = false;
 				}

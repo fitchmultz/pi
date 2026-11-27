@@ -126,7 +126,7 @@ Records model-attributed usage that is not an assistant message and does not par
 {"type":"usage","id":"f6g7h8i9","parentId":"e5f6g7h8","timestamp":"2024-12-03T14:08:00.000Z","kind":"cache_warm","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":0,"output":0,"cacheRead":50000,"cacheWrite":0,"totalTokens":50000,"cost":{"input":0,"output":0,"cacheRead":0.015,"cacheWrite":0,"total":0.015}}}
 ```
 
-Usage entries contribute to session token and cost totals. Pi hides them from the conversation tree. Consumers should treat unknown `kind` values as normal usage rather than rejecting them.
+Cache warming entries can include `durationMs` (the replay duration in milliseconds) and `cacheWarmMissed: true` (the replay missed most or all of the cache). Both fields are optional for older entries. Usage entries contribute to session token and cost totals. Pi hides them from the conversation tree. Consumers should treat unknown `kind` values as normal usage rather than rejecting them.
 
 Cache-warm entries also preserve the warm request's optional `cacheIdentity`, `thinkingLevel`, and `providerThinkingLevel` metadata. Cache diagnostics compare the next response with that request, not an earlier assistant's account or effort. Older entries without this metadata remain unknown.
 

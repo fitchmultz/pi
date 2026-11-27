@@ -300,9 +300,9 @@ function SettingsSection({ id }: { id: OwnSection }) {
 				<Choice
 					label="Cache warming"
 					value={settings.cacheWarming}
-					fallback="While streaming and 30 minutes after"
+					fallback="While streaming and 30 minutes after (not for Google implicit caches)"
 					options={[
-						{ value: "idle", label: "While streaming and 30 minutes after" },
+						{ value: "idle", label: "While streaming and 30 minutes after (not for Google implicit caches)" },
 						{ value: "streaming", label: "Only while streaming" },
 						{ value: "off", label: "Off" },
 					]}

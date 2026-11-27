@@ -1,4 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	type Api,
 	type AssistantMessage,
@@ -15,6 +17,7 @@ import {
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
+import { Container } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import {
@@ -35,6 +38,9 @@ import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { type SessionEntry, SessionManager, type UsageEntry } from "../src/core/session-manager.ts";
 import { type CacheWarmingMode, SettingsManager } from "../src/core/settings-manager.ts";
+import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 import { createInMemoryModelRegistry } from "./model-runtime-test-utils.ts";
 
 const adaptiveModel: Model<Api> = {
@@ -50,6 +56,7 @@ const openaiModel: Model<Api> = {
 	promptCache: { short: 300, long: 86_400 },
 };
 const unknownModel: Model<Api> = { ...adaptiveModel, promptCache: undefined };
+const neon = getBuiltinModel("google", "gemini-4-neon");
 
 const warmUsage: Usage = {
 	input: 0,
@@ -104,7 +111,8 @@ function fakeRuntime(
 	const state = { mode: options.mode ?? "idle", branch: options.branch ?? branchWithPrompt(100_000) };
 	const warmer = new CacheWarmer(
 		{
-			streamSimple: (model, _context, streamOptions) => {
+			streamSimple: (model, _context, streamOptions, onPrepared) => {
+				onPrepared?.(model, streamOptions ?? {});
 				calls.push({ model, options: streamOptions });
 				return {
 					result: () => (options.result ?? (async (m: Model<Api>) => response(m)))(model),
@@ -678,14 +686,19 @@ describe("cache warming", () => {
 	});
 
 	it.each([
-		{ stopReason: "stop", cacheRead: 0 },
-		{ stopReason: "stop", cacheRead: 58_000 },
-		{ stopReason: "error", cacheRead: 0 },
-		{ stopReason: "aborted", cacheRead: 0 },
+		{ stopReason: "stop", responseMs: 35_000, cacheRead: 0 },
+		{ stopReason: "stop", responseMs: 35_000, cacheRead: 17_823 },
+		{ stopReason: "stop", responseMs: 35_000, cacheRead: 327_633 },
+		{ stopReason: "stop", responseMs: 35_000, cacheRead: 327_633, warmPayloadMs: 3_000 },
+		{ stopReason: "stop", responseMs: 35_000, cacheRead: 327_633, warmPayloadMs: 12_000 },
+		{ stopReason: "stop", responseMs: 67_000, cacheRead: 327_633 },
+		{ stopReason: "stop", responseMs: 72_000, cacheRead: 0 },
+		{ stopReason: "error", responseMs: 90_000, cacheRead: 0 },
+		{ stopReason: "aborted", responseMs: 90_000, cacheRead: 0 },
 	])(
-		"waits for a 90-second Gemini stream ($stopReason, $cacheRead replay cache-read tokens)",
-		async ({ stopReason, cacheRead }) => {
-			const model = { ...getBuiltinModel("google", "gemini-4-neon"), promptCache: { short: 75 } };
+		"waits for a $responseMs ms Gemini response ($stopReason, $cacheRead replay cache-read tokens, payload delay $warmPayloadMs)",
+		async ({ stopReason, responseMs, cacheRead, warmPayloadMs }) => {
+			const model = neon;
 			const credentials = AuthStorage.inMemory();
 			await credentials.modify(model.provider, async () => ({ type: "api_key", key: "offline-key" }));
 			const modelRuntime = await ModelRuntime.create({ credentials, modelsPath: null, allowModelNetwork: false });
@@ -699,6 +712,12 @@ describe("cache warming", () => {
 			const firstResponse = Promise.withResolvers<void>();
 			const reachedSettle = Promise.withResolvers<void>();
 			const beforeSettle = Promise.withResolvers<void>();
+			const reachedMessageEnd = Promise.withResolvers<void>();
+			const finishMessageEnd = Promise.withResolvers<void>();
+			const reachedWarmPayload = Promise.withResolvers<void>();
+			const finishWarmPayload = Promise.withResolvers<void>();
+			const holdMessageEnd = responseMs === 67_000;
+			let payloads = 0;
 			const resourceLoader = new DefaultResourceLoader({
 				cwd: process.cwd(),
 				agentDir: tmpdir(),
@@ -710,6 +729,18 @@ describe("cache warming", () => {
 				noContextFiles: true,
 				extensionFactories: [
 					(pi) => {
+						pi.on("before_provider_request", async () => {
+							if (++payloads === 2 && warmPayloadMs) {
+								reachedWarmPayload.resolve();
+								await finishWarmPayload.promise;
+							}
+						});
+						pi.on("message_end", (event) => {
+							if (holdMessageEnd && event.message.role === "assistant") {
+								reachedMessageEnd.resolve();
+								return finishMessageEnd.promise;
+							}
+						});
 						pi.on("agent_before_settle", () => {
 							reachedSettle.resolve();
 							return beforeSettle.promise;
@@ -731,10 +762,10 @@ describe("cache warming", () => {
 						id: isFirst ? "first" : "warm",
 						status: "completed",
 						usage: {
-							total_input_tokens: 60_000,
-							total_cached_tokens: isFirst ? 58_000 : cacheRead,
+							total_input_tokens: 329_682,
+							total_cached_tokens: isFirst ? 327_633 : cacheRead,
 							total_output_tokens: 1,
-							total_tokens: 60_001,
+							total_tokens: 329_683,
 						},
 					},
 				};
@@ -774,7 +805,8 @@ describe("cache warming", () => {
 			const prompt = session.prompt("Keep this Gemini prompt warm.");
 			try {
 				await firstDelta.promise;
-				await vi.advanceTimersByTimeAsync(90_000);
+				const startedAt = Date.now();
+				await vi.advanceTimersByTimeAsync(responseMs);
 				expect(fetch).toHaveBeenCalledTimes(1);
 				expect(session.cacheWarmingStatus).toEqual({ state: "inactive", reason: "waiting for response" });
 
@@ -791,44 +823,144 @@ describe("cache warming", () => {
 					return;
 				}
 
-				const completedAt = Date.now();
 				firstResponse.resolve();
+				if (holdMessageEnd) {
+					await reachedMessageEnd.promise;
+					await vi.advanceTimersByTimeAsync(1_000);
+					expect(fetch).toHaveBeenCalledTimes(1);
+					finishMessageEnd.resolve();
+				}
 				await reachedSettle.promise;
-				expect(session.cacheWarmingStatus?.nextWarmAt).toBe(completedAt + 65_000);
-
-				await vi.advanceTimersByTimeAsync(30_000);
-				beforeSettle.resolve();
-				await prompt;
-				expect(session.cacheWarmingStatus).toMatchObject({
-					nextWarmAt: completedAt + 65_000,
-					decision: { phase: "idle", continuationProbability: 0.5, action: "warm" },
-				});
-				await vi.advanceTimersByTimeAsync(34_999);
+				if (responseMs === 72_000) {
+					expect(session.cacheWarmingStatus).toEqual({
+						state: "inactive",
+						reason: "cache refresh deadline missed",
+					});
+					await vi.advanceTimersByTimeAsync(65_000);
+					expect(fetch).toHaveBeenCalledTimes(1);
+					return;
+				}
+				const nextWarmAt = Math.max(Date.now(), startedAt + 65_000);
+				expect(session.cacheWarmingStatus?.nextWarmAt).toBe(nextWarmAt);
+				// Responses that land in the late margin warm immediately, without moving the deadline.
+				const waitMs = nextWarmAt - Date.now();
+				if (waitMs > 0) await vi.advanceTimersByTimeAsync(waitMs - 1);
 				expect(fetch).toHaveBeenCalledTimes(1);
-				await vi.advanceTimersByTimeAsync(1);
+				await vi.advanceTimersByTimeAsync(waitMs > 0 ? 1 : 0);
 
 				const usageEntries = () => sessionManager.getEntries().filter((entry) => entry.type === "usage");
-				expect(usageEntries()).toMatchObject([
-					{ kind: "cache_warm", usage: { input: 60_000 - cacheRead, cacheRead } },
-				]);
-				if (cacheRead === 0) {
-					expect(session.cacheWarmingStatus?.reason).toBe("cache warm missed");
+				if (warmPayloadMs) {
+					await reachedWarmPayload.promise;
+					await vi.advanceTimersByTimeAsync(warmPayloadMs);
+					finishWarmPayload.resolve();
+					await vi.advanceTimersByTimeAsync(0);
+					if (warmPayloadMs === 12_000) {
+						expect(fetch).toHaveBeenCalledTimes(1);
+						expect(usageEntries()).toHaveLength(0);
+						expect(session.cacheWarmingStatus).toEqual({
+							state: "inactive",
+							reason: "cache refresh deadline missed",
+						});
+						return;
+					}
+					expect(session.cacheWarmingStatus?.nextWarmAt).toBe(startedAt + 68_000 + 65_000);
 				}
+				const missed = cacheRead !== 327_633;
+				expect(usageEntries()).toMatchObject([
+					{ kind: "cache_warm", durationMs: warmPayloadMs ?? 0, usage: { input: 329_682 - cacheRead, cacheRead } },
+				]);
+				expect(usageEntries()[0]?.cacheWarmMissed).toBe(missed ? true : undefined);
+				expect(
+					sessionManager
+						.getBranch()
+						.slice(-2)
+						.map((entry) =>
+							entry.type === "message" ? entry.message.role : entry.type === "usage" ? entry.kind : entry.type,
+						),
+				).toEqual(["assistant", "cache_warm"]);
+				beforeSettle.resolve();
+				await prompt;
+				expect(session.cacheWarmingStatus?.reason).toBe(missed ? "cache warm missed" : "agent run settled");
+				expect(vi.getTimerCount()).toBe(0);
 				await vi.advanceTimersByTimeAsync(600_000);
-				const expectedWarms = cacheRead === 0 ? 1 : 9;
-				expect(fetch).toHaveBeenCalledTimes(1 + expectedWarms);
-				expect(usageEntries()).toHaveLength(expectedWarms);
-				expect(session.cacheWarmingStatus?.reason).toBe(
-					cacheRead === 0 ? "cache warm missed" : "10-minute idle safety limit reached",
-				);
+				expect(fetch).toHaveBeenCalledTimes(2);
+				expect(usageEntries()).toHaveLength(1);
 			} finally {
 				firstResponse.resolve();
+				finishMessageEnd.resolve();
+				finishWarmPayload.resolve();
 				beforeSettle.resolve();
 				await prompt;
 				session.dispose();
 			}
 		},
 	);
+
+	it("anchors the next Google replay to the last dispatch and stops after a failed warm", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+		const firstWarm = Promise.withResolvers<AssistantMessage>();
+		let attempts = 0;
+		const { warmer, calls, warmedEntries } = fakeRuntime({
+			result: (model) => (attempts++ === 0 ? firstWarm.promise : Promise.resolve(response(model, "error"))),
+		});
+		const google = request(neon);
+		warmer.start(google, current, google);
+		await vi.advanceTimersByTimeAsync(10_000);
+		warmer.onResponseCompleted();
+		await vi.advanceTimersByTimeAsync(55_000);
+		expect(calls).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(40_000);
+		firstWarm.resolve({
+			...response(neon),
+			usage: { ...warmUsage, input: 2_050, cacheRead: 97_950 },
+		});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(warmedEntries[0]?.durationMs).toBe(40_000);
+		expect(warmer.status.nextWarmAt).toBe(130_000);
+		await vi.advanceTimersByTimeAsync(25_000);
+		expect(calls).toHaveLength(2);
+		expect(warmer.status).toMatchObject({ state: "inactive", reason: "cache warm failed" });
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("re-evaluates an in-flight streaming decision once the run goes idle", async () => {
+		vi.useFakeTimers();
+		const streamingDecision = Promise.withResolvers<CacheWarmingAction>();
+		const { warmer, calls, events } = fakeRuntime({
+			branch: branchWithPrompt(100_000),
+			decide: (event) => (event.continuationProbability === 1 ? streamingDecision.promise : event.action),
+		});
+		warmer.start(request(), current, request());
+		await vi.advanceTimersByTimeAsync(270_000);
+		expect(events.map((event) => event.action)).toEqual(["warm"]);
+		warmer.onAgentSettled();
+		streamingDecision.resolve("warm");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(events.map((event) => [event.continuationProbability, event.action])).toEqual([
+			[1, "warm"],
+			[0.15, "stop"],
+		]);
+		expect(calls).toHaveLength(0);
+	});
+
+	it("stops an in-flight Google streaming decision immediately on settle", async () => {
+		vi.useFakeTimers();
+		const streamingDecision = Promise.withResolvers<CacheWarmingAction>();
+		const { warmer, calls, events } = fakeRuntime({ decide: () => streamingDecision.promise });
+		const google = request(neon);
+		warmer.start(google, current, google);
+		warmer.onResponseCompleted();
+		await vi.advanceTimersByTimeAsync(65_000);
+		expect(events).toHaveLength(1);
+		warmer.onAgentSettled();
+		expect(warmer.status).toEqual({ state: "inactive", reason: "agent run settled" });
+		streamingDecision.resolve("warm");
+		await vi.advanceTimersByTimeAsync(65_000);
+		expect(calls).toHaveLength(0);
+		expect(events).toHaveLength(1);
+		expect(vi.getTimerCount()).toBe(0);
+	});
 
 	it.each([
 		{ reasoning: "high", thinkingLevel: "high" },
@@ -839,6 +971,7 @@ describe("cache warming", () => {
 			result: async (model) => ({
 				...response(model),
 				cacheIdentity: "warm-account",
+				durationMs: 37,
 				providerThinkingLevel: reasoning,
 			}),
 		});
@@ -880,6 +1013,7 @@ describe("cache warming", () => {
 				model: adaptiveModel.id,
 				usage: warmUsage,
 				cacheIdentity: "warm-account",
+				durationMs: 37,
 				thinkingLevel,
 				providerThinkingLevel: reasoning,
 			},
@@ -1157,8 +1291,63 @@ describe("cache warming", () => {
 		);
 	});
 
+	it("renders a persisted warm miss separately from adjacent healthy warms", () => {
+		initTheme("dark");
+		const dir = mkdtempSync(join(tmpdir(), "pi-warm-notice-"));
+		try {
+			const manager = SessionManager.create(dir, dir);
+			manager.appendMessage(response(neon));
+			const note = "extension override";
+			manager.appendUsage("cache_warm", neon.provider, neon.id, warmUsage, note);
+			manager.appendUsage("cache_warm", neon.provider, neon.id, warmUsage, note);
+			manager.appendUsage(
+				"cache_warm",
+				neon.provider,
+				neon.id,
+				{ ...warmUsage, input: 311_859, cacheRead: 17_823, cost: { ...warmUsage.cost, total: 0.938 } },
+				note,
+				{ cacheWarmMissed: true, durationMs: 250 },
+			);
+			manager.appendUsage("cache_warm", neon.provider, neon.id, warmUsage, note);
+			const file = manager.getSessionFile();
+			if (!file) throw new Error("expected the cache warming session to be saved");
+			const entries = SessionManager.open(file)
+				.getBranch()
+				.filter((entry) => entry.type === "usage");
+			expect(entries[2]).toMatchObject({ cacheWarmMissed: true, durationMs: 250 });
+
+			const chatContainer = new Container();
+			const mode = InteractiveMode.prototype;
+			const renderer = Object.assign(Object.create(mode), {
+				chatContainer,
+				runtimeHost: {
+					session: { settingsManager: SettingsManager.inMemory({ notices: { cacheWarming: true } }) },
+				},
+			}) as {
+				renderSessionItems(
+					entries: UsageEntry[],
+					messageMeta: undefined,
+					options: { suppressRequestRender: true },
+				): void;
+			};
+			renderer.renderSessionItems(entries, undefined, { suppressRequestRender: true });
+			expect(
+				chatContainer
+					.render(120)
+					.map((line) => stripAnsi(line).trim())
+					.filter(Boolean),
+			).toEqual([
+				"Cache warmed (extension override): $0.020",
+				"Cache warm missed (extension override): $0.938",
+				"Cache warmed (extension override): $0.010",
+			]);
+			expect(formatCacheWarmingUsage(0.938, undefined, true)).toBe("Cache warm missed: $0.938");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("uses the catalog's 75-second warming budget for Gemini 4", () => {
-		const neon = getBuiltinModel("google", "gemini-4-neon");
 		expect(neon.promptCache).toEqual({ short: 75 });
 		expect(getPromptCacheTtlMs(neon, { cacheRetention: "long" })).toBe(75_000);
 		expect(getCacheWarmingDelayMs(75_000)).toBe(65_000);
@@ -1177,7 +1366,7 @@ describe("cache warming", () => {
 	});
 
 	it("keeps idle warming active across turn_end boundaries and context refreshes with custom messages", async () => {
-		const model = getBuiltinModel("google", "gemini-4-neon");
+		const model = adaptiveModel;
 		const credentials = AuthStorage.inMemory();
 		await credentials.modify(model.provider, async () => ({
 			type: "api_key",
@@ -1245,11 +1434,11 @@ describe("cache warming", () => {
 						content: [{ type: "text", text: "ok" }],
 						usage: {
 							...warmUsage,
-							input: 2_050,
+							input: 0,
 							output: 10,
 							cacheRead: 200_000,
 							cacheWrite: 0,
-							totalTokens: 202_060,
+							totalTokens: 200_010,
 						},
 					},
 				});

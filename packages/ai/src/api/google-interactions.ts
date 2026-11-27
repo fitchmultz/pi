@@ -119,6 +119,7 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 		const delta = entry && owner !== undefined ? await getDelta(entry, payload, steps, owner) : undefined;
 		let previousId = delta && entry ? entry.id : undefined;
 		let preferred =
+			!options?.cacheWarm &&
 			strict.hasPreferred &&
 			payload.tools === strict.tools &&
 			payload.generation_config?.tool_choice === "validated";

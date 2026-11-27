@@ -568,7 +568,7 @@ export class SettingsSelectorComponent extends Container {
 				id: "cache-warming-mode",
 				label: "Cache warming",
 				description:
-					"off; streaming while the agent runs; idle also between runs while continuation stays profitable",
+					"streaming warms while the agent runs; idle also warms between runs, except for Google implicit caches",
 				currentValue: config.cacheWarmingMode,
 				values: [...CACHE_WARMING_MODES],
 			},

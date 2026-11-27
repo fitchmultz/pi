@@ -1716,8 +1716,8 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   **Compaction by cost** (`cold.ts`): while its prompt cache is warm a turn reads the context at about a tenth of the
   input price and a summary (never cached) costs it all at full price, so only the regular cutoff applies; once cold
   the next turn rewrites the cache at full price anyway, so it compacts first. Cold: the last answer's time plus the
-  model's cache lifetime (`getPromptCacheTtlMs`, `cacheRetention`) plus its idle warming window (10 minutes for
-  Google implicit caches and 30 minutes otherwise, with `cacheWarming: "idle"`); at once for a model without a
+  model's cache lifetime (`getPromptCacheTtlMs`, `cacheRetention`) plus its idle warming window (30 minutes with
+  `cacheWarming: "idle"`, except for Google implicit caches, which do not warm while idle); at once for a model without a
   prompt cache. It compacts when the last answer after the context's head reported at least 150k tokens, or the
   regular cutoff (window − `reserveTokens`) when lower, compaction is enabled, and the conversation is idle:
   from a timer set after each answer (only while the
@@ -1810,10 +1810,12 @@ call, hold, method, relay and activation; nothing is measured or walked for it. 
   Durable extension; each `afterResponse` starts the conversation's run, replacing the last one. The request comes from
   the core: the Harness's `Models` proxy remembers each `streamSimple` request by the message `result()` resolved with
   (`WeakMap`); `HarnessParts.requestOf(message)` takes it once as a read-only `ModelRequest` (Durable's frozen entry
-  messages; never mutate, copy or freeze it; resending skips `beforeProviderRequest`). `completeSimple` (compaction,
-  the refreshes) is not remembered. Each refresh: no phase while `pi.live.generation` exists, streaming while
-  `pi.live.run` exists, idle only for top-level conversations, none once the model or the context's start changed;
-  usage goes to `pi.usage`. Timers live in the plugin's native (a reload ends them); liveness kind `cacheWarming`.
+  messages; never mutate, copy or freeze it). Replays use `streamSimple` directly, skipping Durable's
+  `beforeProviderRequest` hook. Each refresh checks that the model and context prefix still match. A generation in
+  flight blocks a replay, except when the finished Google response belongs to that generation and is entering its tool
+  round. Google implicit caches warm only while the run is active; Pi rechecks at payload send, and measures each
+  replay window from the preceding request's dispatch. Other providers can also warm between runs in top-level conversations.
+  Usage goes to `pi.usage`. Timers live in the plugin's native (a reload ends them); liveness kind `cacheWarming`.
   Setting `cacheWarming` (`"idle"`, `"streaming"`, `"off"`). Tests: `cache-warming.test.ts`,
   `harness-requests.test.ts` (pins that the hook's message is the object `result()` resolved with).
 - **MCP servers** (`plugins/mcp`, plan `docs/mcp-durable.md`, WP6-8): the server's `McpManager` (local,

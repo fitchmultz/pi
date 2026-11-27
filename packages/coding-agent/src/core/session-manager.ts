@@ -91,7 +91,7 @@ export interface ModelChangeEntry extends SessionEntryBase {
 
 export interface UsageEntry
 	extends SessionEntryBase,
-		Pick<AssistantMessage, "cacheIdentity" | "thinkingLevel" | "providerThinkingLevel"> {
+		Pick<AssistantMessage, "cacheIdentity" | "durationMs" | "thinkingLevel" | "providerThinkingLevel"> {
 	type: "usage";
 	/** Arbitrary usage category, such as "cache_warm". */
 	kind: string;
@@ -100,6 +100,8 @@ export interface UsageEntry
 	usage: Usage;
 	/** Optional human-readable qualifier for usage notices. */
 	note?: string;
+	/** This cache warming replay missed or read too little of the original cache to keep warming. */
+	cacheWarmMissed?: boolean;
 }
 
 /**
@@ -1765,7 +1767,10 @@ export class SessionManager {
 		model: string,
 		usage: Usage,
 		note?: string,
-		metadata?: Pick<UsageEntry, "cacheIdentity" | "thinkingLevel" | "providerThinkingLevel">,
+		metadata?: Pick<
+			UsageEntry,
+			"cacheIdentity" | "cacheWarmMissed" | "durationMs" | "thinkingLevel" | "providerThinkingLevel"
+		>,
 	): UsageEntry {
 		const entry: UsageEntry = {
 			type: "usage",
@@ -1778,6 +1783,8 @@ export class SessionManager {
 			usage,
 			...(note ? { note } : {}),
 			cacheIdentity: metadata?.cacheIdentity,
+			cacheWarmMissed: metadata?.cacheWarmMissed,
+			durationMs: metadata?.durationMs,
 			thinkingLevel: metadata?.thinkingLevel,
 			providerThinkingLevel: metadata?.providerThinkingLevel,
 		};
