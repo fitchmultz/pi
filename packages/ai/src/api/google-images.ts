@@ -152,8 +152,7 @@ function buildParams(
 
 	const imageConfig: ImageConfig = {};
 	if (options?.aspectRatio !== undefined) imageConfig.aspectRatio = options.aspectRatio;
-	const size = options?.size ?? options?.imageSize;
-	if (size !== undefined) imageConfig.imageSize = size;
+	if (options?.size !== undefined) imageConfig.imageSize = options.size;
 
 	return {
 		model: model.id,

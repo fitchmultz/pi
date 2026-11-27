@@ -139,7 +139,7 @@ describe("google-images", () => {
 			{
 				apiKey: "explicit-google-key",
 				aspectRatio: "3:2",
-				imageSize: "2K",
+				size: "2K",
 				fetch: async (input, init) => {
 					seenHeaders.push(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
 					const bodyText =

@@ -274,14 +274,14 @@ function checkImagesContext(context: unknown): ImagesContext {
 
 type CodemodeImagesOptions = Pick<ImagesOptions, "aspectRatio" | "size">;
 
-const IMAGES_OPTION_KEYS = new Set(["aspectRatio", "size", "imageSize"]);
+const IMAGES_OPTION_KEYS = new Set(["aspectRatio", "size"]);
 
 /** Validate optional generation options from a script; unknown keys throw, so typos and request fields such as `apiKey` never pass silently. */
 function checkImagesOptions(options: unknown): CodemodeImagesOptions | undefined {
 	if (options === undefined || options === null) return undefined;
 	const fail = (problem: string) =>
 		new Error(
-			`models.generateImages() ${problem}. Expected options: { aspectRatio?, size? } (imageSize is an alias for size). See "Generate images" in ${CODEMODE_DOCS_PATH}.`,
+			`models.generateImages() ${problem}. Expected options: { aspectRatio?, size? }. See "Generate images" in ${CODEMODE_DOCS_PATH}.`,
 		);
 	if (typeof options !== "object" || Array.isArray(options)) {
 		throw fail(`expects an options object as its third argument, got ${describeValue(options)}`);
@@ -296,13 +296,11 @@ function checkImagesOptions(options: unknown): CodemodeImagesOptions | undefined
 		}
 		checked.aspectRatio = record.aspectRatio.trim();
 	}
-	for (const key of ["imageSize", "size"] as const) {
-		const value = record[key];
-		if (value === undefined) continue;
-		if (typeof value !== "string" || value.trim().length === 0) {
-			throw fail(`options.${key} must be a non-empty string, got ${describeValue(value)}`);
+	if (record.size !== undefined) {
+		if (typeof record.size !== "string" || record.size.trim().length === 0) {
+			throw fail(`options.size must be a non-empty string, got ${describeValue(record.size)}`);
 		}
-		checked.size = value.trim();
+		checked.size = record.size.trim();
 	}
 	return Object.keys(checked).length > 0 ? checked : undefined;
 }

@@ -831,7 +831,7 @@ for (const block of result.output) {
 }
 ```
 
-The third argument takes the usual request options plus `aspectRatio` (e.g. `'16:9'`) and `size` (e.g. `'1K'`, `'2K'`, `'4K'`). `openrouter-images` sends them to OpenRouter's `image_config` unchanged. `google-images` sends `size` as Gemini's `imageSize`; the old option name `imageSize` also works for Google. Which values work depends on the model:
+The third argument takes the usual request options plus `aspectRatio` (e.g. `'16:9'`) and `size` (e.g. `'1K'`, `'2K'`, `'4K'`). Supported values depend on the model:
 
 ```typescript
 const wide = await models.generateImages(
