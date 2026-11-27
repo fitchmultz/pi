@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { mock, test } from "node:test";
 import {
 	type Api,
+	type AssistantMessage,
 	type CacheRetention,
 	type CacheWarmingPhase,
 	createAssistantMessageEventStream,
@@ -22,13 +23,39 @@ import {
 } from "@earendil-works/pi-ai";
 import { getBuiltinModel } from "@earendil-works/pi-ai/providers/all";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import type { ConversationId, ConversationView, LiveState, UsageState } from "@earendil-works/pi-durable";
-import { BACKGROUND_CONTEXT } from "@p2/app/v1";
+import {
+	type ConversationId,
+	type ConversationView,
+	defineExtension,
+	defineTool,
+	GenerationTask,
+	hook,
+	LiveDoc,
+	type LiveState,
+	type UsageState,
+} from "@earendil-works/pi-durable";
+import { obj } from "@earendil-works/pi-schema";
+import { BACKGROUND_CONTEXT, followNative, whenLive } from "@p2/app/v1";
 import type { ModelRequest } from "@p2/app/v1/worker";
 import { type CacheWarmingMode, ConversationWarmers, type WarmerHost } from "../../plugins/cache-warming/warmer.ts";
+import cacheWarmingWorker from "../../plugins/cache-warming/worker.ts";
 import { Chat } from "../../plugins/chat/contract.ts";
+import { WorkerModels } from "../../plugins/models/contract.ts";
 import { Sessions } from "../../plugins/sessions/contract.ts";
-import { holdIn, startFixture, until } from "./helpers.ts";
+import { createHost, defineFacet, Session } from "../../src/runtime/chord.ts";
+import { openHostStore, sessionDirectory } from "../../src/runtime/host-dirs.ts";
+import { HOST } from "../../src/runtime/principals.ts";
+import {
+	Extensions,
+	HarnessConfig,
+	HarnessHost,
+	HarnessNative,
+	Liveness,
+	SessionLocation,
+	type WorkerInit,
+	workerCore,
+} from "../../src/runtime/worker.ts";
+import { APP, holdIn, NO_IMAGES, startFixture, until } from "./helpers.ts";
 
 const MODEL: Model<"pi-messages"> = {
 	id: "claude-opus-5-5",
@@ -62,28 +89,38 @@ function setup(t: { after(fn: () => void): void }, mode: CacheWarmingMode = "idl
 		sent: [] as ModelsSimpleStreamOptions[],
 		recorded: 0,
 		cacheRead: 0,
+		input: 0,
 		retention: "short" as CacheRetention,
 		authReady: Promise.resolve(),
+		replyReady: Promise.resolve(),
 		failed: false,
 	};
-	const respond = (_model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions) => {
-		options?.signal?.throwIfAborted();
+	const respond = (model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions) => {
 		assert.deepEqual(context.messages, REQUEST.messages);
 		assert.ok(options);
-		state.sent.push(options);
 		const answer = fauxAssistantMessage([]);
 		const message = {
 			...answer,
-			usage: { ...answer.usage, cacheRead: state.cacheRead },
+			usage: { ...answer.usage, input: state.input, cacheRead: state.cacheRead },
 			stopReason: state.failed ? ("error" as const) : ("length" as const),
 		};
 		const stream = createAssistantMessageEventStream();
-		if (message.stopReason === "error") stream.push({ type: "error", reason: "error", error: message });
-		else {
-			stream.push({ type: "start", partial: message });
-			stream.push({ type: "done", reason: "length", message });
-		}
-		stream.end();
+		void (async () => {
+			try {
+				await options.onPayload?.({}, model);
+				options.signal?.throwIfAborted();
+				state.sent.push(options);
+				await state.replyReady;
+				if (message.stopReason === "error") stream.push({ type: "error", reason: "error", error: message });
+				else {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "length", message });
+				}
+			} catch {
+				stream.push({ type: "error", reason: "aborted", error: { ...message, stopReason: "aborted" } });
+			}
+			stream.end();
+		})();
 		return stream;
 	};
 	const models = createModels();
@@ -197,37 +234,60 @@ test("schedules from the prepared dispatch rather than the response or replay op
 	assert.equal(state.sent.length, 1);
 });
 
-test("arms the first Gemini replay 65 s after a response that took 90 s", async (t) => {
+test("anchors Gemini replays to dispatch, including time spent preparing a payload", async (t) => {
 	const { state, start, advance } = setup(t, "idle", GEMINI);
-	state.phase = "idle";
 	state.cacheRead = 57_950;
-	await advance(90_000);
-	start(60_000, "stop", REQUEST.options, 0);
-	await advance(64_999);
+	state.input = 2_050;
+	const payload = Promise.withResolvers<void>();
+	const reply = Promise.withResolvers<void>();
+	state.replyReady = reply.promise;
+	await advance(35_000);
+	start(60_000, "toolUse", { ...REQUEST.options, onPayload: () => payload.promise }, 0);
+	await advance(29_999);
 	assert.equal(state.sent.length, 0);
 	await advance(1);
+	await advance(2_000);
+	assert.equal(state.sent.length, 0);
+	payload.resolve();
+	await advance(0);
 	assert.equal(state.sent.length, 1);
+	await advance(40_000);
+	reply.resolve();
+	await advance(0);
 	assert.equal(state.recorded, 1);
+	await advance(24_999);
+	assert.equal(state.sent.length, 1);
+	await advance(1);
+	assert.equal(state.sent.length, 2);
 });
 
-test("stops Gemini replays at the ten-minute idle limit", async (t) => {
+test("does not arm a Gemini replay when the response took 72 s", async (t) => {
 	const { state, start, advance } = setup(t, "idle", GEMINI);
-	state.phase = "idle";
+	await advance(72_000);
+	start(60_000, "toolUse", REQUEST.options, 0);
+	assert.equal(state.alive, 0);
+	await advance(65_000);
+	assert.equal(state.sent.length, 0);
+});
+
+test("stops Gemini replays on idle transition even under idle mode", async (t) => {
+	const { state, start, advance } = setup(t, "idle", GEMINI);
 	state.cacheRead = 57_950;
+	state.input = 2_050;
 	start(60_000);
-	for (let refresh = 0; refresh < 9; refresh++) await advance(65_000);
-	assert.equal(state.sent.length, 9);
-	assert.equal(state.recorded, 9);
-	await advance(15_000);
-	assert.equal(state.alive, 0);
 	await advance(65_000);
-	assert.equal(state.sent.length, 9);
+	assert.equal(state.sent.length, 1);
+	state.phase = "idle";
+	await advance(65_000);
+	assert.equal(state.sent.length, 1);
+	assert.equal(state.alive, 0);
 });
 
-test("records a cold Gemini replay and cancels the next one", async (t) => {
+test("records a partial Gemini miss and cancels the next replay", async (t) => {
 	const { state, start, advance } = setup(t, "idle", GEMINI);
-	state.phase = "idle";
-	start(60_000);
+	state.cacheRead = 17_823;
+	state.input = 311_859;
+	start(329_682);
 	await advance(65_000);
 	assert.equal(state.sent.length, 1);
 	assert.equal(state.recorded, 1);
@@ -235,6 +295,34 @@ test("records a cold Gemini replay and cancels the next one", async (t) => {
 	await advance(65_000);
 	assert.equal(state.sent.length, 1);
 });
+
+test("stops a failed Gemini replay without resetting the cache clock", async (t) => {
+	const { state, start, advance } = setup(t, "idle", GEMINI);
+	state.failed = true;
+	start(60_000);
+	await advance(65_000);
+	assert.equal(state.sent.length, 1);
+	assert.equal(state.alive, 0);
+	await advance(65_000);
+	assert.equal(state.sent.length, 1);
+});
+
+for (const interruption of ["idle transition", "refresh deadline"] as const) {
+	test(`cancels Gemini after auth prep on ${interruption}`, async (t) => {
+		const { state, start, advance } = setup(t, "idle", GEMINI);
+		const auth = Promise.withResolvers<void>();
+		state.authReady = auth.promise;
+		start(60_000);
+		await advance(65_000);
+		assert.equal(state.alive, 1);
+		if (interruption === "idle transition") state.phase = "idle";
+		else await advance(5_001);
+		auth.resolve();
+		await advance(0);
+		assert.equal(state.sent.length, 0);
+		assert.equal(state.alive, 0);
+	});
+}
 
 test("rechecks expiry after the host's phase decision", async (t) => {
 	const { state, host, start, advance } = setup(t);
@@ -365,6 +453,195 @@ test("the next response replaces the run; close stops it", async (t) => {
 	await advance(600_000);
 	assert.equal(state.sent.length, 1);
 });
+
+for (const race of ["tool handoff", "settlement during phase read"] as const) {
+	test(`handles a real Durable Google ${race}`, { timeout: 8_000 }, async (t) => {
+		t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+		const context = BACKGROUND_CONTEXT;
+		const scratch = mkdtempSync(join(tmpdir(), "p2-warm-race-"));
+		const store = await openHostStore(sessionDirectory(scratch, "s1"), { outbox: false }, context);
+		const host = createHost({ address: Session({ id: "s1" }), principal: HOST, store, onError: console.error });
+		const finishHandoff = Promise.withResolvers<void>();
+		const finishTool = Promise.withResolvers<void>();
+		const finishPhase = Promise.withResolvers<void>();
+		const reachedHandoff = Promise.withResolvers<void>();
+		const reachedPhase = Promise.withResolvers<void>();
+		const replay = Promise.withResolvers<"sent" | "stopped">();
+		const stopped = Promise.withResolvers<void>();
+		const liveness = new Liveness();
+		const counts = await liveness.watch();
+		let armed = false;
+		counts.start(async (change) => {
+			if (change.kind !== "value") return;
+			if (change.value.cacheWarming === 1) armed = true;
+			else if (armed && change.value.cacheWarming === 0) {
+				replay.resolve("stopped");
+				stopped.resolve();
+			}
+		});
+		const call = { type: "toolCall", id: "finish-1", name: "finish", arguments: {} } as const;
+		const models = createModels();
+		const respond = (model: Model<Api>, _context: TranscriptContext, options?: SimpleStreamOptions) => {
+			const warming = options?.cacheWarm === true;
+			const base = fauxAssistantMessage(warming ? [] : [call]);
+			const message: AssistantMessage = {
+				...base,
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: warming ? "length" : "toolUse",
+				usage: {
+					...base.usage,
+					input: warming ? 60_000 : 2_050,
+					cacheRead: warming ? 0 : 57_950,
+					totalTokens: 60_001,
+				},
+			};
+			const stream = createAssistantMessageEventStream();
+			void (async () => {
+				try {
+					await options?.onPayload?.({}, model);
+					options?.signal?.throwIfAborted();
+					if (warming) replay.resolve("sent");
+					else t.mock.timers.tick(race === "tool handoff" ? 66_000 : 64_000);
+					stream.push({ type: "done", reason: message.stopReason === "toolUse" ? "toolUse" : "length", message });
+				} catch {
+					stream.push({ type: "error", reason: "aborted", error: { ...message, stopReason: "aborted" } });
+				}
+				stream.end();
+			})();
+			return stream;
+		};
+		models.setProvider(
+			createProvider({
+				id: GEMINI.provider,
+				models: [GEMINI],
+				auth: { apiKey: { name: "Test", resolve: async () => ({ auth: {} }) } },
+				api: { stream: respond, streamSimple: respond },
+			}),
+		);
+		const probe = defineExtension({
+			name: "warm-race",
+			hooks: [
+				hook(GenerationTask, {
+					afterResponse: async () => {
+						reachedHandoff.resolve();
+						await finishHandoff.promise;
+					},
+				}),
+			],
+			tools: [
+				defineTool({
+					name: "finish",
+					description: "End the run",
+					parameters: obj({}),
+					execute: async () => {
+						await finishTool.promise;
+						return { output: [], control: { terminate: true } };
+					},
+				}),
+			],
+		});
+		const init: WorkerInit = {
+			app: APP,
+			dataDir: scratch,
+			fake: true,
+			telemetry: false,
+			generation: 1,
+			values: {
+				session: {
+					id: "s1",
+					cwd: scratch,
+					env: null,
+					model: { provider: GEMINI.provider, modelId: GEMINI.id },
+					thinkingLevel: "off",
+				},
+			},
+		};
+		const core = workerCore(
+			init,
+			liveness,
+			new SessionLocation({ cwd: scratch, env: null }),
+			store,
+			(fn) => host.root(fn, context),
+			NO_IMAGES,
+			undefined,
+		);
+		const config = defineFacet((facet, self) => {
+			facet.serve(WorkerModels, (_params, bindings) => ({
+				settings: followNative(
+					bindings,
+					() => () => undefined,
+					() => ({ cacheWarming: "idle" as const }),
+				),
+			}));
+			self.contribute(HarnessConfig, { default: { models: () => models, settings: () => ({}) } });
+			self.contribute(Extensions, { [probe.name]: probe });
+		});
+		try {
+			await host.load(
+				[
+					{ name: "@p2/core", facet: core },
+					{ name: "config", facet: config },
+					{ name: "cache-warming", facet: cacheWarmingWorker },
+				],
+				context,
+			);
+			const holder = host.hold(HarnessHost, {}, context);
+			t.after(() => holder.release());
+			await whenLive(holder);
+			const parts = (await host.registry(HarnessNative, context)).value;
+			assert.ok(parts);
+			const { durable } = parts;
+			const root = await durable.root(context);
+			const warming = (await host.registry(Extensions, context)).value.get("cache-warming");
+			assert.ok(warming);
+			await root.configure({ tools: probe.tools, extensions: [warming, probe] }, context);
+			if (race === "settlement during phase read") {
+				const conversation = durable.conversation.bind(durable);
+				let phaseReads = 0;
+				t.mock.method(durable, "conversation", async (...args: Parameters<typeof conversation>) => {
+					const current = await conversation(...args);
+					if (current && ++phaseReads === 2) {
+						const read = current.context.bind(current);
+						t.mock.method(current, "context", async (...input: Parameters<typeof read>) => {
+							const view = await read(...input);
+							reachedPhase.resolve();
+							await finishPhase.promise;
+							return view;
+						});
+					}
+					return current;
+				});
+			}
+			durable.resume();
+			const submission = await root.submit({ type: "input", content: "hello" }, context);
+			await reachedHandoff.promise;
+			if (race === "tool handoff") {
+				assert.ok((await durable.snapshot(LiveDoc, root.id, context))?.generation);
+				assert.equal(await replay.promise, "sent", "the response's own generation must not block its warm");
+				await stopped.promise;
+			} else {
+				finishHandoff.resolve();
+				await reachedPhase.promise;
+				assert.ok((await durable.snapshot(LiveDoc, root.id, context))?.run);
+				finishTool.resolve();
+				await submission.wait(context);
+				assert.equal((await durable.snapshot(LiveDoc, root.id, context))?.run, undefined);
+				finishPhase.resolve();
+				assert.equal(await replay.promise, "stopped", "settlement during the last phase read must block dispatch");
+			}
+		} finally {
+			finishHandoff.resolve();
+			finishTool.resolve();
+			finishPhase.resolve();
+			await counts.stop();
+			await host.close(context);
+			await store.close(context);
+			rmSync(scratch, { recursive: true, force: true });
+		}
+	});
+}
 
 test(
 	"a worker keeps the main conversation's cache warm after its run and counts the refreshes' spend",

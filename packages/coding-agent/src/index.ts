@@ -333,6 +333,7 @@ export {
 	type SessionTreeNode,
 	sessionEntryToContextMessages,
 	type ThinkingLevelChangeEntry,
+	type UsageEntry,
 } from "./core/session-manager.ts";
 export {
 	type CacheWarmingMode,

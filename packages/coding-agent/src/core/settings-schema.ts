@@ -476,7 +476,7 @@ export const SettingsSchema = Type.Object(
 		cacheWarming: Type.Optional(
 			Type.Union([Type.Literal("off"), Type.Literal("streaming"), Type.Literal("idle")], {
 				description:
-					'Cache-warming profile. "idle" also warms between agent runs. Global only because each refresh costs money.',
+					'Cache-warming profile. "idle" also warms between agent runs, except for Google implicit caches. Global only because each refresh costs money.',
 				default: SETTINGS_DEFAULTS.cacheWarming,
 			}),
 		),

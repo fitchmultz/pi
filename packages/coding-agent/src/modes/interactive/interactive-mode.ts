@@ -4624,7 +4624,7 @@ export class InteractiveMode {
 		options: { updateFooter?: boolean; populateHistory?: boolean; suppressRequestRender?: boolean } = {},
 	): void {
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
-		// Cache misses are not persisted, unlike successful cache-warming usage.
+		// Cache misses on real responses are not persisted, unlike cache-warming usage.
 		// Re-derive estimates from each message's ancestry, including retained pre-compaction messages.
 		const cacheMisses = this.settingsManager.getNotices().cacheMisses
 			? collectCacheMisses(this.sessionManager.getEntries(), this.session.modelRuntime)
@@ -4889,16 +4889,25 @@ export class InteractiveMode {
 
 	private addCacheWarmingUsage(entry: UsageEntry): void {
 		if (!this.settingsManager.getNotices().cacheWarming) return;
-		// Back-to-back warms collapse into one line with the cumulative cost.
+		// Coalesce successful warms only; each miss keeps its own cost and label.
 		const previous = this.cacheWarmingNotice;
-		if (previous && this.chatContainer.children.at(-1) === previous.component && previous.note === entry.note) {
+		if (
+			!entry.cacheWarmMissed &&
+			previous &&
+			this.chatContainer.children.at(-1) === previous.component &&
+			previous.note === entry.note
+		) {
 			previous.total.cost += entry.usage.cost.total;
 			previous.component.invalidate();
 			return;
 		}
 		const total = { cost: entry.usage.cost.total };
-		const component = new ThemedText(() => theme.fg("dim", formatCacheWarmingUsage(total.cost, entry.note)), 1, 0);
-		this.cacheWarmingNotice = { component, total, note: entry.note };
+		const component = new ThemedText(
+			() => theme.fg("dim", formatCacheWarmingUsage(total.cost, entry.note, entry.cacheWarmMissed)),
+			1,
+			0,
+		);
+		this.cacheWarmingNotice = entry.cacheWarmMissed ? undefined : { component, total, note: entry.note };
 		this.chatContainer.addChild(new Spacer(1));
 		addChatActivity(this.chatContainer, component);
 	}

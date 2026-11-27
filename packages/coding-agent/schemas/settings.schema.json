@@ -773,7 +773,7 @@
           "const": "idle"
         }
       ],
-      "description": "Cache-warming profile. \"idle\" also warms between agent runs. Global only because each refresh costs money.",
+      "description": "Cache-warming profile. \"idle\" also warms between agent runs, except for Google implicit caches. Global only because each refresh costs money.",
       "default": "idle"
     },
     "restartWhenStale": {

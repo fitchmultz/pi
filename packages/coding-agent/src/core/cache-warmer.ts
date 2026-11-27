@@ -8,6 +8,7 @@ import {
 	type Context,
 	evaluateCacheWarming,
 	getCacheWarmingDelayMs,
+	getCacheWarmingDispatchWindow,
 	getCacheWarmingMaxIdleAgeMs,
 	getCacheWarmingRequestOptions,
 	getEffectiveCacheRetention,
@@ -102,20 +103,21 @@ interface ActiveRun extends CacheWarmRequest {
 	ttlMs: number;
 	delayMs: number;
 	startedAt: number;
-	completedAt?: number;
+	/** Dispatch time of the last request that wrote or refreshed Google's cache. */
+	anchorAt: number;
 	controller: AbortController;
 	phase: "streaming" | "idle";
 	cycle: RefreshCycle;
 }
 
-function getSafetyLimit(run: Pick<ActiveRun, "model" | "phase" | "startedAt" | "completedAt">) {
+function getSafetyLimit(run: Pick<ActiveRun, "model" | "phase" | "startedAt">) {
 	if (run.phase === "streaming") {
 		return { deadline: run.startedAt + CACHE_WARMING_MAX_AGE_MS, reason: "one-hour safety limit reached" };
 	}
 	const maxIdleAgeMs = getCacheWarmingMaxIdleAgeMs(run.model);
 	return {
-		deadline: (run.completedAt ?? run.startedAt) + maxIdleAgeMs,
-		reason: `${maxIdleAgeMs / 60_000}-minute idle safety limit reached`,
+		deadline: run.startedAt + maxIdleAgeMs,
+		reason: maxIdleAgeMs <= 0 ? "agent run settled" : `${maxIdleAgeMs / 60_000}-minute idle safety limit reached`,
 	};
 }
 
@@ -196,11 +198,13 @@ export class CacheWarmer {
 			);
 			return;
 		}
+		const startedAt = Date.now();
 		const run: Omit<ActiveRun, "cycle"> = {
 			...request,
 			isCurrent,
 			...timing,
-			startedAt: Date.now(),
+			startedAt,
+			anchorAt: startedAt,
 			controller: new AbortController(),
 			phase: "streaming",
 		};
@@ -211,11 +215,10 @@ export class CacheWarmer {
 		if (cycle) this.run = { ...run, cycle };
 	}
 
-	/** Anchor Google's next warm and idle window to the real response, before any tool work. */
+	/** Arm Google's refresh once the response's usage is in the journal. */
 	onResponseCompleted(): void {
 		const run = this.run;
 		if (!run || run.cycle.kind !== "awaiting-response" || !this.validateRun(run)) return;
-		run.completedAt = Date.now();
 		const next = this.schedule(run);
 		if (next) run.cycle = next;
 	}
@@ -232,6 +235,11 @@ export class CacheWarmer {
 			return;
 		}
 		run.phase = "idle";
+		const modeStopReason = this.getModeStopReason(run);
+		if (modeStopReason) {
+			this.stop(modeStopReason);
+			return;
+		}
 		const { deadline, reason } = getSafetyLimit(run);
 		if (run.cycle.nextWarmAt > deadline || Date.now() >= deadline) {
 			this.stop(reason);
@@ -264,28 +272,29 @@ export class CacheWarmer {
 	}
 
 	private schedule(run: Omit<ActiveRun, "cycle">): ScheduledRefresh | undefined {
-		const nextWarmAt = Date.now() + run.delayMs;
+		const now = Date.now();
+		const anchorAt = usesGoogleImplicitCache(run.model.api) ? run.anchorAt : now;
+		const { dueAt, deadlineAt: refreshDeadlineAt } = getCacheWarmingDispatchWindow(anchorAt, run.ttlMs, run.delayMs);
+		const nextWarmAt = Math.max(now, dueAt);
+		if (nextWarmAt > refreshDeadlineAt) {
+			this.stop("cache refresh deadline missed");
+			return undefined;
+		}
 		const { deadline, reason } = getSafetyLimit(run);
-		if (nextWarmAt > deadline || Date.now() >= deadline) {
+		if (nextWarmAt > deadline || now >= deadline) {
 			this.stop(reason);
 			return undefined;
 		}
-		const timer = setTimeout(
-			() => {
-				// The timer is armed for one run: the one that holds this cycle.
-				if (this.run?.cycle === cycle) void this.refresh(this.run);
-			},
-			Math.max(0, nextWarmAt - Date.now()),
-		);
+		const timer = setTimeout(() => {
+			// The timer is armed for one run: the one that holds this cycle.
+			if (this.run?.cycle === cycle) void this.refresh(this.run);
+		}, nextWarmAt - now);
 		timer.unref?.();
 		const cycle: ScheduledRefresh = {
 			kind: "scheduled",
 			timer,
 			nextWarmAt,
-			// A timer can run late after sleep or event-loop blockage. Keep half of
-			// the planned pre-expiry margin for that delay and request dispatch; a
-			// late refresh is likely a full-price cache write, not a cache warm.
-			refreshDeadlineAt: nextWarmAt + Math.floor((run.ttlMs - run.delayMs) / 2),
+			refreshDeadlineAt,
 		};
 		return cycle;
 	}
@@ -296,23 +305,27 @@ export class CacheWarmer {
 		const { nextWarmAt, refreshDeadlineAt } = cycle;
 		run.cycle = { kind: "deciding", nextWarmAt };
 		if (!this.validateRun(run)) return;
-		if (this.refreshDeadlineMissed(run, refreshDeadlineAt)) return;
+		if (this.refreshDeadlineMissed(refreshDeadlineAt)) return;
 		const promptTokens = lastPromptTokens(this.sessionManager.getBranch());
-		const decision = this.evaluate(run, promptTokens);
-		const { warmCost, missCost, continuationProbability } = decision;
-		let action = decision.action;
-		try {
-			action = await this.decide({
-				type: "cache_warming_decision",
-				warmCost,
-				missCost,
-				continuationProbability,
-				action,
-			});
-		} catch {
-			// Extension failures fall back to pi's own decision.
-		}
-		if (!this.validateRun(run) || this.refreshDeadlineMissed(run, refreshDeadlineAt)) return;
+		let decision: CacheWarmingDecision;
+		let action: CacheWarmingAction;
+		do {
+			decision = this.evaluate(run, promptTokens);
+			const { warmCost, missCost, continuationProbability } = decision;
+			action = decision.action;
+			try {
+				action = await this.decide({
+					type: "cache_warming_decision",
+					warmCost,
+					missCost,
+					continuationProbability,
+					action,
+				});
+			} catch {
+				// Extension failures fall back to pi's own decision.
+			}
+			if (!this.validateRun(run) || this.refreshDeadlineMissed(refreshDeadlineAt)) return;
+		} while (decision.phase !== run.phase);
 		const extensionOverride = action !== decision.action;
 		if (action === "stop") {
 			const reason = extensionOverride
@@ -325,22 +338,42 @@ export class CacheWarmer {
 		}
 
 		run.cycle = { kind: "refreshing", nextWarmAt, extensionOverride };
+		const signal = run.controller.signal;
+		const google = usesGoogleImplicitCache(run.model.api);
+		const replayOptions = getCacheWarmingRequestOptions(run.options, signal);
+		let warmDispatchedAt = Date.now();
+		if (google) {
+			replayOptions.onPayload = async (payload, model) => {
+				const replacement = await run.options.onPayload?.(payload, model);
+				// A payload hook can consume the rest of Google's short refresh window.
+				if (!this.validateRun(run) || this.refreshDeadlineMissed(refreshDeadlineAt)) signal.throwIfAborted();
+				warmDispatchedAt = Date.now();
+				return replacement;
+			};
+		}
+		let refreshed = false;
 		try {
 			const message = await this.models
-				.streamSimple(
-					run.model,
-					run.context,
-					getCacheWarmingRequestOptions(run.options, run.controller.signal),
-					(model, options) => {
-						if (!this.validateRun(run) || this.refreshDeadlineMissed(run, refreshDeadlineAt)) return;
-						const timing = getCacheWarmingTiming(model, options, run.ttlMs);
-						if (!timing) this.stop("cache lifetime unavailable");
-						else Object.assign(run, timing);
-					},
-				)
+				.streamSimple(run.model, run.context, replayOptions, (model, options) => {
+					if (!this.validateRun(run) || this.refreshDeadlineMissed(refreshDeadlineAt)) {
+						signal.throwIfAborted();
+						return;
+					}
+					const timing = getCacheWarmingTiming(model, options, run.ttlMs);
+					if (!timing) {
+						this.stop("cache lifetime unavailable");
+						signal.throwIfAborted();
+						return;
+					}
+					Object.assign(run, timing);
+					warmDispatchedAt = Date.now();
+				})
 				.result();
 			if (!this.validateRun(run)) return;
 			if (message.stopReason !== "error" && message.stopReason !== "aborted") {
+				refreshed = true;
+				run.anchorAt = warmDispatchedAt;
+				const missed = shouldStopAfterColdCacheWarm(run.model, promptTokens, message.usage);
 				const entry = this.sessionManager.appendUsage(
 					"cache_warm",
 					message.provider,
@@ -349,31 +382,29 @@ export class CacheWarmer {
 					extensionOverride ? "extension override" : undefined,
 					{
 						cacheIdentity: message.cacheIdentity,
+						cacheWarmMissed: missed || undefined,
+						durationMs: message.durationMs ?? Math.max(0, Date.now() - warmDispatchedAt),
 						thinkingLevel: message.thinkingLevel ?? run.options.reasoning ?? "off",
 						providerThinkingLevel: message.providerThinkingLevel,
 					},
 				);
-				if (shouldStopAfterColdCacheWarm(run.model, promptTokens, message.usage)) {
-					this.stop("cache warm missed");
-				}
+				if (missed) this.stop("cache warm missed");
 				this.onWarmed?.(entry);
 			}
 		} catch {
 			// Cache warming is best-effort and must not affect the active agent run.
 		}
 		if (this.run !== run) return;
+		// A failed Google replay did not reset the cache clock.
+		if (!refreshed && google) {
+			this.stop("cache warm failed");
+			return;
+		}
 		const next = this.schedule(run);
 		if (next) run.cycle = next;
 	}
 
-	private refreshDeadlineMissed(run: ActiveRun, refreshDeadlineAt: number): boolean {
-		if (run.phase === "idle" && usesGoogleImplicitCache(run.model.api)) {
-			const { deadline, reason } = getSafetyLimit(run);
-			if (Date.now() >= deadline) {
-				this.stop(reason);
-				return true;
-			}
-		}
+	private refreshDeadlineMissed(refreshDeadlineAt: number): boolean {
 		if (Date.now() <= refreshDeadlineAt) return false;
 		this.stop("cache refresh deadline missed");
 		return true;
@@ -390,7 +421,8 @@ export class CacheWarmer {
 	private getModeStopReason(run: ActiveRun): string | undefined {
 		const mode = this.getMode();
 		if (mode === "off") return "cache warming disabled";
-		if (mode === "streaming" && run.phase === "idle") return "agent run settled";
+		if (run.phase === "idle" && (mode === "streaming" || getCacheWarmingMaxIdleAgeMs(run.model) <= 0))
+			return "agent run settled";
 		return undefined;
 	}
 
@@ -448,8 +480,8 @@ export function formatCacheWarmingStatus(status: CacheWarmingStatus, now = Date.
 }
 
 /** One-line transcript text for the total cost of one or more consecutive cache warms. */
-export function formatCacheWarmingUsage(totalCost: number, note?: string): string {
+export function formatCacheWarmingUsage(totalCost: number, note?: string, missed = false): string {
 	const noteText = note ? ` (${note})` : "";
 	const cost = totalCost.toFixed(6).replace(/(\.\d{3}\d*?)0+$/, "$1");
-	return `Cache warmed${noteText}: $${cost}`;
+	return `${missed ? "Cache warm missed" : "Cache warmed"}${noteText}: $${cost}`;
 }

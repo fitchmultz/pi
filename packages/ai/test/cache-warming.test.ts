@@ -20,7 +20,7 @@ describe("Google implicit cache warming policy", () => {
 			expect(getEffectiveCacheRetention(model, { cacheRetention: "long" })).toBe("short");
 			expect(getEffectiveCacheRetention(model, { cacheRetention: "none" })).toBe("none");
 			expect(isCacheWarmingReplayable(model, { reasoning: "xhigh" })).toBe(true);
-			expect(getCacheWarmingMaxIdleAgeMs(model)).toBe(600_000);
+			expect(getCacheWarmingMaxIdleAgeMs(model)).toBe(0);
 			expect(shouldStopAfterColdCacheWarm(model, 4_095, { cacheRead: 0 })).toBe(false);
 			expect(shouldStopAfterColdCacheWarm(model, 4_096, { cacheRead: 0 })).toBe(true);
 			expect(shouldStopAfterColdCacheWarm(model, 60_000, { cacheRead: 57_950 })).toBe(false);
@@ -43,10 +43,23 @@ describe("Google implicit cache warming policy", () => {
 		expect(decision.warmCost).toBeCloseTo((97_950 * 0.15 + 2_050 * 3 + 15) / 1_000_000, 9);
 		expect(decision.missCost).toBeCloseTo((97_950 * (3 - 0.15)) / 1_000_000, 9);
 		expect(decision.action).toBe("warm");
-		expect(evaluateCacheWarming(neon, 46_000, "idle")).toMatchObject({
-			continuationProbability: 0.5,
+		expect(evaluateCacheWarming(neon, 100_000, "idle")).toMatchObject({
+			continuationProbability: 0,
+			expectedSavings: -decision.warmCost,
 			action: "stop",
 		});
-		expect(evaluateCacheWarming(neon, 47_000, "idle").action).toBe("warm");
+	});
+
+	it.each([
+		{ promptTokens: 4_096, usage: { cacheRead: 2_046, input: 2_050 }, cold: false },
+		{ promptTokens: 329_682, usage: { cacheRead: 17_823, input: 311_859 }, cold: true },
+		{ promptTokens: 60_000, usage: { cacheRead: 19_800, input: 40_200 }, cold: true },
+		{ promptTokens: 329_682, usage: { cacheRead: 327_633, input: 2_049 }, cold: false },
+		{ promptTokens: 4_095, usage: { cacheRead: 0 }, cold: false },
+		{ promptTokens: 329_682, usage: { cacheRead: 17_823 }, cold: true },
+		{ promptTokens: 329_682, usage: { cacheRead: 17_823, input: 5_000 }, cold: false },
+		{ promptTokens: 60_000, usage: { cacheRead: 19_800, input: 2_050, cacheWrite: 38_150 }, cold: true },
+	])("classifies Google replay usage $usage against a $promptTokens-token prompt", ({ promptTokens, usage, cold }) => {
+		expect(shouldStopAfterColdCacheWarm(neon, promptTokens, usage)).toBe(cold);
 	});
 });
