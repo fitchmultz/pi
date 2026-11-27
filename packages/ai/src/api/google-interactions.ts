@@ -291,26 +291,19 @@ async function openPlanStream(
 					const response = await googleFetch(url, { method: "POST", headers, body, signal: options?.signal });
 					if (response.ok) return response;
 					const { status, headers: responseHeaders } = response;
-					const rawBody = await response.text();
 					const error = classifyGoogleInteractionsError({
 						status,
 						headers: responseHeaders,
-						body: rawBody,
+						body: await response.text(),
 						modelId: model.id,
 					});
-					const err = Object.assign(new Error(error.message), {
-						status,
-						headers: responseHeaders,
-						body: rawBody,
-					});
-					if (error.final) throw Object.assign(err, { final: true });
-					throw err;
+					if (error.final) throw Object.assign(new Error(error.message), { status });
+					throw Object.assign(new Error(error.message), { status, headers: responseHeaders });
 				},
 				{
 					maxRetries: options?.maxRetries,
 					maxRetryDelayMs: options?.maxRetryDelayMs,
 					signal: options?.signal,
-					shouldRetry: (error) => !(error as { final?: boolean })?.final,
 				},
 			);
 			if (!response.body) throw new Error(`${model.provider} response has no body`);
