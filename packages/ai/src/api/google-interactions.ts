@@ -22,7 +22,6 @@ import { providerHeadersToRecord } from "../utils/headers.ts";
 import { getIdentityHeaders } from "../utils/identity.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { SseDecoder } from "../utils/sse.ts";
-import { getJsonSchemaToolParameters } from "./constrained-sampling.ts";
 import { createGoogleClient, createGoogleFetch, resolveGoogleApiKey, retryGoogleRequest } from "./google-client.ts";
 import { classifyGoogleInteractionsError } from "./google-interactions-errors.ts";
 import {
@@ -260,50 +259,78 @@ async function openPlanStream(
 	headers.delete("x-goog-api-key");
 
 	const { instruction, steps, tools: currentTools } = projectTranscript(model, context);
-	const tools = currentTools.map(
-		(tool): Interactions.Function => ({
-			type: "function",
-			name: tool.name,
-			description: tool.description,
-			parameters: getJsonSchemaToolParameters(tool, false),
-		}),
-	);
+	const strict = prepareTools(model, currentTools, options);
+	const planToolChoice = (prepared: ReturnType<typeof prepareTools>) =>
+		prepared.tools && (options?.toolChoice || prepared.choice === "validated") ? prepared.choice : undefined;
+	const toolChoice = planToolChoice(strict);
 	const config: Interactions.GenerationConfig = {
 		...(options?.maxTokens !== undefined && { max_output_tokens: options.maxTokens }),
-		...(tools.length > 0 && options?.toolChoice && { tool_choice: options.toolChoice }),
+		...(toolChoice && { tool_choice: toolChoice }),
 		...(options?.thinkingLevel && { thinking_level: options.thinkingLevel, thinking_summaries: "auto" }),
 	};
-	const payload: Request = {
+	const original: Request = {
 		model: model.id,
 		store: false,
 		stream: true,
 		input: steps,
 		...(instruction && { system_instruction: instruction }),
-		...(tools.length > 0 && { tools }),
+		...(strict.tools && { tools: strict.tools }),
 		...(Object.keys(config).length > 0 && { generation_config: config }),
 	};
-	const replacement = await options?.onPayload?.(payload, model);
-	const body = JSON.stringify(replacement === undefined ? payload : replacement);
+	const replacement = await options?.onPayload?.(original, model);
+	const payload = replacement === undefined ? original : { ...(replacement as Request) };
+	let preferred =
+		strict.hasPreferred && payload.tools === strict.tools && payload.generation_config?.tool_choice === "validated";
 	const url = `${model.baseUrl.replace(/\/+$/u, "")}/interactions:createPerUserQuota`;
 	const googleFetch = createGoogleFetch("Google", model, options);
-	const response = await retryProviderRequest(
-		async () => {
-			const response = await googleFetch(url, { method: "POST", headers, body, signal: options?.signal });
-			if (response.ok) return response;
-			const { status, headers: responseHeaders } = response;
-			const error = classifyGoogleInteractionsError({
-				status,
-				headers: responseHeaders,
-				body: await response.text(),
-				modelId: model.id,
-			});
-			if (error.final) throw new Error(error.message);
-			throw Object.assign(new Error(error.message), { status, headers: responseHeaders });
-		},
-		{ maxRetries: options?.maxRetries, maxRetryDelayMs: options?.maxRetryDelayMs, signal: options?.signal },
-	);
-	if (!response.body) throw new Error(`${model.provider} response has no body`);
-	return readPlanSse(response.body);
+	for (;;) {
+		const body = JSON.stringify(payload);
+		try {
+			const response = await retryProviderRequest(
+				async () => {
+					const response = await googleFetch(url, { method: "POST", headers, body, signal: options?.signal });
+					if (response.ok) return response;
+					const { status, headers: responseHeaders } = response;
+					const rawBody = await response.text();
+					const error = classifyGoogleInteractionsError({
+						status,
+						headers: responseHeaders,
+						body: rawBody,
+						modelId: model.id,
+					});
+					const err = Object.assign(new Error(error.message), {
+						status,
+						headers: responseHeaders,
+						body: rawBody,
+					});
+					if (error.final) throw Object.assign(err, { final: true });
+					throw err;
+				},
+				{
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+					shouldRetry: (error) => !(error as { final?: boolean })?.final,
+				},
+			);
+			if (!response.body) throw new Error(`${model.provider} response has no body`);
+			return readPlanSse(response.body);
+		} catch (error) {
+			if (!preferred || !isGoogleStrictToolRejectionError(error)) throw error;
+			preferred = false;
+			strictToolSessions.markExceeded(options?.sessionId);
+			const fallback = prepareTools(model, currentTools, options, true);
+			payload.tools = fallback.tools;
+			const fallbackChoice = planToolChoice(fallback);
+			if (fallbackChoice) {
+				payload.generation_config = { ...payload.generation_config, tool_choice: fallbackChoice };
+			} else if (payload.generation_config) {
+				const { tool_choice: _, ...rest } = payload.generation_config;
+				if (Object.keys(rest).length > 0) payload.generation_config = rest;
+				else delete payload.generation_config;
+			}
+		}
+	}
 }
 
 async function* readPlanSse(body: ReadableStream<Uint8Array>): AsyncGenerator<SseEvent> {

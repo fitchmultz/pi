@@ -147,7 +147,6 @@ describe("Google AI Ultra plan requests", () => {
 			name: "read_file",
 			description: "Read a file",
 			parameters: Type.Object({ path: Type.String() }),
-			constrainedSampling: { type: "json_schema", strict: "require" },
 		} as const;
 
 		const result = await streamSimple(
@@ -213,6 +212,55 @@ describe("Google AI Ultra plan requests", () => {
 				thinking_summaries: "auto",
 			},
 		});
+	});
+
+	it("enforces strict JSON-schema tool sampling and rejects strict: require when unsupported", async () => {
+		let body: Record<string, unknown> = {};
+		const fetch: FetchFunction = async (_url, init) => {
+			body = JSON.parse(String(init?.body));
+			return sseResponse([completed]);
+		};
+		const strictTool = {
+			name: "read_file",
+			description: "Read a file",
+			parameters: Type.Object({ path: Type.String() }),
+			constrainedSampling: { type: "json_schema", strict: "require" },
+		} as const;
+		const toolContext = normalizeContext({
+			tools: [strictTool],
+			messages: [{ role: "user", content: "Hi", timestamp: 0 }],
+		});
+
+		const ok = await streamSimple(model, toolContext, { headers, fetch }).result();
+		expect(ok.stopReason).toBe("stop");
+		expect(body).toMatchObject({
+			tools: [
+				{
+					type: "function",
+					name: "read_file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" } },
+						required: ["path"],
+						additionalProperties: false,
+					},
+				},
+			],
+			generation_config: { tool_choice: "validated" },
+		});
+
+		let sent = false;
+		const rejected = await streamSimple(model, toolContext, {
+			headers,
+			toolChoice: "none",
+			fetch: async () => {
+				sent = true;
+				return sseResponse([completed]);
+			},
+		}).result();
+		expect(rejected.stopReason).toBe("error");
+		expect(rejected.errorMessage).toContain('Tool "read_file" requires JSON-schema constrained sampling');
+		expect(sent).toBe(false);
 	});
 
 	it.each([null, "Basic abc", "Bearer"])("rejects merged Authorization %j before making the request", async (auth) => {
