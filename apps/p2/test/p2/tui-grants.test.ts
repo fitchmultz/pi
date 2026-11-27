@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@p2/app/v1";
 import { VirtualTerminal } from "../../../../packages/tui/test/virtual-terminal.ts";
-import { Sessions } from "../../plugins/sessions/contract.ts";
+import { SESSIONS_OWNER, Sessions } from "../../plugins/sessions/contract.ts";
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
 import { filterTerminalOutput } from "../../src/hosts/tui-filter.ts";
 import { Grants, type LauncherAction, PrivilegedKeys, parseTarget } from "../../src/hosts/tui-grants.ts";
 import { TERMINAL_RESET, TerminalModes } from "../../src/hosts/tui-modes.ts";
 import { TERMINAL_COLOR_QUERY } from "../../src/hosts/tui-terminal-colors.ts";
 import { TrustedUi, visibleText } from "../../src/hosts/tui-trusted-ui.ts";
-import { holdIn, poll, startFixture, TUI_NODE, tuiBundleServer } from "./helpers.ts";
+import { holdWith, poll, startFixture, TUI_NODE, tuiBundleServer } from "./helpers.ts";
 
 const CTRL_X = "\x18";
 const ESC = "\x1b";
@@ -291,7 +291,7 @@ test(
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());
-		const sessions = await holdIn(fixture.browser(), Sessions, {}, "owner");
+		const sessions = await holdWith(fixture.browser(), Sessions, {}, ...SESSIONS_OWNER);
 		type Snapshot = { session?: string; screen?: string; drafts: [string, string][] };
 		const typeInto = async (kitty: boolean): Promise<{ draft: string; screen: string }> => {
 			await sessions.create({ cwd: fixture.workspace }, BACKGROUND_CONTEXT);
@@ -337,7 +337,7 @@ test(
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());
-		await (await holdIn(fixture.browser(), Sessions, {}, "owner")).create(
+		await (await holdWith(fixture.browser(), Sessions, {}, ...SESSIONS_OWNER)).create(
 			{ cwd: fixture.workspace },
 			BACKGROUND_CONTEXT,
 		);

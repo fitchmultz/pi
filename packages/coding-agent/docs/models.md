@@ -262,15 +262,17 @@ See [Classifier overrides](models-configuration.md#classifier-overrides).
 
 ## Use image models
 
-Image models generate images from a prompt and optional input images. Pi lists Google's native Gemini image models (such as `gemini-nano-banana-2.1`, `gemini-3.1-flash-lite-image`, and `gemini-3-pro-image`) under the `google` provider (`google-images`) using the same `GEMINI_API_KEY` or gateway credentials as Google chat models, and OpenRouter's image models (such as `google/gemini-2.5-flash-image` and `black-forest-labs/flux.2-pro`) under the `openrouter` provider using `OPENROUTER_API_KEY` or `/login`.
+Image models generate images from a prompt and optional input images. Pi lists Google's native Gemini image models (such as `gemini-nano-banana-2.1`, `gemini-3.1-flash-lite-image`, and `gemini-3-pro-image`) under the `google` provider (`google-images`) using the same `GEMINI_API_KEY` or gateway credentials as Google chat models, and OpenRouter's image models (such as `google/gemini-2.5-flash-image` and `black-forest-labs/flux.2-pro`) under the `openrouter` provider using `OPENROUTER_API_KEY` or `/login`. Radius also lists image models when enabled for the organization, using the same credential as its chat models.
 
-Like decision models, image models do not appear in `/model`; the model reaches them through the [`codemode`](cli.md#enable-codemode) tool. Scripts list them with `models.getAvailableOfType("image")` and call `models.generateImages(model, { input })`. The result's `output` holds base64 image blocks, which `image()` attaches to the `codemode` result so the model sees them:
+Like decision models, image models do not appear in `/model`; the model reaches them through the [`codemode`](cli.md#enable-codemode) tool. Scripts list them with `models.getAvailableOfType("image")` and call `models.generateImages(model, { input }, options?)`. The result's `output` holds base64 image blocks, which `image()` attaches to the `codemode` result so the model sees them:
 
 ```js
 const painter = await models.getModelOfType("image", "openrouter", "google/gemini-2.5-flash-image");
-const result = await models.generateImages(painter, {
-  input: [{ type: "text", text: "A red fox in the snow, watercolor" }],
-});
+const result = await models.generateImages(
+  painter,
+  { input: [{ type: "text", text: "A red fox in the snow, watercolor" }] },
+  { aspectRatio: "16:9", size: "2K" },
+);
 if (result.stopReason !== "stop") return result.errorMessage;
 for (const block of result.output) if (block.type === "image") image(block);
 ```

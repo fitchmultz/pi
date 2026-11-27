@@ -272,27 +272,39 @@ function checkImagesContext(context: unknown): ImagesContext {
 	return context as unknown as ImagesContext;
 }
 
-/** Check optional script-supplied image options (`aspectRatio`, `imageSize`) without allowing auth/transport overrides. */
-function checkImagesOptions(options: unknown): Pick<ImagesOptions, "aspectRatio" | "imageSize"> | undefined {
+type CodemodeImagesOptions = Pick<ImagesOptions, "aspectRatio" | "size">;
+
+const IMAGES_OPTION_KEYS = new Set(["aspectRatio", "size", "imageSize"]);
+
+/** Validate optional generation options from a script; unknown keys throw, so typos and request fields such as `apiKey` never pass silently. */
+function checkImagesOptions(options: unknown): CodemodeImagesOptions | undefined {
 	if (options === undefined || options === null) return undefined;
 	const fail = (problem: string) =>
 		new Error(
-			`models.generateImages() ${problem}. Expected options: { aspectRatio?: string, imageSize?: string }. See "Generate images" in ${CODEMODE_DOCS_PATH}.`,
+			`models.generateImages() ${problem}. Expected options: { aspectRatio?, size? } (imageSize is an alias for size). See "Generate images" in ${CODEMODE_DOCS_PATH}.`,
 		);
 	if (typeof options !== "object" || Array.isArray(options)) {
 		throw fail(`expects an options object as its third argument, got ${describeValue(options)}`);
 	}
-	const { aspectRatio, imageSize } = options as Record<string, unknown>;
-	if (aspectRatio !== undefined && typeof aspectRatio !== "string") {
-		throw fail(`options.aspectRatio must be a string, got ${describeValue(aspectRatio)}`);
+	const record = options as Record<string, unknown>;
+	const unknownKey = Object.keys(record).find((key) => !IMAGES_OPTION_KEYS.has(key));
+	if (unknownKey !== undefined) throw fail(`does not accept options.${unknownKey}`);
+	const checked: CodemodeImagesOptions = {};
+	if (record.aspectRatio !== undefined) {
+		if (typeof record.aspectRatio !== "string" || record.aspectRatio.trim().length === 0) {
+			throw fail(`options.aspectRatio must be a non-empty string, got ${describeValue(record.aspectRatio)}`);
+		}
+		checked.aspectRatio = record.aspectRatio.trim();
 	}
-	if (imageSize !== undefined && typeof imageSize !== "string") {
-		throw fail(`options.imageSize must be a string, got ${describeValue(imageSize)}`);
+	for (const key of ["imageSize", "size"] as const) {
+		const value = record[key];
+		if (value === undefined) continue;
+		if (typeof value !== "string" || value.trim().length === 0) {
+			throw fail(`options.${key} must be a non-empty string, got ${describeValue(value)}`);
+		}
+		checked.size = value.trim();
 	}
-	return {
-		...(aspectRatio !== undefined ? { aspectRatio } : {}),
-		...(imageSize !== undefined ? { imageSize } : {}),
-	};
+	return Object.keys(checked).length > 0 ? checked : undefined;
 }
 
 /** The fields of `ClassifierResult` and `AssistantImages` that a nested call row reports. */
@@ -1006,15 +1018,14 @@ function createModelGlobals(
 				models.classify(resolved, context, { signal }),
 			),
 		"models.generateImages": (args, { signal }) => {
-			const rawArgs = args as unknown[];
-			const imageOptions = checkImagesOptions(rawArgs[2]);
+			const [, , rawOptions] = args as unknown[];
 			return runModelCall(
 				"models.generateImages",
 				"image",
-				rawArgs,
-				checkImagesContext,
-				async (resolved, context) => {
-					const result = await models.generateImages(resolved, context, { ...imageOptions, signal });
+				args as unknown[],
+				(context) => ({ context: checkImagesContext(context), options: checkImagesOptions(rawOptions) }),
+				async (resolved, { context, options }) => {
+					const result = await models.generateImages(resolved, context, { ...options, signal });
 					addGeneratedImages(result.output.filter((block) => block.type === "image").length);
 					return result;
 				},

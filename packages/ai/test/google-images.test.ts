@@ -77,7 +77,7 @@ describe("google-images", () => {
 			{
 				apiKey: "test-gemini-key",
 				aspectRatio: "16:9",
-				imageSize: "2K",
+				size: "2K",
 				fetch: fakeFetch,
 				onResponse: (response) => {
 					observedResponseStatus = response.status;
@@ -139,7 +139,7 @@ describe("google-images", () => {
 			{
 				apiKey: "explicit-google-key",
 				aspectRatio: "3:2",
-				imageSize: "1K",
+				imageSize: "2K",
 				fetch: async (input, init) => {
 					seenHeaders.push(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
 					const bodyText =
@@ -175,7 +175,7 @@ describe("google-images", () => {
 		expect(seenBodies[0]).toMatchObject({
 			store: false,
 			generationConfig: {
-				imageConfig: { aspectRatio: "3:2", imageSize: "1K" },
+				imageConfig: { aspectRatio: "3:2", imageSize: "2K" },
 			},
 		});
 

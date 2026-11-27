@@ -7,7 +7,7 @@ import { stripTerminalSequences, TuiAltScreen } from "@earendil-works/pi-tui";
 import { BACKGROUND_CONTEXT } from "@p2/app/v1";
 import { VirtualTerminal } from "../../../../packages/tui/test/virtual-terminal.ts";
 import quietToolsTui from "../../plugins/quiet-tools/tui.ts";
-import { Sessions } from "../../plugins/sessions/contract.ts";
+import { SESSIONS_OWNER, Sessions } from "../../plugins/sessions/contract.ts";
 import { launcherActions } from "../../src/hosts/tui-actions.ts";
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
 import { loadLocalPreferences, watchLocalPreferences } from "../../src/hosts/tui-local-preferences.ts";
@@ -18,7 +18,7 @@ import { tuiCoreFacet } from "../../src/tui/core-commands.ts";
 import { restoreRuntime, snapshotRuntime } from "../../src/tui/snapshot.ts";
 import { LIGHT_THEME } from "../../src/tui/theme/builtin-themes.ts";
 import { createTheme } from "../../src/tui/theme/theme.ts";
-import { holdIn, poll, startFixture, TUI_NODE, testHost } from "./helpers.ts";
+import { holdWith, poll, startFixture, TUI_NODE, testHost } from "./helpers.ts";
 
 test("savePrefs patches: privileged bindings, the editor command and launcher-only keys are refused", () => {
 	const refused = (patch: unknown) => validatePrefsPatch(patch).kind === "invalid";
@@ -224,7 +224,7 @@ test(
 	async (t) => {
 		const fixture = await startFixture();
 		t.after(() => fixture.close());
-		await (await holdIn(fixture.browser(), Sessions, {}, "owner")).create(
+		await (await holdWith(fixture.browser(), Sessions, {}, ...SESSIONS_OWNER)).create(
 			{ cwd: fixture.workspace },
 			BACKGROUND_CONTEXT,
 		);

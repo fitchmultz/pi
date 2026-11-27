@@ -11,6 +11,12 @@
 - Fixed concurrent `acceptHostKey`/`forgetHostKey` calls through equivalent known-hosts path spellings losing updates, which could restore a removed host key ([#10517](https://github.com/earendil-works/pi/issues/10517)).
 - Fixed cancelled or timed-out daemon shell commands on macOS sometimes running later steps after the current step was killed. A waiting shell no longer goes on to its next step, and a step that the shell was starting when the kill landed, which that kill can miss, is now killed as soon as the daemon sees the shell exit.
 
+## [1.7.0] - 2026-11-27
+
+### Fixed
+
+- A terminal's background jobs no longer outlive it: when its shell exits, or the terminal is closed (`RemoteTerminal.close()`, a cancelled `pty`, a lost connection or the daemon's exit), every process of its session is killed on Linux, Android and macOS, not only the shell's process group (a shell with job control puts each background job, `sleep 60 &`, in a group of its own). Commands of `exec` and `process` are ended the same way. A program that left the session (`setsid`, a daemon) is not reached; a process id found for the session is checked again when it is signalled: held through a pidfd on Linux where `pidfd_open` works, else (macOS, Android, older kernels) checked right before the signal, which leaves a small window. A `pty` or `process` program's registration is its own: a later program that gets the same process id is never forgotten or signalled by the earlier one's late close or cleanup (`exec` commands still forget and kill by process id after they are reaped)
+
 ## [1.6.1] - 2026-11-25
 
 ### Fixed

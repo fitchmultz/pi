@@ -10,11 +10,11 @@ import { after, before, describe, it } from "node:test";
 import type { ConversationView } from "@earendil-works/pi-durable";
 import type { Host } from "@p2/app/v1";
 import { BACKGROUND_CONTEXT, follow } from "@p2/app/v1";
-import { Chat } from "../../plugins/chat/contract.ts";
+import { CHAT_PARTICIPANT, Chat } from "../../plugins/chat/contract.ts";
 import { Models } from "../../plugins/models/contract.ts";
-import { Sessions } from "../../plugins/sessions/contract.ts";
+import { SESSIONS_OWNER, Sessions } from "../../plugins/sessions/contract.ts";
 import { Browser, browserTests, COMPOSER, composerText, setComposer } from "./browser.ts";
-import { type Fixture, holdIn, startFixture, until } from "./helpers.ts";
+import { type Fixture, holdWith, startFixture, until } from "./helpers.ts";
 
 /**
  * The page's WebSockets, with a switch: `__goOffline()` closes them and fails every new one (the app keeps retrying),
@@ -103,14 +103,14 @@ describe("offline in the browser", { skip: !browserTests }, () => {
 	});
 
 	it("keeps the composer, shows the message at once, and delivers it once back online", async () => {
-		const session = await (await holdIn(owner, Sessions, {}, "owner")).create(
+		const session = await (await holdWith(owner, Sessions, {}, ...SESSIONS_OWNER)).create(
 			{
 				cwd: fixture.workspace,
 				title: "Offline",
 			},
 			BACKGROUND_CONTEXT,
 		);
-		const chat = await holdIn(owner, Chat, { session: session.id, conversation: 1 }, "participant");
+		const chat = await holdWith(owner, Chat, { session: session.id, conversation: 1 }, ...CHAT_PARTICIPANT);
 		const stop = follow(chat.view, () => {});
 		try {
 			await browser.metrics(390, 844);
@@ -140,14 +140,14 @@ describe("offline in the browser", { skip: !browserTests }, () => {
 	});
 
 	it("lets messages that arrived while offline fade in one after another, and nothing when opening", async () => {
-		const session = await (await holdIn(owner, Sessions, {}, "owner")).create(
+		const session = await (await holdWith(owner, Sessions, {}, ...SESSIONS_OWNER)).create(
 			{
 				cwd: fixture.workspace,
 				title: "Arrivals",
 			},
 			BACKGROUND_CONTEXT,
 		);
-		const chat = await holdIn(owner, Chat, { session: session.id, conversation: 1 }, "participant");
+		const chat = await holdWith(owner, Chat, { session: session.id, conversation: 1 }, ...CHAT_PARTICIPANT);
 		const stop = follow(chat.view, () => {});
 		try {
 			await chat.send({ text: "first", requestId: "a1" }, BACKGROUND_CONTEXT);
@@ -207,7 +207,7 @@ describe("offline in the browser", { skip: !browserTests }, () => {
 	});
 
 	it("forgets what this device kept of sessions the server no longer has", async () => {
-		const session = await (await holdIn(owner, Sessions, {}, "owner")).create(
+		const session = await (await holdWith(owner, Sessions, {}, ...SESSIONS_OWNER)).create(
 			{
 				cwd: fixture.workspace,
 				title: "Still here",
@@ -232,14 +232,14 @@ describe("offline in the browser", { skip: !browserTests }, () => {
 	});
 
 	it("shows a conversation kept on the device at once on a page that starts offline", async () => {
-		const session = await (await holdIn(owner, Sessions, {}, "owner")).create(
+		const session = await (await holdWith(owner, Sessions, {}, ...SESSIONS_OWNER)).create(
 			{
 				cwd: fixture.workspace,
 				title: "Kept",
 			},
 			BACKGROUND_CONTEXT,
 		);
-		const chat = await holdIn(owner, Chat, { session: session.id, conversation: 1 }, "participant");
+		const chat = await holdWith(owner, Chat, { session: session.id, conversation: 1 }, ...CHAT_PARTICIPANT);
 		const stop = follow(chat.view, () => {});
 		try {
 			await chat.send({ text: "remember me", requestId: "kept" }, BACKGROUND_CONTEXT);
@@ -299,7 +299,7 @@ describe("offline in the browser", { skip: !browserTests }, () => {
 	});
 
 	it("shows a new session's first message at once and creates the session once back online", async () => {
-		const catalog = await holdIn(owner, Sessions, {}, "owner");
+		const catalog = await holdWith(owner, Sessions, {}, ...SESSIONS_OWNER);
 		const before = new Set(catalog.sessions.value.map((session) => session.id));
 		await browser.metrics(390, 844);
 		await browser.open(`http://127.0.0.1:${fixture.server.port}/new`);
@@ -326,7 +326,7 @@ describe("offline in the browser", { skip: !browserTests }, () => {
 		await browser.evaluate("window.__offline = false");
 		await browser.wait(`location.pathname.startsWith('/s/')`);
 		const id = await browser.evaluate<string>("location.pathname.slice(3)");
-		const chat = await holdIn(owner, Chat, { session: id, conversation: 1 }, "participant");
+		const chat = await holdWith(owner, Chat, { session: id, conversation: 1 }, ...CHAT_PARTICIPANT);
 		const stop = follow(chat.view, () => {});
 		try {
 			await until(chat.view, (view) => JSON.stringify(view?.entries ?? []).includes(`Echo: ${text}`), 60_000);
@@ -355,10 +355,10 @@ describe("offline in the browser", { skip: !browserTests }, () => {
 	});
 
 	it("shows a message whose answer was lost once when its conversation opens again", async () => {
-		const sessions = await holdIn(owner, Sessions, {}, "owner");
+		const sessions = await holdWith(owner, Sessions, {}, ...SESSIONS_OWNER);
 		const here = await sessions.create({ cwd: fixture.workspace, title: "Lost answer" }, BACKGROUND_CONTEXT);
 		const elsewhere = await sessions.create({ cwd: fixture.workspace, title: "Not here" }, BACKGROUND_CONTEXT);
-		const chat = await holdIn(owner, Chat, { session: here.id, conversation: 1 }, "participant");
+		const chat = await holdWith(owner, Chat, { session: here.id, conversation: 1 }, ...CHAT_PARTICIPANT);
 		const stop = follow(chat.view, () => {});
 		try {
 			await browser.metrics(1280, 900);
@@ -402,10 +402,10 @@ describe("offline in the browser", { skip: !browserTests }, () => {
 	});
 
 	it("keeps showing a message whose upload fails as newer entries arrive, also in its conversation opened again", async () => {
-		const sessions = await holdIn(owner, Sessions, {}, "owner");
+		const sessions = await holdWith(owner, Sessions, {}, ...SESSIONS_OWNER);
 		const here = await sessions.create({ cwd: fixture.workspace, title: "Upload fails" }, BACKGROUND_CONTEXT);
 		const elsewhere = await sessions.create({ cwd: fixture.workspace, title: "Not there" }, BACKGROUND_CONTEXT);
-		const chat = await holdIn(owner, Chat, { session: here.id, conversation: 1 }, "participant");
+		const chat = await holdWith(owner, Chat, { session: here.id, conversation: 1 }, ...CHAT_PARTICIPANT);
 		const stop = follow(chat.view, () => {});
 		// Chrome fails the page's uploads while `failing`, as a dropped connection does.
 		let failing = true;

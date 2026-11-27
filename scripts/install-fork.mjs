@@ -65,7 +65,6 @@ export function isolatedEnvironment(home, tools, cacheDir) {
 		XDG_DATA_HOME: join(home, "data"),
 		PI_CODING_AGENT_DIR: join(home, "agent"),
 		PI_OFFLINE: "1",
-		PI_TELEMETRY: "0",
 		HUSKY: "0",
 		JITI_FS_CACHE: "0",
 		...forkNpmEnvironment(cacheDir),

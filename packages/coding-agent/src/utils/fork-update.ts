@@ -157,7 +157,6 @@ export async function runForkUpdate(options: ForkUpdateOptions = {}): Promise<vo
 			XDG_CACHE_HOME: join(home, "cache"),
 			XDG_DATA_HOME: join(home, "data"),
 			PI_CODING_AGENT_DIR: join(home, "agent"),
-			PI_TELEMETRY: "0",
 			HUSKY: "0",
 			...npmEnvironment,
 			npm_config_userconfig: join(home, ".npmrc"),

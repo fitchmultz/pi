@@ -111,7 +111,6 @@ export default function(pi) {
 						HOME: home,
 						USERPROFILE: home,
 						PI_CODING_AGENT_DIR: join(home, "agent"),
-						PI_TELEMETRY: "0",
 						JITI_FS_CACHE: "0",
 						...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
 					},

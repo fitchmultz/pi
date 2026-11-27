@@ -1,7 +1,7 @@
 import { defineProvider } from "../define.ts";
 import { INTERNATIONAL_BASE_URL, QWEN_COMPLETIONS_COMPAT, qwenTokenPlanModels } from "./qwen-token-plan.ts";
 
-// Token Plan Individual (Personal) text-model allowlist, verified 2026-11-09 against both regions' docs.
+// Token Plan Individual (Personal) text-model allowlist, verified 2026-11-25 against both regions' docs.
 // It shares the international endpoint with a narrower catalog; qwen-token-plan-individual-cn uses it on the China endpoint.
 // The dynamic "auto" router is not listed: it has no fixed model metadata.
 // https://docs.qwencloud.com/token-plan/personal/token-plan-personal-overview

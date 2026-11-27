@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { BACKGROUND_CONTEXT } from "@p2/app/v1";
 import { VirtualTerminal } from "../../../../packages/tui/test/virtual-terminal.ts";
-import { Sessions } from "../../plugins/sessions/contract.ts";
+import { SESSIONS_OWNER, Sessions } from "../../plugins/sessions/contract.ts";
 import { Sharing } from "../../plugins/sharing/contract.ts";
 import { startTuiClient } from "../../src/hosts/tui-client.ts";
 import {
@@ -20,7 +20,7 @@ import {
 	saveConfig,
 	type TuiConfig,
 } from "../../src/hosts/tui-config.ts";
-import { holdIn, poll, startFixture, TUI_NODE, until } from "./helpers.ts";
+import { holdWith, poll, startFixture, TUI_NODE, until } from "./helpers.ts";
 
 /**
  * Plays the TLS-terminating tunnel of a remote origin: forwards HTTP and upgrades to the server as `https://<host>`
@@ -221,7 +221,7 @@ test(
 		});
 		t.after(() => fixture.close());
 		const owner = fixture.browser();
-		const session = await (await holdIn(owner, Sessions, {}, "owner")).create(
+		const session = await (await holdWith(owner, Sessions, {}, ...SESSIONS_OWNER)).create(
 			{ cwd: fixture.workspace },
 			BACKGROUND_CONTEXT,
 		);

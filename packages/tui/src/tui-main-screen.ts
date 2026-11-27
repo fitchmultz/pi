@@ -523,9 +523,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			const isSixel = isImage && isSixelImageLine(line);
 			const imageReservedRows = isImage ? this.getTopAnchoredImageReservedRows(newLines, i, renderEnd) : 1;
 			if (imageReservedRows > 1) {
+				// Kitty can scroll while reserving rows at the bottom; Sixel keeps its full-redraw path.
 				const imageStartScreenRow = i - viewportTop;
-				if (imageStartScreenRow < 0 || imageStartScreenRow + imageReservedRows > height) {
-					logRedraw(`image pre-clear would scroll (${imageStartScreenRow} + ${imageReservedRows} > ${height})`);
+				if (
+					imageReservedRows > height ||
+					(isSixel && (imageStartScreenRow < 0 || imageStartScreenRow + imageReservedRows > height))
+				) {
+					logRedraw(`image pre-clear would not fit (${imageStartScreenRow} + ${imageReservedRows} > ${height})`);
 					fullRender(true);
 					return;
 				}

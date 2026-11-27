@@ -1,15 +1,16 @@
 import { piDecisionApi } from "../api/pi-decision.lazy.ts";
+import { piImageApi } from "../api/pi-image.lazy.ts";
 import { piMessagesApi } from "../api/pi-messages.lazy.ts";
 import { envApiKeyAuth, lazyOAuth } from "../auth/helpers.ts";
 import { loadRadiusOAuth } from "../auth/oauth/load.ts";
 import type { Provider } from "../models.ts";
-import type { ClassifierModel, Model } from "../types.ts";
+import type { ClassifierModel, ImageModel, Model } from "../types.ts";
 import { isModelType } from "../utils/model-operations.ts";
-import { RADIUS_MODELS } from "./radius.models.ts";
+import { RADIUS_CLASSIFIER_MODELS, RADIUS_IMAGE_MODELS, RADIUS_MODELS } from "./radius.models.ts";
 import {
 	DEFAULT_RADIUS_GATEWAY,
 	getRadiusAllModelsFromConfig,
-	getRadiusModels,
+	getRadiusCredentialConfig,
 	loadRadiusGatewayConfig,
 	normalizeRadiusGatewayUrl,
 } from "./radius-config.ts";
@@ -20,7 +21,7 @@ export interface RadiusProviderOptions {
 	gateway?: string;
 }
 
-type RadiusModel = Model<"pi-messages"> | ClassifierModel<"pi-decision">;
+type RadiusModel = Model<"pi-messages"> | ClassifierModel<"pi-decision"> | ImageModel<"pi-image">;
 
 /** Radius gateway provider with a persisted, dynamically refreshed catalog. */
 export function radiusProvider(options: RadiusProviderOptions = {}): Provider<"pi-messages"> {
@@ -29,13 +30,18 @@ export function radiusProvider(options: RadiusProviderOptions = {}): Provider<"p
 	const gateway = normalizeRadiusGatewayUrl(options.gateway ?? DEFAULT_RADIUS_GATEWAY);
 	const baselineModels: RadiusModel[] =
 		gateway === normalizeRadiusGatewayUrl(DEFAULT_RADIUS_GATEWAY)
-			? Object.values(RADIUS_MODELS).map((model) => ({ ...model, provider: id }))
+			? [
+					...(Object.values(RADIUS_MODELS) as Model<"pi-messages">[]),
+					...(Object.values(RADIUS_CLASSIFIER_MODELS) as ClassifierModel<"pi-decision">[]),
+					...(Object.values(RADIUS_IMAGE_MODELS) as ImageModel<"pi-image">[]),
+				].map((model) => ({ ...model, provider: id }))
 			: [];
 	// Gateway catalog for this account. Radius org owners can disable models, so once known it replaces
 	// the shipped baseline instead of overlaying it. The baseline only covers the time before any catalog exists.
 	let dynamicModels: RadiusModel[] | undefined;
 	const streams = piMessagesApi();
 	const classifiers = piDecisionApi();
+	const images = piImageApi();
 
 	return {
 		id,
@@ -52,7 +58,8 @@ export function radiusProvider(options: RadiusProviderOptions = {}): Provider<"p
 			if (stored) {
 				const restored = stored.models.filter(
 					(model): model is RadiusModel =>
-						model.provider === id && (isModelType(model, "chat") || isModelType(model, "classifier")),
+						model.provider === id &&
+						(isModelType(model, "chat") || isModelType(model, "classifier") || isModelType(model, "image")),
 				);
 				if (
 					!(await context.publish({
@@ -67,8 +74,9 @@ export function radiusProvider(options: RadiusProviderOptions = {}): Provider<"p
 
 			// Import catalogs cached by the pre-ModelsStore Radius implementation.
 			if (!stored && context.credential?.type === "oauth") {
-				const legacy = getRadiusModels(id, context.credential);
-				if (legacy.length > 0) {
+				const config = getRadiusCredentialConfig(context.credential);
+				if (config) {
+					const legacy = getRadiusAllModelsFromConfig(id, config);
 					if (
 						!(await context.publish({
 							persist: { models: legacy, checkedAt: Date.now() },
@@ -97,5 +105,6 @@ export function radiusProvider(options: RadiusProviderOptions = {}): Provider<"p
 		stream: (model, context, streamOptions) => streams.stream(model, context, streamOptions),
 		streamSimple: (model, context, streamOptions) => streams.streamSimple(model, context, streamOptions),
 		classify: (model, context, classifyOptions) => classifiers.classify(model, context, classifyOptions),
+		generateImages: (model, context, imageOptions) => images.generateImages(model, context, imageOptions),
 	};
 }

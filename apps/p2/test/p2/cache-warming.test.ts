@@ -39,9 +39,9 @@ import { BACKGROUND_CONTEXT, followNative, whenLive } from "@p2/app/v1";
 import type { ModelRequest } from "@p2/app/v1/worker";
 import { type CacheWarmingMode, ConversationWarmers, type WarmerHost } from "../../plugins/cache-warming/warmer.ts";
 import cacheWarmingWorker from "../../plugins/cache-warming/worker.ts";
-import { Chat } from "../../plugins/chat/contract.ts";
+import { CHAT_PARTICIPANT, Chat } from "../../plugins/chat/contract.ts";
 import { WorkerModels } from "../../plugins/models/contract.ts";
-import { Sessions } from "../../plugins/sessions/contract.ts";
+import { SESSIONS_OWNER, Sessions } from "../../plugins/sessions/contract.ts";
 import { createHost, defineFacet, Session } from "../../src/runtime/chord.ts";
 import { openHostStore, sessionDirectory } from "../../src/runtime/host-dirs.ts";
 import { HOST } from "../../src/runtime/principals.ts";
@@ -51,11 +51,12 @@ import {
 	HarnessHost,
 	HarnessNative,
 	Liveness,
+	PluginLoad,
 	SessionLocation,
 	type WorkerInit,
 	workerCore,
 } from "../../src/runtime/worker.ts";
-import { APP, holdIn, NO_IMAGES, startFixture, until } from "./helpers.ts";
+import { APP, holdWith, NO_IMAGES, startFixture, until } from "./helpers.ts";
 
 const MODEL: Model<"pi-messages"> = {
 	id: "claude-opus-5-5",
@@ -565,6 +566,7 @@ for (const race of ["tool handoff", "settlement during phase read"] as const) {
 			store,
 			(fn) => host.root(fn, context),
 			NO_IMAGES,
+			new PluginLoad(),
 			undefined,
 		);
 		const config = defineFacet((facet, self) => {
@@ -674,9 +676,11 @@ test(
 		);
 		const owner = fixture.browser();
 		const session = (
-			await (await holdIn(owner, Sessions, {}, "owner")).create({ cwd: fixture.workspace }, BACKGROUND_CONTEXT)
+			await (
+				await holdWith(owner, Sessions, {}, ...SESSIONS_OWNER)
+			).create({ cwd: fixture.workspace }, BACKGROUND_CONTEXT)
 		).id;
-		const chat = await holdIn(owner, Chat, { session, conversation: 1 }, "participant");
+		const chat = await holdWith(owner, Chat, { session, conversation: 1 }, ...CHAT_PARTICIPANT);
 		await chat.send({ text: "hello", requestId: "m1" }, BACKGROUND_CONTEXT);
 		const live = (view: ConversationView | null | undefined) => view?.docs["pi.live"] as LiveState | undefined;
 		const tokens = (view: ConversationView | null | undefined) =>

@@ -9,6 +9,7 @@ const BASE_COMPAT: OpenAICompletionsCompat = {
 	supportsLongCacheRetention: false,
 };
 const TOGGLE_REASONING_COMPAT: OpenAICompletionsCompat = { ...BASE_COMPAT, thinkingFormat: "together" };
+
 const TOGGLE_REASONING_LEVELS: ThinkingLevelMap = { minimal: null, low: null, medium: null };
 
 export default defineProvider({
@@ -20,6 +21,8 @@ export default defineProvider({
 			skipDeprecated: true,
 			map: (model) => {
 				if (!model.reasoning) return { ...model, compat: BASE_COMPAT };
+				// Every reasoning model Together lists takes its thinking toggle. (The effort-controlled ones, gpt-oss and
+				// DeepSeek V4 Pro 0813, are deprecated upstream and skipped.)
 				return { ...model, compat: TOGGLE_REASONING_COMPAT, thinkingLevelMap: { ...TOGGLE_REASONING_LEVELS } };
 			},
 		}),

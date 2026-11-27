@@ -79,7 +79,7 @@ export type KnownApi =
 
 export type Api = KnownApi | (string & {});
 
-export type KnownImageApi = "openrouter-images" | "google-images";
+export type KnownImageApi = "openrouter-images" | "google-images" | "pi-image";
 
 export type ImageApi = KnownImageApi | (string & {});
 
@@ -395,15 +395,11 @@ export interface ClassifierOptions extends ProviderRequestOptions<ClassifierMode
 }
 
 export interface ImagesOptions extends ProviderRequestOptions<ImageModel<ImageApi>> {
-	/**
-	 * Output aspect ratio, such as `"1:1"`, `"16:9"`, or `"3:2"`.
-	 * APIs that cannot apply it ignore it.
-	 */
+	/** Desired aspect ratio, e.g. `"1:1"`, `"16:9"`, `"4:3"`, `"9:16"`. Sent to the provider unchanged; supported values depend on the model. */
 	aspectRatio?: string;
-	/**
-	 * Output image size, such as `"1K"`, `"2K"`, or `"4K"`.
-	 * APIs that cannot apply it ignore it.
-	 */
+	/** Desired resolution, e.g. `"1K"`, `"2K"`, `"4K"`. Sent to the provider unchanged; supported values depend on the model. */
+	size?: string;
+	/** @deprecated Use `size`. Google image generation still accepts this alias. */
 	imageSize?: string;
 	/**
 	 * Optional metadata to include in API requests.
@@ -521,6 +517,12 @@ export interface Usage {
 	 * providers that expose a reasoning breakdown; left undefined by providers that don't.
 	 */
 	reasoning?: number;
+	/**
+	 * Image output tokens, when the provider reports them. This is a subset of `output`,
+	 * like `reasoning`; the rest of `output` is text and reasoning. Left undefined by
+	 * providers that don't report the split.
+	 */
+	imageOutput?: number;
 	totalTokens: number;
 	cost: {
 		/** Catalog-derived input cost. */

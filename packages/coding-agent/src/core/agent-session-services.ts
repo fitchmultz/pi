@@ -188,6 +188,12 @@ export async function createAgentSessionServices(
 			message: `Extension "${error.extensionPath}" error: ${error.error}`,
 		})),
 	);
+	// A warning, like invalid settings: the runtime keeps working without the file's models, and an error would
+	// make the CLI exit.
+	const modelsJsonError = modelRuntime.getError();
+	if (modelsJsonError) {
+		diagnostics.push({ type: "warning", message: `models.json error: ${modelsJsonError}` });
+	}
 	diagnostics.push(...applyExtensionFlagValues(resourceLoader, options.extensionFlagValues));
 
 	const prepared = reloadOptions?.workingSession ?? reloadOptions?.workingSessionPolicy;

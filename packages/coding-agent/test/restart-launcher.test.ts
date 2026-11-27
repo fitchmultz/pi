@@ -339,14 +339,35 @@ process.exitCode = await superviseCli(${JSON.stringify(getRestartRuntimeWorker(r
 			expect(() => parseRestartRequest(value)).toThrow();
 		expect(() => parseRestartCommand(["--message"], "/work")).toThrow("Missing value");
 	});
-	it("rejects client requests outside a managed session", async () => {
+	it.each([
+		{ args: ["restart"] },
+		{ args: ["restart", "--message", "--agent-dir"] },
+		{ args: ["--agent-dir", "/tmp/profile", "restart", "--message", "--agent-dir"] },
+	])("rejects client requests outside a managed session: $args", async ({ args }) => {
 		const previous = process.env.PI_RESTART_SOCKET;
 		delete process.env.PI_RESTART_SOCKET;
 		try {
-			await expect(runCliLauncher(["restart"], "unused")).rejects.toThrow("managed interactive Pi");
+			await expect(runCliLauncher(args, "unused")).rejects.toThrow("managed interactive Pi");
 		} finally {
 			if (previous) process.env.PI_RESTART_SOCKET = previous;
 		}
+	});
+	it("shows restart help when --agent-dir precedes the command", async () => {
+		const log = vi.spyOn(console, "log").mockImplementation(() => {});
+		expect(await runCliLauncher(["--agent-dir", "/tmp/profile", "restart", "--help"], "unused")).toBe(0);
+		expect(log).toHaveBeenCalledWith(expect.stringContaining("Usage: pi restart"));
+	});
+	it.each(["@profile", "/tmp/profile"])("keeps the agent directory %s on the replacement worker", async (profile) => {
+		const f = await fixture();
+		const runtime = f.release("A", "if (!handoff) restart({}); else ready();");
+		expect(await superviseCli(getRestartRuntimeWorker(runtime), ["--agent-dir", profile], { execArgv: [] })).toBe(0);
+		const [initial, replacement] = f.read();
+		expect(replacement.args).toEqual([
+			"--agent-dir",
+			profile,
+			"--working-session",
+			`${f.session.workingSession}-${initial.pid}`,
+		]);
 	});
 	it("re-resolves a moved invocation symlink and replaces -e without replay", async () => {
 		const f = await fixture();

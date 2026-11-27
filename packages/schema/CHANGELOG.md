@@ -6,6 +6,8 @@
 
 - Fixed `coerce` and `parse` converting an optional `null` inside an `anyOf`/`oneOf` branch into a value (`"null"` for a string) instead of dropping it, without breaking enclosing `oneOf`, `allOf`, or sibling constraints. A schema that accepts the value as it is keeps its nulls, and reusable validators now clear recursion scratch state even if pass 1 throws.
 
+## [1.7.0] - 2026-11-27
+
 ## [1.6.1] - 2026-11-25
 
 ## [1.6.0] - 2026-11-20
