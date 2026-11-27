@@ -39,7 +39,8 @@ export default defineFacet((host) => {
 						if (!startsWith(current, request.messages)) return undefined;
 						// Only the main conversation and its `/tree` branches can warm while idle, and never for Google.
 						const idleEligible =
-							getCacheWarmingMaxIdleAgeMs(request.model) > 0 && (await isTopLevel(session, conversationId, context));
+							getCacheWarmingMaxIdleAgeMs(request.model) > 0 &&
+							(await isTopLevel(session, conversationId, context));
 						// Read the run last: it can settle while we load the agent and context.
 						const live = await session.snapshot(LiveDoc, conversationId, context);
 						if (generation !== undefined && live?.run?.taskId !== generation.taskId) return undefined;
