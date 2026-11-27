@@ -209,9 +209,20 @@ describe("Google AI Ultra plan requests", () => {
 				max_output_tokens: 123,
 				...(toolChoice && { tool_choice: toolChoice }),
 				thinking_level: "low",
-				thinking_summaries: "auto",
+				thinking_summaries: "none",
 			},
 		});
+	});
+
+	it("requests automatic thinking summaries by default when reasoning is enabled", async () => {
+		let body: Record<string, unknown> = {};
+		const fetch: FetchFunction = async (_url, init) => {
+			body = JSON.parse(String(init?.body));
+			return sseResponse([completed]);
+		};
+		const result = await streamSimple(model, context, { headers, fetch, reasoning: "high" }).result();
+		expect(result.stopReason).toBe("stop");
+		expect(body.generation_config).toMatchObject({ thinking_level: "high", thinking_summaries: "auto" });
 	});
 
 	it("enforces strict JSON-schema tool sampling and rejects strict: require when unsupported", async () => {

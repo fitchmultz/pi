@@ -263,10 +263,12 @@ async function openPlanStream(
 	const planToolChoice = (prepared: ReturnType<typeof prepareTools>) =>
 		prepared.tools && (options?.toolChoice || prepared.choice === "validated") ? prepared.choice : undefined;
 	const toolChoice = planToolChoice(strict);
+	const thinkingSummaries = options?.thinkingSummaries ?? (options?.thinkingLevel ? "auto" : undefined);
 	const config: Interactions.GenerationConfig = {
 		...(options?.maxTokens !== undefined && { max_output_tokens: options.maxTokens }),
 		...(toolChoice && { tool_choice: toolChoice }),
-		...(options?.thinkingLevel && { thinking_level: options.thinkingLevel, thinking_summaries: "auto" }),
+		...(options?.thinkingLevel && { thinking_level: options.thinkingLevel }),
+		...(thinkingSummaries && { thinking_summaries: thinkingSummaries }),
 	};
 	const original: Request = {
 		model: model.id,
