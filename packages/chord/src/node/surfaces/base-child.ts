@@ -11,9 +11,13 @@ process.once("message", (request: BaseRequest) => {
 	);
 });
 
-/** Sends `message` to the server, then exits. */
+/** Sends `message` and waits for the server to acknowledge receipt by disconnecting. */
 function answer(message: BaseAnswer): void {
-	process.send?.(message, () => process.exit(0));
+	if (!process.connected || process.send === undefined) process.exit(0);
+	process.once("disconnect", () => process.exit(0));
+	process.send(message, (error) => {
+		if (error !== null) process.exit(0);
+	});
 }
 
 /** `error` as data the server makes its error from again: esbuild's failure keeps its `errors` and `warnings`. */
