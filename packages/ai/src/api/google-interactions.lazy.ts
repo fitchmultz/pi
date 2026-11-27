@@ -1,5 +1,6 @@
 import type { ProviderStreams } from "../types.ts";
-import { lazyApi } from "./lazy.ts";
+import { type LazyApiCapabilities, lazyApi } from "./lazy.ts";
 
-export const googleInteractionsApi = (): ProviderStreams =>
-	lazyApi(() => import("./google-interactions.ts"), { fetchDeferred: true, cancelDeferred: true });
+export const googleInteractionsApi = (
+	capabilities: LazyApiCapabilities = { fetchDeferred: true, cancelDeferred: true },
+): ProviderStreams => lazyApi(() => import("./google-interactions.ts"), capabilities);

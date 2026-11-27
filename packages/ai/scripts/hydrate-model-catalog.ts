@@ -3,6 +3,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { applyImageResizeDefaults } from "../catalog/build.ts";
+import { googleAiPlanModels } from "../catalog/providers/google-ai-plan.ts";
 import { normalizeCloudflareModel, withCloudflareGatewayDecisionsModels } from "../src/api/cloudflare.ts";
 import { normalizeGoogleModel } from "../src/api/google-catalog.ts";
 import { withGoogleDecisionsModels } from "../src/api/google-decisions-catalog.ts";
@@ -79,7 +81,14 @@ export function hydrateModelCatalog(
 	const structure: ModelDataStructure = {};
 	const openaiEntries = Array.isArray(catalog.openai) ? catalog.openai.filter(isCatalogEntry) : [];
 	for (const provider of readModelDataProviderIds(packageRoot)) {
-		const models = catalog[provider];
+		// The pinned offline snapshot predates plan support. A supplied entry still takes precedence.
+		const models =
+			provider === "google-ai-plan" && catalog[provider] === undefined
+				? googleAiPlanModels().map((model) => {
+						applyImageResizeDefaults(model);
+						return { ...model, type: "chat" };
+					})
+				: catalog[provider];
 		if (models === undefined) throw new Error(`Model catalog is missing provider: ${provider}`);
 		if (!Array.isArray(models) || models.length === 0) {
 			throw new Error(`Model catalog has no typed model list for provider: ${provider}`);

@@ -17,6 +17,15 @@ Run `/logout` and select a provider to remove its stored credential. This does n
 
 `auth.json` can contain API keys and OAuth tokens. Keep it private and do not commit it.
 
+### Google AI Ultra plan
+
+Run `/login google-ai-plan` and sign in with a Google account that has an eligible Google AI Ultra
+plan. If the browser is on another machine, paste the final redirect URL when Pi prompts you.
+
+Select `google-ai-plan/gemini-4-hydrogen` with `/model`, or choose another model in the plan's
+catalog. These requests use your plan quota. If you want to use a Gemini API key instead, select
+the separate `google` provider.
+
 ## Use an API key from the environment
 
 Environment variables are useful in CI and anywhere Pi should not store the key. Set the variable before starting Pi:

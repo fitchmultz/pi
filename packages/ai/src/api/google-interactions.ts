@@ -13,19 +13,21 @@ import type {
 	StreamFunction,
 	StreamOptions,
 	Tool,
+	TranscriptContext,
 	Usage,
 } from "../types.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { providerHeadersToRecord } from "../utils/headers.ts";
-import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
-import { getSystemMessageText } from "../utils/text.ts";
-import { getCurrentTools, getInitialSystemMessage, resolveTranscript } from "../utils/transcript.ts";
+import { getIdentityHeaders } from "../utils/identity.ts";
+import { retryProviderRequest } from "../utils/provider-retry.ts";
+import { SseDecoder } from "../utils/sse.ts";
 import { createGoogleClient, createGoogleFetch, resolveGoogleApiKey, retryGoogleRequest } from "./google-client.ts";
+import { classifyGoogleInteractionsError } from "./google-interactions-errors.ts";
 import {
 	type GoogleInteractionsReplay,
 	InteractionSteps,
-	projectSteps,
+	projectTranscript,
 	replayMetadata,
 } from "./google-interactions-steps.ts";
 import {
@@ -45,6 +47,7 @@ export type { GoogleInteractionsReplay } from "./google-interactions-steps.ts";
 type InteractionModel = Model<"google-interactions">;
 type Request = Interactions.InteractionCreateParams.CreateModelInteractionParams;
 type Lifecycle = Interactions.InteractionCompletedEvent["interaction"];
+type SseEvent = Interactions.InteractionSSEEvent;
 
 // Each foreground segment reaches 65,536 tokens before it can request continuation.
 // https://aistudio.google.com/docs/long-decode bounds the whole decode at 1,048,576 tokens minus input.
@@ -62,16 +65,21 @@ export interface GoogleInteractionsOptions extends StreamOptions {
 
 export const stream: StreamFunction<"google-interactions", GoogleInteractionsOptions> = (model, context, options) =>
 	runStream(model, options?.signal, async (events, output) => {
+		if (model.provider === "google-ai-plan") {
+			const source = await openPlanStream(model, context, options);
+			const { reason, steps } = await readInteraction(source, model, events, output, options);
+			output.stopReason = reason;
+			output.googleInteractionsReplay = replayMetadata(output, steps);
+			return;
+		}
+
 		const request = createInteractionClient(model, options);
-		const transcript = resolveTranscript(context, true);
-		const steps = projectSteps(model, transcript);
-		const initial = getInitialSystemMessage(transcript.messages);
-		const tools = getCurrentTools(transcript.messages);
+		const { steps, instruction, tools } = projectTranscript(model, context);
 		const strict = prepareTools(model, tools, options);
 		const original: Request = {
 			model: model.id,
 			input: steps,
-			system_instruction: initial ? sanitizeSurrogates(getSystemMessageText(initial)) : "",
+			system_instruction: instruction,
 			tools: strict.tools,
 			generation_config: {
 				max_output_tokens: options?.maxTokens ?? model.maxTokens,
@@ -175,61 +183,15 @@ export const stream: StreamFunction<"google-interactions", GoogleInteractionsOpt
 		const seenTokens = new Set<string>();
 		let hopBaseUsage: Usage | undefined;
 		for (let hop = 1; ; hop++) {
-			const hopSteps = new InteractionSteps(events, output);
-			let interaction: Lifecycle | undefined;
-			let usage: Interactions.Usage | undefined;
-			let status: string | undefined;
-			let token: string | undefined;
-			let id: string | undefined;
-			let tier: string | undefined;
-			for await (const event of source) {
-				const previousUsage = usage;
-				const previousTier = tier;
-				await options?.onProviderStreamEvent?.(event, model);
-				switch (event.event_type) {
-					case "interaction.created":
-					case "interaction.completed":
-						interaction = event.interaction;
-						id = interaction.id;
-						output.responseId = id;
-						output.responseModel = interaction.model ?? output.responseModel;
-						status = interaction.status;
-						token = interaction.continuation_token ?? token;
-						tier = interaction.service_tier ?? tier;
-						usage = interaction.usage ?? usage;
-						break;
-					case "interaction.status_update":
-						id = event.interaction_id;
-						status = event.status;
-						token = event.continuation_token ?? token;
-						usage = event.usage ?? usage;
-						break;
-					case "step.start":
-						hopSteps.start(event.index, structuredClone(event.step));
-						break;
-					case "step.delta":
-						hopSteps.delta(event.index, event.delta);
-						usage = event.metadata?.total_usage ?? usage;
-						break;
-					case "step.stop":
-						hopSteps.stop(event.index);
-						usage = event.usage ?? usage;
-						break;
-					case "error":
-						output.rawStopReason = event.error?.code;
-						throw new Error(event.error?.message ?? "Google Interactions stream returned an error");
-				}
-				if (usage && (usage !== previousUsage || tier !== previousTier)) {
-					output.usage = buildUsage(model, usage, tier ?? request.serviceTier(), hopBaseUsage);
-				}
-				options?.signal?.throwIfAborted();
-			}
-			options?.signal?.throwIfAborted();
-			const reason = stopReason(status);
-			output.rawStopReason = status;
-			if (reason === "error")
-				throw new Error(`Google Interactions stream ended with status: ${status ?? "missing"}`);
-			nativeSteps.push(...hopSteps.finish(interaction?.steps));
+			const {
+				status,
+				reason,
+				id,
+				token,
+				usage,
+				steps: hopSteps,
+			} = await readInteraction(source, model, events, output, options, request.serviceTier(), hopBaseUsage);
+			nativeSteps.push(...hopSteps);
 			if (
 				status !== "requires_continuation" ||
 				!id ||
@@ -277,6 +239,185 @@ export const streamSimple: StreamFunction<"google-interactions", SimpleStreamOpt
 	});
 };
 
+async function openPlanStream(
+	model: InteractionModel,
+	context: TranscriptContext,
+	options?: GoogleInteractionsOptions,
+): Promise<AsyncIterable<SseEvent>> {
+	const headers = new Headers(
+		providerHeadersToRecord(
+			getIdentityHeaders(model, options?.identity),
+			{ accept: "text/event-stream", "content-type": "application/json" },
+			model.headers,
+			options?.headers,
+		),
+	);
+	if (!/^Bearer[ \t]+\S+$/i.test(headers.get("authorization") ?? "")) {
+		throw new Error(`No Bearer credentials for provider: ${model.provider}`);
+	}
+	headers.delete("dpop");
+	headers.delete("x-goog-api-key");
+
+	const { instruction, steps, tools: currentTools } = projectTranscript(model, context);
+	const strict = prepareTools(model, currentTools, options);
+	const planToolChoice = (prepared: ReturnType<typeof prepareTools>) =>
+		prepared.tools && (options?.toolChoice || prepared.choice === "validated") ? prepared.choice : undefined;
+	const toolChoice = planToolChoice(strict);
+	const thinkingSummaries = options?.thinkingSummaries ?? (options?.thinkingLevel ? "auto" : undefined);
+	const config: Interactions.GenerationConfig = {
+		...(options?.maxTokens !== undefined && { max_output_tokens: options.maxTokens }),
+		...(toolChoice && { tool_choice: toolChoice }),
+		...(options?.thinkingLevel && { thinking_level: options.thinkingLevel }),
+		...(thinkingSummaries && { thinking_summaries: thinkingSummaries }),
+	};
+	const original: Request = {
+		model: model.id,
+		store: false,
+		stream: true,
+		input: steps,
+		...(instruction && { system_instruction: instruction }),
+		...(strict.tools && { tools: strict.tools }),
+		...(Object.keys(config).length > 0 && { generation_config: config }),
+	};
+	const replacement = await options?.onPayload?.(original, model);
+	const payload = replacement === undefined ? original : { ...(replacement as Request) };
+	let preferred =
+		strict.hasPreferred && payload.tools === strict.tools && payload.generation_config?.tool_choice === "validated";
+	const url = `${model.baseUrl.replace(/\/+$/u, "")}/interactions:createPerUserQuota`;
+	const googleFetch = createGoogleFetch("Google", model, options);
+	for (;;) {
+		const body = JSON.stringify(payload);
+		try {
+			const response = await retryProviderRequest(
+				async () => {
+					const response = await googleFetch(url, { method: "POST", headers, body, signal: options?.signal });
+					if (response.ok) return response;
+					const { status, headers: responseHeaders } = response;
+					const error = classifyGoogleInteractionsError({
+						status,
+						headers: responseHeaders,
+						body: await response.text(),
+						modelId: model.id,
+					});
+					if (error.final) throw Object.assign(new Error(error.message), { status });
+					throw Object.assign(new Error(error.message), { status, headers: responseHeaders });
+				},
+				{
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				},
+			);
+			if (!response.body) throw new Error(`${model.provider} response has no body`);
+			return readPlanSse(response.body);
+		} catch (error) {
+			if (!preferred || !isGoogleStrictToolRejectionError(error)) throw error;
+			preferred = false;
+			strictToolSessions.markExceeded(options?.sessionId);
+			const fallback = prepareTools(model, currentTools, options, true);
+			payload.tools = fallback.tools;
+			const fallbackChoice = planToolChoice(fallback);
+			if (fallbackChoice) {
+				payload.generation_config = { ...payload.generation_config, tool_choice: fallbackChoice };
+			} else if (payload.generation_config) {
+				const { tool_choice: _, ...rest } = payload.generation_config;
+				if (Object.keys(rest).length > 0) payload.generation_config = rest;
+				else delete payload.generation_config;
+			}
+		}
+	}
+}
+
+async function* readPlanSse(body: ReadableStream<Uint8Array>): AsyncGenerator<SseEvent> {
+	const reader = body.getReader();
+	const sse = new SseDecoder();
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			for (const { data } of done ? sse.end() : sse.push(value)) {
+				if (data && data !== "[DONE]") yield JSON.parse(data) as SseEvent;
+			}
+			if (done) return;
+		}
+	} finally {
+		// The terminal event need not coincide with EOF. Cancel unread bytes on early exit.
+		void reader.cancel().catch(() => {});
+		reader.releaseLock();
+	}
+}
+
+async function readInteraction(
+	source: AsyncIterable<SseEvent>,
+	model: InteractionModel,
+	events: AssistantMessageEventStream,
+	output: AssistantMessage,
+	options: GoogleInteractionsOptions | undefined,
+	responseTier?: string,
+	hopBaseUsage?: Usage,
+) {
+	const steps = new InteractionSteps(events, output);
+	const plan = model.provider === "google-ai-plan";
+	let completed = false;
+	let interaction: Lifecycle | undefined;
+	let usage: Interactions.Usage | undefined;
+	let status: string | undefined;
+	let token: string | undefined;
+	let id: string | undefined;
+	let tier: string | undefined;
+	for await (const event of source) {
+		const previousUsage = usage;
+		const previousTier = tier;
+		await options?.onProviderStreamEvent?.(event, model);
+		switch (event.event_type) {
+			case "interaction.created":
+			case "interaction.completed":
+				interaction = event.interaction;
+				id = interaction.id;
+				output.responseId = id;
+				output.responseModel = interaction.model ?? output.responseModel;
+				status = interaction.status;
+				token = interaction.continuation_token ?? token;
+				tier = interaction.service_tier ?? tier;
+				usage = interaction.usage ?? usage;
+				completed = event.event_type === "interaction.completed";
+				break;
+			case "interaction.status_update":
+				id = event.interaction_id;
+				status = event.status;
+				token = event.continuation_token ?? token;
+				usage = event.usage ?? usage;
+				break;
+			case "step.start":
+				steps.start(event.index, structuredClone(event.step));
+				break;
+			case "step.delta":
+				steps.delta(event.index, event.delta);
+				usage = event.metadata?.total_usage ?? usage;
+				break;
+			case "step.stop":
+				steps.stop(event.index);
+				usage = event.usage ?? usage;
+				break;
+			case "error":
+				output.rawStopReason = event.error?.code;
+				throw new Error(event.error?.message ?? "Google Interactions stream returned an error");
+		}
+		if (usage && (usage !== previousUsage || tier !== previousTier)) {
+			output.usage = buildUsage(model, usage, plan ? undefined : (tier ?? responseTier), hopBaseUsage);
+		}
+		options?.signal?.throwIfAborted();
+		if (plan && completed) break;
+	}
+	options?.signal?.throwIfAborted();
+	if (plan && !completed) throw new Error("Google stream ended before interaction.completed");
+	const reason = stopReason(status);
+	output.rawStopReason = status;
+	if (reason === "error" || (plan && status === "requires_continuation")) {
+		throw new Error(`Google Interactions stream ended with status: ${status ?? "missing"}`);
+	}
+	return { status, reason, id, token, usage, steps: steps.finish(interaction?.steps) };
+}
+
 export function fetchDeferred(
 	model: Model<Api>,
 	handle: DeferredHandle,
@@ -320,6 +461,7 @@ export async function cancelDeferred(
 function checkHandle(model: Model<Api>, handle: DeferredHandle): asserts model is InteractionModel {
 	if (
 		!hasApi(model, "google-interactions") ||
+		model.provider === "google-ai-plan" ||
 		handle.api !== model.api ||
 		handle.provider !== model.provider ||
 		handle.modelId !== model.id
@@ -441,7 +583,7 @@ function isBackgroundPending(status: string): boolean {
 	return status === "queued" || status === "in_progress";
 }
 
-function stopReason(status: string | undefined) {
+function stopReason(status: string | undefined): "toolUse" | "stop" | "length" | "error" {
 	switch (status) {
 		case "requires_action":
 			return "toolUse";

@@ -71,7 +71,8 @@ function applyModelsDevEffort(model: ChatModel, source: ModelsDevModel | undefin
 	if (map) mergeThinking(model, map);
 }
 
-function applyImageResizeDefaults(model: AnyModel): void {
+/** Fill in the default resize profile for image-capable catalog models. */
+export function applyImageResizeDefaults(model: AnyModel): void {
 	if (!model.input.includes("image")) return;
 	const images = model.inputLimits?.images;
 	model.inputLimits = {
