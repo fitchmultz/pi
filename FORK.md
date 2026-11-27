@@ -1,8 +1,8 @@
 # fitchmultz/pi — personal Pi fork
 
 Personal fork of [earendil-works/pi](https://github.com/earendil-works/pi), rebuilt on upstream
-v1.0.0 and synchronized through upstream main at
-`e4cd354e6f3ce317a9dd4a8ab1dd4fb6500ebc98` (2026-11-25), 4 commits after official v1.6.1.
+v1.0.0 and synchronized through official Pi `v1.7.0`
+(`fb0fe823539f6d04850f6e34748c01f01f212e1f`, 2026-11-27).
 It is upstream plus the features below. Everything else follows upstream behavior and APIs.
 
 Supported and tested desktop platforms are Apple Silicon macOS and Linux (x64/arm64).
@@ -10,7 +10,8 @@ Android/Termux device functionality is retained. Windows and Intel macOS are not
 
 Each integration record documents its baseline, conflict decisions and verification, newest first:
 
-- [2026-11-25](docs/upstream-sync-2026-11-25.md), including official v1.6.1, the current baseline
+- [2026-11-27](docs/upstream-sync-2026-11-27.md), official v1.7.0, the current baseline
+- [2026-11-25](docs/upstream-sync-2026-11-25.md), including official v1.6.1
 - [2026-11-24](docs/upstream-sync-2026-11-24.md)
 - [2026-11-21](docs/upstream-sync-2026-11-21.md)
 - [2026-11-20](docs/upstream-sync-2026-11-20.md), including official v1.6.0
@@ -73,7 +74,7 @@ all-platform qualification.
 | Z.AI Coding Plan Responses optimization: routes `zai` GLM-5.3+ (`glm-5.3`, `glm-5.3-flash`, `glm-5.3-highspeed`, `glm-5.4`) over OpenAI Responses (`https://api.z.ai/api/v1`) with `supportsDeveloperRole`, `supportsMidConvoSystemMessages`, `supportsStrictMode`, `supportsOpenAIGrammarTools`, and `supportsLongCacheRetention: false`, preserves those defaults across hydration and `pi.dev` catalog overlays via `normalizeZaiModel()` (and keeps `zai-coding-cn` GLM-5.3+ `supportsMidConvoSystemMessages: true`), includes `zai` in `OPENAI_RESPONSES_TOOL_CALL_PROVIDERS`, classifies Z.AI Coding Plan 429 limit codes (`1309`–`1321` and Responses `permission_denied`/plan-limit wording) as non-retryable, and defaults `zai`/`zai-coding-cn` to `glm-5.4` | `packages/ai/src/api/zai-catalog.ts`, `packages/ai/catalog/providers/zai.ts`, `packages/ai/src/providers/{zai,zai-coding-cn}.ts`, `packages/ai/src/api/openai-responses-shared.ts`, `packages/ai/src/utils/retry.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `core/{remote-catalog-provider,model-resolver}.ts` | `packages/ai/test/{zai-coding-plan-models,model-data-validation,providers,retry}.test.ts`, `remote-catalog-provider.test.ts` | — |
 | Google Decisions classifier: `google-decisions` API (`POST /v1beta/decisions` with `x-goog-api-key`) and `google/gemini-decision-1` multimodal catalog entry, preserved across offline catalog hydration | `packages/ai/src/api/google-decisions{,-catalog,.lazy}.ts`, `packages/ai/src/api/classifier-shared.ts`, `packages/ai/catalog/providers/google.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `packages/ai/src/providers/google.ts` | `packages/ai/test/{google-decisions,classifier-models,model-data-validation}.test.ts` | [Models](packages/coding-agent/docs/models.md) |
 | Google Interactions: `google/gemini-4-neon` uses `google-interactions`; other Google chat models keep their existing API. Pi preserves signed model steps for stateless replay and sends only new steps when the transcript matches the last stored interaction. Cache warming replays without storing or changing that history. The adapter handles foreground continuation, served-tier pricing, and deferred background responses through the same Google and Cloudflare AI Gateway routes. | `packages/ai/src/api/google-interactions{,-steps,.lazy}.ts`, `packages/ai/src/providers/google.ts`, `packages/ai/catalog/providers/google.ts` | `packages/ai/test/{google-interactions,model-data-validation}.test.ts`, `suite/prompt-cache-prefix.test.ts` | [AI README](packages/ai/README.md), [Models configuration](packages/coding-agent/docs/models-configuration.md#google-interactions) |
-| Google native image generation: `google-images` API over `@google/genai` `generateContent` (`ImagesOptions.aspectRatio`/`imageSize` wired through `Models.generateImages()` and `codemode`, Gemini Developer API `store: false` opt-out, filters internal `thought` parts, shares Google auth/fetch/retry including Cloudflare AI Gateway `/google-ai-studio` passthrough) and active Nano Banana image models sourced from `models.dev` (`gemini-nano-banana-2.1`, `gemini-3.1-flash-lite-image`, `gemini-3-pro-image`) with image-output token pricing, preserved across offline catalog hydration | `packages/ai/src/api/google-{client,images,images.lazy}.ts`, `packages/ai/src/providers/{google,images/register-builtins}.ts`, `packages/ai/catalog/{sources/models-dev,providers/google}.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `extensions/codemode/execute.ts` | `packages/ai/test/{google-images,model-data-validation}.test.ts`, `suite/agent-session-codemode.test.ts` | [AI README](packages/ai/README.md), [Codemode](packages/coding-agent/docs/codemode.md) |
+| Google native image generation: `google-images` API over `@google/genai` `generateContent` (`ImagesOptions.aspectRatio`/`size` wired through `Models.generateImages()` and `codemode`, with `imageSize` retained as an alias, Gemini Developer API `store: false` opt-out, filters internal `thought` parts, shares Google auth/fetch/retry including Cloudflare AI Gateway `/google-ai-studio` passthrough) and active Nano Banana image models sourced from `models.dev` (`gemini-nano-banana-2.1`, `gemini-3.1-flash-lite-image`, `gemini-3-pro-image`) with image-output token pricing, preserved across offline catalog hydration | `packages/ai/src/api/google-{client,images,images.lazy}.ts`, `packages/ai/src/providers/{google,images/register-builtins}.ts`, `packages/ai/catalog/{sources/models-dev,providers/google}.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `extensions/codemode/execute.ts` | `packages/ai/test/{google-images,model-data-validation}.test.ts`, `suite/agent-session-codemode.test.ts` | [AI README](packages/ai/README.md), [Codemode](packages/coding-agent/docs/codemode.md) |
 | Gemini 4 resilience, continuation, signatures, strict-tool fallback, prefix-cache stability, cache warming, and catalog limits: `20 min` (`1200000` ms) HTTP idle timeout option, Google `httpOptions.fetch` response-header capture (`Retry-After`/`x-should-retry` + `onResponse`), `null`-removed header stripping, and header-only `timeoutMs`, `promptFeedback.blockReason` diagnostics, Gemini Developer API `store: false` opt-out (including HTTPS and Workers AI Binding `/google-ai-studio` routes), `compat.supportsTemperature` omission on Gemini 4 & 3.6+, `compat.supportsMidConvoSystemMessages` inline `<system_update>` rendering on Gemini 4+ to keep `systemInstruction` cache-stable, `textSignature` inclusion in context/compaction token estimates, `gemini-4-neon` Flex/Priority multipliers (including prefixed model IDs), clamped non-negative `usage.input`, and prefixed `\nuser\n` stop-sequence guard, Cloudflare 1102/credit-depletion retry classification, canonical `google` catalog `100 MiB` `maxRequestBytes`, `65536` streaming `maxTokens` for `gemini-4-carbon`/`gemini-4-argon`, and `promptCache: { short: 75 }` for Gemini 4 models (including hydration and `pi.dev` overlays), `long -> short` effective retention, 2,050-token uncached-tail pricing, and Standard-tier replays when Priority is requested, Pi-owned `FinishReason.CONTINUATION` loop with Hop-1 prompt sizing and summed cost (`isRecoverableLength` excludes `CONTINUATION`), distinct/signature-only thought-signature preservation plus cross-model Gemini 4 replay, and bounded per-session `400` `VALIDATED` fallback for `strict: "prefer"` tools | `packages/ai/src/{cache-warming,utils/headers}.ts`, `packages/ai/src/api/{google-shared,google-generative-ai,google-vertex,google-catalog,strict-tool-limits}.ts`, `packages/ai/src/utils/{retry,overflow,transform-messages,estimate}.ts`, `packages/ai/src/providers/compat-schema.ts`, `packages/ai/catalog/providers/google.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `core/{http-dispatcher,remote-catalog-provider,compaction/compaction}.ts` | `packages/ai/test/{google-stream,google-stop-reason-continuation,google-shared-signed-empty-blocks,google-shared-retry,fetch-option,overflow,retry,provider-retry,context-estimate,model-data-validation}.test.ts`, `cache-warmer.test.ts`, `http-dispatcher.test.ts`, `remote-catalog-provider.test.ts`, `compaction.test.ts`, `suite/prompt-cache-prefix.test.ts` | [Settings](packages/coding-agent/docs/settings.md), [Models](packages/coding-agent/docs/models.md#prompt-cache-lifetimes), [Models configuration](packages/coding-agent/docs/models-configuration.md) |
 | Cloudflare AI Gateway Decisions classifier: `cloudflare-ai-gateway/gpt-6-luna` reuses OpenAI's `openai-decisions` catalog entry on the gateway's `/openai` passthrough and authenticates with the gateway token, so it stays available while `openai` uses Sign in with ChatGPT. OpenAI Decisions and System One requests accept an `authorization` or `cf-aig-authorization` header in place of an API key through the OpenAI chat APIs' check, `hasCredentialHeader()`. Pinned offline hydration derives the entry from the snapshot's `openai` entry when the snapshot predates it | `packages/ai/catalog/providers/{cloudflare-ai-gateway,openai}.ts`, `packages/ai/src/api/cloudflare.ts`, `packages/ai/scripts/hydrate-model-catalog.ts`, `packages/ai/src/providers/cloudflare-ai-gateway.ts`, `packages/ai/src/api/classifier-shared.ts`, `packages/ai/src/utils/headers.ts` | `packages/ai/test/{classifier-models,model-data-validation}.test.ts` | [Models](packages/coding-agent/docs/models.md#use-decision-models) |
 | Path hyperlinks: prose paths and inline-code paths/URLs stay clickable after wrapping (treating CJK punctuation as link boundaries and wrapping inline-code OSC 8 links inside `theme.code(...)` so code styling stays unbroken); terminals only regex-match one row and the source-transform seam cannot preserve literal codespan rendering | `packages/tui/src/components/markdown.ts` | `packages/tui/test/markdown.test.ts` | [Terminal setup](packages/coding-agent/docs/terminal-setup.md#override-detected-capabilities) |
@@ -350,6 +351,8 @@ and the obsolete `scripts/coding-agent-consumer.mjs` shim has been removed.
 Retained offline comparison fixtures are documented in [Performance reproduction](docs/performance.md).
 
 Chord v2 is the root package and supplies the host, links, store, plugins and app kit.
+The v1.7.0 sync adopts slice 15: grantable members replace variants, and p2/p3 hosts and clients
+must use the same wire protocol (version 2).
 The fork keeps `CheckJsonOptions` and its container hook in `@earendil-works/chord/json`
 for native working-session validation. Coding-agent imports JSON helpers from `/json`,
 not the host runtime. Durable imports context, draft and JSON types from `/context`,
@@ -373,8 +376,10 @@ These are release integrations, not additional fork mechanisms.
 Grep globs follow upstream's search-path-relative matching. Edit execution and preview use upstream's
 bounded diff windows, computed before writing. Original line endings are spliced back only at
 matched ranges, with the fork's exact fuzzy-boundary mapping retained in the shared Durable owner.
-Kitty fullscreen images draw after all covered text rows on every terminal. These upstream fixes
-do not replace the fork's UTF-8 validation, compact Bash rendering, or source-aware selection.
+Kitty fullscreen images draw after all covered text rows on every terminal. Official Pi v1.7.0
+adds signed 32-bit Kitty IDs and scrolls regular-screen Kitty appends without clearing scrollback.
+The fork keeps Sixel row reservation, cursor save/restore, and its full-redraw fallback. These
+upstream fixes do not replace the fork's UTF-8 validation, compact Bash rendering, or source-aware selection.
 
 Model references follow upstream's shared provider-selection policy, including gateway IDs,
 thinking suffixes, authenticated-provider tie breaking and explicit-key ambiguity. The fork retains
@@ -389,9 +394,10 @@ factory entry. Removing it changes supported `ctx.ui.setEditorText()` behavior w
 is open, so the attempted removal is withdrawn. Factory admission and late-component disposal
 after early completion remain; native-boundary tests cover these retained adaptations.
 
-Client identity and attribution now follow pi-ai's native `ClientIdentity` and
+Client identity and attribution follow pi-ai's native `ClientIdentity` and
 `withClientIdentity`, including the mutable wrapper's fork `getAvailability()` diagnostics.
-This is an upstream API migration, not retirement of a fork-only attribution engine.
+Official Pi v1.7.0 removed install/update reporting, `enableInstallTelemetry`, and `PI_TELEMETRY`.
+Coding-agent attribution headers no longer depend on the removed opt-out.
 Headers returned by `before_provider_headers` retain object identity through custom-provider
 dispatch (required by Cursor); prepared-retention warming remains.
 Google adapters apply identity during client/header setup while sharing the existing stream engine.
@@ -437,6 +443,10 @@ Moonshot OpenAI entries and Kimi Coding's implied estimate
 the rate as zero get it restored from their input rate during offline hydration and
 fetched/cached runtime merges. Custom endpoints and other providers are unchanged. Claude 5.5 pricing now follows
 models.dev metadata, including Sonnet 5.5's $0.10/M cache-read rate.
+
+Terminal resume (OSC 7577) follows official Pi, including `--agent-dir` and the original restriction
+and resource flags. Managed restart still restores the complete working session, keeps the terminal's
+resume record through the worker swap, and skips input draining; a normal quit clears the record.
 
 Restart guidance is a recorded `restart` prompt section, set in `before_agent_start`, so a copy of
 the session that runs without managed control keeps the leading system message and records the

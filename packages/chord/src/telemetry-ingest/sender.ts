@@ -49,12 +49,11 @@ export function sendWorkerTelemetry<P extends Principal>(
 		(partial) => recorder.pending(partial),
 		() => held.release(),
 		(batch) => {
-			if (held.state.value.kind !== "live" || held.variant !== "worker") return undefined;
+			if (held.state.value.kind !== "live") return undefined;
+			const { ingest } = held;
+			if (ingest === undefined) return undefined;
 			// A batch takes at most `WORKER_BATCH_ROWS` metric rows; more series in one interval are dropped.
-			return held.ingest(
-				{ spans: batch.spans, metrics: batch.metrics.slice(0, WORKER_BATCH_ROWS) },
-				BACKGROUND_CONTEXT,
-			);
+			return ingest({ spans: batch.spans, metrics: batch.metrics.slice(0, WORKER_BATCH_ROWS) }, BACKGROUND_CONTEXT);
 		},
 	);
 }
@@ -73,7 +72,7 @@ function sender(
 	let sending: Promise<void> | undefined;
 	let stopped = false;
 	const once = async (partial: boolean): Promise<void> => {
-		if (!waiting(partial)) return;
+		if (stopped || !waiting(partial)) return;
 		const batch = recorder.take(partial, limit);
 		const sent = call(batch);
 		if (sent === undefined) {

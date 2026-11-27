@@ -1,36 +1,11 @@
 import { calculateCost } from "../models.ts";
-import type { ClassifierApi, ClassifierModel, ClassifierOptions, ProviderHeaders, Usage } from "../types.ts";
-import { hasCredentialHeader, headersToRecord, providerHeadersToRecord } from "../utils/headers.ts";
-import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
-import { retryProviderRequest } from "../utils/provider-retry.ts";
+import type { ClassifierApi, ClassifierModel, ClassifierOptions, Usage } from "../types.ts";
+import { isRecord, type JsonHttpError, postJsonRequest } from "./json-request.ts";
+
+export { isRecord };
 
 /** An HTTP failure in the shape `retryProviderRequest` and `normalizeProviderError` understand. */
-export interface ClassifierHttpError extends Error {
-	status: number | undefined;
-	headers: Headers | undefined;
-	body: string;
-}
-
-function httpError(label: string, response: Response, body: string): ClassifierHttpError {
-	const error = new Error(`${label} returned ${response.status}`) as ClassifierHttpError;
-	error.status = response.status;
-	error.headers = response.headers;
-	error.body = body;
-	return error;
-}
-
-function timeoutError(timeoutMs: number): ClassifierHttpError {
-	const error = new Error(`Request timed out after ${timeoutMs}ms`) as ClassifierHttpError;
-	error.name = "TimeoutError";
-	error.status = undefined;
-	error.headers = undefined;
-	error.body = "";
-	return error;
-}
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+export type ClassifierHttpError = JsonHttpError;
 
 export function requiredNumber(label: string, value: unknown, field: string): number {
 	if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -39,31 +14,13 @@ export function requiredNumber(label: string, value: unknown, field: string): nu
 	return value;
 }
 
-function requestHeaders(
-	model: ClassifierModel<ClassifierApi>,
-	apiKey: string | undefined,
-	optionsHeaders?: ProviderHeaders,
-	identity?: ClientIdentity,
-	authHeaders?: Record<string, string>,
-): Record<string, string> {
-	const auth = authHeaders ?? (apiKey ? { authorization: `Bearer ${apiKey}` } : {});
-	return (
-		providerHeadersToRecord(
-			getIdentityHeaders(model, identity),
-			{ ...auth, "content-type": "application/json" },
-			model.headers,
-			optionsHeaders,
-		) ?? {}
-	);
-}
-
 /**
  * Posts one JSON classifier request with bearer auth, or with the credential header the caller
  * already set, `onPayload`/`onResponse` hooks, a fresh timeout per attempt, and provider retries.
  * Returns the parsed response body; throws on failure.
  * `noRetryStatuses` lists HTTP statuses that fail at once although they are normally retried.
  */
-export async function postClassifierRequest(
+export function postClassifierRequest(
 	label: string,
 	url: URL,
 	model: ClassifierModel<ClassifierApi>,
@@ -72,47 +29,7 @@ export async function postClassifierRequest(
 	noRetryStatuses?: readonly number[],
 	authHeaders?: Record<string, string>,
 ): Promise<unknown> {
-	// Gateways such as Cloudflare AI Gateway send the credential in a header instead of an API key,
-	// which the OpenAI chat APIs accept through the same check.
-	const mergedHeaders = providerHeadersToRecord(model.headers, options?.headers);
-	if (!options || (!options.apiKey && !hasCredentialHeader(mergedHeaders))) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
-	const apiKey = options.apiKey;
-	let payload = body;
-	const transformed = await options.onPayload?.(payload, model);
-	if (transformed !== undefined) payload = transformed;
-	const requestFetch = options.fetch ?? globalThis.fetch;
-	return retryProviderRequest(
-		async () => {
-			const timeoutSignal = options.timeoutMs !== undefined ? AbortSignal.timeout(options.timeoutMs) : undefined;
-			const signal =
-				options.signal && timeoutSignal
-					? AbortSignal.any([options.signal, timeoutSignal])
-					: (options.signal ?? timeoutSignal);
-			try {
-				const next = await requestFetch(url, {
-					method: "POST",
-					headers: requestHeaders(model, apiKey, options.headers, options.identity, authHeaders),
-					body: JSON.stringify(payload),
-					signal,
-				});
-				// Reported before the body is read, so a body that fails to arrive still reports its status.
-				await options.onResponse?.({ status: next.status, headers: headersToRecord(next.headers) }, model);
-				if (!next.ok) throw httpError(label, next, await next.text());
-				return (await next.json()) as unknown;
-			} catch (error) {
-				if (timeoutSignal?.aborted && !options.signal?.aborted) throw timeoutError(options.timeoutMs!);
-				throw error;
-			}
-		},
-		{
-			maxRetries: options.maxRetries ?? 2,
-			maxRetryDelayMs: options.maxRetryDelayMs,
-			signal: options.signal,
-			noRetryStatuses,
-		},
-	);
+	return postJsonRequest(label, url, model, body, options, noRetryStatuses, authHeaders);
 }
 
 function tokenCount(value: unknown): number {

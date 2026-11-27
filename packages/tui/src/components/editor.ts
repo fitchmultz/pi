@@ -799,34 +799,10 @@ export class Editor implements Component, Focusable {
 			}
 
 			if (kb.matches(data, "tui.select.confirm")) {
-				const selected = this.autocompleteList.getSelectedItem();
-				if (selected && this.autocompleteProvider) {
-					// Enter runs a slash command only from the command-name menu. Path and argument menus can also have a
-					// "/" prefix ("look at /tmp/fi", "/open /tm"), so the prefix alone does not identify the menu. Read the
-					// context before applying the completion: the completed "/model " already contains a space.
-					const submitsCommand = this.isCompletingSlashCommandName();
-					this.pushUndoSnapshot();
-					this.lastAction = null;
-					const result = this.autocompleteProvider.applyCompletion(
-						this.state.lines,
-						this.state.cursorLine,
-						this.state.cursorCol,
-						selected,
-						this.autocompletePrefix,
-					);
-					this.state.lines = result.lines;
-					this.state.cursorLine = result.cursorLine;
-					this.setCursorCol(result.cursorCol);
-
-					if (submitsCommand) {
-						this.cancelAutocomplete();
-						// Fall through to submit
-					} else {
-						this.cancelAutocomplete();
-						if (this.onChange) this.onChange(this.getText());
-						return;
-					}
+				if (this.confirmAutocomplete() === "applied") {
+					return;
 				}
+				// "submit" or "none": fall through to submit
 			}
 		}
 
@@ -2264,8 +2240,19 @@ export class Editor implements Component, Focusable {
 	}
 
 	private acceptAutocompleteItem(selected: AutocompleteItem): void {
-		if (!this.autocompleteProvider) return;
 		const wasSlashCommandName = this.isCompletingSlashCommandName();
+		if (!this.applyAutocompleteItem(selected)) return;
+		this.onChange?.(this.getText());
+		if (wasSlashCommandName) {
+			const afterCursor = (this.state.lines[this.state.cursorLine] || "").slice(0, this.state.cursorCol);
+			if (this.isInSlashCommandContext(afterCursor) && !this.isInSlashCommandNameContext(afterCursor)) {
+				this.tryTriggerAutocomplete();
+			}
+		}
+	}
+
+	private applyAutocompleteItem(selected: AutocompleteItem): boolean {
+		if (!this.autocompleteProvider) return false;
 		this.pushUndoSnapshot();
 		this.lastAction = null;
 		const result = this.autocompleteProvider.applyCompletion(
@@ -2279,13 +2266,7 @@ export class Editor implements Component, Focusable {
 		this.state.cursorLine = result.cursorLine;
 		this.setCursorCol(result.cursorCol);
 		this.cancelAutocomplete();
-		this.onChange?.(this.getText());
-		if (wasSlashCommandName) {
-			const afterCursor = (this.state.lines[this.state.cursorLine] || "").slice(0, this.state.cursorCol);
-			if (this.isInSlashCommandContext(afterCursor) && !this.isInSlashCommandNameContext(afterCursor)) {
-				this.tryTriggerAutocomplete();
-			}
-		}
+		return true;
 	}
 
 	// Autocomplete methods
@@ -2539,6 +2520,28 @@ export class Editor implements Component, Focusable {
 	private cancelAutocomplete(): void {
 		this.cancelAutocompleteRequest();
 		this.clearAutocompleteUi();
+	}
+
+	/**
+	 * Apply the currently selected autocomplete suggestion.
+	 * Returns "none" if no completion was applied, "applied" if inserted without submitting,
+	 * or "submit" if a slash command name was completed and should be submitted.
+	 */
+	protected confirmAutocomplete(): "none" | "applied" | "submit" {
+		// Enter runs a slash command only from the command-name menu. Path and argument menus can also have a
+		// "/" prefix ("look at /tmp/fi", "/open /tm"), so the prefix alone does not identify the menu. Read the
+		// context before applying the completion: the completed "/model " already contains a space.
+		const submitsCommand = this.isCompletingSlashCommandName();
+		const selected = this.autocompleteState ? this.autocompleteList?.getSelectedItem() : undefined;
+		if (!selected || !this.applyAutocompleteItem(selected)) {
+			return "none";
+		}
+
+		if (submitsCommand) {
+			return "submit";
+		}
+		if (this.onChange) this.onChange(this.getText());
+		return "applied";
 	}
 
 	public isShowingAutocomplete(): boolean {

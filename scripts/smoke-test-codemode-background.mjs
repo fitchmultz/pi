@@ -211,7 +211,7 @@ async function main() {
 			cwd: root,
 			stdio: "inherit",
 			timeout: 60_000,
-			env: { PATH: process.env.PATH, HOME: root, PI_OFFLINE: "1", PI_TELEMETRY: "0" },
+			env: { PATH: process.env.PATH, HOME: root, PI_OFFLINE: "1" },
 		});
 	} finally {
 		await rm(root, { recursive: true, force: true });

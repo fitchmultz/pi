@@ -65,7 +65,6 @@ function fixture(rootDir = tmpdir()) {
 		JSON.stringify({
 			tuiMode: "regular",
 			quietStartup: true,
-			enableInstallTelemetry: false,
 			experimental: { firstTimeSetup: false },
 		}),
 	);
@@ -225,7 +224,6 @@ child.on('exit', code => {process.exitCode = code ?? 1;});
 				`HOME=${home}`,
 				`PI_CODING_AGENT_DIR=${agentDir}`,
 				"PI_OFFLINE=1",
-				"PI_TELEMETRY=0",
 				"TERM=xterm-256color",
 				"JITI_FS_CACHE=0",
 				...Object.entries(options.env ?? {}).map(([key, value]) => `${key}=${value}`),
@@ -871,7 +869,6 @@ export default function(pi) {
 				JSON.stringify({
 					tuiMode: "regular",
 					quietStartup: true,
-					enableInstallTelemetry: false,
 					experimental: { firstTimeSetup: false },
 					httpIdleTimeoutMs: 80,
 					retry: { maxRetries: 2, baseDelayMs: 1000 },
@@ -892,7 +889,6 @@ export default function(pi) {
 				JSON.stringify({
 					tuiMode: "regular",
 					quietStartup: true,
-					enableInstallTelemetry: false,
 					experimental: { firstTimeSetup: false },
 					retry: { maxRetries: 7, baseDelayMs: 1000 },
 					shellCommandPrefix: "reloaded-prefix",

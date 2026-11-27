@@ -23,7 +23,7 @@ describe("--session and --fork ID resolution", () => {
 	}
 
 	function args(overrides: Partial<Args>): Args {
-		return { messages: [], fileArgs: [], unknownFlags: new Map(), diagnostics: [], ...overrides };
+		return { messages: [], fileArgs: [], unknownFlags: new Map(), resumeFlags: [], diagnostics: [], ...overrides };
 	}
 
 	async function forkSource(arg: string): Promise<string | undefined> {

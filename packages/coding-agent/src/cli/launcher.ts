@@ -6,6 +6,7 @@ import { constants } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { assertPrivateFilePath, atomicWriteFileSync } from "../utils/atomic-file.ts";
 import { readJsonFileSync } from "../utils/streaming-file.ts";
+import { takeAgentDirArg } from "./agent-dir-arg.ts";
 import { parseArgs } from "./args.ts";
 import {
 	type CompletedWorkingSession,
@@ -160,8 +161,11 @@ export function getRestartRuntimeWorker(runtime: string): string {
 }
 
 /** Use the CLI parser's token boundaries; startup messages and attachments are never replayed. */
-export function getRestartArgs(args: string[], extensions?: string[]): string[] {
-	const result: string[] = [];
+export function getRestartArgs(cliArgs: string[], extensions?: string[]): string[] {
+	const agentDirArg = takeAgentDirArg(cliArgs);
+	if (agentDirArg.kind === "error") throw new Error(agentDirArg.message);
+	const { args, agentDir } = agentDirArg;
+	const result = agentDir === undefined ? [] : ["--agent-dir", agentDir];
 	const replaced = new Set([
 		"--session",
 		"--session-id",
@@ -448,8 +452,10 @@ export async function superviseCli(
 	}
 }
 
-export async function runCliLauncher(args: string[], launcherPath: string): Promise<number> {
-	if (args[0] === "restart") {
+export async function runCliLauncher(cliArgs: string[], launcherPath: string): Promise<number> {
+	const agentDirArg = takeAgentDirArg(cliArgs, "restart");
+	if (agentDirArg.kind === "ok" && agentDirArg.args[0] === "restart") {
+		const { args } = agentDirArg;
 		if (args.length === 2 && (args[1] === "--help" || args[1] === "-h")) {
 			console.log(`Usage: pi restart [--message <text>] [-e <extension> ...] [--runtime <package-dir>]
 Queue a restart from a managed interactive Pi shell tool; activation waits for final idle.
@@ -474,5 +480,5 @@ Exit codes: 0 = queued (or help); 1 = invalid options, unavailable session, or r
 		return 0;
 	}
 	const invocationPath = resolve(launcherPath);
-	return superviseCli(getCliWorkerPath(realpathSync(invocationPath)), args, { invocationPath });
+	return superviseCli(getCliWorkerPath(realpathSync(invocationPath)), cliArgs, { invocationPath });
 }

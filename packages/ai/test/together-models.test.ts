@@ -41,6 +41,15 @@ describe("Together models", () => {
 		});
 	});
 
+	it("gives every Together reasoning model the Together thinking toggle", () => {
+		for (const id of ["deepseek-ai/DeepSeek-V4.1-Flash", "zai-org/GLM-5.3"] as const) {
+			const model = getModel("together", id);
+			expect(model.reasoning).toBe(true);
+			expect(model.thinkingLevelMap).toEqual({ minimal: null, low: null, medium: null });
+			expect(model.compat).toMatchObject({ supportsReasoningEffort: false, thinkingFormat: "together" });
+		}
+	});
+
 	it("resolves TOGETHER_API_KEY from the environment", () => {
 		process.env.TOGETHER_API_KEY = "test-together-key";
 

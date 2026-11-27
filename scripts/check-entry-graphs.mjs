@@ -130,8 +130,9 @@ const BUDGETS = {
 	},
 	"packages/coding-agent": {
 		// Standalone supervisor and detached background-job processes must stay off TypeBox, settings, and TUI.
+		// Includes cli/agent-dir-arg.ts so the launcher parses --agent-dir identically to the worker.
 		"./src/cli-launcher.ts": {
-			maxFiles: 12,
+			maxFiles: 13,
 			forbid: [
 				"core/settings-manager.ts",
 				"core/settings-schema.ts",

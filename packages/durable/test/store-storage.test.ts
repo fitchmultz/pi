@@ -8,7 +8,6 @@ import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import {
 	applyBatch,
-	type ChordStore,
 	createHost,
 	defineFacet,
 	defineState,
@@ -219,9 +218,9 @@ const Memo = local("app.memo", { version: 1, params: {}, members: { memo: obj({ 
 
 /** A store on `:memory:` with an outbox from its first commit, and Durable's storage in it. */
 async function recorded() {
-	const store = (await openStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), context, {
+	const store = await openStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), context, {
 		outbox: true,
-	})) as ChordStore;
+	});
 	const storage = await StoreStorage.open(store, "harness", context);
 	await commitWrites(storage, [{ type: "conversation", value: { id: ROOT_CONVERSATION_ID } }], context);
 	return { store, storage };
@@ -326,8 +325,8 @@ describe("archives and batches of Durable data", () => {
 	it("an outbox of Durable commits replayed into an empty store gives the same archive (create-plus-retire included)", async () => {
 		const { store, storage } = await recorded();
 		await history(storage);
-		const commits = await (store as ChordStore).outbox!.read(0, 1_000, context);
-		const replica = (await openStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), context)) as ChordStore;
+		const commits = await store.outbox!.read(0, 1_000, context);
+		const replica = await openStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), context);
 		await applyBatch(replica, commits, context);
 		const exported = async (from: Store) => {
 			const parts = [];
@@ -345,7 +344,7 @@ describe("head markers (the entry_heads table)", () => {
 		const directory = await mkdtemp(join(tmpdir(), "pi-durable-store-heads-"));
 		const path = join(directory, "store.sqlite");
 		const open = async () =>
-			(await openStore(sqliteBackend(await openNodeSqliteDatabase(path)), context, { outbox: true })) as ChordStore;
+			await openStore(sqliteBackend(await openNodeSqliteDatabase(path)), context, { outbox: true });
 		let store = await open();
 		let storage = await StoreStorage.open(store, "harness", context);
 		await commitWrites(storage, [{ type: "conversation", value: { id: ROOT_CONVERSATION_ID } }], context);
@@ -376,7 +375,7 @@ describe("head markers (the entry_heads table)", () => {
 		]);
 		const copy = await importStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), parts, context);
 		expect(await heads(await StoreStorage.open(copy, "harness", context))).toEqual([marker, undefined]);
-		const replica = (await openStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), context)) as ChordStore;
+		const replica = await openStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), context);
 		await applyBatch(replica, await store.outbox!.read(0, 1_000, context), context);
 		expect(await heads(await StoreStorage.open(replica, "harness", context))).toEqual([marker, undefined]);
 		for (const each of [copy, replica, store]) await each.close(context);
@@ -398,7 +397,7 @@ describe("reads (slice 6b §1.4, §2.4)", () => {
 
 describe("commits (slice 6b §1.3, §2.5)", () => {
 	it("publishes each commit of a Session inside the attached host's batch, and plainly without a host", async () => {
-		const store = (await openStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), context)) as ChordStore;
+		const store = await openStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), context);
 		const storage = await StoreStorage.open(store, "harness", context);
 		const plain: boolean[] = [];
 		storage.publishing(() => plain.push(store.batch === undefined), context);
@@ -429,7 +428,7 @@ describe("commits (slice 6b §1.3, §2.5)", () => {
 				.getMetrics()
 				.filter(({ name }) => name === "chord.store.statements")
 				.reduce((total, { value }) => total + value, 0);
-		const store = (await openStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), context)) as ChordStore;
+		const store = await openStore(sqliteBackend(await openNodeSqliteDatabase(":memory:")), context);
 		const host = createHost({ store, onError: () => {} });
 		const storage = await StoreStorage.open(store, "harness", context);
 		await commitWrites(storage, [{ type: "conversation", value: { id: ROOT_CONVERSATION_ID } }], context);

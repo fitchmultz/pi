@@ -1408,8 +1408,12 @@ export function calculateCost(model: AnyModel, usage: Usage): Usage["cost"] {
 	const longWrite1h = usage.cacheWrite1h ?? 0;
 	const longWrite12h = usage.cacheWrite12h ?? 0;
 	const shortWrite = Math.max(0, usage.cacheWrite - longWrite1h - longWrite12h);
+	// Image models price image tokens at `imageOutput` and the rest of output at `output`. Without the
+	// provider's split, all output counts as image tokens: the image price never undercharges.
+	const imageRate = model.cost.imageOutput;
+	const imageTokens = imageRate === undefined ? 0 : Math.min(usage.output, usage.imageOutput ?? usage.output);
 	usage.cost.input = (rates.input / 1000000) * usage.input;
-	usage.cost.output = (rates.output / 1000000) * usage.output;
+	usage.cost.output = (rates.output * (usage.output - imageTokens) + (imageRate ?? 0) * imageTokens) / 1000000;
 	usage.cost.cacheRead = (rates.cacheRead / 1000000) * usage.cacheRead;
 	usage.cost.cacheWrite =
 		(rates.cacheWrite * shortWrite + rates.input * 2 * longWrite1h + rates.input * 2.5 * longWrite12h) / 1000000;

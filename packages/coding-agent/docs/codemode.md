@@ -280,9 +280,11 @@ interface ImagesContext {
 }
 
 interface ImagesOptions {
-  /** Output aspect ratio, such as "1:1", "16:9", or "3:2". Ignored by APIs that do not support it. */
+  /** Desired aspect ratio, e.g. `"1:1"`, `"16:9"`, `"4:3"`, `"9:16"`. */
   aspectRatio?: string;
-  /** Output image size, such as "1K", "2K", or "4K". Ignored by APIs that do not support it. */
+  /** Desired resolution: `"1K"`, `"2K"` or `"4K"`. Pixel dimensions such as `"1024x1536"` are not supported. */
+  size?: string;
+  /** Deprecated alias for size for existing Google image scripts. */
   imageSize?: string;
 }
 
@@ -301,6 +303,8 @@ type TextBlock = { type: "text"; text: string };
 type ImageBlock = { type: "image"; data: string; mimeType: string };
 ```
 
+Options must be non-empty strings. Pi trims whitespace and treats `imageSize` as `size` when `size` is absent. Supported values depend on the model; the provider may return an error for an unsupported value. Unknown option keys throw.
+
 Show generated images with `image(block)`. Do not print `data` with `text()`, `console`, or `return`: it is large and the model cannot read it as text. `image()` also saves each image to a temp file and puts its path in the result, so a later turn can copy or move the file.
 
 ```js
@@ -313,7 +317,7 @@ const painter =
 if (!painter) return "No image generation model is available with current credentials.";
 const result = await models.generateImages(painter, {
   input: [{ type: "text", text: "A red fox in the snow, watercolor" }],
-}, { aspectRatio: "16:9", imageSize: "2K" });
+}, { aspectRatio: "16:9", size: "2K" });
 if (result.stopReason !== "stop") return result.errorMessage;
 for (const block of result.output) {
   if (block.type === "image") image(block);

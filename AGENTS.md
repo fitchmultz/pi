@@ -59,6 +59,7 @@ These publication restrictions apply to `earendil-works/pi` and take precedence 
 - No `any` unless absolutely necessary.
 - Never tell the members of a typed union apart with `in` (`"report" in entry`): make it a tagged union (a `kind` field) and switch on the tag. `in` is only for values of unknown type at a trust boundary (wire input, files, Node errors), for feature detection, and for stored or frozen wire formats that a version bump would have to change (say so in a comment).
 - No runtime checks of values whose types TypeScript already guarantees (no `typeof`/`instanceof`/`Array.isArray`/shape guards on typed parameters, typed callback results or typed declarations). Validate only at decided trust boundaries (wire input, schema-checked arguments and params).
+- Never compare values by serializing them (`JSON.stringify`, canonical JSON, a joined text key): it allocates on every comparison, also when nothing changed. Compare by identity where the value is shared, else field by field (a set of names: same size and each name in the other). Where a text key is unavoidable (a `Map` key), build it once and keep it.
 - Inline single-line helpers that have only one call site.
 - Before adding custom functionality, inspect Pi's APIs and installed dependencies. Trace relevant callers and verify required behavior from source, types, docs, or runtime evidence; resolve discoverable unknowns and state remaining uncertainty rather than guess.
 - **No inline imports** (`await import()`, `import("pkg").Type`, dynamic type imports). Top-level imports only.
@@ -67,7 +68,7 @@ These publication restrictions apply to `earendil-works/pi` and take precedence 
 - Use only erasable TypeScript syntax (Node strip-only mode) in code checked by the root config (`packages/*/src`, `packages/*/test`, `packages/coding-agent/examples`): no parameter properties, `enum`, `namespace`/`module`, `import =`, `export =`, or other constructs needing JS emit. Use explicit fields with constructor assignments.
 - Preserve intended functionality, public contracts and data integrity. Remove redundant mechanisms when the authorized replacement covers their behavior; investigate uncertain intent rather than asking by default. Ask only if completing the task requires an unapproved material behavior change.
 - Do not add compatibility layers for obsolete interfaces unless requested; preserve contracts required by the authorized outcome.
-- Never hardcode key checks (e.g. `matchesKey(keyData, "ctrl+x")`). Add defaults to `DEFAULT_EDITOR_KEYBINDINGS` or `DEFAULT_APP_KEYBINDINGS` so they stay configurable.
+- Never hardcode key checks (e.g. `matchesKey(keyData, "ctrl+x")`). Add defaults to `TUI_KEYBINDINGS` (`packages/tui`) or `APP_KEYBINDINGS` (`packages/coding-agent`) so they stay configurable.
 - Never modify `packages/ai/src/models.generated.ts` directly; update the catalog definitions in `packages/ai/catalog/` instead (see its README), then regenerate. Including the resulting `models.generated.ts` diff is always OK, even if regeneration includes unrelated upstream model metadata changes. The generated model data in `packages/ai/src/providers/data/` is gitignored: never stage it, and don't look for it in git history.
 
 ## Chord v2 Code Style

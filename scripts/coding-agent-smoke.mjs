@@ -20,7 +20,6 @@ export function smokeTestCodingAgent(directory, runtime = process.execPath) {
 		XDG_CACHE_HOME: home,
 		PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
 		PI_OFFLINE: "1",
-		PI_TELEMETRY: "0",
 	};
 	if (process.platform === "android") {
 		env.PREFIX = process.env.PREFIX;
