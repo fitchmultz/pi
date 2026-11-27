@@ -1142,7 +1142,7 @@ describe("codemode models", () => {
 				else text(block.text);
 			}
 			const failed = await models.generateImages(
-				model, { input: [{ type: "text", text: "explode" }] }, { imageSize: "2K" },
+				model, { input: [{ type: "text", text: "explode" }] }, { size: " 2K " },
 			);
 			const attempt = async (fn) => { try { await fn(); return "ok"; } catch (error) { return error.message; } };
 			return {
@@ -1152,6 +1152,9 @@ describe("codemode models", () => {
 				wrongType: await attempt(() => models.generateImages({ provider: "scorer", id: "judge" }, { input: [] })),
 				badOptions: await attempt(() =>
 					models.generateImages(model, { input: [{ type: "text", text: "a fox" }] }, { aspectRatio: 16 }),
+				),
+				retiredOption: await attempt(() =>
+					models.generateImages(model, { input: [{ type: "text", text: "a fox" }] }, { imageSize: "2K" }),
 				),
 			};
 		`,
@@ -1170,6 +1173,9 @@ describe("codemode models", () => {
 			wrongType:
 				'"scorer/judge" is a classifier model, not an image model. List the image models you can use with models.getAvailableOfType("image").',
 			badOptions: expect.stringContaining("options.aspectRatio must be a non-empty string"),
+			retiredOption: expect.stringContaining(
+				"does not accept options.imageSize. Expected options: { aspectRatio?, size? }",
+			),
 		});
 		expect(result.content[2]).toEqual({ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" });
 		expect(imageRequests.map((request) => [request.baseUrl, request.apiKey])).toEqual([

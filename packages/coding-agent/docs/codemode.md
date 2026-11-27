@@ -284,8 +284,6 @@ interface ImagesOptions {
   aspectRatio?: string;
   /** Desired resolution: `"1K"`, `"2K"` or `"4K"`. Pixel dimensions such as `"1024x1536"` are not supported. */
   size?: string;
-  /** Deprecated alias for size for existing Google image scripts. */
-  imageSize?: string;
 }
 
 interface ImagesResult {
@@ -303,7 +301,7 @@ type TextBlock = { type: "text"; text: string };
 type ImageBlock = { type: "image"; data: string; mimeType: string };
 ```
 
-Options must be non-empty strings. Pi trims whitespace and treats `imageSize` as `size` when `size` is absent. Supported values depend on the model; the provider may return an error for an unsupported value. Unknown option keys throw.
+Options must be non-empty strings. Pi trims whitespace. Supported values depend on the model; the provider may return an error for an unsupported value. Unknown option keys throw.
 
 Show generated images with `image(block)`. Do not print `data` with `text()`, `console`, or `return`: it is large and the model cannot read it as text. `image()` also saves each image to a temp file and puts its path in the result, so a later turn can copy or move the file.
 

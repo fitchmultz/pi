@@ -399,8 +399,6 @@ export interface ImagesOptions extends ProviderRequestOptions<ImageModel<ImageAp
 	aspectRatio?: string;
 	/** Desired resolution, e.g. `"1K"`, `"2K"`, `"4K"`. Sent to the provider unchanged; supported values depend on the model. */
 	size?: string;
-	/** @deprecated Use `size`. Google image generation still accepts this alias. */
-	imageSize?: string;
 	/**
 	 * Optional metadata to include in API requests.
 	 * Providers extract the fields they understand and ignore the rest.
