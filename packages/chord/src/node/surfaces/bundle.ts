@@ -71,13 +71,15 @@ export async function buildBase(
 		let answered = false;
 		child.once("message", (message: BaseAnswer) => {
 			answered = true;
+			if (child.connected) child.disconnect();
 			if (message.kind === "built") resolve(message.bundle);
 			else reject(Object.assign(new Error(message.message), { errors: message.errors, warnings: message.warnings }));
 		});
 		child.once("error", (error) => {
 			if (!answered) reject(error);
 		});
-		child.once("exit", (code, signal) => {
+		// Exit can precede delivery of a reply still buffered in the IPC channel.
+		child.once("close", (code, signal) => {
 			if (!answered)
 				reject(new Error(`chord: the base build's process ended without an answer (${signal ?? code})`));
 		});
