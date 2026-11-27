@@ -104,6 +104,40 @@ describe("published model catalog hydration", () => {
 		expect(readFileSync(join(dataDir, "test-provider.json"), "utf8")).toBe(provider);
 	});
 
+	it("fills a missing Google AI plan catalog in an offline snapshot without replacing a supplied entry", () => {
+		const { dataDir, packageRoot, values } = createFixture("google-ai-plan");
+		const catalogPath = join(packageRoot, "catalog.json");
+		const providerPath = join(dataDir, "google-ai-plan.json");
+		writeFileSync(catalogPath, JSON.stringify({ "other-provider": [chatModel(values)] }));
+		rmSync(dataDir, { recursive: true });
+
+		hydrateModelCatalog(packageRoot, catalogPath);
+		const groups: Record<string, Record<string, unknown>> = JSON.parse(readFileSync(providerPath, "utf8"));
+		expect(Object.keys(groups["google-interactions"]).sort()).toEqual([
+			"chat:gemini-3.5-flash-lite",
+			"chat:gemini-4-carbon",
+			"chat:gemini-4-hydrogen",
+			"chat:gemini-4-neon",
+		]);
+		expect(groups["google-interactions"]["chat:gemini-4-hydrogen"]).toMatchObject({
+			provider: "google-ai-plan",
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			inputLimits: { images: { maxPerRequest: 3600, resize: { maxWidth: 2000, maxHeight: 2000 } } },
+		});
+
+		const supplied = { ...chatModel(values), id: "provided-model", api: "google-interactions" };
+		writeFileSync(catalogPath, JSON.stringify({ "google-ai-plan": [supplied] }));
+		hydrateModelCatalog(packageRoot, catalogPath);
+		expect(JSON.parse(readFileSync(providerPath, "utf8"))).toEqual({
+			"google-interactions": { "chat:provided-model": supplied },
+		});
+
+		writeFileSync(catalogPath, JSON.stringify({ "google-ai-plan": [] }));
+		expect(() => hydrateModelCatalog(packageRoot, catalogPath)).toThrow(
+			/no typed model list for provider: google-ai-plan/,
+		);
+	});
+
 	it.each(["claude-opus-5-5", "claude-fable-5-2"])(
 		"hydrates published Cloudflare %s defaults while preserving explicit metadata",
 		(id) => {

@@ -125,7 +125,7 @@ export function createGoogleFetch<TModel extends AnyModel>(
 	providerLabel: string,
 	model: TModel,
 	options: ProviderRequestOptions<TModel> | undefined,
-	onFailedHeaders: (headers: Headers | undefined) => void,
+	onFailedHeaders?: (headers: Headers | undefined) => void,
 	onCandidateFinishMessage?: (message: string) => void,
 ): FetchFunction {
 	const baseFetch = options?.fetch ?? globalThis.fetch;
@@ -140,7 +140,7 @@ export function createGoogleFetch<TModel extends AnyModel>(
 	const removedHeaders = removedProviderHeaderNames(model.headers, options?.headers);
 
 	return async (input, init) => {
-		onFailedHeaders(undefined);
+		onFailedHeaders?.(undefined);
 		let requestInput = input;
 		let requestInit = init;
 		if (removedHeaders.size > 0) {
@@ -180,7 +180,7 @@ export function createGoogleFetch<TModel extends AnyModel>(
 		}
 
 		if (!response.ok) {
-			onFailedHeaders(new Headers(response.headers));
+			onFailedHeaders?.(new Headers(response.headers));
 		} else if (onCandidateFinishMessage) {
 			// Workaround for https://github.com/googleapis/js-genai/issues/2211 — @google/genai drops candidate.finishMessage in its MLDev response converter; capture it from the wire until fixed upstream.
 			const requestUrl =

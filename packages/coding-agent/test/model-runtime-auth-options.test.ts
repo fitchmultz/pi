@@ -87,6 +87,45 @@ describe("ModelRuntime auth options", () => {
 		expect((await runtime.getAuth("anthropic"))?.auth.apiKey).toBe("stored-key");
 	});
 
+	it("sends a stored Google AI plan OAuth credential as a Bearer token on the quota route", async () => {
+		const credentials = AuthStorage.inMemory({
+			"google-ai-plan": {
+				type: "oauth",
+				access: "plan-access",
+				refresh: "plan-refresh",
+				expires: Date.now() + 60 * 60_000,
+			},
+		});
+		const runtime = await ModelRuntime.create({ credentials, modelsPath: null });
+		const provider = runtime.getProvider("google-ai-plan")!;
+		expect(provider.getModels()).toHaveLength(4);
+		expect(provider.auth.oauth?.isSubscription).toBe(true);
+		expect(provider.auth.apiKey).toBeUndefined();
+		const model = runtime.getModel(provider.id, "gemini-4-hydrogen")!;
+		const requests: { url: string; headers: Headers }[] = [];
+		const result = await runtime.completeSimple(
+			model,
+			{ messages: [{ role: "user", content: "Hi", timestamp: 0 }] },
+			{
+				fetch: async (url, init) => {
+					requests.push({ url: String(url), headers: new Headers(init?.headers) });
+					return new Response(
+						'data: {"event_type":"interaction.completed","interaction":{"id":"i1","status":"completed"}}\n\n',
+					);
+				},
+			},
+		);
+
+		expect(result.stopReason).toBe("stop");
+		expect(requests.map(({ url }) => url)).toEqual([
+			"https://generativelanguage.googleapis.com/v1beta/interactions:createPerUserQuota",
+		]);
+		const headers = requests[0].headers;
+		expect(headers.get("authorization")).toBe("Bearer plan-access");
+		expect(headers.get("x-goog-api-key")).toBeNull();
+		expect(headers.get("dpop")).toBeNull();
+	});
+
 	it("composes fresh fallback envelopes with the effective provider and never crosses a local auth failure", async () => {
 		const credentials = new InMemoryCredentialStore();
 		const runtime = await ModelRuntime.create({ credentials, modelsPath: null });

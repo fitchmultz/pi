@@ -44,6 +44,10 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
 	"coding plan package has expired",
 	"fair usage policy",
 	"usage limit reached for the past",
+
+	// Google AI Ultra plan: daily quota exhaustion or a model the plan does not include.
+	"Daily limit reached for",
+	"is not available on the Google AI Ultra plan",
 ]);
 
 const RETRYABLE_GENERATION_RAW_STOP_REASONS = new Set([

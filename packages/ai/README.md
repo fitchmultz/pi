@@ -1908,6 +1908,7 @@ Several providers support OAuth authentication instead of static API keys:
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
 - **OpenRouter** (OAuth PKCE that mints a user-controlled API key)
+- **Google AI Ultra plan** (requires your app's own Google OAuth client)
 
 Each of these providers carries an `OAuthAuth` on `provider.auth.oauth` with three operations: `login(interaction)` uses the provider-neutral `AuthInteraction.prompt()`/`notify()` protocol and returns a credential, `refresh(credential, signal)` refreshes expiring credentials when applicable, and `toAuth(credential)` derives request auth (GitHub Copilot's per-account base URL comes from here). Provider login interactions and refresh calls always carry a concrete abort signal. Refresh is automatic: `models.getAuth(providerId)` and request paths refresh expired tokens under a credential-store lock, so concurrent requests and processes cannot double-refresh. OpenRouter's OAuth flow instead returns a permanent API key, so its refresh operation is a no-op.
 
@@ -1944,6 +1945,22 @@ await models.complete(model, context);
 // Logout
 await models.logout('anthropic');
 ```
+
+### Google AI Ultra plan
+
+Pi AI ships no Google OAuth client, so `builtinProviders()` does not include `google-ai-plan`.
+Register a Desktop app OAuth client for your app and have Google approve it for plan access.
+Set your app's [`User-Agent` identity](#client-identity) and register the provider:
+
+```typescript
+import { googleAiPlanProvider } from '@earendil-works/pi-ai/providers/google-ai-plan';
+
+models.setProvider(googleAiPlanProvider({ clientId: '<your client id>', clientSecret: '<your client secret>' }));
+```
+
+`google-ai-plan` streams via the Interactions API using the signed-in account's quota. Each
+request sends the full transcript with `store: false`. The separate `google` provider uses
+the Gemini API key route.
 
 ### Vertex AI
 

@@ -67,6 +67,9 @@ pi
 
 For a built-in AI provider, run `/login` inside Pi to connect a subscription or API key. Then give Pi a task.
 
+With an eligible Google AI Ultra plan, run `/login google-ai-plan` in Fitch Pi to use your plan quota.
+See [Google AI Ultra plan sign-in](docs/providers.md#google-ai-ultra-plan).
+
 See the [documentation](docs/index.md) for full setup and usage instructions.
 
 ## Share your OSS coding agent sessions

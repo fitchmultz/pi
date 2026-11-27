@@ -4,8 +4,13 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
-import { renderSystemMessageUpdate } from "../utils/text.ts";
-import { withoutInitialSystemMessage } from "../utils/transcript.ts";
+import { contentText, getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
+import {
+	getCurrentTools,
+	getInitialSystemMessage,
+	resolveTranscript,
+	withoutInitialSystemMessage,
+} from "../utils/transcript.ts";
 import {
 	isValidThoughtSignature,
 	needsGoogleThoughtSignatureSkip,
@@ -31,9 +36,12 @@ export function replayMetadata(output: AssistantMessage, steps: ModelStep[]): Go
 	return { contentHash: shortHash(JSON.stringify(output.content)), steps };
 }
 
-export function projectSteps(model: Model<"google-interactions">, context: TranscriptContext): Interactions.Step[] {
+/** Project the request transcript using the system and step formats of the destination route. */
+export function projectTranscript(model: Model<"google-interactions">, context: TranscriptContext) {
+	const plan = model.provider === "google-ai-plan";
+	const transcript = resolveTranscript(context, !plan);
 	const steps: Interactions.Step[] = [];
-	const conversation = withoutInitialSystemMessage(context.messages).map((message) => {
+	const conversation = withoutInitialSystemMessage(transcript.messages).map((message) => {
 		if (message.role !== "assistant" || !message.googleInteractionsReplay) return message;
 		const { googleInteractionsReplay, ...portable } = message;
 		// Compare before transformMessages normalizes portable blocks for the destination API.
@@ -73,47 +81,52 @@ export function projectSteps(model: Model<"google-interactions">, context: Trans
 				}
 				break;
 			}
-			case "user":
-				steps.push({
-					type: "user_input",
-					content: (typeof message.content === "string"
+			case "user": {
+				const content = (
+					typeof message.content === "string"
 						? [{ type: "text" as const, text: message.content }]
 						: message.content
-					).map(toContent),
-				});
+				).map(toContent);
+				if (!plan || content.length > 0) steps.push({ type: "user_input", content });
 				break;
+			}
 			case "toolResult":
 				steps.push({
 					type: "function_result",
 					call_id: message.toolCallId,
 					name: message.toolName,
-					result: message.content.map(toContent),
+					result: plan ? planToolResult(message.content) : message.content.map(toContent),
 					...(message.isError ? { is_error: true } : {}),
 				});
 				break;
 			case "assistant": {
 				const replay = message.googleInteractionsReplay;
-				if (replay) {
+				// The quota route must group text and mark unsigned calls even when replaying its own output.
+				if (!plan && replay) {
 					steps.push(...replay.steps);
 					break;
 				}
 				const canReplaySignature = canReplayGoogleThoughtSignature(message, model);
 				let firstCall = true;
+				let signedThought = false;
 				for (const block of message.content) {
 					if (block.type === "text") {
 						// GenerateContent can end a tool call with an empty text part. Interactions rejects it.
-						if (block.text) steps.push({ type: "model_output", content: [toContent(block)] });
+						if (!block.text) continue;
+						const text = toContent(block);
+						const previous = steps.at(-1);
+						if (plan && previous?.type === "model_output" && previous.content) previous.content.push(text);
+						else steps.push({ type: "model_output", content: [text] });
 					} else if (block.type === "thinking" && canReplaySignature) {
-						const signature = isValidThoughtSignature(block.thinkingSignature)
-							? block.thinkingSignature
-							: undefined;
-						if (signature || block.thinking) {
+						const signature =
+							plan || isValidThoughtSignature(block.thinkingSignature) ? block.thinkingSignature : undefined;
+						const summary = plan ? block.thinking.trim() : block.thinking;
+						if (signature || summary) {
+							signedThought ||= Boolean(signature);
 							steps.push({
 								type: "thought",
 								signature,
-								summary: block.thinking
-									? [{ type: "text", text: sanitizeSurrogates(block.thinking) }]
-									: undefined,
+								summary: summary ? [{ type: "text", text: sanitizeSurrogates(block.thinking) }] : undefined,
 							});
 						}
 					} else if (block.type === "toolCall") {
@@ -123,13 +136,19 @@ export function projectSteps(model: Model<"google-interactions">, context: Trans
 							canReplaySignature && isValidThoughtSignature(block.thoughtSignature)
 								? block.thoughtSignature
 								: undefined;
-						if (signature) steps.push({ type: "thought", signature });
+						if (signature) {
+							steps.push({ type: "thought", signature });
+							signedThought = true;
+						} else if (plan && !signedThought) {
+							steps.push({ type: "thought", signature: SKIP_THOUGHT_SIGNATURE_VALIDATOR });
+							signedThought = true;
+						}
 						const call = {
 							type: "function_call" as const,
 							id: block.id,
 							name: block.name,
 							arguments: block.arguments,
-							...(!signature && firstCall && needsSkipSignature
+							...(!plan && !signature && firstCall && needsSkipSignature
 								? { signature: SKIP_THOUGHT_SIGNATURE_VALIDATOR }
 								: {}),
 						};
@@ -141,7 +160,18 @@ export function projectSteps(model: Model<"google-interactions">, context: Trans
 			}
 		}
 	}
-	return steps;
+	const initial = getInitialSystemMessage(transcript.messages);
+	return {
+		steps,
+		instruction: initial ? sanitizeSurrogates(getSystemMessageText(initial)) : "",
+		tools: getCurrentTools(transcript.messages),
+	};
+}
+
+function planToolResult(content: (TextContent | ImageContent)[]) {
+	const text = sanitizeSurrogates(contentText(content));
+	const images = content.filter((block) => block.type === "image");
+	return images.length > 0 ? [...(text ? [{ type: "text" as const, text }] : []), ...images.map(toContent)] : text;
 }
 
 function isModelStep(step: Interactions.Step): step is ModelStep {

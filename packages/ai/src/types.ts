@@ -98,6 +98,7 @@ export type KnownProvider =
 	| "ant-ling"
 	| "anthropic"
 	| "google"
+	| "google-ai-plan"
 	| "google-vertex"
 	| "openai"
 	| "azure"
