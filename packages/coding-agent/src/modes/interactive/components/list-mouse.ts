@@ -35,10 +35,10 @@ export class ListContainer extends Container {
 		if (event.type !== "wheel") return super.handleMouse(event);
 		const result = this.onWheel?.(event);
 		if (!result) return undefined;
-		// The frame, rather than a child row, owns wheel handling.
+		// The frame, rather than a child row, owns wheel handling; never steal focus onto a non-input wrapper.
 		return {
-			...result,
 			handled: true,
+			render: result.render,
 			target: {
 				component: this,
 				originX: event.screenX - event.x,

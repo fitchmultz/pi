@@ -454,7 +454,13 @@ describe("fullscreen selector mouse input", () => {
 
 	it("handles wheel over the settings search box and outside the settings list", async () => {
 		const onAutoCompactChange = vi.fn();
-		const callbacks: Pick<SettingsCallbacks, "onAutoCompactChange"> = { onAutoCompactChange };
+		const onThemeChange = vi.fn();
+		const onThemePreview = vi.fn();
+		const callbacks: Pick<SettingsCallbacks, "onAutoCompactChange" | "onThemeChange" | "onThemePreview"> = {
+			onAutoCompactChange,
+			onThemeChange,
+			onThemePreview,
+		};
 		const component = new SettingsSelectorComponent(
 			{
 				...SETTINGS_DEFAULTS,
@@ -491,6 +497,21 @@ describe("fullscreen selector mouse input", () => {
 				findRow(terminal, "  Auto-compact");
 				tap(terminal, findRow(terminal, "Auto-compact"));
 				expect(onAutoCompactChange).toHaveBeenCalledExactlyOnceWith(false);
+				// Open Theme submenu, scroll over the frame, and verify keyboard focus remains on SettingsList.
+				terminal.sendInput("Theme");
+				await terminal.waitForRender();
+				terminal.sendInput("\r");
+				await terminal.waitForRender();
+				findRow(terminal, "→ ✓ dark");
+				wheel(terminal, findRow(terminal, "Select a theme"), "down");
+				await terminal.waitForRender();
+				findRow(terminal, "→   light");
+				terminal.sendInput("\x1b[A");
+				await terminal.waitForRender();
+				findRow(terminal, "→ ✓ dark");
+				terminal.sendInput("\r");
+				await terminal.waitForRender();
+				expect(onThemeChange).toHaveBeenCalledExactlyOnceWith("dark");
 			},
 		);
 	});
