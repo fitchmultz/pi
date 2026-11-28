@@ -326,6 +326,9 @@ export class Editor implements Component, Focusable {
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
+	private maxScrollOffset = 0;
+	// Keep wheel input separate from the rendered offset used to hit-test clicks.
+	private wheelScrollOffset?: number;
 
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
@@ -557,20 +560,23 @@ export class Editor implements Component, Focusable {
 		const terminalRows = this.tui.terminal.rows;
 		const maxVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
 
-		// Find the cursor line index in layoutLines
-		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
-		if (cursorLineIndex === -1) cursorLineIndex = 0;
-
-		// Adjust scroll offset to keep cursor visible
-		if (cursorLineIndex < this.scrollOffset) {
-			this.scrollOffset = cursorLineIndex;
-		} else if (cursorLineIndex >= this.scrollOffset + maxVisibleLines) {
-			this.scrollOffset = cursorLineIndex - maxVisibleLines + 1;
+		// Wheel scrolling can hide the cursor until the user resumes editing.
+		if (this.wheelScrollOffset !== undefined) {
+			this.scrollOffset = this.wheelScrollOffset;
+		} else {
+			let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
+			if (cursorLineIndex === -1) cursorLineIndex = 0;
+			if (cursorLineIndex < this.scrollOffset) {
+				this.scrollOffset = cursorLineIndex;
+			} else if (cursorLineIndex >= this.scrollOffset + maxVisibleLines) {
+				this.scrollOffset = cursorLineIndex - maxVisibleLines + 1;
+			}
 		}
 
 		// Clamp scroll offset to valid range
-		const maxScrollOffset = Math.max(0, layoutLines.length - maxVisibleLines);
-		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxScrollOffset));
+		this.maxScrollOffset = Math.max(0, layoutLines.length - maxVisibleLines);
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, this.maxScrollOffset));
+		if (this.wheelScrollOffset !== undefined) this.wheelScrollOffset = this.scrollOffset;
 
 		// Get visible lines slice
 		const visibleLines = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
@@ -654,13 +660,13 @@ export class Editor implements Component, Focusable {
 		if (
 			this.autocompleteState &&
 			this.autocompleteList &&
-			event.y >= autocompleteStartRow &&
-			event.y < autocompleteStartRow + this.renderedAutocompleteHeight
+			(event.type === "wheel" ||
+				(event.y >= autocompleteStartRow && event.y < autocompleteStartRow + this.renderedAutocompleteHeight))
 		) {
 			const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
 			const paddingX = Math.min(this.paddingX, maxPadding);
 			const contentWidth = Math.max(1, event.width - paddingX * 2);
-			const result = this.autocompleteList.handleMouse?.({
+			const result = this.autocompleteList.handleMouse({
 				...event,
 				x: event.x - paddingX,
 				y: event.y - autocompleteStartRow,
@@ -668,6 +674,14 @@ export class Editor implements Component, Focusable {
 				height: this.renderedAutocompleteHeight,
 			});
 			return result ? { ...result, focus: true } : undefined;
+		}
+
+		if (event.type === "wheel" && event.wheelDelta && this.maxScrollOffset > 0) {
+			const offset = this.wheelScrollOffset ?? this.scrollOffset;
+			const nextOffset = Math.max(0, Math.min(offset + event.wheelDelta, this.maxScrollOffset));
+			if (nextOffset === offset) return { handled: true, render: false };
+			this.wheelScrollOffset = nextOffset;
+			return { handled: true };
 		}
 
 		// Leave press/drag/release unhandled so the renderer's screen-level text
@@ -713,6 +727,7 @@ export class Editor implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		this.wheelScrollOffset = undefined;
 		const kb = getKeybindings();
 
 		// Handle character jump mode (awaiting next character to jump to)
@@ -1493,6 +1508,7 @@ export class Editor implements Component, Focusable {
 	 * Use this for all non-vertical cursor movements to reset sticky column behavior.
 	 */
 	private setCursorCol(col: number): void {
+		this.wheelScrollOffset = undefined;
 		this.state.cursorCol = col;
 		this.preferredVisualCol = null;
 		this.snappedFromCursorCol = null;

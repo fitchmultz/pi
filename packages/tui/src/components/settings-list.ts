@@ -180,7 +180,17 @@ export class SettingsList implements Component {
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
 		if (this.submenuComponent) {
 			const result = this.submenuComponent.handleMouse?.(event);
-			return result ? { ...result, focus: true } : undefined;
+			if (result) return { ...result, focus: true };
+			return event.type === "wheel" ? { handled: true, render: false } : undefined;
+		}
+
+		const displayItems = this.getDisplayItems();
+		if (event.type === "wheel") {
+			if (!event.wheelDelta || displayItems.length === 0) return { handled: true, render: false };
+			const delta = event.wheelDelta < 0 ? -1 : 1;
+			const previousIndex = this.selectedIndex;
+			this.selectedIndex = Math.max(0, Math.min(displayItems.length - 1, this.selectedIndex + delta));
+			return { handled: true, render: this.selectedIndex !== previousIndex };
 		}
 
 		if (this.searchEnabled && this.searchInput) {
@@ -191,14 +201,7 @@ export class SettingsList implements Component {
 			if (event.y === 1) return undefined;
 		}
 
-		const displayItems = this.getDisplayItems();
 		if (displayItems.length === 0) return undefined;
-		if (event.type === "wheel" && event.wheelDelta) {
-			const delta = event.wheelDelta < 0 ? -1 : 1;
-			const previousIndex = this.selectedIndex;
-			this.selectedIndex = Math.max(0, Math.min(displayItems.length - 1, this.selectedIndex + delta));
-			return { handled: true, render: this.selectedIndex !== previousIndex };
-		}
 		// Hover must not change selection: the visible range is centered on it.
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 

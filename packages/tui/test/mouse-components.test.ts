@@ -4,9 +4,11 @@ import { Box } from "../src/components/box.ts";
 import { Editor, type EditorTheme } from "../src/components/editor.ts";
 import { Input } from "../src/components/input.ts";
 import { MouseRegion } from "../src/components/mouse-region.ts";
+import { ScrollView } from "../src/components/scroll-view.ts";
 import { SelectList, type SelectListTheme } from "../src/components/select-list.ts";
 import { SettingsList, type SettingsListTheme } from "../src/components/settings-list.ts";
 import { Text } from "../src/components/text.ts";
+import { VStack } from "../src/components/v-stack.ts";
 import { Container, type TuiMouseEvent, type TuiMouseEventType } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { stripTerminalSequences } from "../src/utils.ts";
@@ -201,6 +203,42 @@ describe("mouse-aware components", () => {
 		assert.deepStrictEqual(changes, [{ id: "third", value: "high" }]);
 	});
 
+	it("scrolls settings from the search field, spacer, description, and hint", () => {
+		const list = new SettingsList(
+			Array.from({ length: 8 }, (_, i) => ({
+				id: `item-${i}`,
+				label: `Item ${i}`,
+				description: `Description ${i}`,
+				currentValue: "off",
+			})),
+			3,
+			settingsTheme,
+			() => {},
+			() => {},
+			{ enableSearch: true },
+		);
+		list.handleInput("Item");
+		const lines = list.render(80);
+		const rows = [0, 1, lines.length - 3, lines.length - 1];
+		for (const [index, row] of rows.entries()) {
+			assert.strictEqual(
+				list.handleMouse({ ...mouse("wheel", 1, row, 80, lines.length), wheelDelta: 1 })?.handled,
+				true,
+			);
+			assert.ok(list.render(80).some((line) => line.startsWith(`> Item ${index + 1}`)));
+		}
+
+		assert.strictEqual(list.handleMouse(mouse("press", 2, 0, 80, lines.length))?.focus, true);
+		list.handleInput("X");
+		const emptyResults = list.render(80);
+		assert.match(stripTerminalSequences(emptyResults[0]), /^> XItem/);
+		assert.match(emptyResults[2], /No matching settings/);
+		assert.deepStrictEqual(list.handleMouse({ ...mouse("wheel", 1, 0, 80, emptyResults.length), wheelDelta: 1 }), {
+			handled: true,
+			render: false,
+		});
+	});
+
 	for (const row of [0, 4]) {
 		it(`ignores hover and clicks visible select-list row ${row} after scrolling`, () => {
 			const list = new SelectList(
@@ -329,6 +367,36 @@ describe("mouse-aware components", () => {
 		tui.stop();
 	});
 
+	it("routes wheel input to a settings submenu and consumes it over the submenu hint", () => {
+		const list = new SettingsList(
+			[
+				{
+					id: "theme",
+					label: "Theme",
+					currentValue: "first",
+					submenu: (_value, done) => {
+						const submenu = new SubmenuHost(done);
+						submenu.addChild(new Text("Choose a theme", 0, 0));
+						return submenu;
+					},
+				},
+			],
+			5,
+			settingsTheme,
+			() => {},
+			() => {},
+		);
+		list.handleInput("\r");
+		const lines = list.render(30);
+		assert.strictEqual(list.handleMouse({ ...mouse("wheel", 1, 0, 30, lines.length), wheelDelta: 1 })?.handled, true);
+		assert.match(list.render(30)[1], /^→ Second/);
+		assert.strictEqual(
+			list.handleMouse({ ...mouse("wheel", 1, 2, 30, lines.length), wheelDelta: -1 })?.handled,
+			true,
+		);
+		assert.match(list.render(30)[1], /^→ Second/);
+	});
+
 	it("positions and focuses the multiline editor through alternate-screen dispatch", async () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const tui = new TuiAltScreen(terminal);
@@ -346,6 +414,90 @@ describe("mouse-aware components", () => {
 		assert.strictEqual(editor.getText(), "heXllo");
 		assert.strictEqual(tui.getFocusedComponent(), editor);
 		tui.stop();
+	});
+
+	it("scrolls editor autocomplete from the text and borders while leaving text clicks for the caret", async () => {
+		const editor = new Editor(new TuiAltScreen(new VirtualTerminal()), editorTheme);
+		editor.setAutocompleteProvider({
+			getSuggestions: async () => ({
+				prefix: "/",
+				items: ["first", "second", "third", "fourth"].map((label) => ({ label, value: `/${label}` })),
+			}),
+			applyCompletion: (_lines, cursorLine, _cursorCol, item) => ({
+				lines: [item.value],
+				cursorLine,
+				cursorCol: item.value.length,
+			}),
+		});
+		editor.handleInput("/");
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+		const lines = editor.render(30);
+		assert.match(lines[3], /^→ first/);
+		for (const [row, label] of ["second", "third", "fourth"].entries()) {
+			assert.strictEqual(
+				editor.handleMouse({ ...mouse("wheel", 1, row, 30, lines.length), wheelDelta: 1 })?.handled,
+				true,
+			);
+			assert.match(editor.render(30)[4 + row], new RegExp(`^→ ${label}`));
+		}
+
+		assert.strictEqual(editor.handleMouse(mouse("click", 0, 1, 30, lines.length))?.focus, true);
+		assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 0 });
+	});
+
+	it("scrolls wrapped editor rows without moving the caret and yields the wheel when the text fits", async () => {
+		const terminal = new VirtualTerminal(9, 10);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { wheelScrollLines: 2 });
+		const editor = new Editor(tui, editorTheme);
+		editor.setText("11111111222222223333333344444444555555556666666677777777\nlast");
+		const transcript = new ScrollView(new Text("output\n".repeat(12).trimEnd(), 0, 0), {
+			primary: true,
+			follow: "end",
+		});
+		tui.setLayoutRoot(new VStack([{ component: transcript, basis: 0, grow: 1 }, editor]));
+		tui.setFocus(editor);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			assert.match(terminal.getViewport()[4], /^44444444/);
+			const top = transcript.scrollTop;
+			const cursor = editor.getCursor();
+
+			terminal.sendInput("\x1b[<64;2;5M");
+			await terminal.waitForRender();
+			assert.match(terminal.getViewport()[4], /^22222222/);
+			assert.strictEqual(transcript.scrollTop, top);
+
+			tui.setWheelScrollLines(1);
+			terminal.sendInput("\x1b[<65;2;5M");
+			await terminal.waitForRender();
+			assert.match(terminal.getViewport()[4], /^33333333/);
+			assert.deepStrictEqual(editor.getCursor(), cursor);
+
+			terminal.sendInput("X");
+			await terminal.waitForRender();
+			assert.match(terminal.getViewport()[4], /^44444444/);
+			assert.match(editor.getText(), /\nlastX$/);
+
+			// A click before the wheel frame is drawn still hits the row the user can see.
+			terminal.sendInput("\x1b[<64;2;5M");
+			terminal.sendInput("\x1b[<0;2;5M");
+			terminal.sendInput("\x1b[<0;2;5m");
+			assert.deepStrictEqual(editor.getCursor(), { line: 0, col: 25 });
+
+			editor.setText("short");
+			tui.requestRender();
+			await terminal.waitForRender();
+			assert.match(terminal.getViewport()[8], /^short/);
+			const topWithShortEditor = transcript.scrollTop;
+			terminal.sendInput("\x1b[<64;2;9M");
+			await terminal.waitForRender();
+			assert.strictEqual(transcript.scrollTop, topWithShortEditor - 1);
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("selects and copies editor text on drag instead of moving the cursor", async () => {
