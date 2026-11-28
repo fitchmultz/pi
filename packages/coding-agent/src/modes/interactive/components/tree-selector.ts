@@ -21,7 +21,7 @@ import { shortenHomePath } from "../../../utils/paths.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { formatKeyText, keyHint } from "./keybinding-hints.ts";
-import { handleListWheel, ListContainer, ListMouseRows, UNCHANGED_LIST_WHEEL } from "./list-mouse.ts";
+import { handleListWheel, ListContainer, ListMouseRows } from "./list-mouse.ts";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -1398,7 +1398,7 @@ export class TreeSelectorComponent extends ListContainer implements Focusable {
 		initialSelectedId?: string,
 		initialFilterMode?: FilterMode,
 	) {
-		super((event) => (this.labelInput ? UNCHANGED_LIST_WHEEL : this.treeList.handleWheel(event)));
+		super((event) => (this.labelInput ? undefined : this.treeList.handleWheel(event)));
 
 		this.onLabelChangeCallback = onLabelChange;
 		const maxVisibleLines = Math.max(5, Math.floor(terminalHeight / 2));

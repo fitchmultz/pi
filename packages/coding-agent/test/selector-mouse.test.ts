@@ -298,7 +298,11 @@ describe("fullscreen selector mouse input", () => {
 				terminal.sendInput("\x1b");
 				terminal.sendInput("\x1b[114;5u"); // Ctrl+R
 				await terminal.waitForRender();
-				findRow(terminal, "Rename Session");
+				const renameRow = findRow(terminal, "Rename Session");
+				const beforeRenameWheel = terminal.getViewport()[0];
+				wheel(terminal, renameRow, "up");
+				await terminal.waitForRender();
+				expect(terminal.getViewport()[0]).not.toBe(beforeRenameWheel);
 				tap(terminal, findRow(terminal, "> Weave Beta"));
 				terminal.sendInput("New ");
 				terminal.sendInput("\r");
@@ -330,7 +334,12 @@ describe("fullscreen selector mouse input", () => {
 				expect(terminal.getViewport()[selected - 1]).toMatch(/^› /);
 				terminal.sendInput("L");
 				await terminal.waitForRender();
-				tap(terminal, findRow(terminal, "> Name"), 6);
+				const labelRow = findRow(terminal, "> Name");
+				const beforeLabelWheel = terminal.getViewport()[0];
+				wheel(terminal, labelRow, "up");
+				await terminal.waitForRender();
+				expect(terminal.getViewport()[0]).not.toBe(beforeLabelWheel);
+				tap(terminal, labelRow, 6);
 				terminal.sendInput("X");
 				terminal.sendInput("\r");
 				await terminal.waitForRender();

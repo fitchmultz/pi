@@ -826,7 +826,7 @@ export class SessionSelectorComponent extends ListContainer implements Focusable
 		},
 		currentSessionFilePath?: string,
 	) {
-		super((event) => (this.mode === "rename" ? UNCHANGED_LIST_WHEEL : this.sessionList.handleWheel(event)));
+		super((event) => (this.mode === "rename" ? undefined : this.sessionList.handleWheel(event)));
 		this.keybindings = options?.keybindings ?? KeybindingsManager.create();
 		this.currentSessionsLoader = currentSessionsLoader;
 		this.allSessionsLoader = allSessionsLoader;
