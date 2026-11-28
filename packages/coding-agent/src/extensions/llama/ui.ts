@@ -10,6 +10,8 @@ import {
 	Spacer,
 	Text,
 	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -17,6 +19,12 @@ import type { ExtensionCommandContext } from "../../core/extensions/types.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { DynamicBorder } from "../../modes/interactive/components/dynamic-border.ts";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
+import {
+	handleListWheel,
+	ListContainer,
+	listMouseRegion,
+	UNCHANGED_LIST_WHEEL,
+} from "../../modes/interactive/components/list-mouse.ts";
 import type { Theme } from "../../modes/interactive/theme/theme.ts";
 import type { LlamaModelInfo, LlamaProgress } from "./client.ts";
 import type { HuggingFaceModel } from "./huggingface.ts";
@@ -65,8 +73,14 @@ function selectTheme(theme: Theme) {
 	};
 }
 
-function frame(theme: Theme, title: string, body: Component[], footer?: string): Container {
-	const container = new Container();
+function frame(
+	theme: Theme,
+	title: string,
+	body: Component[],
+	footer?: string,
+	onWheel?: (event: TuiMouseEvent) => TuiMouseEventResult,
+): Container {
+	const container = new ListContainer(onWheel);
 	container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 	container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
 	for (const child of body) container.addChild(child);
@@ -97,7 +111,7 @@ function compactCount(value: number): string {
 	return String(value);
 }
 
-class HuggingFaceSearch extends Container implements Focusable {
+class HuggingFaceSearch extends ListContainer implements Focusable {
 	readonly capturesViewportInput: boolean = true;
 	private readonly tui: TUI;
 	private readonly theme: Theme;
@@ -127,7 +141,7 @@ class HuggingFaceSearch extends Container implements Focusable {
 		cache: Map<string, HuggingFaceModel[]>,
 		onSelectModel: (model: string | undefined) => void,
 	) {
-		super();
+		super((event) => this.handleWheel(event));
 		this.tui = tui;
 		this.theme = theme;
 		this.keybindings = keybindings;
@@ -166,12 +180,16 @@ class HuggingFaceSearch extends Container implements Focusable {
 			const prefix = index === this.selectedIndex ? "→ " : "  ";
 			const details = `${compactCount(model.downloads)} downloads`;
 			this.resultsContainer.addChild(
-				new Text(
-					index === this.selectedIndex
-						? this.theme.fg("accent", `${prefix}${model.id}  ${details}`)
-						: `${prefix}${model.id}${this.theme.fg("muted", `  ${details}`)}`,
-					0,
-					0,
+				listMouseRegion(
+					new Text(
+						index === this.selectedIndex
+							? this.theme.fg("accent", `${prefix}${model.id}  ${details}`)
+							: `${prefix}${model.id}${this.theme.fg("muted", `  ${details}`)}`,
+						0,
+						0,
+					),
+					() => this.highlight(index),
+					() => this.close(model.id),
 				),
 			);
 		}
@@ -253,20 +271,26 @@ class HuggingFaceSearch extends Container implements Focusable {
 		this.onSelectModel(model);
 	}
 
+	private highlight(index: number): void {
+		this.selectedIndex = index;
+		this.selectionTouched = true;
+		this.updateResults();
+	}
+
+	handleWheel(event: TuiMouseEvent): TuiMouseEventResult {
+		return handleListWheel(event, this.selectedIndex, this.filteredResults.length, (index) => this.highlight(index));
+	}
+
 	handleInput(data: string): void {
 		if (this.keybindings.matches(data, "tui.select.up")) {
 			if (this.filteredResults.length > 0) {
-				this.selectedIndex = this.selectedIndex === 0 ? this.filteredResults.length - 1 : this.selectedIndex - 1;
-				this.selectionTouched = true;
-				this.updateResults();
+				this.highlight(this.selectedIndex === 0 ? this.filteredResults.length - 1 : this.selectedIndex - 1);
 			}
 			return;
 		}
 		if (this.keybindings.matches(data, "tui.select.down")) {
 			if (this.filteredResults.length > 0) {
-				this.selectedIndex = this.selectedIndex === this.filteredResults.length - 1 ? 0 : this.selectedIndex + 1;
-				this.selectionTouched = true;
-				this.updateResults();
+				this.highlight(this.selectedIndex === this.filteredResults.length - 1 ? 0 : this.selectedIndex + 1);
 			}
 			return;
 		}
@@ -279,9 +303,7 @@ class HuggingFaceSearch extends Container implements Focusable {
 		);
 		if (pageIndex !== undefined) {
 			if (this.filteredResults.length > 0) {
-				this.selectedIndex = pageIndex;
-				this.selectionTouched = true;
-				this.updateResults();
+				this.highlight(pageIndex);
 			}
 			return;
 		}
@@ -384,6 +406,7 @@ class LlamaView implements LlamaUi, Focusable {
 					"llama.cpp models",
 					[new Text(this.theme.fg("dim", serverUrl), 1, 0), new Spacer(1), list],
 					`${keyHint("tui.select.confirm", "load/unload/download")} • ${keyHint("tui.select.cancel", "close")}`,
+					(event) => list.handleMouse(event) ?? UNCHANGED_LIST_WHEEL,
 				),
 				list,
 			);
@@ -405,6 +428,7 @@ class LlamaView implements LlamaUi, Focusable {
 					title,
 					[new Spacer(1), list],
 					`${keyHint("tui.select.confirm", "select")} • ${keyHint("tui.select.cancel", "cancel")}`,
+					(event) => list.handleMouse(event) ?? UNCHANGED_LIST_WHEEL,
 				),
 				list,
 			);
@@ -438,6 +462,7 @@ class LlamaView implements LlamaUi, Focusable {
 					"Download model",
 					[new Spacer(1), component],
 					`${keyHint("tui.select.confirm", "select")} • ${keyHint("tui.select.cancel", "back")}`,
+					(event) => component.handleWheel(event),
 				),
 				component,
 				component,
@@ -503,6 +528,10 @@ class LlamaView implements LlamaUi, Focusable {
 		return this.content
 			.render(width)
 			.map((line) => (visibleWidth(line) > width ? truncateToWidth(line, width, "") : line));
+	}
+
+	handleMouse(event: TuiMouseEvent) {
+		return this.content.handleMouse(event);
 	}
 
 	invalidate(): void {

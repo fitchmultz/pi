@@ -7,6 +7,7 @@ import {
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
+import { handleListWheel, ListContainer, listMouseRegion } from "./list-mouse.ts";
 
 export type TrustSelection = Pick<ProjectTrustOption, "trusted" | "updates">;
 
@@ -29,7 +30,7 @@ function formatDecision(trustPath: string | undefined, decision: ProjectTrustSto
 	return `${label} (${decision.path})`;
 }
 
-export class TrustSelectorComponent extends Container {
+export class TrustSelectorComponent extends ListContainer {
 	private selectedIndex: number;
 	private readonly listContainer: Container;
 	private readonly trustOptions: ProjectTrustOption[];
@@ -38,7 +39,9 @@ export class TrustSelectorComponent extends Container {
 	private readonly onCancelCallback: () => void;
 
 	constructor(options: TrustSelectorOptions) {
-		super();
+		super((event) =>
+			handleListWheel(event, this.selectedIndex, this.trustOptions.length, (index) => this.highlight(index)),
+		);
 
 		this.savedDecision = options.savedDecision;
 		this.trustOptions = getProjectTrustOptions(options.cwd);
@@ -110,23 +113,34 @@ export class TrustSelectorComponent extends Container {
 			const currentMarker = isCurrent ? theme.fg("accent", "✓ ") : "  ";
 			const prefix = isSelected ? theme.fg("accent", "→ ") : "  ";
 			const label = isSelected ? theme.fg("accent", option.label) : theme.fg("text", option.label);
-			this.listContainer.addChild(new Text(`${prefix}${currentMarker}${label}`, 1, 0));
+			this.listContainer.addChild(
+				listMouseRegion(
+					new Text(`${prefix}${currentMarker}${label}`, 1, 0),
+					() => this.highlight(i),
+					() => this.selectOption(option),
+				),
+			);
 		}
+	}
+
+	private highlight(index: number): void {
+		this.selectedIndex = index;
+		this.updateList();
+	}
+
+	private selectOption(option: ProjectTrustOption): void {
+		this.onSelectCallback({ trusted: option.trusted, updates: option.updates });
 	}
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-			this.updateList();
+			this.highlight(Math.max(0, this.selectedIndex - 1));
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
-			this.selectedIndex = Math.min(this.trustOptions.length - 1, this.selectedIndex + 1);
-			this.updateList();
+			this.highlight(Math.min(this.trustOptions.length - 1, this.selectedIndex + 1));
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
 			const selected = this.trustOptions[this.selectedIndex];
-			if (selected) {
-				this.onSelectCallback({ trusted: selected.trusted, updates: selected.updates });
-			}
+			if (selected) this.selectOption(selected);
 		} else if (kb.matches(keyData, "tui.select.cancel")) {
 			this.onCancelCallback();
 		}

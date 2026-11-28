@@ -6,9 +6,11 @@ import {
 	getKeybindings,
 	Input,
 	type Keybinding,
+	MouseRegion,
 	Spacer,
 	sliceByColumn,
 	Text,
+	type TuiMouseEvent,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -19,6 +21,7 @@ import { shortenHomePath } from "../../../utils/paths.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { formatKeyText, keyHint } from "./keybinding-hints.ts";
+import { handleListWheel, ListContainer, ListMouseRows } from "./list-mouse.ts";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -110,6 +113,7 @@ class TreeList implements Component {
 	private flatNodes: FlatNode[] = [];
 	private filteredNodes: FlatNode[] = [];
 	private selectedIndex = 0;
+	private readonly mouseRows = new ListMouseRows<number>();
 	private currentLeafId: string | null;
 	private maxVisibleLines: number;
 	private filterMode: FilterMode = "default";
@@ -666,7 +670,7 @@ class TreeList implements Component {
 
 	render(width: number): string[] {
 		const lines: string[] = [];
-
+		this.mouseRows.clear();
 		if (this.filteredNodes.length === 0) {
 			lines.push(truncateToWidth(theme.fg("muted", "  No entries found"), width));
 			lines.push(truncateToWidth(theme.fg("muted", `  (0/0)${this.getStatusLabels()}`), width));
@@ -754,6 +758,7 @@ class TreeList implements Component {
 				gutter = theme.bg("selectedBg", gutter);
 				body = theme.bg("selectedBg", body);
 			}
+			this.mouseRows.set(renderedRows.length, i);
 			renderedRows.push({ gutter, body, anchorCol, bodyWidth: visibleWidth(body), isSelected });
 		}
 
@@ -985,6 +990,25 @@ class TreeList implements Component {
 				return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? "..." : ""}]`;
 			}
 		}
+	}
+
+	handleWheel(event: TuiMouseEvent) {
+		return handleListWheel(event, this.selectedIndex, this.filteredNodes.length, (index) => {
+			this.selectedIndex = index;
+		});
+	}
+
+	handleMouse(event: TuiMouseEvent) {
+		return this.mouseRows.handleMouse(
+			event,
+			(index) => {
+				this.selectedIndex = index;
+			},
+			(index) => {
+				const selected = this.filteredNodes[index];
+				if (selected) this.onSelect?.(selected.node.entry.id);
+			},
+		);
 	}
 
 	handleInput(keyData: string): void {
@@ -1269,7 +1293,10 @@ function compactRawKeys(keys: string[]): string {
 
 /** Label input component shown when editing a label */
 class LabelInput implements Component, Focusable {
-	private input: Input;
+	private readonly input = new Input();
+	private readonly inputRegion = new MouseRegion(this.input, () => undefined);
+	private readonly indent = "  ";
+	private inputHeight = 0;
 	private entryId: string;
 	public onSubmit?: (entryId: string, label: string | undefined) => void;
 	public onCancel?: () => void;
@@ -1286,7 +1313,6 @@ class LabelInput implements Component, Focusable {
 
 	constructor(entryId: string, currentLabel: string | undefined) {
 		this.entryId = entryId;
-		this.input = new Input();
 		if (currentLabel) {
 			this.input.setValue(currentLabel);
 		}
@@ -1296,10 +1322,12 @@ class LabelInput implements Component, Focusable {
 
 	render(width: number): string[] {
 		const lines: string[] = [];
-		const indent = "  ";
+		const indent = this.indent;
 		const availableWidth = width - indent.length;
 		lines.push(truncateToWidth(`${indent}${theme.fg("muted", "Label (empty to remove):")}`, width));
-		lines.push(...this.input.render(availableWidth).map((line) => truncateToWidth(`${indent}${line}`, width)));
+		const inputLines = this.inputRegion.render(availableWidth);
+		this.inputHeight = inputLines.length;
+		lines.push(...inputLines.map((line) => truncateToWidth(`${indent}${line}`, width)));
 		lines.push(
 			truncateToWidth(
 				`${indent}${keyHint("tui.select.confirm", "save")}  ${keyHint("tui.select.cancel", "cancel")}`,
@@ -1320,12 +1348,25 @@ class LabelInput implements Component, Focusable {
 			this.input.handleInput(keyData);
 		}
 	}
+
+	handleMouse(event: TuiMouseEvent) {
+		const x = event.x - this.indent.length;
+		const y = event.y - 1;
+		if (x < 0 || y < 0 || y >= this.inputHeight) return undefined;
+		return this.inputRegion.handleMouse({
+			...event,
+			x,
+			y,
+			width: event.width - this.indent.length,
+			height: this.inputHeight,
+		});
+	}
 }
 
 /**
  * Component that renders a session tree selector for navigation
  */
-export class TreeSelectorComponent extends Container implements Focusable {
+export class TreeSelectorComponent extends ListContainer implements Focusable {
 	private treeList: TreeList;
 	private searchLine: SearchLine;
 	private labelInput: LabelInput | null = null;
@@ -1357,7 +1398,7 @@ export class TreeSelectorComponent extends Container implements Focusable {
 		initialSelectedId?: string,
 		initialFilterMode?: FilterMode,
 	) {
-		super();
+		super((event) => (this.labelInput ? undefined : this.treeList.handleWheel(event)));
 
 		this.onLabelChangeCallback = onLabelChange;
 		const maxVisibleLines = Math.max(5, Math.floor(terminalHeight / 2));

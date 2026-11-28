@@ -5,7 +5,7 @@
 
 import {
 	type Component,
-	Container,
+	type Container,
 	type Focusable,
 	Input,
 	type SelectItem,
@@ -13,6 +13,8 @@ import {
 	Spacer,
 	Text,
 	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -21,6 +23,7 @@ import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { AuthUrlComponent } from "../../modes/interactive/components/auth-url.ts";
 import { DynamicBorder } from "../../modes/interactive/components/dynamic-border.ts";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
+import { ListContainer, UNCHANGED_LIST_WHEEL } from "../../modes/interactive/components/list-mouse.ts";
 import { getSelectListTheme, type Theme } from "../../modes/interactive/theme/theme.ts";
 
 export interface McpMenu {
@@ -55,8 +58,14 @@ export interface McpUi {
 	redirectUrl(title: string, authorizationUrl: string, signal: AbortSignal): Promise<string | undefined>;
 }
 
-function frame(theme: Theme, title: string, body: Component[], footer?: string): Container {
-	const container = new Container();
+function frame(
+	theme: Theme,
+	title: string,
+	body: Component[],
+	footer?: string,
+	onWheel?: (event: TuiMouseEvent) => TuiMouseEventResult,
+): Container {
+	const container = new ListContainer(onWheel);
 	container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 	container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
 	for (const child of body) container.addChild(child);
@@ -131,11 +140,20 @@ export class McpManagerView implements McpUi, Component, Focusable {
 				const footer = `${keyHint("tui.select.confirm", menu.confirmLabel)} • ${keyHint("tui.select.cancel", menu.cancelLabel)}`;
 				if (menu.items.length === 0) {
 					body.push(new Text(this.theme.fg("muted", menu.empty ?? "Nothing to show."), 1, 0));
-					this.setContent(frame(this.theme, menu.title, body, keyHint("tui.select.cancel", menu.cancelLabel)), {
-						handleInput: (data) => {
-							if (this.keybindings.matches(data, "tui.select.cancel")) finish(undefined);
+					this.setContent(
+						frame(
+							this.theme,
+							menu.title,
+							body,
+							keyHint("tui.select.cancel", menu.cancelLabel),
+							() => UNCHANGED_LIST_WHEEL,
+						),
+						{
+							handleInput: (data) => {
+								if (this.keybindings.matches(data, "tui.select.cancel")) finish(undefined);
+							},
 						},
-					});
+					);
 					return;
 				}
 				const list = new SelectList(
@@ -152,7 +170,10 @@ export class McpManagerView implements McpUi, Component, Focusable {
 				list.onSelect = (item) => finish(item.value);
 				list.onCancel = () => finish(undefined);
 				body.push(list);
-				this.setContent(frame(this.theme, menu.title, body, footer), list);
+				this.setContent(
+					frame(this.theme, menu.title, body, footer, (event) => list.handleMouse(event) ?? UNCHANGED_LIST_WHEEL),
+					list,
+				);
 			};
 			render();
 			unsubscribe = subscribe?.(() => {
@@ -236,6 +257,10 @@ export class McpManagerView implements McpUi, Component, Focusable {
 	handleInput(data: string): void {
 		this.inputHandler?.handleInput?.(data);
 		this.tui.requestRender();
+	}
+
+	handleMouse(event: TuiMouseEvent) {
+		return this.content.handleMouse(event);
 	}
 
 	render(width: number): string[] {

@@ -7,8 +7,10 @@ import {
 	type Focusable,
 	getKeybindings,
 	Input,
+	MouseRegion,
 	Spacer,
 	Text,
+	type TuiMouseEvent,
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -18,6 +20,7 @@ import { canonicalizePath, getPathComparisonKey, shortenHomePath } from "../../.
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
+import { handleListWheel, ListContainer, ListMouseRows, UNCHANGED_LIST_WHEEL } from "./list-mouse.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
@@ -278,10 +281,13 @@ class SessionList implements Component, Focusable {
 	private allSessions: SessionInfo[] = [];
 	private filteredSessions: FlatSessionNode[] = [];
 	private selectedIndex: number = 0;
+	private readonly mouseRows = new ListMouseRows<string>();
 	private selectionTouched = false;
 	// Session to select once it appears, while a progressive reload has not yet delivered it
 	private pendingSelectedPath?: string;
-	private searchInput: Input;
+	private readonly searchInput = new Input();
+	private readonly searchRegion = new MouseRegion(this.searchInput, () => undefined);
+	private searchHeight = 0;
 	private showCwd = false;
 	private sortMode: SortMode = "threaded";
 	private nameFilter: NameFilter = "all";
@@ -322,7 +328,6 @@ class SessionList implements Component, Focusable {
 	) {
 		this.allSessions = sessions;
 		this.filteredSessions = [];
-		this.searchInput = new Input();
 		this.showCwd = showCwd;
 		this.sortMode = sortMode;
 		this.nameFilter = nameFilter;
@@ -427,9 +432,10 @@ class SessionList implements Component, Focusable {
 
 	render(width: number): string[] {
 		const lines: string[] = [];
-
-		// Render search input
-		lines.push(...this.searchInput.render(width));
+		this.mouseRows.clear();
+		const searchLines = this.searchRegion.render(width);
+		this.searchHeight = searchLines.length;
+		lines.push(...searchLines);
 		lines.push(""); // Blank line after search
 
 		if (this.filteredSessions.length === 0) {
@@ -520,6 +526,7 @@ class SessionList implements Component, Focusable {
 			if (isSelected) {
 				line = theme.bg("selectedBg", line);
 			}
+			this.mouseRows.set(lines.length, session.path);
 			lines.push(truncateToWidth(line, width));
 		}
 
@@ -541,6 +548,33 @@ class SessionList implements Component, Focusable {
 		const parts = node.ancestorContinues.map((continues) => (continues ? "│  " : "   "));
 		const branch = node.isLast ? "└─ " : "├─ ";
 		return parts.join("") + branch;
+	}
+
+	handleWheel(event: TuiMouseEvent) {
+		if (this.confirmingDeletePath !== null) return UNCHANGED_LIST_WHEEL;
+		return handleListWheel(event, this.selectedIndex, this.filteredSessions.length, (index) => this.highlight(index));
+	}
+
+	handleMouse(event: TuiMouseEvent) {
+		if (this.confirmingDeletePath !== null) return undefined;
+		if (event.y >= 0 && event.y < this.searchHeight) {
+			const result = this.searchRegion.handleMouse({ ...event, height: this.searchHeight });
+			if (result) return result;
+		}
+		return this.mouseRows.handleMouse(
+			event,
+			(path) => {
+				const index = this.filteredSessions.findIndex((node) => node.session.path === path);
+				if (index !== -1) this.highlight(index);
+			},
+			(path) => this.onSelect?.(path),
+		);
+	}
+
+	private highlight(index: number): void {
+		this.selectedIndex = index;
+		this.selectionTouched = true;
+		this.pendingSelectedPath = undefined;
 	}
 
 	handleInput(keyData: string): void {
@@ -711,7 +745,7 @@ async function deleteSessionFile(
 /**
  * Component that renders a session selector
  */
-export class SessionSelectorComponent extends Container implements Focusable {
+export class SessionSelectorComponent extends ListContainer implements Focusable {
 	get capturesViewportInput(): boolean {
 		return this.mode !== "rename";
 	}
@@ -792,7 +826,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		},
 		currentSessionFilePath?: string,
 	) {
-		super();
+		super((event) => (this.mode === "rename" ? undefined : this.sessionList.handleWheel(event)));
 		this.keybindings = options?.keybindings ?? KeybindingsManager.create();
 		this.currentSessionsLoader = currentSessionsLoader;
 		this.allSessionsLoader = allSessionsLoader;

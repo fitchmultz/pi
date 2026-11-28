@@ -16,6 +16,7 @@ import { getDistinctModelName, getModelSelectorSearchText } from "../model-searc
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText, keyHint } from "./keybinding-hints.ts";
+import { handleListWheel, ListContainer, listMouseRegion } from "./list-mouse.ts";
 
 interface ModelItem {
 	provider: string;
@@ -40,7 +41,7 @@ const MAX_VISIBLE = 10;
 /**
  * Component that renders a model selector with search
  */
-export class ModelSelectorComponent extends Container implements Focusable {
+export class ModelSelectorComponent extends ListContainer implements Focusable {
 	readonly capturesViewportInput: boolean = true;
 	private searchInput: Input;
 
@@ -88,7 +89,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		onSelectAsDefault?: (model: Model<any>) => void,
 		defaultModel?: DefaultModelReference,
 	) {
-		super();
+		super((event) =>
+			handleListWheel(event, this.selectedIndex, this.filteredModels.length, (index) => this.highlight(index)),
+		);
 
 		this.tui = tui;
 		this.currentModel = currentModel;
@@ -339,7 +342,13 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const providerBadge = theme.fg("muted", `[${item.provider}]`);
 			const line = `${cursor}${currentMarker}${modelText}${nameText} ${providerBadge}${defaultBadge}`;
 
-			this.listContainer.addChild(new Text(line, 0, 0));
+			this.listContainer.addChild(
+				listMouseRegion(
+					new Text(line, 0, 0),
+					() => this.highlight(i),
+					() => this.handleSelect(item.model),
+				),
+			);
 		}
 
 		// Add scroll indicator if needed
@@ -370,6 +379,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 	}
 
+	private highlight(index: number): void {
+		this.selectedIndex = index;
+		this.updateList();
+	}
+
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		const pageIndex = getSelectPageIndex(kb, keyData, this.selectedIndex, this.filteredModels.length, MAX_VISIBLE);
@@ -386,20 +400,17 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		// Up arrow - wrap to bottom when at top
 		if (kb.matches(keyData, "tui.select.up")) {
 			if (this.filteredModels.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredModels.length - 1 : this.selectedIndex - 1;
-			this.updateList();
+			this.highlight(this.selectedIndex === 0 ? this.filteredModels.length - 1 : this.selectedIndex - 1);
 		}
 		// Down arrow - wrap to top when at bottom
 		else if (kb.matches(keyData, "tui.select.down")) {
 			if (this.filteredModels.length === 0) return;
-			this.selectedIndex = this.selectedIndex === this.filteredModels.length - 1 ? 0 : this.selectedIndex + 1;
-			this.updateList();
+			this.highlight(this.selectedIndex === this.filteredModels.length - 1 ? 0 : this.selectedIndex + 1);
 		}
 		// Page up/down
 		else if (pageIndex !== undefined) {
 			if (this.filteredModels.length === 0) return;
-			this.selectedIndex = pageIndex;
-			this.updateList();
+			this.highlight(pageIndex);
 		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {

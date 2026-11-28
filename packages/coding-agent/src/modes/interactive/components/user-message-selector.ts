@@ -1,14 +1,15 @@
 import {
 	type Component,
-	Container,
 	getKeybindings,
 	getSelectPageIndex,
 	Spacer,
 	Text,
+	type TuiMouseEvent,
 	truncateToWidth,
 } from "@earendil-works/pi-tui";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
+import { handleListWheel, ListContainer, ListMouseRows } from "./list-mouse.ts";
 
 interface UserMessageItem {
 	id: string; // Entry ID in the session
@@ -23,6 +24,7 @@ class UserMessageList implements Component {
 	readonly capturesViewportInput: boolean = true;
 	private messages: UserMessageItem[] = [];
 	private selectedIndex: number = 0;
+	private readonly mouseRows = new ListMouseRows<number>();
 	public onSelect?: (entryId: string) => void;
 	public onCancel?: () => void;
 	private maxVisible: number = 10; // Max messages visible
@@ -41,6 +43,7 @@ class UserMessageList implements Component {
 
 	render(width: number): string[] {
 		const lines: string[] = [];
+		this.mouseRows.clear();
 
 		if (this.messages.length === 0) {
 			lines.push(theme.fg("muted", "  No user messages found"));
@@ -68,12 +71,14 @@ class UserMessageList implements Component {
 			const truncatedMsg = truncateToWidth(normalizedMessage, maxMsgWidth);
 			const messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
 
+			this.mouseRows.set(lines.length, i);
 			lines.push(messageLine);
 
 			// Second line: metadata (position in history)
 			const position = i + 1;
 			const metadata = `  Message ${position} of ${this.messages.length}`;
 			const metadataLine = theme.fg("muted", metadata);
+			this.mouseRows.set(lines.length, i);
 			lines.push(metadataLine);
 			lines.push(""); // Blank line between messages
 		}
@@ -85,6 +90,22 @@ class UserMessageList implements Component {
 		}
 
 		return lines;
+	}
+
+	handleWheel(event: TuiMouseEvent) {
+		return handleListWheel(event, this.selectedIndex, this.messages.length, (index) => {
+			this.selectedIndex = index;
+		});
+	}
+
+	handleMouse(event: TuiMouseEvent) {
+		return this.mouseRows.handleMouse(
+			event,
+			(index) => {
+				this.selectedIndex = index;
+			},
+			(index) => this.onSelect?.(this.messages[index]!.id),
+		);
 	}
 
 	handleInput(keyData: string): void {
@@ -122,7 +143,7 @@ class UserMessageList implements Component {
 /**
  * Component that renders a user message selector for branching
  */
-export class UserMessageSelectorComponent extends Container {
+export class UserMessageSelectorComponent extends ListContainer {
 	private messageList: UserMessageList;
 
 	constructor(
@@ -131,7 +152,7 @@ export class UserMessageSelectorComponent extends Container {
 		onCancel: () => void,
 		initialSelectedId?: string,
 	) {
-		super();
+		super((event) => this.messageList.handleWheel(event));
 
 		// Add header
 		this.addChild(new Spacer(1));

@@ -13,6 +13,7 @@ import {
 import { isPreferredProvider } from "../../../core/preferred-providers.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
+import { handleListWheel, ListContainer, listMouseRegion } from "./list-mouse.ts";
 import { getProviderBrandStyle, type ProviderBrandStyle, startBrandAnimation } from "./provider-brand.ts";
 
 /**
@@ -69,7 +70,7 @@ const MAX_VISIBLE = 8;
  * Component that renders an auth provider selector. With `tui`, the selected row of a preferred partner provider
  * shows its animated brand style.
  */
-export class OAuthSelectorComponent extends Container implements Focusable {
+export class OAuthSelectorComponent extends ListContainer implements Focusable {
 	readonly capturesViewportInput: boolean = true;
 	private searchInput: Input;
 
@@ -102,7 +103,9 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		initialSearchInput?: string,
 		tui?: TUI,
 	) {
-		super();
+		super((event) =>
+			handleListWheel(event, this.selectedIndex, this.filteredProviders.length, (index) => this.highlight(index)),
+		);
 
 		this.mode = mode;
 		this.allProviders = providers;
@@ -212,7 +215,13 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 				line = text + partnerMarker + authTypeLabel + statusIndicator;
 			}
 
-			this.listContainer.addChild(new TruncatedText(line, 1, 0));
+			this.listContainer.addChild(
+				listMouseRegion(
+					new TruncatedText(line, 1, 0),
+					() => this.highlight(i),
+					() => this.onSelectCallback(provider.id, provider.authType),
+				),
+			);
 		}
 
 		if (startIndex > 0 || endIndex < this.filteredProviders.length) {
@@ -232,26 +241,28 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		}
 	}
 
+	private highlight(index: number): void {
+		this.selectedIndex = index;
+		this.updateList();
+	}
+
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		const pageIndex = getSelectPageIndex(kb, keyData, this.selectedIndex, this.filteredProviders.length, MAX_VISIBLE);
 		// Up arrow
 		if (kb.matches(keyData, "tui.select.up")) {
 			if (this.filteredProviders.length === 0) return;
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-			this.updateList();
+			this.highlight(Math.max(0, this.selectedIndex - 1));
 		}
 		// Down arrow
 		else if (kb.matches(keyData, "tui.select.down")) {
 			if (this.filteredProviders.length === 0) return;
-			this.selectedIndex = Math.min(this.filteredProviders.length - 1, this.selectedIndex + 1);
-			this.updateList();
+			this.highlight(Math.min(this.filteredProviders.length - 1, this.selectedIndex + 1));
 		}
 		// Page up/down
 		else if (pageIndex !== undefined) {
 			if (this.filteredProviders.length === 0) return;
-			this.selectedIndex = pageIndex;
-			this.updateList();
+			this.highlight(pageIndex);
 		}
 		// Enter
 		else if (kb.matches(keyData, "tui.select.confirm")) {
