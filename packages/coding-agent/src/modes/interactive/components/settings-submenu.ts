@@ -1,5 +1,4 @@
 import {
-	type Component,
 	Container,
 	fuzzyFilter,
 	getKeybindings,
@@ -9,9 +8,11 @@ import {
 	type SelectListLayoutOptions,
 	Spacer,
 	Text,
+	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 import { getSelectListTheme, theme } from "../theme/theme.ts";
 import { keyText } from "./keybinding-hints.ts";
+import { ListContainer, UNCHANGED_LIST_WHEEL } from "./list-mouse.ts";
 
 const SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -29,7 +30,7 @@ export interface SelectSubmenuOptions {
  * Single-step submenu that shows a titled select list.
  * With `searchable: true`, typing filters the list using fuzzy matching.
  */
-export class SelectSubmenu extends Container {
+export class SelectSubmenu extends ListContainer {
 	private selectList: SelectList;
 	private listChildIndex: number;
 	private allOptions: SelectItem[];
@@ -49,7 +50,7 @@ export class SelectSubmenu extends Container {
 		onSelectionChange?: (value: string) => void,
 		submenuOptions?: SelectSubmenuOptions,
 	) {
-		super();
+		super((event) => this.selectList.handleMouse(event) ?? UNCHANGED_LIST_WHEEL);
 
 		this.allOptions = options;
 		this.listLayout = submenuOptions?.layout ?? SUBMENU_SELECT_LIST_LAYOUT;
@@ -185,7 +186,7 @@ export class SteppedSubmenu extends Container {
 	private readonly onComplete: (context: Record<string, string>) => void;
 	private readonly onCancel: () => void;
 	private readonly opts: SteppedSubmenuOptions;
-	private activeComponent: Component;
+	private activeComponent: SelectSubmenu;
 	private context: Record<string, string>;
 
 	constructor(
@@ -203,7 +204,7 @@ export class SteppedSubmenu extends Container {
 		this.activeComponent = this.buildStep(opts.startAtStep ?? 0);
 	}
 
-	private buildStep(stepIndex: number): Component {
+	private buildStep(stepIndex: number): SelectSubmenu {
 		const step = this.steps[stepIndex];
 		const total = this.steps.length;
 		const stepLabel = total > 1 ? `Step ${stepIndex + 1}/${total} \u00b7 ` : "";
@@ -254,10 +255,15 @@ export class SteppedSubmenu extends Container {
 	}
 
 	handleInput(data: string): void {
-		this.activeComponent.handleInput?.(data);
+		this.activeComponent.handleInput(data);
+	}
+
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
+		// The active step renders at this component's origin, with no additional chrome.
+		return this.activeComponent.handleMouse(event);
 	}
 
 	invalidate(): void {
-		this.activeComponent.invalidate?.();
+		this.activeComponent.invalidate();
 	}
 }

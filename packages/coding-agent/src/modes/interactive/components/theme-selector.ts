@@ -1,6 +1,7 @@
-import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/pi-tui";
+import { type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/pi-tui";
 import { getAvailableThemes, getSelectListTheme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
+import { ListContainer, UNCHANGED_LIST_WHEEL } from "./list-mouse.ts";
 
 const THEME_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -10,7 +11,7 @@ const THEME_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 /**
  * Component that renders a theme selector
  */
-export class ThemeSelectorComponent extends Container {
+export class ThemeSelectorComponent extends ListContainer {
 	private selectList: SelectList;
 	private onPreview: (themeName: string) => void;
 
@@ -20,7 +21,7 @@ export class ThemeSelectorComponent extends Container {
 		onCancel: () => void,
 		onPreview: (themeName: string) => void,
 	) {
-		super();
+		super((event) => this.selectList.handleMouse(event) ?? UNCHANGED_LIST_WHEEL);
 		this.onPreview = onPreview;
 
 		// Get available themes and create select items

@@ -1,6 +1,6 @@
 /**
  * Generic selector component for extensions.
- * Displays a list of string options with keyboard navigation.
+ * Displays a list of string options with keyboard and mouse navigation.
  */
 
 import { Container, getKeybindings, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
@@ -8,6 +8,7 @@ import { theme } from "../theme/theme.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, rawKeyHint } from "./keybinding-hints.ts";
+import { handleListWheel, ListContainer, listMouseRegion } from "./list-mouse.ts";
 
 export interface ExtensionSelectorOptions {
 	tui?: TUI;
@@ -16,7 +17,7 @@ export interface ExtensionSelectorOptions {
 	description?: string;
 }
 
-export class ExtensionSelectorComponent extends Container {
+export class ExtensionSelectorComponent extends ListContainer {
 	private options: string[];
 	private selectedIndex = 0;
 	private listContainer: Container;
@@ -34,7 +35,9 @@ export class ExtensionSelectorComponent extends Container {
 		onCancel: () => void,
 		opts?: ExtensionSelectorOptions,
 	) {
-		super();
+		super((event) =>
+			handleListWheel(event, this.selectedIndex, this.options.length, (index) => this.highlight(index)),
+		);
 
 		this.options = options;
 		this.onSelectCallback = onSelect;
@@ -98,7 +101,14 @@ export class ExtensionSelectorComponent extends Container {
 			const text = isSelected
 				? theme.fg("accent", "→ ") + theme.fg("accent", this.options[i])
 				: `  ${theme.fg("text", this.options[i])}`;
-			this.listContainer.addChild(new Text(text, 1, 0));
+			const option = this.options[i]!;
+			this.listContainer.addChild(
+				listMouseRegion(
+					new Text(text, 1, 0),
+					() => this.highlight(i),
+					() => this.selectOption(option),
+				),
+			);
 		}
 
 		if (startIndex > 0 || endIndex < this.options.length) {
@@ -107,19 +117,25 @@ export class ExtensionSelectorComponent extends Container {
 		}
 	}
 
+	private highlight(index: number): void {
+		this.selectedIndex = index;
+		this.updateList();
+	}
+
+	private selectOption(option: string | undefined): void {
+		if (option) this.onSelectCallback(option);
+	}
+
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
 		if (kb.matches(keyData, "app.tools.expand")) {
 			this.onToggleToolsExpanded?.();
 		} else if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
-			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
-			this.updateList();
+			this.highlight(Math.max(0, this.selectedIndex - 1));
 		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
-			this.selectedIndex = Math.min(this.options.length - 1, this.selectedIndex + 1);
-			this.updateList();
+			this.highlight(Math.min(this.options.length - 1, this.selectedIndex + 1));
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {
-			const selected = this.options[this.selectedIndex];
-			if (selected) this.onSelectCallback(selected);
+			this.selectOption(this.options[this.selectedIndex]);
 		} else if (kb.matches(keyData, "tui.select.cancel")) {
 			this.onCancelCallback();
 		}

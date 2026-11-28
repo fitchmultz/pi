@@ -15,6 +15,7 @@ import { getDistinctModelName, getModelSearchText } from "../model-search.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
+import { handleListWheel, ListContainer, listMouseRegion } from "./list-mouse.ts";
 
 // EnabledIds: null = all enabled (no filter), string[] = explicit ordered list
 type EnabledIds = string[] | null;
@@ -95,7 +96,7 @@ export interface ModelsCallbacks {
  * Component for enabling/disabling models for Ctrl+P cycling.
  * Changes are session-only until explicitly persisted with Ctrl+S.
  */
-export class ScopedModelsSelectorComponent extends Container implements Focusable {
+export class ScopedModelsSelectorComponent extends ListContainer implements Focusable {
 	readonly capturesViewportInput: boolean = true;
 	private modelsById: Map<string, Model<any>> = new Map();
 	private allIds: string[] = [];
@@ -121,7 +122,9 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	private refreshStatusText?: Text;
 
 	constructor(config: ModelsConfig, callbacks: ModelsCallbacks) {
-		super();
+		super((event) =>
+			handleListWheel(event, this.selectedIndex, this.filteredItems.length, (index) => this.highlight(index)),
+		);
 		this.callbacks = callbacks;
 
 		for (const model of config.allModels) {
@@ -258,7 +261,13 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			const nameText = name ? theme.fg("muted", ` (${name})`) : "";
 			const providerBadge = theme.fg("muted", item.model ? ` [${item.model.provider}]` : " [unavailable]");
 			const status = item.model && item.enabled ? theme.fg("accent", "✓ ") : "  ";
-			this.listContainer.addChild(new Text(`${prefix}${status}${modelText}${nameText}${providerBadge}`, 0, 0));
+			this.listContainer.addChild(
+				listMouseRegion(
+					new Text(`${prefix}${status}${modelText}${nameText}${providerBadge}`, 0, 0),
+					() => this.highlight(i),
+					() => this.toggleModel(item.fullId),
+				),
+			);
 		}
 
 		// Add scroll indicator if needed
@@ -281,27 +290,36 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		}
 	}
 
+	private highlight(index: number): void {
+		this.selectedIndex = index;
+		this.updateList();
+	}
+
+	private toggleModel(fullId: string): void {
+		this.enabledIds = toggle(this.enabledIds, this.allIds, fullId);
+		this.isDirty = true;
+		this.refresh();
+		this.notifyChange();
+	}
+
 	handleInput(data: string): void {
 		const kb = getKeybindings();
 
 		// Navigation
 		if (kb.matches(data, "tui.select.up")) {
 			if (this.filteredItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1;
-			this.updateList();
+			this.highlight(this.selectedIndex === 0 ? this.filteredItems.length - 1 : this.selectedIndex - 1);
 			return;
 		}
 		if (kb.matches(data, "tui.select.down")) {
 			if (this.filteredItems.length === 0) return;
-			this.selectedIndex = this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1;
-			this.updateList();
+			this.highlight(this.selectedIndex === this.filteredItems.length - 1 ? 0 : this.selectedIndex + 1);
 			return;
 		}
 		const pageIndex = getSelectPageIndex(kb, data, this.selectedIndex, this.filteredItems.length, this.maxVisible);
 		if (pageIndex !== undefined) {
 			if (this.filteredItems.length === 0) return;
-			this.selectedIndex = pageIndex;
-			this.updateList();
+			this.highlight(pageIndex);
 			return;
 		}
 
@@ -330,12 +348,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		// Toggle on Enter
 		if (kb.matches(data, "tui.select.confirm")) {
 			const item = this.filteredItems[this.selectedIndex];
-			if (item) {
-				this.enabledIds = toggle(this.enabledIds, this.allIds, item.fullId);
-				this.isDirty = true;
-				this.refresh();
-				this.notifyChange();
-			}
+			if (item) this.toggleModel(item.fullId);
 			return;
 		}
 

@@ -198,6 +198,7 @@
 - Kept trailing diagnoses, such as shell timeouts and exit codes, in long codemode tool-error previews.
 - `background_command` now treats `id: "null"` as omitted for `status` only and explains how to use the current directory when a start with `cwd: "null"` cannot find that directory.
 - `find` now reports missing paths as missing and still suggests nearby names. `grep` explains empty searches with `glob: "null"` and suggests supported alternatives when ripgrep rejects a regex.
+- In fullscreen, scroll anywhere inside a selector to move its highlight. Click or tap a row to choose it, including wrapped rows. This also works in settings submenus and the bundled MCP and llama.cpp menus.
 
 ### Removed
 

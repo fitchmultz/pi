@@ -36,6 +36,7 @@ import {
 } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
+import { ListContainer, UNCHANGED_LIST_WHEEL } from "./list-mouse.ts";
 import { SelectSubmenu, SteppedSubmenu, type SteppedSubmenuStep } from "./settings-submenu.ts";
 
 const MODEL_PICKER_LAYOUT = { minPrimaryColumnWidth: 12, maxPrimaryColumnWidth: 46 };
@@ -287,7 +288,7 @@ function defaultAutomaticThemes(
 	return { lightTheme: themeName, darkTheme: themeName };
 }
 
-class ThemeSubmenu extends Container {
+class ThemeSubmenu extends ListContainer {
 	private inputComponent: Component | undefined;
 	private readonly callbacks: SettingsCallbacks;
 	private readonly availableThemes: string[];
@@ -306,7 +307,7 @@ class ThemeSubmenu extends Container {
 		callbacks: SettingsCallbacks,
 		onDone: (selectedValue?: string) => void,
 	) {
-		super();
+		super((event) => this.inputComponent?.handleMouse?.(event) ?? UNCHANGED_LIST_WHEEL);
 		this.callbacks = callbacks;
 		this.availableThemes = availableThemes;
 		this.terminalTheme = terminalTheme;
@@ -498,11 +499,12 @@ class ThemeSubmenu extends Container {
 /**
  * Main settings selector component.
  */
-export class SettingsSelectorComponent extends Container {
+export class SettingsSelectorComponent extends ListContainer {
 	private settingsList: SettingsList;
 
 	constructor(config: SettingsConfig, callbacks: SettingsCallbacks) {
-		super();
+		// SettingsList reserves rows 0 and 1 for search. Route wheel over that chrome to the list.
+		super((event) => this.settingsList.handleMouse({ ...event, y: 2 }) ?? UNCHANGED_LIST_WHEEL);
 
 		const supportsImages = getCapabilities().images;
 		const followUpKey = keyDisplayText("app.message.followUp");

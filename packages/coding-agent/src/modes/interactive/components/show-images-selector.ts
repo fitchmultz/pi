@@ -1,6 +1,7 @@
-import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/pi-tui";
+import { type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/pi-tui";
 import { getSelectListTheme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
+import { ListContainer, UNCHANGED_LIST_WHEEL } from "./list-mouse.ts";
 
 const SHOW_IMAGES_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -10,11 +11,11 @@ const SHOW_IMAGES_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 /**
  * Component that renders a show images selector with borders
  */
-export class ShowImagesSelectorComponent extends Container {
+export class ShowImagesSelectorComponent extends ListContainer {
 	private selectList: SelectList;
 
 	constructor(currentValue: boolean, onSelect: (show: boolean) => void, onCancel: () => void) {
-		super();
+		super((event) => this.selectList.handleMouse(event) ?? UNCHANGED_LIST_WHEEL);
 
 		const items: SelectItem[] = [
 			{ value: "yes", label: "Yes", description: "Show images inline in terminal" },

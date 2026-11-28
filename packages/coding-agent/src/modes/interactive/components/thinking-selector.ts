@@ -1,6 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import {
-	Container,
 	type Focusable,
 	fuzzyFilter,
 	getKeybindings,
@@ -14,6 +13,7 @@ import {
 import { getSelectListTheme, theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
+import { ListContainer, UNCHANGED_LIST_WHEEL } from "./list-mouse.ts";
 
 const THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	minPrimaryColumnWidth: 12,
@@ -33,7 +33,7 @@ const LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 /**
  * Component that renders a thinking level selector with borders
  */
-export class ThinkingSelectorComponent extends Container implements Focusable {
+export class ThinkingSelectorComponent extends ListContainer implements Focusable {
 	private searchInput: Input;
 	private selectList: SelectList;
 	private selectListChildIndex: number;
@@ -60,7 +60,7 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 		onSelectAsDefault?: (level: ThinkingLevel) => void,
 		defaultThinkingLevel?: ThinkingLevel,
 	) {
-		super();
+		super((event) => this.selectList.handleMouse(event) ?? UNCHANGED_LIST_WHEEL);
 		this.onSelect = onSelect;
 		this.onCancel = onCancel;
 		this.onSelectAsDefault = onSelectAsDefault;
