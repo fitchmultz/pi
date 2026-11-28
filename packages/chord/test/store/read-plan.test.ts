@@ -635,21 +635,27 @@ describe("a plan's statement texts (hot-path review)", () => {
 		const triples = names.flatMap((a, i) =>
 			names.slice(i + 1).flatMap((b, j) => names.slice(i + j + 2).map((c) => [a, b, c])),
 		);
-		const timed = (shapes: readonly string[][]): number => {
+		const setup = (shapes: readonly string[][]) => {
 			const plan = new ReadPlan(query(Readings), "readings", {}, "rows", new Map());
 			for (const columns of shapes) plan.probe({ limit: 1 }, columns, [1, 1, 1]);
-			const last = shapes.at(-1)!;
-			let best = Number.POSITIVE_INFINITY;
-			for (let round = 0; round < 5; round++) {
-				const started = performance.now();
-				for (let call = 0; call < 20_000; call++) plan.probe({ limit: 1 }, last, [1, 1, 1]);
-				best = Math.min(best, performance.now() - started);
-			}
-			return best;
+			return { plan, last: shapes.at(-1)! };
+		};
+		const measureCpuUs = ({ plan, last }: ReturnType<typeof setup>): number => {
+			const started = process.cpuUsage();
+			for (let call = 0; call < 20_000; call++) plan.probe({ limit: 1 }, last, [1, 1, 1]);
+			const used = process.cpuUsage(started);
+			return used.user + used.system;
 		};
 		expect(triples).toHaveLength(4_960);
-		const few = timed(triples.slice(0, 4));
-		const many = timed(triples);
+		const fewPlan = setup(triples.slice(0, 4));
+		const manyPlan = setup(triples);
+		// Interleave rounds and measure process CPU time so OS preemption from parallel vitest workers cannot skew the ratio.
+		let few = Number.POSITIVE_INFINITY;
+		let many = Number.POSITIVE_INFINITY;
+		for (let round = 0; round < 5; round++) {
+			few = Math.min(few, measureCpuUs(fewPlan));
+			many = Math.min(many, measureCpuUs(manyPlan));
+		}
 		expect(many / few).toBeLessThan(5);
 	});
 });
