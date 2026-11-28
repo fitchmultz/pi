@@ -1162,14 +1162,19 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	private routeWheel(event: WheelEvent, delta: number): void {
 		let remaining = delta;
+		let contained = false;
 		const seen = new Set<ScrollView>();
 		for (const scrollView of this.currentLayout ? getScrollViewsAt(this.currentLayout, event.x, event.y) : []) {
 			seen.add(scrollView);
 			remaining = scrollView.scrollBy(remaining);
-			if (remaining === 0 || scrollView.overscroll === "contain") break;
+			if (remaining === 0) break;
+			if (scrollView.overscroll === "contain") {
+				contained = true;
+				break;
+			}
 		}
 		const primary = this.getPrimaryScrollView();
-		if (remaining !== 0 && !seen.has(primary)) primary.scrollBy(remaining);
+		if (remaining !== 0 && !contained && !seen.has(primary)) primary.scrollBy(remaining);
 		this.updateScrollbarHover(event.x, event.y);
 		// Scrolling moves the viewport only. Reusing the previous component output keeps a wheel
 		// frame O(viewport); re-rendering a long transcript on every wheel event saturated a core.

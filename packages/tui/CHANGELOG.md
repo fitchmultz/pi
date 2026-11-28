@@ -30,6 +30,9 @@
 - Fixed `wrapTextWithAnsi()` adding a blank row after a line that fills the width when a space follows it and then a word longer than the width, or nothing else on that line. This affected text with an active style or hyperlink and, in a fullscreen frame, all `Text` and `Markdown` text.
 - Fixed fullscreen rendering and `Loader` animation slowing or stopping when the terminal loses focus.
 - Fixed Markdown OSC 8 linkification swallowing trailing CJK punctuation, inline codespans calling `theme.code()` multiple times (duplicating theme delimiters), fullscreen selection copies miscomputing block offsets after HTML comments containing matching text, and `sliceWithWidth()`'s ASCII fast path dropping or leaking selection source markers across sliced overlay rows.
+- Fixed unused wheel input reaching the primary scroll view when a nested `ScrollView` has `overscroll: "contain"`.
+- Wheel input anywhere over the editor now scrolls open autocomplete or, when the draft overflows, scrolls the editor without moving the caret.
+- Wheel input anywhere over the settings list now scrolls settings without scrolling the background transcript.
 
 ## [1.7.0] - 2026-11-27
 
