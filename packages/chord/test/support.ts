@@ -97,13 +97,17 @@ export async function counted(work: (context: Context) => void): Promise<Counts>
 }
 
 setFlagsFromString("--expose-gc");
-const gc = runInNewContext("gc") as () => void;
+const gc = runInNewContext("gc") as (options?: {
+	type?: "major" | "minor";
+	execution?: "sync" | "async";
+}) => Promise<void> | void;
 
 /** Expects every referent to be collected once nothing else holds it. */
 export async function expectCollected(...refs: WeakRef<object>[]): Promise<void> {
-	for (let round = 0; round < 10 && refs.some((ref) => ref.deref() !== undefined); round++) {
+	for (let round = 0; round < 10; round++) {
 		await new Promise((resolve) => setImmediate(resolve));
-		gc();
+		await gc({ type: "major", execution: "async" });
+		if (refs.every((ref) => ref.deref() === undefined)) break;
 	}
 	expect(refs.map((ref) => ref.deref() === undefined)).toEqual(refs.map(() => true));
 }
